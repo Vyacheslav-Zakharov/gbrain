@@ -272,6 +272,13 @@ export interface AuthInfo {
    * case (back-compat).
    */
   allowedSources?: string[];
+  /**
+   * Source ids this authenticated caller may WRITE to. For OAuth logins this
+   * must be derived from user_permissions.json `federated_write`, not from
+   * federated_read. Undefined means legacy/no explicit write grant; handlers
+   * may fall back to scalar sourceId for backward compatibility.
+   */
+  writeSources?: string[];
 }
 
 export interface OperationContext {
@@ -1978,6 +1985,8 @@ const add_link: Operation = {
     link_type: { type: 'string', description: 'Link type (e.g., invested_in, works_at)' },
     context: { type: 'string', description: 'Context for the link' },
     link_source: { type: 'string', description: "Provenance tag (kebab-case, e.g. 'citation-graph'). Defaults to 'manual'. Reconciliation-managed built-ins (markdown/frontmatter/mentions/wikilink-resolved) are rejected." },
+    from_source_id: { type: 'string', description: 'Source id for the from page. Defaults to caller write source.' },
+    to_source_id: { type: 'string', description: 'Source id for the to page. Defaults to caller write source.' },
   },
   mutating: true,
   scope: 'write',
@@ -1993,18 +2002,37 @@ const add_link: Operation = {
         `use 'manual' (the default) or a custom kebab tag like 'citation-graph'`,
       );
     }
-    // v0.31.8 (D7): single ctx.sourceId scopes both endpoints + origin. Cross-
-    // source link creation is out of scope for this wave; use the engine API
-    // directly for that edge case.
-    const linkOpts = ctx.sourceId
-      ? { fromSourceId: ctx.sourceId, toSourceId: ctx.sourceId, originSourceId: ctx.sourceId }
-      : undefined;
-    await ctx.engine.addLink( // gbrain-allow-direct-insert: add_link MCP op is the explicit canonical surface for manual link creation; auto-link reconciliation runs separately via auto_link post-hook
-      p.from as string, p.to as string,
-      (p.context as string) || '', (p.link_type as string) || '',
-      linkSource, undefined, undefined,
-      linkOpts,
-    );
+    // Cross-source add_link authority model:
+    // - from_source_id is WRITE authority (ctx.auth.writeSources, fallback ctx.sourceId)
+    // - to_source_id is READ authority (ctx.auth.allowedSources, fallback ctx.sourceId)
+    // - trusted local callers (ctx.remote === false) keep unrestricted engine API power
+    const defaultSourceId = ctx.sourceId ?? 'default';
+    const fromSourceId = ((p.from_source_id as string | undefined) || defaultSourceId).trim();
+    const toSourceId = ((p.to_source_id as string | undefined) || defaultSourceId).trim();
+    if (!fromSourceId || !toSourceId) {
+      throw new OperationError('invalid_params', 'from_source_id/to_source_id must be non-empty when provided');
+    }
+
+    const opaqueRemoteLinkError = () => new OperationError('permission_denied', 'page not found or not accessible');
+    if (ctx.remote !== false) {
+      const writeSources = ctx.auth?.writeSources?.length ? ctx.auth.writeSources : [defaultSourceId];
+      const readSources = ctx.auth?.allowedSources?.length ? ctx.auth.allowedSources : [defaultSourceId];
+      if (!writeSources.includes(fromSourceId)) throw opaqueRemoteLinkError();
+      if (!readSources.includes(toSourceId)) throw opaqueRemoteLinkError();
+    }
+
+    const linkOpts = { fromSourceId, toSourceId, originSourceId: fromSourceId };
+    try {
+      await ctx.engine.addLink( // gbrain-allow-direct-insert: add_link MCP op is the explicit canonical surface for manual link creation; auto-link reconciliation runs separately via auto_link post-hook
+        p.from as string, p.to as string,
+        (p.context as string) || '', (p.link_type as string) || '',
+        linkSource, undefined, undefined,
+        linkOpts,
+      );
+    } catch (err) {
+      if (ctx.remote !== false) throw opaqueRemoteLinkError();
+      throw err;
+    }
     return { status: 'ok' };
   },
   cliHints: { name: 'link', aliases: ['link-add'], positional: ['from', 'to'] },

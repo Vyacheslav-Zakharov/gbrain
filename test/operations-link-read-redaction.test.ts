@@ -3,11 +3,12 @@
  *
  * These tests sit above the engine: remote scalar callers must be promoted to
  * sourceIds[] and cross_source_edges config must be read from DB config, not only
- * passed as direct engine opts.
+ * passed as direct engine opts. The same operation surface also covers the
+ * cross-source add_link schema/authority boundary used by remote MCP clients.
  */
 
 import { describe, test, expect } from 'bun:test';
-import { operationsByName, type OperationContext } from '../src/core/operations.ts';
+import { operationsByName, OperationError, type OperationContext } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
 function makeCtx(): { ctx: OperationContext; calls: Array<{ op: string; slug: string; opts: any }> } {
@@ -39,6 +40,34 @@ function makeCtx(): { ctx: OperationContext; calls: Array<{ op: string; slug: st
     dryRun: false,
     remote: true,
     sourceId: 'beta',
+  } as unknown as OperationContext;
+
+  return { ctx, calls };
+}
+
+function makeAddLinkCtx(): { ctx: OperationContext; calls: Array<{ args: any[] }> } {
+  const calls: Array<{ args: any[] }> = [];
+  const engine = {
+    addLink: async (...args: any[]) => {
+      calls.push({ args });
+    },
+  } as unknown as BrainEngine;
+
+  const ctx = {
+    engine,
+    config: {},
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    dryRun: false,
+    remote: true,
+    sourceId: 'beta',
+    auth: {
+      token: 'test',
+      clientId: 'client',
+      scopes: ['write'],
+      sourceId: 'beta',
+      allowedSources: ['beta', 'shared'],
+      writeSources: ['beta'],
+    },
   } as unknown as OperationContext;
 
   return { ctx, calls };
@@ -77,5 +106,56 @@ describe('link read operations — DB-configured cross-source read redaction', (
         policy: { defaultPolicy: 'hidden', bySource: { default: 'locked-stub' } },
       },
     });
+  });
+});
+
+describe('add_link operation — cross-source authority boundary', () => {
+  test('schema exposes source-qualified endpoints', () => {
+    expect(operationsByName.add_link.params.from_source_id).toBeTruthy();
+    expect(operationsByName.add_link.params.to_source_id).toBeTruthy();
+  });
+
+  test('remote caller may write from write source to readable target source', async () => {
+    const { ctx, calls } = makeAddLinkCtx();
+
+    await operationsByName.add_link.handler(ctx, {
+      from: 'meetings/demo',
+      to: 'projects/ai-protocol',
+      link_type: 'discusses',
+      context: 'pilot',
+      from_source_id: 'beta',
+      to_source_id: 'shared',
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.slice(0, 7)).toEqual([
+      'meetings/demo',
+      'projects/ai-protocol',
+      'pilot',
+      'discusses',
+      'manual',
+      undefined,
+      undefined,
+    ]);
+    expect(calls[0].args[7]).toEqual({ fromSourceId: 'beta', toSourceId: 'shared', originSourceId: 'beta' });
+  });
+
+  test('remote caller cannot write from read-only source', async () => {
+    const { ctx } = makeAddLinkCtx();
+
+    try {
+      await operationsByName.add_link.handler(ctx, {
+        from: 'projects/ai-protocol',
+        to: 'meetings/demo',
+        link_type: 'discusses',
+        from_source_id: 'shared',
+        to_source_id: 'beta',
+      });
+      throw new Error('expected add_link to reject');
+    } catch (err) {
+      expect(err).toBeInstanceOf(OperationError);
+      expect((err as OperationError).code).toBe('permission_denied');
+      expect((err as Error).message).toBe('page not found or not accessible');
+    }
   });
 });
