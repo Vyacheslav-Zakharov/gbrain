@@ -73,6 +73,36 @@ function makeAddLinkCtx(): { ctx: OperationContext; calls: Array<{ args: any[] }
   return { ctx, calls };
 }
 
+function makeListPagesCtx(): { ctx: OperationContext; calls: any[] } {
+  const calls: any[] = [];
+  const engine = {
+    listPages: async (opts: any) => {
+      calls.push(opts);
+      return [
+        { slug: 'a', type: 'note', title: 'A', updated_at: '2026-01-01T00:00:00Z' },
+      ];
+    },
+  } as unknown as BrainEngine;
+
+  const ctx = {
+    engine,
+    config: {},
+    logger: { info() {}, warn() {}, error() {}, debug() {} },
+    dryRun: false,
+    remote: true,
+    sourceId: 'beta',
+    auth: {
+      token: 'test',
+      clientId: 'client',
+      scopes: ['read'],
+      sourceId: 'beta',
+      allowedSources: ['beta', 'shared'],
+    },
+  } as unknown as OperationContext;
+
+  return { ctx, calls };
+}
+
 describe('link read operations — DB-configured cross-source read redaction', () => {
   test('get_links remote scalar scope uses DB config and calls engine sourceIds[] redaction path', async () => {
     const { ctx, calls } = makeCtx();
@@ -156,6 +186,34 @@ describe('add_link operation — cross-source authority boundary', () => {
       expect(err).toBeInstanceOf(OperationError);
       expect((err as OperationError).code).toBe('permission_denied');
       expect((err as Error).message).toBe('page not found or not accessible');
+    }
+  });
+});
+
+describe('list_pages operation — explicit source_id scope', () => {
+  test('schema exposes source_id filter', () => {
+    expect(operationsByName.list_pages.params.source_id).toBeTruthy();
+  });
+
+  test('remote caller requesting a granted source gets scalar sourceId filter, not full federated view', async () => {
+    const { ctx, calls } = makeListPagesCtx();
+
+    await operationsByName.list_pages.handler(ctx, { source_id: 'shared', limit: 1 });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ sourceId: 'shared', limit: 1 });
+    expect(calls[0].sourceIds).toBeUndefined();
+  });
+
+  test('remote caller requesting an out-of-grant source is denied', async () => {
+    const { ctx } = makeListPagesCtx();
+
+    try {
+      await operationsByName.list_pages.handler(ctx, { source_id: 'internal-hr', limit: 1 });
+      throw new Error('expected list_pages to reject');
+    } catch (err) {
+      expect(err).toBeInstanceOf(OperationError);
+      expect((err as OperationError).code).toBe('permission_denied');
     }
   });
 });

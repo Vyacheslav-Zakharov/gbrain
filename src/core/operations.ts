@@ -1397,6 +1397,7 @@ const list_pages: Operation = {
       description: 'Sort order. Default updated_desc (matches pre-v0.29). Options: updated_desc, updated_asc, created_desc, slug.',
     },
     include_deleted: { type: 'boolean', description: 'v0.26.5: include soft-deleted pages (default: false). Used by restore workflows and operator diagnostics.' },
+    source_id: { type: 'string', description: 'Scope results to a single source. Remote callers may only request a granted source.' },
   },
   handler: async (ctx, p) => {
     // Whitelist the sort enum at the handler before passing to the engine.
@@ -1408,10 +1409,10 @@ const list_pages: Operation = {
       : undefined;
     // v0.34.1 (#861 — P0 leak seal): thread the auth'd client's source scope
     // into the listPages filter so an OAuth client scoped to src-A cannot
-    // enumerate src-B pages. Pre-fix, ctx.sourceId / ctx.auth?.allowedSources
-    // were ignored at this op handler and the engine returned every source's
-    // pages indiscriminately.
-    const scope = sourceScopeOpts(ctx);
+    // enumerate src-B pages. If the caller asks for source_id, validate it
+    // against the same grant resolver used by query/get_page rather than
+    // silently ignoring it and returning the whole federated view.
+    const scope = resolveRequestedScope(ctx, p.source_id as string | undefined, false);
     const pages = await ctx.engine.listPages({
       type: p.type as any,
       tag: p.tag as string,

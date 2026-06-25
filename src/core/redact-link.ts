@@ -87,7 +87,12 @@ export function redactLink(
     } as RedactableLink;
   }
 
-  if (!isAccessible(out.origin_source_id, accessible)) {
+  // Only redact origin provenance when an origin page actually exists and is
+  // outside the grant. Manual/custom edges commonly have no origin page; their
+  // link_source is provenance for the edge itself and must survive a normal
+  // visible-endpoint read. A missing/null origin_source_id is therefore not an
+  // inaccessible origin — it is the absence of origin provenance.
+  if (out.origin_source_id && !isAccessible(out.origin_source_id, accessible)) {
     out = {
       ...out,
       link_source: null,
