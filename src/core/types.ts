@@ -1181,6 +1181,12 @@ export interface Link {
    * 'investors'). Used for debug output and the `unresolved` response list.
    */
   origin_field?: string | null;
+  /** Source ids for cross-source graph edges. Present on source-aware link reads. */
+  from_source_id?: string | null;
+  to_source_id?: string | null;
+  origin_source_id?: string | null;
+  /** True only for ACL-redacted remote/federated reads. */
+  locked?: true;
 }
 
 export interface GraphNode {

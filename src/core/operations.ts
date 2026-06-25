@@ -448,6 +448,47 @@ export function linkReadScopeOpts(ctx: OperationContext): { sourceId?: string; s
   return scope;
 }
 
+async function crossSourceLinkReadScopeOpts(ctx: OperationContext): Promise<{
+  sourceId?: string;
+  sourceIds?: string[];
+  crossSourceEdges?: { enabled?: boolean; policy?: { defaultPolicy?: 'locked-stub' | 'hidden'; bySource?: Record<string, 'locked-stub' | 'hidden'> } };
+}> {
+  const scope = linkReadScopeOpts(ctx);
+  // Trusted local/internal callers keep full cross-source view. Redaction is a
+  // remote/federated read-boundary concern.
+  if (ctx.remote === false || !scope.sourceIds?.length) return scope;
+
+  let enabled = Boolean(ctx.config.cross_source_edges?.enabled);
+  try {
+    const raw = await ctx.engine.getConfig('cross_source_edges.enabled');
+    if (raw !== null) enabled = ['true', '1', 'yes', 'on'].includes(raw.trim().toLowerCase());
+  } catch {
+    // Fail closed to current behavior: no cross-source locked stubs.
+  }
+  if (!enabled) return scope;
+
+  const bySource: Record<string, 'locked-stub' | 'hidden'> = { ...(ctx.config.cross_source_edges?.policy ?? {}) };
+  try {
+    const keys = await ctx.engine.listConfigKeys('cross_source_edges.policy.');
+    for (const key of keys) {
+      const sourceId = key.slice('cross_source_edges.policy.'.length);
+      const value = (await ctx.engine.getConfig(key))?.trim();
+      if (sourceId && (value === 'locked-stub' || value === 'hidden')) bySource[sourceId] = value;
+    }
+  } catch {
+    // DB-plane policy unavailable: file-plane policy (if any) still applies;
+    // otherwise the helper default is hidden.
+  }
+
+  return {
+    ...scope,
+    crossSourceEdges: {
+      enabled: true,
+      policy: { defaultPolicy: 'hidden', bySource },
+    },
+  };
+}
+
 /**
  * Resolve a per-call requested source scope against the caller's trust + grant.
  * FAIL-CLOSED: anything not strictly `ctx.remote === false` is untrusted.
@@ -2006,7 +2047,7 @@ const get_links: Operation = {
     // #2200: linkReadScopeOpts so a federated grant — and an untrusted remote
     // scalar scope (promoted to sourceIds[]) — reaches the engine's all-endpoint
     // branch. Trusted local/internal callers keep the scalar cross-source view.
-    const sourceOpts = linkReadScopeOpts(ctx);
+    const sourceOpts = await crossSourceLinkReadScopeOpts(ctx);
     return ctx.engine.getLinks(p.slug as string, sourceOpts);
   },
   scope: 'read',
@@ -2021,7 +2062,7 @@ const get_backlinks: Operation = {
   handler: async (ctx, p) => {
     // #2200: linkReadScopeOpts — federated grant + untrusted remote scalar
     // (promoted to sourceIds[]) reach the engine's all-endpoint branch.
-    const sourceOpts = linkReadScopeOpts(ctx);
+    const sourceOpts = await crossSourceLinkReadScopeOpts(ctx);
     return ctx.engine.getBacklinks(p.slug as string, sourceOpts);
   },
   scope: 'read',

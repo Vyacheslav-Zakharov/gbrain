@@ -18,6 +18,16 @@ import type {
   AdjacencyRow,
   EnrichCandidatesOpts, EnrichCandidate,
 } from './types.ts';
+import type { CrossSourceEdgePolicyConfig } from './redact-link.ts';
+
+export interface LinkReadOpts {
+  sourceId?: string;
+  sourceIds?: string[];
+  crossSourceEdges?: {
+    enabled?: boolean;
+    policy?: CrossSourceEdgePolicyConfig;
+  };
+}
 
 /**
  * v0.27.1: file row for binary-asset metadata. Mirrors the `files` table
@@ -1155,13 +1165,13 @@ export interface BrainEngine {
    * grant); the scalar branch is internal/CLI and keeps cross-source visibility
    * (reconcileLinks + back-link validators depend on it).
    */
-  getLinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]>;
+  getLinks(slug: string, opts?: LinkReadOpts): Promise<Link[]>;
   /**
    * v0.31.8 (D12 + D16): same `opts.sourceId` semantics as `getLinks`,
    * applied to the to-page side of the join. #2200: `opts.sourceIds` federated
    * grant constrains both endpoints (see `getLinks`).
    */
-  getBacklinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]>;
+  getBacklinks(slug: string, opts?: LinkReadOpts): Promise<Link[]>;
   /**
    * v114 (#1941): distinct link_source provenances with edge counts, for
    * `gbrain link-sources`. Source-scoped via `{sourceId?, sourceIds?}` (both

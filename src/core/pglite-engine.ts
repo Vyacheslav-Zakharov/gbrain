@@ -3,7 +3,7 @@ import { vector } from '@electric-sql/pglite/vector';
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import type { Transaction } from '@electric-sql/pglite';
 import type {
-  BrainEngine,
+  BrainEngine, LinkReadOpts,
   BatchOpts,
   LinkBatchInput, TimelineBatchInput,
   ReservedConnection,
@@ -59,6 +59,7 @@ import {
   EmbeddingColumnNotRegisteredError,
 } from './search/embedding-column.ts';
 import { hasCJK, escapeLikePattern } from './cjk.ts';
+import { redactLinks } from './redact-link.ts';
 
 type PGLiteDB = PGlite;
 
@@ -2583,11 +2584,28 @@ export class PGLiteEngine implements BrainEngine {
     }
   }
 
-  async getLinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]> {
+  async getLinks(slug: string, opts?: LinkReadOpts): Promise<Link[]> {
+    if (opts?.sourceIds && opts.sourceIds.length > 0 && opts.crossSourceEdges?.enabled) {
+      const { rows } = await this.db.query(
+        `SELECT f.slug as from_slug, t.slug as to_slug,
+                l.link_type, l.context, l.link_source,
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
+         FROM links l
+         JOIN pages f ON f.id = l.from_page_id AND f.deleted_at IS NULL
+         JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL
+         LEFT JOIN pages o ON o.id = l.origin_page_id AND o.deleted_at IS NULL
+         WHERE f.slug = $1 AND f.source_id = ANY($2::text[])`,
+        [slug, opts.sourceIds]
+      );
+      return redactLinks(rows as any, opts.sourceIds, opts.crossSourceEdges.policy, 'out') as unknown as Link[];
+    }
     // #2200: federated grant scopes ALL THREE page endpoints — from, to, AND the
     // origin (the authoring page, surfaced as origin_slug). The origin LEFT JOIN
     // carries the same ANY($) filter so an out-of-grant origin's slug nulls out.
-    // Remote MCP clients always land here.
+    // Remote MCP clients always land here when cross-source edges are disabled.
     if (opts?.sourceIds && opts.sourceIds.length > 0) {
       const { rows } = await this.db.query(
         `SELECT f.slug as from_slug, t.slug as to_slug,
@@ -2634,7 +2652,24 @@ export class PGLiteEngine implements BrainEngine {
     return rows as unknown as Link[];
   }
 
-  async getBacklinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]> {
+  async getBacklinks(slug: string, opts?: LinkReadOpts): Promise<Link[]> {
+    if (opts?.sourceIds && opts.sourceIds.length > 0 && opts.crossSourceEdges?.enabled) {
+      const { rows } = await this.db.query(
+        `SELECT f.slug as from_slug, t.slug as to_slug,
+                l.link_type, l.context, l.link_source,
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
+         FROM links l
+         JOIN pages f ON f.id = l.from_page_id AND f.deleted_at IS NULL
+         JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL
+         LEFT JOIN pages o ON o.id = l.origin_page_id AND o.deleted_at IS NULL
+         WHERE t.slug = $1 AND t.source_id = ANY($2::text[])`,
+        [slug, opts.sourceIds]
+      );
+      return redactLinks(rows as any, opts.sourceIds, opts.crossSourceEdges.policy, 'in') as unknown as Link[];
+    }
     // #2200: federated grant scopes all three endpoints (mirrors getLinks) — the
     // referrer (from), the queried page (to), AND the origin — so neither a
     // foreign referrer nor a foreign origin slug is disclosed to the caller.

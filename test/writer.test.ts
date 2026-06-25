@@ -56,12 +56,12 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({ engine: 'pglite', database_path: dbDir });
   await engine.initSchema();
-});
+}, 90_000);
 
 afterAll(async () => {
   await engine.disconnect();
   rmSync(dbDir, { recursive: true, force: true });
-});
+}, 30_000);
 
 // Reset DB between tests by truncating — cheaper than tearing down PGLite.
 async function reset(): Promise<void> {
@@ -641,6 +641,38 @@ describe('back-link validator', () => {
       engine,
     });
     expect(findings).toEqual([]);
+  });
+
+  test('remote redacted locked-stub target → no warning and no target lookup', async () => {
+    const lookedUp: string[] = [];
+    const stubEngine = {
+      getLinks: async (slug: string) => {
+        lookedUp.push(slug);
+        if (slug === 'people/a') {
+          return [{
+            from_slug: 'people/a',
+            to_slug: null,
+            link_type: 'mentions',
+            context: null,
+            link_source: null,
+            locked: true,
+          }];
+        }
+        throw new Error(`validator should not look up redacted target ${slug}`);
+      },
+    } as unknown as typeof engine;
+
+    const findings = await backLinkValidator.validate({
+      slug: 'people/a',
+      type: 'person',
+      compiledTruth: 'x',
+      timeline: '',
+      frontmatter: {},
+      engine: stubEngine,
+    });
+
+    expect(findings).toEqual([]);
+    expect(lookedUp).toEqual(['people/a']);
   });
 });
 

@@ -1,6 +1,6 @@
 import postgres from 'postgres';
 import type {
-  BrainEngine,
+  BrainEngine, LinkReadOpts,
   BatchOpts,
   LinkBatchInput, TimelineBatchInput,
   ReservedConnection,
@@ -19,6 +19,7 @@ import type {
   DomainBankSampleOpts, CorpusSampleOpts, DomainBankRow,
 } from './types.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
+import { redactLinks } from './redact-link.ts';
 import { deriveResolutionTuple, finalizeScorecard } from './takes-resolution.ts';
 import { normalizeWeightForStorage } from './takes-fence.ts';
 import { executeRawJsonb } from './sql-query.ts';
@@ -2648,13 +2649,34 @@ export class PostgresEngine implements BrainEngine {
     }
   }
 
-  async getLinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]> {
+  async getLinks(slug: string, opts?: LinkReadOpts): Promise<Link[]> {
     const sql = this.sql;
+    // Cross-source edge read mode: keep the NEAR endpoint scoped, but allow the
+    // FAR endpoint to be returned through the engine-boundary redactor. This is
+    // gated by opts.crossSourceEdges.enabled so legacy/fail-closed behavior is
+    // preserved by default.
+    if (opts?.sourceIds && opts.sourceIds.length > 0 && opts.crossSourceEdges?.enabled) {
+      const ids = opts.sourceIds;
+      const rows = await sql`
+        SELECT f.slug as from_slug, t.slug as to_slug,
+               l.link_type, l.context, l.link_source,
+               o.slug as origin_slug, l.origin_field,
+               f.source_id as from_source_id,
+               t.source_id as to_source_id,
+               o.source_id as origin_source_id
+        FROM links l
+        JOIN pages f ON f.id = l.from_page_id AND f.deleted_at IS NULL
+        JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL
+        LEFT JOIN pages o ON o.id = l.origin_page_id AND o.deleted_at IS NULL
+        WHERE f.slug = ${slug} AND f.source_id = ANY(${ids}::text[])
+      `;
+      return redactLinks(rows as any, ids, opts.crossSourceEdges.policy, 'out') as unknown as Link[];
+    }
     // #2200: federated grant scopes ALL THREE page endpoints — from, to, AND the
     // origin (the page that authored the edge, surfaced as origin_slug). Scoping
     // only from+to would still leak an out-of-grant origin's slug; the origin
     // LEFT JOIN carries the same ANY($) filter so origin_slug nulls out of grant.
-    // Remote MCP clients always land here.
+    // Remote MCP clients always land here when cross-source edges are disabled.
     if (opts?.sourceIds && opts.sourceIds.length > 0) {
       const ids = opts.sourceIds;
       const rows = await sql`
@@ -2699,8 +2721,25 @@ export class PostgresEngine implements BrainEngine {
     return rows as unknown as Link[];
   }
 
-  async getBacklinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]> {
+  async getBacklinks(slug: string, opts?: LinkReadOpts): Promise<Link[]> {
     const sql = this.sql;
+    if (opts?.sourceIds && opts.sourceIds.length > 0 && opts.crossSourceEdges?.enabled) {
+      const ids = opts.sourceIds;
+      const rows = await sql`
+        SELECT f.slug as from_slug, t.slug as to_slug,
+               l.link_type, l.context, l.link_source,
+               o.slug as origin_slug, l.origin_field,
+               f.source_id as from_source_id,
+               t.source_id as to_source_id,
+               o.source_id as origin_source_id
+        FROM links l
+        JOIN pages f ON f.id = l.from_page_id AND f.deleted_at IS NULL
+        JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL
+        LEFT JOIN pages o ON o.id = l.origin_page_id AND o.deleted_at IS NULL
+        WHERE t.slug = ${slug} AND t.source_id = ANY(${ids}::text[])
+      `;
+      return redactLinks(rows as any, ids, opts.crossSourceEdges.policy, 'in') as unknown as Link[];
+    }
     // #2200: federated grant scopes all three endpoints (mirrors getLinks) — the
     // referrer (from), the queried page (to), AND the origin — so neither a
     // foreign referrer nor a foreign origin slug is disclosed to the caller.
