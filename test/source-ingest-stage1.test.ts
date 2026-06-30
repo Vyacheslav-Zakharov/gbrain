@@ -74,19 +74,19 @@ describe('source-ingest Stage 1 contract', () => {
   });
 
   test('operations are registered with read-side MCP-safe and write-side localOnly split', () => {
-    for (const name of ['source_discover', 'source_profile_draft', 'source_validate_profile', 'source_dry_run', 'source_sync_status']) {
+    for (const name of ['source_discover', 'source_profile_draft', 'source_validate_profile', 'source_profile_get', 'source_dry_run', 'source_sync_status']) {
       expect(operationsByName[name]).toBeTruthy();
       expect(operationsByName[name].scope).toBe('read');
       expect(operationsByName[name].localOnly).not.toBe(true);
     }
-    for (const name of ['source_ingest', 'source_refresh', 'source_revert']) {
+    for (const name of ['source_profile_put', 'source_ingest', 'source_refresh', 'source_revert']) {
       expect(operationsByName[name]).toBeTruthy();
       expect(operationsByName[name].scope).toBe('write');
       expect(operationsByName[name].localOnly).toBe(true);
     }
   });
 
-  test('source_dry_run returns rule-level counts and does not write', async () => {
+  test('source_dry_run returns rule-level counts, stratified samples, and managed-block previews', async () => {
     const out = await operationsByName.source_dry_run.handler(ctx(), { profile: vehicleProfile, sample_limit: 10 }) as any;
     expect(out.ok).toBe(true);
     expect(out.dry_run).toBe(true);
@@ -94,5 +94,45 @@ describe('source-ingest Stage 1 contract', () => {
     expect(out.counts.would_write).toBe(2);
     expect(out.counts.skipped).toBe(1);
     expect(out.link_rules[0].rule_id).toBe('located-at-facility');
+    expect(out.link_rules[0].matched).toBe(2);
+    expect(out.stratified_samples.would_write.length).toBeGreaterThan(0);
+    expect(out.sample_pages[0].managed_block_preview).toContain('gbrain-source-sync:start');
+    expect(out.sample_pages[0].slug).toBe('assets/equipment/a-001');
+    expect(out.warnings).toContain('shared_profile_has_pii_candidates');
+  });
+
+  test('source_profile_draft uses discovery heuristics but remains unapproved', async () => {
+    const out = await operationsByName.source_profile_draft.handler(ctx(), { connector_id: 'fake-source', source_object: 'vehicle', target_source_id: 'shared', sample_limit: 10 }) as any;
+    expect(out.profile.status).toBe('draft');
+    expect(out.profile.target.gbrain_type).toBe('equipment');
+    expect(out.profile.target.suggested_source_id).toBe('shared');
+    expect(out.profile.target.approved_source_id).toBeUndefined();
+    expect(out.warnings).toContain('source_id_not_frozen');
+  });
+
+  test('source_profile_put is local-only and persists approved profile versions', async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const engine = {
+      executeRaw: async (sql: string, params?: unknown[]) => {
+        calls.push({ sql, params });
+        if (sql.includes('FROM sources')) return params?.[0] === 'shared' ? [{ id: 'shared' }] : [];
+        if (sql.includes('SELECT current_version FROM source_ingest_profiles')) return [];
+        return [];
+      },
+    } as unknown as BrainEngine;
+    const localCtx = { engine, config: { engine: 'pglite' }, logger: console, dryRun: false, remote: false, sourceId: 'shared' } as OperationContext;
+    const out = await operationsByName.source_profile_put.handler(localCtx, {
+      profile: { ...vehicleProfile, status: 'draft', target: { ...vehicleProfile.target, approved_source_id: undefined } },
+      approve: true,
+      approved_source_id: 'shared',
+      approved_by: 'tester',
+      change_note: 'approve vehicle profile',
+    }) as any;
+    expect(out.ok).toBe(true);
+    expect(out.saved.version).toBe(1);
+    expect(out.profile.status).toBe('reviewed');
+    expect(out.profile.target.approved_source_id).toBe('shared');
+    expect(calls.some(c => c.sql.includes('INSERT INTO source_ingest_profiles'))).toBe(true);
+    expect(calls.some(c => c.sql.includes('INSERT INTO source_ingest_profile_versions'))).toBe(true);
   });
 });

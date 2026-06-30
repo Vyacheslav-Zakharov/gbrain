@@ -47,8 +47,11 @@ import {
 } from './operations-descriptions.ts';
 import { getSourceConnector } from './source-ingest/connectors/fake.ts';
 import { discoverSourceObject } from './source-ingest/discovery.ts';
+import { draftSourceIngestProfile } from './source-ingest/draft.ts';
+import { buildSourceDryRun } from './source-ingest/dry-run.ts';
 import { sourceIngestProfileJsonSchema } from './source-ingest/profile-schema.ts';
 import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
+import { listSourceIngestProfiles, putSourceIngestProfile } from './source-ingest/store.ts';
 
 // --- Types ---
 
@@ -2873,32 +2876,8 @@ const source_profile_draft: Operation = {
     const connectorId = p.connector_id as string;
     const sourceObject = p.source_object as string;
     const discovery = await discoverSourceObject(resolveSourceConnectorOrThrow(connectorId), sourceObject, (p.sample_limit as number | undefined) ?? 50);
-    const idField = discovery.idCandidates.includes('id') ? 'id' : (discovery.idCandidates[0] || 'id');
-    const updatedAt = discovery.updatedAtCandidates[0];
-    const isVehicle = sourceObject === 'vehicle';
-    const profile = {
-      profile_id: `${connectorId.replace(/[^a-z0-9-]/g, '-')}-${sourceObject.replace(/[^a-z0-9-]/g, '-')}-v1`,
-      status: 'draft',
-      source_connector: connectorId,
-      source_object: sourceObject,
-      target: {
-        gbrain_type: isVehicle ? 'equipment' : sourceObject,
-        suggested_source_id: p.target_source_id || null,
-        slug_template: isVehicle ? 'assets/equipment/{{ code | slugify }}' : `${sourceObject}/{{ ${idField} | slugify }}`,
-      },
-      selection: isVehicle ? { exclude: [{ field: 'is_group', op: 'eq', value: true }, { field: 'node_type', op: 'in', value: ['folder', 'category', 'location_node'] }] } : {},
-      identity: { external_id_field: idField, natural_key_fields: discovery.idCandidates.includes('code') ? ['code'] : [], display_name_field: discovery.fields.some(f => f.name === 'name') ? 'name' : idField },
-      freshness: { policy: isVehicle ? 'P30D' : 'P7D', on_access: 'acknowledge_when_stale', ...(updatedAt ? { changed_since_field: updatedAt } : {}) },
-      mapping: { frontmatter: isVehicle ? { equipment_class: 'vehicle' } : {} },
-      links: isVehicle ? [
-        { id: 'part-of-parent-equipment', type: 'part_of', target: { type: 'equipment', lookup: 'external_id', value_field: 'parent_id' }, when: [{ field: 'parent_id', op: 'exists' }], confidence: 0.7 },
-        { id: 'located-at-facility', type: 'located_at', target: { type: 'facility', lookup: 'external_id', value_field: 'location_id' }, when: [{ field: 'location_id', op: 'exists' }], confidence: 0.7 },
-      ] : [],
-      update_policy: { mode: 'managed_block', preserve_manual_sections: true, field_allowlist: ['title', 'external_code', 'equipment_class', 'status'] },
-      security: { classification: p.target_source_id === 'shared' ? 'shared' : 'internal', pii: isVehicle && discovery.fields.some(f => /responsible|person|plate/i.test(f.name)), pii_fields: discovery.fields.filter(f => /iin|phone|email|responsible|person/i.test(f.name)).map(f => f.name) },
-      review: { drafted_by: 'agent', approved_by: null, approved_at: null },
-    };
-    return { discovery, profile, warnings: ['draft_only_not_approved', 'source_id_not_frozen'] };
+    const { profile, warnings } = draftSourceIngestProfile({ connectorId, sourceObject, discovery, targetSourceId: p.target_source_id as string | undefined });
+    return { discovery, profile, warnings };
   },
 };
 
@@ -2916,6 +2895,52 @@ const source_validate_profile: Operation = {
   },
 };
 
+const source_profile_get: Operation = {
+  name: 'source_profile_get',
+  description: 'List persisted source-ingest profiles or read one profile. Read-only; MCP-safe.',
+  scope: 'read',
+  params: {
+    profile_id: { type: 'string', description: 'Optional profile id' },
+  },
+  handler: async (ctx, p) => {
+    const rows = await listSourceIngestProfiles(ctx.engine, p.profile_id as string | undefined);
+    return { rows, count: rows.length };
+  },
+};
+
+const source_profile_put: Operation = {
+  name: 'source_profile_put',
+  description: 'LOCAL/TRUSTED: persist a reviewed source-ingest profile version. Approval freezes approved_source_id before any batch ingest can run.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    profile: { type: 'object', required: true, description: 'Source ingest profile JSON' },
+    approve: { type: 'boolean', description: 'When true, require/freeze approved_source_id and mark profile reviewed unless already active.' },
+    approved_source_id: { type: 'string', description: 'Source id to freeze on approval' },
+    approved_by: { type: 'string', description: 'Reviewer identity' },
+    change_note: { type: 'string', description: 'Version note' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_profile_put is local/trusted only.');
+    const raw = { ...(p.profile as Record<string, unknown>) } as Record<string, unknown>;
+    const target = { ...((raw.target as Record<string, unknown>) || {}) };
+    if (p.approve) {
+      const approvedSourceId = (p.approved_source_id as string | undefined) || (target.approved_source_id as string | undefined);
+      if (!approvedSourceId) throw new OperationError('invalid_params', 'approved_source_id is required when approve=true.');
+      target.approved_source_id = approvedSourceId;
+      raw.target = target;
+      raw.status = raw.status === 'active' ? 'active' : 'reviewed';
+      raw.review = { ...((raw.review as Record<string, unknown>) || {}), approved_by: p.approved_by || 'local', approved_at: new Date().toISOString() };
+    }
+    const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, raw);
+    if (!validation.ok || !validation.profile) return { ok: false, validation };
+    if (ctx.dryRun) return { dry_run: true, validation };
+    const saved = await putSourceIngestProfile(ctx.engine, validation.profile, { createdBy: (p.approved_by as string | undefined) || 'local', changeNote: p.change_note as string | undefined });
+    return { ok: true, saved, profile: validation.profile };
+  },
+};
+
 const source_dry_run: Operation = {
   name: 'source_dry_run',
   description: 'Apply a source-ingest profile to connector samples without writing pages, links, timeline, or sync state. Returns counts, skipped records, sensitivity hints, and link-rule coverage.',
@@ -2930,23 +2955,7 @@ const source_dry_run: Operation = {
     const profile = validation.profile;
     const connector = resolveSourceConnectorOrThrow(profile.source_connector);
     const sample = await connector.sample(profile.source_object, (p.sample_limit as number | undefined) ?? 50);
-    const skipped = sample.filter(r => r.data.is_group === true || r.data.node_type === 'folder').map(r => ({ external_id: r.external_id, reason: 'group_or_folder_node' }));
-    const candidates = sample.filter(r => !skipped.some(s => s.external_id === r.external_id));
-    const linkRules = (profile.links || []).map(rule => {
-      const valueField = rule.target.value_field;
-      const matched = valueField ? candidates.filter(r => r.data[valueField] !== undefined && r.data[valueField] !== null).length : 0;
-      return { rule_id: rule.id, type: rule.type, matched, total: candidates.length, unresolved_bucket: candidates.length - matched, sample_edges: [] };
-    });
-    return {
-      ok: true,
-      dry_run: true,
-      validation,
-      counts: { sampled: sample.length, would_write: candidates.length, skipped: skipped.length, failed: 0 },
-      skipped,
-      link_rules: linkRules,
-      routing_sensitivity: { approved_source_id: profile.target.approved_source_id ?? null, classification: profile.security.classification, pii: profile.security.pii, pii_fields: profile.security.pii_fields || [] },
-      sample_pages: candidates.slice(0, 3).map(r => ({ external_id: r.external_id, title: String(r.data[profile.identity.display_name_field] ?? r.external_id), source_ingest: { profile_id: profile.profile_id, external_ref: `${profile.source_connector}:${profile.source_object}:${r.external_id}` } })),
-    };
+    return { ...buildSourceDryRun(profile, sample), validation };
   },
 };
 
@@ -5324,7 +5333,7 @@ export const operations: Operation[] = [
   // Ingest log
   log_ingest, get_ingest_log,
   // Source Ingest (third-party connectors; Stage 1 read contracts + local write skeletons)
-  source_discover, source_profile_draft, source_validate_profile, source_dry_run, source_sync_status,
+  source_discover, source_profile_draft, source_validate_profile, source_profile_get, source_profile_put, source_dry_run, source_sync_status,
   source_ingest, source_refresh, source_revert,
   // Files
   file_list, file_upload, file_url,
