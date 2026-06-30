@@ -52,6 +52,7 @@ import { buildSourceDryRun } from './source-ingest/dry-run.ts';
 import { sourceIngestProfileJsonSchema } from './source-ingest/profile-schema.ts';
 import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
 import { listSourceIngestProfiles, putSourceIngestProfile } from './source-ingest/store.ts';
+import { runSourceIngestExecutor } from './source-ingest/executor.ts';
 
 // --- Types ---
 
@@ -2997,15 +2998,34 @@ const source_sync_status: Operation = {
 
 const source_ingest: Operation = {
   name: 'source_ingest',
-  description: 'LOCAL/TRUSTED write-side skeleton for third-party batch ingest. Stage 1 refuses execution until managed-block executor lands.',
+  description: 'LOCAL/TRUSTED Stage 3A batch ingest executor. Fake-source only; writes git-backed pages through the existing import/write-through path and records source_sync_state.',
   scope: 'write',
   mutating: true,
   localOnly: true,
-  params: { profile_id: { type: 'string', required: true }, dry_run: { type: 'boolean', description: 'Use source_dry_run for read-side preview.' } },
+  params: {
+    profile_id: { type: 'string', required: true },
+    run_id: { type: 'string', description: 'Optional run id. Defaults to source-ingest-<timestamp>.' },
+    limit: { type: 'number', description: 'Optional max records for pilot runs.' },
+    dry_run: { type: 'boolean', description: 'Return action preview only. Use source_dry_run for read-side page preview.' },
+    require_clean_git: { type: 'boolean', description: 'Fail if the target source repo has uncommitted/untracked changes. Default true.' },
+    allow_db_only: { type: 'boolean', description: 'Allow explicitly DB-only sources. Stage 3A still requires git-backed and rejects this for real writes.' },
+    no_embed: { type: 'boolean', description: 'Skip embedding during pilot import. Default true.' },
+  },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_ingest is local/trusted only.');
     if (ctx.dryRun || p.dry_run) return { dry_run: true, action: 'source_ingest', profile_id: p.profile_id };
-    throw new OperationError('not_implemented', 'source_ingest executor is intentionally not implemented in Stage 1.', 'Use source_dry_run and approve Stage 2/3 executor design first.', 'docs/source-ingest-phase-0-inventory.md');
+    try {
+      return await runSourceIngestExecutor(ctx.engine, {
+        profile_id: p.profile_id as string,
+        run_id: p.run_id as string | undefined,
+        limit: p.limit as number | undefined,
+        require_clean_git: p.require_clean_git as boolean | undefined,
+        allow_db_only: p.allow_db_only as boolean | undefined,
+        no_embed: p.no_embed as boolean | undefined,
+      }, ctx.logger);
+    } catch (e) {
+      throw new OperationError('source_ingest_failed', e instanceof Error ? e.message : String(e));
+    }
   },
 };
 
