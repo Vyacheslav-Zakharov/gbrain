@@ -48,6 +48,17 @@ describe('source-ingest executor preflight', () => {
     }
   });
 
+  test('allows dirty git-backed source when explicitly requested but reports dirty paths', async () => {
+    const repo = tempGitRepo();
+    writeFileSync(join(repo, 'dirty.md'), 'dirty\n');
+    const out = await resolveSourceIngestStorageMode(engineWithSource({ id: 'shared', local_path: repo }), 'shared', { requireCleanGit: false });
+    expect(out.mode).toBe('git-backed');
+    if (out.mode === 'git-backed') {
+      expect(out.git_clean).toBe(false);
+      expect(out.dirty_paths?.join('\n')).toContain('dirty.md');
+    }
+  });
+
   test('blocks DB-only source unless explicitly allowed by config or opts', async () => {
     const blocked = await resolveSourceIngestStorageMode(engineWithSource({ id: 'default', local_path: null, config: {} }), 'default');
     expect(blocked.mode).toBe('blocked');

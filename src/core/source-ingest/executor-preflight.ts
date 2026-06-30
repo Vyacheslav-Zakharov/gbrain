@@ -3,7 +3,7 @@ import { execFileSync } from 'child_process';
 import type { BrainEngine } from '../engine.ts';
 
 export type SourceIngestStorageMode =
-  | { mode: 'git-backed'; source_id: string; local_path: string; git_clean: true }
+  | { mode: 'git-backed'; source_id: string; local_path: string; git_clean: boolean; dirty_paths?: string[] }
   | { mode: 'db-only'; source_id: string; explicitly_allowed: true }
   | { mode: 'blocked'; source_id: string; reason: string; local_path?: string; git_clean?: boolean; dirty_paths?: string[] };
 
@@ -74,7 +74,7 @@ export async function resolveSourceIngestStorageMode(
         dirty_paths: status.dirty_paths,
       };
     }
-    return { mode: 'git-backed', source_id: sourceId, local_path: localPath, git_clean: true };
+    return { mode: 'git-backed', source_id: sourceId, local_path: localPath, git_clean: status.clean, ...(status.clean ? {} : { dirty_paths: status.dirty_paths }) };
   }
 
   const explicitlyAllowed = opts.allowDbOnly === true || configAllowsDbOnly(source.config);
