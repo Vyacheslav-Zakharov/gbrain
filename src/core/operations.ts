@@ -3012,6 +3012,7 @@ const source_ingest: Operation = {
     allow_db_only: { type: 'boolean', description: 'Allow explicitly DB-only sources. Stage 3A still requires git-backed and rejects this for real writes.' },
     no_embed: { type: 'boolean', description: 'Skip embedding during pilot import. Default true.' },
   },
+  cliHints: { name: 'source-ingest-run', positional: ['profile_id'], aliases: ['source-ingest'] },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_ingest is local/trusted only.');
     if (ctx.dryRun || p.dry_run) return { dry_run: true, action: 'source_ingest', profile_id: p.profile_id };
@@ -3054,6 +3055,7 @@ const source_revert: Operation = {
     run_id: { type: 'string', required: true },
     apply: { type: 'boolean', description: 'Reserved for a future mutating rollback. Stage 3B rejects apply=true.' },
   },
+  cliHints: { name: 'source-ingest-revert', positional: ['run_id'] },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_revert is local/trusted only.');
     if (p.apply) throw new OperationError('not_implemented', 'source_revert apply=true is deferred; Stage 3B is report-only.');

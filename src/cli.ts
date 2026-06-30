@@ -938,6 +938,38 @@ export function formatResult(opName: string, result: unknown): string {
         `#${v.id}  ${v.snapshot_at?.toString().slice(0, 19) || '?'}  ${v.compiled_truth?.slice(0, 60) || ''}...`,
       ).join('\n') + '\n';
     }
+    case 'source_ingest': {
+      const r = result as any;
+      const lines = [
+        `source_ingest ${r.ok ? 'ok' : 'failed'} run_id=${r.run_id ?? '?'}`,
+        `profile=${r.profile_id ?? '?'} source=${r.source_id ?? '?'}`,
+      ];
+      if (r.storage) {
+        lines.push(`storage=${r.storage.mode}${r.storage.local_path ? ` path=${r.storage.local_path}` : ''}${r.storage.git_clean === false ? ' dirty=true' : ''}`);
+        if (Array.isArray(r.storage.dirty_paths) && r.storage.dirty_paths.length) lines.push(`dirty_paths=${r.storage.dirty_paths.join(', ')}`);
+      }
+      if (r.counts) lines.push(`counts sampled=${r.counts.sampled ?? 0} written=${r.counts.written ?? 0} unchanged=${r.counts.unchanged ?? 0} skipped=${r.counts.skipped ?? 0} failed=${r.counts.failed ?? 0}`);
+      if (r.git_commit) lines.push(`git_commit=${r.git_commit.committed ? r.git_commit.sha : `no (${r.git_commit.reason ?? 'unknown'})`}`);
+      if (r.graph_writes) lines.push(`graph_writes=${r.graph_writes}`);
+      if (Array.isArray(r.results) && r.results.length) {
+        lines.push('results:');
+        for (const item of r.results) lines.push(`  ${item.external_id}: ${item.status}${item.slug ? ` ${item.slug}` : ''}${item.reason ? ` (${item.reason})` : ''}${item.warnings?.length ? ` warnings=${item.warnings.join(',')}` : ''}`);
+      }
+      return lines.join('\n') + '\n';
+    }
+    case 'source_revert': {
+      const r = result as any;
+      const lines = [
+        `source_revert ${r.mode ?? 'report'} run_id=${r.run_id ?? '?'}`,
+        `counts affected=${r.counts?.affected ?? 0} success_or_unchanged=${r.counts?.success_or_unchanged ?? 0} failed=${r.counts?.failed ?? 0}`,
+      ];
+      if (Array.isArray(r.pages) && r.pages.length) {
+        lines.push('pages:');
+        for (const p of r.pages) lines.push(`  ${p.slug} source=${p.source_id} external=${p.external_id} action=${p.revert_action}`);
+      }
+      if (Array.isArray(r.warnings) && r.warnings.length) lines.push(`warnings=${r.warnings.join(', ')}`);
+      return lines.join('\n') + '\n';
+    }
     default:
       return JSON.stringify(result, null, 2) + '\n';
   }
