@@ -53,6 +53,7 @@ import { sourceIngestProfileJsonSchema } from './source-ingest/profile-schema.ts
 import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
 import { listSourceIngestProfiles, putSourceIngestProfile } from './source-ingest/store.ts';
 import { runSourceIngestExecutor } from './source-ingest/executor.ts';
+import { buildSourceRevertReport } from './source-ingest/revert.ts';
 
 // --- Types ---
 
@@ -3045,15 +3046,19 @@ const source_refresh: Operation = {
 
 const source_revert: Operation = {
   name: 'source_revert',
-  description: 'LOCAL/TRUSTED skeleton for reverting a source-ingest run by run_id. Real rollback semantics land with the executor.',
+  description: 'LOCAL/TRUSTED report-only revert planner for source-ingest runs. Stage 3B does not mutate pages yet.',
   scope: 'write',
   mutating: true,
   localOnly: true,
-  params: { run_id: { type: 'string', required: true } },
+  params: {
+    run_id: { type: 'string', required: true },
+    apply: { type: 'boolean', description: 'Reserved for a future mutating rollback. Stage 3B rejects apply=true.' },
+  },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_revert is local/trusted only.');
+    if (p.apply) throw new OperationError('not_implemented', 'source_revert apply=true is deferred; Stage 3B is report-only.');
     if (ctx.dryRun) return { dry_run: true, action: 'source_revert', run_id: p.run_id };
-    throw new OperationError('not_implemented', 'source_revert is deferred until run_id write semantics are implemented.', 'Stage 3 must define created-vs-updated rollback behavior first.', 'docs/source-ingest-phase-0-inventory.md');
+    return buildSourceRevertReport(ctx.engine, p.run_id as string);
   },
 };
 

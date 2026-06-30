@@ -4,8 +4,11 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { putSourceIngestProfile } from '../src/core/source-ingest/store.ts';
+import { putSourceIngestProfile, profileHash } from '../src/core/source-ingest/store.ts';
 import { runSourceIngestExecutor } from '../src/core/source-ingest/executor.ts';
+import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
+import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
+import { importFromContent } from '../src/core/import-file.ts';
 import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
 
 let engine: PGLiteEngine;
@@ -126,5 +129,60 @@ describe('source-ingest Stage 3A executor', () => {
     expect(out.storage.mode).toBe('blocked');
     if (out.storage.mode === 'blocked') expect(out.storage.reason).toBe('dirty_git_tree');
     expect(await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' })).toBeNull();
+  }, 30000);
+
+  test('warns when a human edited inside the managed block before refresh', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-edit-1', no_embed: true });
+    const page = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(page).toBeTruthy();
+    const edited = page!.compiled_truth.replace('- status: active', '- status: human-edited-inside-block');
+    const imported = await importFromContent(engine, 'source-ingest/vehicles/a-001', edited, {
+      noEmbed: true,
+      sourceId: 'shared',
+      sourcePath: 'source-ingest/vehicles/a-001.md',
+      source_kind: 'manual_test_edit',
+      source_uri: 'test:inside-managed-block',
+      ingested_via: 'test',
+      remote: false,
+    });
+    expect(imported.status).toBe('imported');
+    const out = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-edit-2', no_embed: true });
+    const record = out.results.find(r => r.external_id === 'veh-001');
+    expect(record?.warnings).toContain('managed_block_user_edit_overwritten');
+    const refreshed = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(refreshed?.compiled_truth).toContain('- status: active');
+  }, 30000);
+
+  test('resumes from op-checkpoint and skips completed external refs', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-resume-1', limit: 1, no_embed: true });
+    const key = {
+      op: 'source_ingest',
+      fingerprint: fingerprint({ profile_id: profile.profile_id, profile_hash: profileHash(profile), source_id: 'shared', connector: 'fake-source', object: 'vehicle', mode: 'stage3a' }),
+    };
+    await appendCompleted(engine, key, ['fake-source:vehicle:veh-001']);
+    const out = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-resume-2', no_embed: true });
+    expect(out.ok).toBe(true);
+    expect(out.results.find(r => r.external_id === 'veh-001')).toMatchObject({ status: 'skipped', reason: 'checkpoint_completed' });
+    expect(out.results.find(r => r.external_id === 'veh-002')).toMatchObject({ status: 'written' });
+    expect(out.checkpoint.cleared).toBe(true);
+    expect(await engine.getPage('source-ingest/vehicles/a-002', { sourceId: 'shared' })).toBeTruthy();
+  }, 30000);
+
+  test('source_revert report-only lists pages touched by run_id without mutating', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-revert-report', no_embed: true });
+    const before = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    const report = await buildSourceRevertReport(engine, 'run-revert-report');
+    const after = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(report.mode).toBe('report-only');
+    expect(report.counts.affected).toBe(2);
+    expect(report.pages.map(p => p.slug).sort()).toEqual(['source-ingest/vehicles/a-001', 'source-ingest/vehicles/a-002']);
+    expect(report.warnings).toContain('created_vs_updated_rollback_semantics_deferred');
+    expect(after?.content_hash).toBe(before?.content_hash);
   }, 30000);
 });
