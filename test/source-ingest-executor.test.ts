@@ -8,6 +8,7 @@ import { putSourceIngestProfile, profileHash } from '../src/core/source-ingest/s
 import { runSourceIngestExecutor } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
+import { listDueSourceRefreshes, parseFreshnessPolicyMs } from '../src/core/source-ingest/freshness.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
@@ -237,6 +238,31 @@ describe('source-ingest Stage 3A executor', () => {
     const report = await buildSourceRevertReport(engine, 'run-revert-block', { apply: true, no_embed: true });
     expect(report.pages.find(p => p.slug === 'source-ingest/vehicles/a-001')).toMatchObject({ revert_action: 'blocked', reason: 'page_updated_after_run' });
     expect(await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' })).toBeTruthy();
+  }, 30000);
+
+  test('source_refresh freshness planner marks stale rows due and fresh rows not due', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    expect(parseFreshnessPolicyMs('P30D')).toBe(30 * 24 * 60 * 60_000);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-freshness', no_embed: true });
+    const sync = await engine.executeRaw<{ stale_after: string | null }>(
+      `SELECT stale_after::text FROM source_sync_state WHERE external_id = $1`,
+      ['veh-001'],
+    );
+    expect(sync[0].stale_after).toBeTruthy();
+    expect(await listDueSourceRefreshes(engine, { profile_id: profile.profile_id })).toEqual([]);
+    await engine.executeRaw(`UPDATE source_sync_state SET stale_after = now() - interval '1 hour' WHERE profile_id = $1`, [profile.profile_id]);
+    const due = await listDueSourceRefreshes(engine, { profile_id: profile.profile_id });
+    expect(due).toHaveLength(1);
+    expect(due[0]).toMatchObject({ profile_id: profile.profile_id, due_rows: 2, reason: 'stale' });
+  }, 30000);
+
+  test('source_refresh planner returns initial_sync for reviewed profiles with no sync rows', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    const due = await listDueSourceRefreshes(engine, { profile_id: profile.profile_id });
+    expect(due).toHaveLength(1);
+    expect(due[0]).toMatchObject({ profile_id: profile.profile_id, total_rows: 0, never_synced_rows: 1, reason: 'initial_sync' });
   }, 30000);
 
   test('source-ingest minion handler parses payload, updates progress, and runs executor', async () => {

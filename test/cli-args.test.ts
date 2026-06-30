@@ -90,5 +90,25 @@ describe('parseOpArgs', () => {
     expect(text).toContain('source-ingest/vehicles/a-001 source=shared');
     expect(text).toContain('warnings=report_only_stage3b_no_mutation');
   });
+
+  test('source-refresh operator CLI parses and formats due profiles', () => {
+    const op = operationsByName.source_refresh;
+    expect(op.cliHints?.name).toBe('source-ingest-refresh');
+    expect(parseOpArgs(op, ['fake-source-vehicle-v1', '--enqueue', '--queue', 'ingest', '--no-require-clean-git'])).toEqual({
+      profile_id: 'fake-source-vehicle-v1',
+      enqueue: true,
+      queue: 'ingest',
+      require_clean_git: false,
+    });
+    const text = formatResult('source_refresh', {
+      mode: 'enqueue',
+      count: 1,
+      due: [{ profile_id: 'fake-source-vehicle-v1', approved_source_id: 'shared', total_rows: 2, due_rows: 2, reason: 'stale', oldest_stale_after: '2026-01-01T00:00:00Z' }],
+      jobs: [{ profile_id: 'fake-source-vehicle-v1', job_id: 20, status: 'waiting', queue: 'default', run_id: 'source-refresh-fake-source-vehicle-v1-x' }],
+    });
+    expect(text).toContain('source_refresh enqueue count=1');
+    expect(text).toContain('fake-source-vehicle-v1 source=shared rows=2 due=2 reason=stale');
+    expect(text).toContain('job=20 status=waiting');
+  });
 });
 

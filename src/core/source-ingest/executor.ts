@@ -11,6 +11,7 @@ import { renderSlugTemplate } from './dry-run.ts';
 import { profileHash, stableJson } from './store.ts';
 import { validateSourceIngestProfile, type SourceFilterRule, type SourceIngestProfile } from './profile-schema.ts';
 import { resolveSourceIngestStorageMode, type SourceIngestStorageMode } from './executor-preflight.ts';
+import { nextStaleAfter } from './freshness.ts';
 
 export interface SourceIngestExecutorOptions {
   profile_id: string;
@@ -169,11 +170,12 @@ async function writeSyncState(engine: BrainEngine, args: {
   result: string;
   error?: string | null;
 }) {
+  const staleAfter = nextStaleAfter(args.profile.freshness?.policy ?? null);
   await engine.executeRaw(
     `INSERT INTO source_sync_state
        (connector_id, source_object, external_id, slug, approved_source_id, profile_id, profile_version,
-        content_fingerprint, last_source_hash, source_updated_at, last_synced_at, freshness_policy, run_id, last_result, last_error, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11,$12,$13,$14,now())
+        content_fingerprint, last_source_hash, source_updated_at, last_synced_at, stale_after, freshness_policy, run_id, last_result, last_error, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11,$12,$13,$14,$15,now())
      ON CONFLICT (connector_id, source_object, external_id) DO UPDATE SET
        slug = EXCLUDED.slug,
        approved_source_id = EXCLUDED.approved_source_id,
@@ -183,6 +185,7 @@ async function writeSyncState(engine: BrainEngine, args: {
        last_source_hash = EXCLUDED.last_source_hash,
        source_updated_at = EXCLUDED.source_updated_at,
        last_synced_at = EXCLUDED.last_synced_at,
+       stale_after = EXCLUDED.stale_after,
        freshness_policy = EXCLUDED.freshness_policy,
        run_id = EXCLUDED.run_id,
        last_result = EXCLUDED.last_result,
@@ -199,6 +202,7 @@ async function writeSyncState(engine: BrainEngine, args: {
       args.managedBlockHash,
       hashText(stableJson(args.record.data)),
       args.record.source_updated_at ?? null,
+      staleAfter?.toISOString() ?? null,
       args.profile.freshness?.policy ?? null,
       args.runId,
       args.result,

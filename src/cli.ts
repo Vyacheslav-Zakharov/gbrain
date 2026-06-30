@@ -964,6 +964,21 @@ export function formatResult(opName: string, result: unknown): string {
       }
       return lines.join('\n') + '\n';
     }
+    case 'source_refresh': {
+      const r = result as any;
+      const lines = [
+        `source_refresh ${r.mode ?? 'report-only'} count=${r.count ?? 0}`,
+      ];
+      if (Array.isArray(r.due) && r.due.length) {
+        lines.push('due:');
+        for (const d of r.due) lines.push(`  ${d.profile_id} source=${d.approved_source_id} rows=${d.total_rows} due=${d.due_rows} reason=${d.reason} oldest=${d.oldest_stale_after ?? 'never'}`);
+      }
+      if (Array.isArray(r.jobs) && r.jobs.length) {
+        lines.push('jobs:');
+        for (const j of r.jobs) lines.push(`  ${j.profile_id}: job=${j.job_id} status=${j.status} queue=${j.queue} run_id=${j.run_id}`);
+      }
+      return lines.join('\n') + '\n';
+    }
     case 'source_revert': {
       const r = result as any;
       const lines = [

@@ -54,6 +54,7 @@ import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile
 import { listSourceIngestProfiles, putSourceIngestProfile } from './source-ingest/store.ts';
 import { runSourceIngestExecutor } from './source-ingest/executor.ts';
 import { buildSourceRevertReport } from './source-ingest/revert.ts';
+import { listDueSourceRefreshes } from './source-ingest/freshness.ts';
 
 // --- Types ---
 
@@ -3053,15 +3054,51 @@ const source_ingest: Operation = {
 
 const source_refresh: Operation = {
   name: 'source_refresh',
-  description: 'LOCAL/TRUSTED write-side skeleton for refreshing stale source-ingest profiles. Future cycle phase must enqueue jobs, not do connector I/O inline.',
+  description: 'LOCAL/TRUSTED Stage 4 freshness planner. Enqueues source-ingest jobs for due profiles; does not perform connector I/O inline.',
   scope: 'write',
   mutating: true,
   localOnly: true,
-  params: { profile_id: { type: 'string' } },
+  params: {
+    profile_id: { type: 'string', description: 'Optional profile id filter' },
+    limit: { type: 'number', description: 'Max due profiles to plan/enqueue (default 50)' },
+    enqueue: { type: 'boolean', description: 'Submit source-ingest jobs for due profiles. Default false returns report-only plan.' },
+    queue: { type: 'string', description: 'Minion queue name for enqueue (default: default).' },
+    priority: { type: 'number', description: 'Minion job priority (0 = highest, default 0).' },
+    timeout_ms: { type: 'number', description: 'Minion job timeout (default 10 minutes).' },
+    require_clean_git: { type: 'boolean', description: 'Forward to source-ingest job. Default true.' },
+    no_embed: { type: 'boolean', description: 'Forward to source-ingest job. Default true.' },
+  },
+  cliHints: { name: 'source-ingest-refresh', positional: ['profile_id'] },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_refresh is local/trusted only.');
-    if (ctx.dryRun) return { dry_run: true, action: 'source_refresh', profile_id: p.profile_id ?? null };
-    throw new OperationError('not_implemented', 'source_refresh queueing is deferred until source_ingest executor exists.', 'Do not perform connector I/O inside cycle.ts.', 'docs/source-ingest-phase-0-inventory.md');
+    const due = await listDueSourceRefreshes(ctx.engine, {
+      profile_id: typeof p.profile_id === 'string' && p.profile_id.length > 0 ? p.profile_id : undefined,
+      limit: typeof p.limit === 'number' ? p.limit : undefined,
+    });
+    if (ctx.dryRun || !p.enqueue) return { mode: 'report-only', count: due.length, due };
+    const { MinionQueue } = await import('./minions/queue.ts');
+    const queue = new MinionQueue(ctx.engine);
+    const jobs = [];
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    for (const row of due) {
+      const runId = `source-refresh-${row.profile_id}-${stamp}`;
+      const data = {
+        profile_id: row.profile_id,
+        run_id: runId,
+        ...(typeof p.require_clean_git === 'boolean' ? { require_clean_git: p.require_clean_git } : {}),
+        no_embed: p.no_embed !== false,
+      };
+      const job = await queue.add('source-ingest', data, {
+        queue: (p.queue as string) || 'default',
+        priority: typeof p.priority === 'number' ? p.priority : 0,
+        max_attempts: 1,
+        max_stalled: 5,
+        timeout_ms: typeof p.timeout_ms === 'number' ? p.timeout_ms : 10 * 60_000,
+        idempotency_key: `source-refresh:${row.profile_id}:${stamp}`,
+      });
+      jobs.push({ profile_id: row.profile_id, job_id: job.id, status: job.status, queue: job.queue, run_id: runId });
+    }
+    return { mode: 'enqueue', count: due.length, due, jobs };
   },
 };
 
