@@ -33,6 +33,9 @@ describe('parseOpArgs', () => {
       '2',
       '--no-require-clean-git',
       '--no-embed',
+      '--job',
+      '--queue',
+      'ingest',
     ]);
     expect(params).toEqual({
       profile_id: 'fake-source-vehicle-v1',
@@ -40,6 +43,8 @@ describe('parseOpArgs', () => {
       limit: 2,
       require_clean_git: false,
       no_embed: true,
+      job: true,
+      queue: 'ingest',
     });
   });
 
@@ -59,6 +64,15 @@ describe('parseOpArgs', () => {
     expect(text).toContain('dirty_paths=?? companies/');
     expect(text).toContain('counts sampled=3 written=2 unchanged=0 skipped=1 failed=0');
     expect(text).toContain('veh-001: written source-ingest/vehicles/a-001');
+    const submitted = formatResult('source_ingest', {
+      submitted: true,
+      job_id: 123,
+      status: 'waiting',
+      queue: 'default',
+      data: { run_id: 'run-job', profile_id: 'fake-source-vehicle-v1' },
+    });
+    expect(submitted).toContain('source_ingest job submitted id=123 status=waiting queue=default');
+    expect(submitted).toContain('watch: gbrain jobs get 123');
   });
 
   test('source-revert operator CLI parses run id and formats report-only output', () => {

@@ -940,6 +940,13 @@ export function formatResult(opName: string, result: unknown): string {
     }
     case 'source_ingest': {
       const r = result as any;
+      if (r?.submitted) {
+        return [
+          `source_ingest job submitted id=${r.job_id} status=${r.status} queue=${r.queue}`,
+          `run_id=${r.data?.run_id ?? '?'} profile=${r.data?.profile_id ?? '?'}`,
+          'watch: gbrain jobs get ' + r.job_id,
+        ].join('\n') + '\n';
+      }
       const lines = [
         `source_ingest ${r.ok ? 'ok' : 'failed'} run_id=${r.run_id ?? '?'}`,
         `profile=${r.profile_id ?? '?'} source=${r.source_id ?? '?'}`,

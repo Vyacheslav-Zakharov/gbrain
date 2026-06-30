@@ -1573,6 +1573,11 @@ export async function registerBuiltinHandlers(
     return { imported: true };
   });
 
+  {
+    const { makeSourceIngestHandler } = await import('../core/minions/handlers/source-ingest.ts');
+    worker.register('source-ingest', makeSourceIngestHandler(engine));
+  }
+
   worker.register('extract', async (job) => {
     const { runExtractCore } = await import('./extract.ts');
     const mode = (typeof job.data.mode === 'string' && ['links', 'timeline', 'all'].includes(job.data.mode))

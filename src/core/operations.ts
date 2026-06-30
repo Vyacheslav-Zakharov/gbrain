@@ -3011,20 +3011,40 @@ const source_ingest: Operation = {
     require_clean_git: { type: 'boolean', description: 'Fail if the target source repo has uncommitted/untracked changes. Default true.' },
     allow_db_only: { type: 'boolean', description: 'Allow explicitly DB-only sources. Stage 3A still requires git-backed and rejects this for real writes.' },
     no_embed: { type: 'boolean', description: 'Skip embedding during pilot import. Default true.' },
+    job: { type: 'boolean', description: 'Submit as a Minion job instead of running inline.' },
+    queue: { type: 'string', description: 'Minion queue name for --job (default: default).' },
+    priority: { type: 'number', description: 'Minion job priority for --job (0 = highest, default 0).' },
+    timeout_ms: { type: 'number', description: 'Minion job timeout for --job (default 10 minutes).' },
   },
   cliHints: { name: 'source-ingest-run', positional: ['profile_id'], aliases: ['source-ingest'] },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_ingest is local/trusted only.');
-    if (ctx.dryRun || p.dry_run) return { dry_run: true, action: 'source_ingest', profile_id: p.profile_id };
+    if (ctx.dryRun || p.dry_run) return { dry_run: true, action: 'source_ingest', profile_id: p.profile_id, job: !!p.job };
+    const jobData = {
+      profile_id: p.profile_id as string,
+      ...(typeof p.run_id === 'string' ? { run_id: p.run_id } : {}),
+      ...(typeof p.limit === 'number' ? { limit: p.limit } : {}),
+      ...(typeof p.require_clean_git === 'boolean' ? { require_clean_git: p.require_clean_git } : {}),
+      ...(typeof p.allow_db_only === 'boolean' ? { allow_db_only: p.allow_db_only } : {}),
+      ...(typeof p.no_embed === 'boolean' ? { no_embed: p.no_embed } : {}),
+    };
+    if (p.job) {
+      const { MinionQueue } = await import('./minions/queue.ts');
+      const queue = new MinionQueue(ctx.engine);
+      const runId = typeof p.run_id === 'string' && p.run_id.length > 0 ? p.run_id : `source-ingest-job-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      const data = { ...jobData, run_id: runId };
+      const job = await queue.add('source-ingest', data, {
+        queue: (p.queue as string) || 'default',
+        priority: typeof p.priority === 'number' ? p.priority : 0,
+        max_attempts: 1,
+        max_stalled: 5,
+        timeout_ms: typeof p.timeout_ms === 'number' ? p.timeout_ms : 10 * 60_000,
+        idempotency_key: `source-ingest:${data.profile_id}:${runId}`,
+      });
+      return { submitted: true, name: 'source-ingest', job_id: job.id, status: job.status, queue: job.queue, data };
+    }
     try {
-      return await runSourceIngestExecutor(ctx.engine, {
-        profile_id: p.profile_id as string,
-        run_id: p.run_id as string | undefined,
-        limit: p.limit as number | undefined,
-        require_clean_git: p.require_clean_git as boolean | undefined,
-        allow_db_only: p.allow_db_only as boolean | undefined,
-        no_embed: p.no_embed as boolean | undefined,
-      }, ctx.logger);
+      return await runSourceIngestExecutor(ctx.engine, jobData, ctx.logger);
     } catch (e) {
       throw new OperationError('source_ingest_failed', e instanceof Error ? e.message : String(e));
     }

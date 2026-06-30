@@ -7,6 +7,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { putSourceIngestProfile, profileHash } from '../src/core/source-ingest/store.ts';
 import { runSourceIngestExecutor } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
+import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
@@ -184,5 +185,33 @@ describe('source-ingest Stage 3A executor', () => {
     expect(report.pages.map(p => p.slug).sort()).toEqual(['source-ingest/vehicles/a-001', 'source-ingest/vehicles/a-002']);
     expect(report.warnings).toContain('created_vs_updated_rollback_semantics_deferred');
     expect(after?.content_hash).toBe(before?.content_hash);
+  }, 30000);
+
+  test('source-ingest minion handler parses payload, updates progress, and runs executor', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    expect(parseSourceIngestJobData({ profile_id: ' fake-source-vehicle-v1 ', limit: 1 })).toMatchObject({ profile_id: 'fake-source-vehicle-v1', limit: 1 });
+    const progress: unknown[] = [];
+    const logs: string[] = [];
+    const handler = makeSourceIngestHandler(engine);
+    const out = await handler({
+      id: 42,
+      name: 'source-ingest',
+      data: { profile_id: profile.profile_id, run_id: 'run-job-handler', no_embed: true },
+      attempts_made: 0,
+      signal: new AbortController().signal,
+      shutdownSignal: new AbortController().signal,
+      updateProgress: async p => { progress.push(p); },
+      updateTokens: async () => {},
+      log: async m => { logs.push(typeof m === 'string' ? m : JSON.stringify(m)); },
+      isActive: async () => true,
+      readInbox: async () => [],
+    });
+    expect(out.ok).toBe(true);
+    expect(out.run_id).toBe('run-job-handler');
+    expect(out.counts.written).toBe(2);
+    expect(progress[0]).toMatchObject({ phase: 'starting', profile_id: profile.profile_id });
+    expect(progress.at(-1)).toMatchObject({ phase: 'completed', run_id: 'run-job-handler', ok: true });
+    expect(logs.some(l => l.includes('starting run'))).toBe(true);
   }, 30000);
 });
