@@ -968,12 +968,13 @@ export function formatResult(opName: string, result: unknown): string {
       const r = result as any;
       const lines = [
         `source_revert ${r.mode ?? 'report'} run_id=${r.run_id ?? '?'}`,
-        `counts affected=${r.counts?.affected ?? 0} success_or_unchanged=${r.counts?.success_or_unchanged ?? 0} failed=${r.counts?.failed ?? 0}`,
+        `counts affected=${r.counts?.affected ?? 0} success_or_unchanged=${r.counts?.success_or_unchanged ?? 0} failed=${r.counts?.failed ?? 0} reverted=${r.counts?.reverted ?? 0} blocked=${r.counts?.blocked ?? 0} noop=${r.counts?.noop ?? 0}`,
       ];
       if (Array.isArray(r.pages) && r.pages.length) {
         lines.push('pages:');
-        for (const p of r.pages) lines.push(`  ${p.slug} source=${p.source_id} external=${p.external_id} action=${p.revert_action}`);
+        for (const p of r.pages) lines.push(`  ${p.slug} source=${p.source_id} external=${p.external_id} action=${p.revert_action}${p.reason ? ` reason=${p.reason}` : ''}${p.version_id ? ` version=${p.version_id}` : ''}`);
       }
+      if (r.git_commit) lines.push(`git_commit=${r.git_commit.committed ? r.git_commit.sha : 'no'}${r.git_commit.reason ? ` (${r.git_commit.reason})` : ''}`);
       if (Array.isArray(r.warnings) && r.warnings.length) lines.push(`warnings=${r.warnings.join(', ')}`);
       return lines.join('\n') + '\n';
     }

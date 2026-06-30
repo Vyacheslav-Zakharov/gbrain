@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -183,8 +183,60 @@ describe('source-ingest Stage 3A executor', () => {
     expect(report.mode).toBe('report-only');
     expect(report.counts.affected).toBe(2);
     expect(report.pages.map(p => p.slug).sort()).toEqual(['source-ingest/vehicles/a-001', 'source-ingest/vehicles/a-002']);
-    expect(report.warnings).toContain('created_vs_updated_rollback_semantics_deferred');
+    expect(report.warnings).toContain('report_only_stage3b_no_mutation');
     expect(after?.content_hash).toBe(before?.content_hash);
+  }, 30000);
+
+  test('source_revert apply soft-deletes pages created by the run and commits file removal', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-revert-created', no_embed: true });
+    const report = await buildSourceRevertReport(engine, 'run-revert-created', { apply: true, no_embed: true });
+    expect(report.mode).toBe('apply');
+    expect(report.counts.reverted).toBe(2);
+    expect(report.pages.every(p => p.revert_action === 'soft-deleted')).toBe(true);
+    expect(await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' })).toBeNull();
+    expect(await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared', includeDeleted: true })).toBeTruthy();
+    expect(existsSync(join(repo, 'source-ingest/vehicles/a-001.md'))).toBe(false);
+    expect(report.git_commit?.committed).toBe(true);
+    expect(execFileSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).trim()).toBe('');
+  }, 30000);
+
+  test('source_revert apply restores previous version for updated pages', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    const original = `---\ntype: equipment\ntitle: Existing A-001\nstatus: active\nsource_id: shared\n---\n\n# Existing A-001\n\nManual pre-source-ingest body.\n`;
+    await importFromContent(engine, 'source-ingest/vehicles/a-001', original, {
+      noEmbed: true,
+      sourceId: 'shared',
+      sourcePath: 'source-ingest/vehicles/a-001.md',
+      remote: false,
+    });
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-revert-update', limit: 1, no_embed: true });
+    expect((await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' }))?.compiled_truth).toContain('Source data');
+    const report = await buildSourceRevertReport(engine, 'run-revert-update', { apply: true, no_embed: true });
+    expect(report.pages.find(p => p.slug === 'source-ingest/vehicles/a-001')).toMatchObject({ revert_action: 'reverted-version' });
+    const reverted = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(reverted?.compiled_truth).toContain('Manual pre-source-ingest body.');
+    expect(readFileSync(join(repo, 'source-ingest/vehicles/a-001.md'), 'utf8')).toContain('Manual pre-source-ingest body.');
+    expect(report.git_commit?.committed).toBe(true);
+  }, 30000);
+
+  test('source_revert apply blocks when page changed after run unless forced', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-revert-block', no_embed: true });
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    const page = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    await importFromContent(engine, 'source-ingest/vehicles/a-001', `${page!.compiled_truth}\n\nManual after-run edit.\n`, {
+      noEmbed: true,
+      sourceId: 'shared',
+      sourcePath: 'source-ingest/vehicles/a-001.md',
+      remote: false,
+    });
+    const report = await buildSourceRevertReport(engine, 'run-revert-block', { apply: true, no_embed: true });
+    expect(report.pages.find(p => p.slug === 'source-ingest/vehicles/a-001')).toMatchObject({ revert_action: 'blocked', reason: 'page_updated_after_run' });
+    expect(await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' })).toBeTruthy();
   }, 30000);
 
   test('source-ingest minion handler parses payload, updates progress, and runs executor', async () => {

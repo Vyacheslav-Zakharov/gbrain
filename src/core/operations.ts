@@ -3073,14 +3073,19 @@ const source_revert: Operation = {
   localOnly: true,
   params: {
     run_id: { type: 'string', required: true },
-    apply: { type: 'boolean', description: 'Reserved for a future mutating rollback. Stage 3B rejects apply=true.' },
+    apply: { type: 'boolean', description: 'Apply guarded rollback. Default false returns a report-only plan.' },
+    force: { type: 'boolean', description: 'Allow rollback when the page was updated after the target run. Default false.' },
+    no_embed: { type: 'boolean', description: 'Skip embedding while restoring prior versions. Default true.' },
   },
   cliHints: { name: 'source-ingest-revert', positional: ['run_id'] },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_revert is local/trusted only.');
-    if (p.apply) throw new OperationError('not_implemented', 'source_revert apply=true is deferred; Stage 3B is report-only.');
-    if (ctx.dryRun) return { dry_run: true, action: 'source_revert', run_id: p.run_id };
-    return buildSourceRevertReport(ctx.engine, p.run_id as string);
+    if (ctx.dryRun || p.dry_run) return { dry_run: true, action: 'source_revert', run_id: p.run_id, apply: !!p.apply };
+    return buildSourceRevertReport(ctx.engine, p.run_id as string, {
+      apply: p.apply === true,
+      force: p.force === true,
+      no_embed: p.no_embed !== false,
+    });
   },
 };
 
