@@ -134,5 +134,12 @@ describe('source-ingest Stage 1 contract', () => {
     expect(out.profile.target.approved_source_id).toBe('shared');
     expect(calls.some(c => c.sql.includes('INSERT INTO source_ingest_profiles'))).toBe(true);
     expect(calls.some(c => c.sql.includes('INSERT INTO source_ingest_profile_versions'))).toBe(true);
+    const profileInsert = calls.find(c => c.sql.includes('INSERT INTO source_ingest_profiles'))!;
+    const versionInsert = calls.find(c => c.sql.includes('INSERT INTO source_ingest_profile_versions'))!;
+    expect(profileInsert.sql).toContain('$11::jsonb');
+    expect(versionInsert.sql).toContain('$6::jsonb');
+    expect(typeof profileInsert.params?.[10]).toBe('object');
+    expect(typeof versionInsert.params?.[5]).toBe('object');
+    expect(profileInsert.params?.[10]).not.toBe(JSON.stringify(profileInsert.params?.[10]));
   });
 });

@@ -14,7 +14,8 @@
  *
  * This scanner flags any executeRaw / executeRawDirect / .unsafe(...) call whose
  * balanced argument span contains BOTH a positional `$N::jsonb` cast
- * (NOT `$N::text::jsonb`, NOT `$N::text[]`) AND a `JSON.stringify(` — the exact
+ * (NOT `$N::text::jsonb`, NOT `$N::text[]`) AND a known JSON-string helper
+ * (`JSON.stringify(`, `stableJson(`, or `canonicalJson(`) — the exact
  * double-encode shape. It is heuristic by design (whole-span correlation); the
  * real backstop is the DATABASE_URL-gated e2e parity test. Keep both.
  *
@@ -43,6 +44,7 @@ const ROOTS = process.argv.slice(2).length > 0 ? process.argv.slice(2) : ['src',
 // `.unsafe()` does not occur there (the `pglite-masks` invariant). The engine
 // parity test pins that the resulting jsonb_typeof agrees across both engines.
 const CALL_RE = /\b(executeRawDirect|executeRaw|unsafe)\s*(?:<[^>;]*>)?\s*\(/g;
+const JSON_STRING_HELPER_RE = /\b(?:JSON\.stringify|stableJson|canonicalJson)\s*\(/;
 
 /** Walk from the '(' at openIdx and return [start,end) of the balanced span,
  *  respecting strings, template literals, and comments. */
@@ -86,7 +88,8 @@ function scanFile(file) {
     const [s, e] = findSpan(src, openIdx);
     const span = src.slice(s, e);
     if (/jsonb-guard-ok/.test(span)) continue;
-    if (!/JSON\.stringify\s*\(/.test(stripComments(span))) continue;
+    const cleanSpan = stripComments(span);
+    if (!JSON_STRING_HELPER_RE.test(cleanSpan)) continue;
     // A positional `$N::jsonb` that is NOT `$N::text::jsonb`.
     const jsonbRe = /\$\d+\s*::\s*jsonb\b/g;
     let j;
@@ -100,7 +103,7 @@ function scanFile(file) {
     if (!badText) continue;
     const line = src.slice(0, s).split('\n').length;
     violations.push(
-      `${file}:${line}  ${method}(...) binds JSON.stringify into ${badText} — use $N::text::jsonb or pass a raw object (executeRawJsonb / sql.json)`,
+      `${file}:${line}  ${method}(...) binds a JSON string helper into ${badText} — use $N::text::jsonb or pass a raw object (executeRawJsonb / sql.json)`,
     );
   }
 }
@@ -122,7 +125,7 @@ for (const root of ROOTS) walk(root);
 if (violations.length) {
   console.error('JSONB positional double-encode violations (#2339 class):\n');
   for (const v of violations) console.error('  ' + v);
-  console.error(`\n${violations.length} violation(s). Fix: bind through $N::text::jsonb (keeping JSON.stringify), or pass a raw object via executeRawJsonb / sql.json. See docs/ENGINES.md.`);
+  console.error(`\n${violations.length} violation(s). Fix: bind through $N::text::jsonb (keeping the JSON string helper), or pass a raw object via executeRawJsonb / sql.json. See docs/ENGINES.md.`);
   process.exit(1);
 }
-console.log('check-jsonb-params: clean (no positional $N::jsonb + JSON.stringify double-encodes)');
+console.log('check-jsonb-params: clean (no positional $N::jsonb + JSON string helper double-encodes)');

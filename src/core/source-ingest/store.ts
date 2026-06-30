@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../engine.ts';
+import { executeRawJsonb } from '../sql-query.ts';
 import type { SourceIngestProfile } from './profile-schema.ts';
 
 export function stableJson(value: unknown): string {
@@ -36,10 +37,11 @@ export async function putSourceIngestProfile(
   const hash = profileHash(profile);
   const existing = await engine.executeRaw<{ current_version: number }>('SELECT current_version FROM source_ingest_profiles WHERE profile_id = $1', [profile.profile_id]);
   const nextVersion = existing.length > 0 ? Number(existing[0].current_version) + 1 : 1;
-  await engine.executeRaw(
+  await executeRawJsonb(
+    engine,
     `INSERT INTO source_ingest_profiles
        (profile_id, connector_id, source_object, status, approved_source_id, target_type, profile_json, profile_hash, current_version, approved_by, approved_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,now())
+     VALUES ($1,$2,$3,$4,$5,$6,$11::jsonb,$7,$8,$9,$10,now())
      ON CONFLICT (profile_id) DO UPDATE SET
        connector_id = EXCLUDED.connector_id,
        source_object = EXCLUDED.source_object,
@@ -59,19 +61,21 @@ export async function putSourceIngestProfile(
       profile.status,
       profile.target.approved_source_id ?? null,
       profile.target.gbrain_type,
-      stableJson(profile),
       hash,
       nextVersion,
       profile.review?.approved_by ?? null,
       profile.review?.approved_at ?? null,
     ],
+    [profile],
   );
-  await engine.executeRaw(
+  await executeRawJsonb(
+    engine,
     `INSERT INTO source_ingest_profile_versions
        (profile_id, version, profile_json, profile_hash, created_by, change_note)
-     VALUES ($1,$2,$3::jsonb,$4,$5,$6)
+     VALUES ($1,$2,$6::jsonb,$3,$4,$5)
      ON CONFLICT (profile_id, version) DO NOTHING`,
-    [profile.profile_id, nextVersion, stableJson(profile), hash, opts.createdBy ?? null, opts.changeNote ?? null],
+    [profile.profile_id, nextVersion, hash, opts.createdBy ?? null, opts.changeNote ?? null],
+    [profile],
   );
   return { profile_id: profile.profile_id, version: nextVersion, profile_hash: hash };
 }
