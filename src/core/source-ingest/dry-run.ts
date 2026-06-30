@@ -75,6 +75,8 @@ function samplePage(profile: SourceIngestProfile, record: SourceRecord) {
     title,
     source_ingest: { profile_id: profile.profile_id, external_ref: externalRef },
     managed_block_preview: block,
+    managed_block_length: block.length,
+    null_field_count: Object.values(flatten(record.data)).filter(v => v === null || v === undefined || v === '').length,
     frontmatter_preview: {
       type: profile.target.gbrain_type,
       title,
@@ -104,6 +106,7 @@ function summarizeLinkRule(rule: SourceLinkRule, records: SourceRecord[]) {
   return {
     rule_id: rule.id,
     type: rule.type,
+    target_type: rule.target.type,
     matched: applies.length - unresolved.length,
     total: records.length,
     applies_to: applies.length,
@@ -120,6 +123,45 @@ function summarizeLinkRule(rule: SourceLinkRule, records: SourceRecord[]) {
   };
 }
 
+function detectSlugCollisions(pages: ReturnType<typeof samplePage>[]) {
+  const bySlug = new Map<string, string[]>();
+  for (const p of pages) {
+    const existing = bySlug.get(p.slug) || [];
+    existing.push(p.external_id);
+    bySlug.set(p.slug, existing);
+  }
+  return Array.from(bySlug.entries())
+    .filter(([, external_ids]) => external_ids.length > 1)
+    .map(([slug, external_ids]) => ({ slug, external_ids, count: external_ids.length }));
+}
+
+function pickStratifiedSamples(
+  pages: ReturnType<typeof samplePage>[],
+  skipped: Array<{ external_id: string; reason: string }>,
+  linkRules: ReturnType<typeof summarizeLinkRule>[],
+  slugCollisions: ReturnType<typeof detectSlugCollisions>,
+) {
+  const longest = [...pages].sort((a, b) => b.managed_block_length - a.managed_block_length)[0] || null;
+  const mostNull = [...pages].sort((a, b) => b.null_field_count - a.null_field_count)[0] || null;
+  const collision = slugCollisions[0]
+    ? pages.find(p => slugCollisions[0].external_ids.includes(p.external_id)) || null
+    : null;
+  const ambiguousLink = linkRules.find(r => r.ambiguous_bucket > 0) || null;
+  const lowConfidenceLink = linkRules.find(r => r.low_confidence_bucket > 0) || null;
+  return {
+    would_write: pages.slice(0, 3),
+    worst_case: {
+      longest_managed_block: longest,
+      most_null_fields: mostNull,
+      slug_collision: collision,
+      ambiguous_link_rule: ambiguousLink,
+      low_confidence_link_rule: lowConfidenceLink,
+    },
+    skipped: skipped.slice(0, 3),
+    link_warnings: linkRules.filter(r => r.warnings.length > 0).map(r => ({ rule_id: r.rule_id, warnings: r.warnings })),
+  };
+}
+
 export function buildSourceDryRun(profile: SourceIngestProfile, sample: SourceRecord[]) {
   const skipped: Array<{ external_id: string; reason: string }> = [];
   const candidates: SourceRecord[] = [];
@@ -129,22 +171,32 @@ export function buildSourceDryRun(profile: SourceIngestProfile, sample: SourceRe
     else skipped.push({ external_id: record.external_id, reason: decision.reason || 'filtered' });
   }
   const pages = candidates.map(r => samplePage(profile, r));
+  const linkRules = (profile.links || []).map(rule => summarizeLinkRule(rule, candidates));
+  const slugCollisions = detectSlugCollisions(pages);
   return {
     ok: true,
     dry_run: true,
-    counts: { sampled: sample.length, would_write: candidates.length, skipped: skipped.length, failed: 0 },
-    skipped,
-    link_rules: (profile.links || []).map(rule => summarizeLinkRule(rule, candidates)),
-    routing_sensitivity: { approved_source_id: profile.target.approved_source_id ?? null, classification: profile.security.classification, pii: profile.security.pii, pii_fields: profile.security.pii_fields || [] },
-    stratified_samples: {
-      would_write: pages.slice(0, 3),
-      skipped: skipped.slice(0, 3),
-      link_warnings: (profile.links || []).filter(r => (r.confidence ?? 1) < 0.75).map(r => r.id),
+    counts: {
+      sampled: sample.length,
+      would_write: candidates.length,
+      skipped: skipped.length,
+      failed: 0,
+      slug_collisions: slugCollisions.length,
     },
+    skipped,
+    slug_collisions: slugCollisions,
+    link_rules: linkRules,
+    routing_sensitivity: { approved_source_id: profile.target.approved_source_id ?? null, classification: profile.security.classification, pii: profile.security.pii, pii_fields: profile.security.pii_fields || [] },
+    stratified_samples: pickStratifiedSamples(pages, skipped, linkRules, slugCollisions),
     sample_pages: pages.slice(0, 3),
+    deferred_checks: [
+      'cross_source_edge_resolution_deferred_until_target_resolver_stage',
+      'managed_block_before_after_diff_deferred_until_update_path',
+    ],
     warnings: [
       ...(profile.security.pii && profile.security.classification === 'shared' ? ['shared_profile_has_pii_candidates'] : []),
       ...(profile.target.approved_source_id ? [] : ['approved_source_id_missing']),
+      ...(slugCollisions.length > 0 ? ['slug_collision_candidates'] : []),
     ],
   };
 }

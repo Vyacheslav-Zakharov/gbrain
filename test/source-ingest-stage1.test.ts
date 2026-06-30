@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { FakeSourceConnector } from '../src/core/source-ingest/connectors/fake.ts';
 import { discoverSourceObject } from '../src/core/source-ingest/discovery.ts';
 import { validateSourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
+import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
 import { mergeManagedBlock, renderManagedBlock } from '../src/core/source-ingest/managed-block.ts';
 import { operationsByName, type OperationContext } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -96,9 +97,26 @@ describe('source-ingest Stage 1 contract', () => {
     expect(out.link_rules[0].rule_id).toBe('located-at-facility');
     expect(out.link_rules[0].matched).toBe(2);
     expect(out.stratified_samples.would_write.length).toBeGreaterThan(0);
+    expect(out.stratified_samples.worst_case.longest_managed_block.external_id).toBeTruthy();
+    expect(out.stratified_samples.worst_case.most_null_fields.external_id).toBeTruthy();
     expect(out.sample_pages[0].managed_block_preview).toContain('gbrain-source-sync:start');
     expect(out.sample_pages[0].slug).toBe('assets/equipment/a-001');
+    expect(out.deferred_checks).toContain('cross_source_edge_resolution_deferred_until_target_resolver_stage');
+    expect(out.deferred_checks).toContain('managed_block_before_after_diff_deferred_until_update_path');
     expect(out.warnings).toContain('shared_profile_has_pii_candidates');
+  });
+
+  test('source_dry_run detects slug collisions and surfaces collision worst-case sample', () => {
+    const sample = [
+      { external_id: 'veh-null-1', data: { id: 'veh-null-1', code: null, name: 'Missing code 1', is_group: false, status: 'active' } },
+      { external_id: 'veh-null-2', data: { id: 'veh-null-2', code: undefined, name: 'Missing code 2', is_group: false, status: 'active' } },
+    ];
+    const out = buildSourceDryRun(vehicleProfile as any, sample);
+    expect(out.counts.slug_collisions).toBe(1);
+    expect(out.slug_collisions[0].slug).toBe('assets/equipment/item');
+    expect(out.slug_collisions[0].external_ids).toEqual(['veh-null-1', 'veh-null-2']);
+    expect(out.stratified_samples.worst_case.slug_collision?.slug).toBe('assets/equipment/item');
+    expect(out.warnings).toContain('slug_collision_candidates');
   });
 
   test('source_profile_draft uses discovery heuristics but remains unapproved', async () => {
