@@ -18,7 +18,16 @@ export interface SourceRefreshPlan {
   mode: 'report-only' | 'enqueue';
   count: number;
   due: SourceRefreshDueRow[];
-  jobs?: Array<{ profile_id: string; job_id: number; status: string; queue: string; run_id: string }>;
+  jobs?: Array<{ profile_id: string; job_id: number; status: string; queue: string; run_id: string; idempotency_key: string; deduped?: boolean }>;
+}
+
+export interface SourceRefreshEnqueueOptions {
+  queue?: string;
+  priority?: number;
+  timeout_ms?: number;
+  require_clean_git?: boolean;
+  no_embed?: boolean;
+  now?: Date;
 }
 
 export function parseFreshnessPolicyMs(policy: string | null | undefined): number | null {
@@ -61,6 +70,7 @@ export async function listDueSourceRefreshes(engine: BrainEngine, opts: {
               s.stale_after,
               CASE
                 WHEN s.external_id IS NULL THEN true
+                WHEN s.stale_after IS NULL AND COALESCE(s.freshness_policy, p.profile_json->'freshness'->>'policy') IS NOT NULL THEN true
                 WHEN s.stale_after IS NOT NULL AND s.stale_after <= ${nowParam} THEN true
                 ELSE false
               END AS is_due
@@ -87,4 +97,53 @@ export async function listDueSourceRefreshes(engine: BrainEngine, opts: {
     params,
   );
   return rows;
+}
+
+export function sourceRefreshWindowKey(row: SourceRefreshDueRow): string {
+  const marker = row.reason === 'initial_sync'
+    ? 'initial'
+    : (row.oldest_stale_after ?? row.last_synced_at ?? 'unknown');
+  return `${row.profile_id}:${marker}`.replace(/[^A-Za-z0-9_.:-]+/g, '_');
+}
+
+export async function enqueueDueSourceRefreshJobs(
+  engine: BrainEngine,
+  due: SourceRefreshDueRow[],
+  opts: SourceRefreshEnqueueOptions = {},
+): Promise<NonNullable<SourceRefreshPlan['jobs']>> {
+  const { MinionQueue } = await import('../minions/queue.ts');
+  const queue = new MinionQueue(engine);
+  const jobs: NonNullable<SourceRefreshPlan['jobs']> = [];
+  const stamp = (opts.now ?? new Date()).toISOString().replace(/[:.]/g, '-');
+  for (const row of due) {
+    const windowKey = sourceRefreshWindowKey(row);
+    const runId = `source-refresh-${row.profile_id}-${stamp}`;
+    const data = {
+      profile_id: row.profile_id,
+      run_id: runId,
+      ...(typeof opts.require_clean_git === 'boolean' ? { require_clean_git: opts.require_clean_git } : {}),
+      changed_since: row.reason !== 'initial_sync',
+      no_embed: opts.no_embed !== false,
+    };
+    const idempotencyKey = `source-refresh:${windowKey}`;
+    const job = await queue.add('source-ingest', data, {
+      queue: opts.queue || 'default',
+      priority: typeof opts.priority === 'number' ? opts.priority : 0,
+      max_attempts: 1,
+      max_stalled: 5,
+      timeout_ms: typeof opts.timeout_ms === 'number' ? opts.timeout_ms : 10 * 60_000,
+      idempotency_key: idempotencyKey,
+    });
+    const actualRunId = String((job.data as Record<string, unknown>)?.run_id ?? runId);
+    jobs.push({
+      profile_id: row.profile_id,
+      job_id: job.id,
+      status: job.status,
+      queue: job.queue,
+      run_id: actualRunId,
+      idempotency_key: idempotencyKey,
+      deduped: actualRunId !== runId,
+    });
+  }
+  return jobs;
 }

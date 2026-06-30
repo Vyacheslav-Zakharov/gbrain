@@ -20,6 +20,7 @@ export interface SourceIngestExecutorOptions {
   require_clean_git?: boolean;
   allow_db_only?: boolean;
   no_embed?: boolean;
+  changed_since?: boolean;
 }
 
 export interface SourceIngestRecordResult {
@@ -244,8 +245,22 @@ export async function runSourceIngestExecutor(
   const connector = getSourceConnector(profile.source_connector);
   if (!connector) throw new Error(`connector not found: ${profile.source_connector}`);
   const records: SourceRecord[] = [];
-  if (!connector.fetchAll) throw new Error(`connector does not support fetchAll: ${profile.source_connector}`);
-  for await (const batch of connector.fetchAll(profile.source_object)) {
+  let iterable: AsyncIterable<{ records: SourceRecord[]; cursor?: string | null }> | undefined;
+  if (opts.changed_since && connector.fetchChangedSince) {
+    const sinceRows = await engine.executeRaw<{ since: string | null }>(
+      `SELECT max(source_updated_at)::text AS since
+         FROM source_sync_state
+        WHERE profile_id = $1 AND connector_id = $2 AND source_object = $3`,
+      [profile.profile_id, profile.source_connector, profile.source_object],
+    );
+    const since = sinceRows[0]?.since;
+    if (since) iterable = connector.fetchChangedSince(profile.source_object, since);
+  }
+  if (!iterable) {
+    if (!connector.fetchAll) throw new Error(`connector does not support fetchAll: ${profile.source_connector}`);
+    iterable = connector.fetchAll(profile.source_object);
+  }
+  for await (const batch of iterable) {
     for (const r of batch.records) records.push(r);
     if (opts.limit && records.length >= opts.limit) break;
   }

@@ -54,7 +54,7 @@ import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile
 import { listSourceIngestProfiles, putSourceIngestProfile } from './source-ingest/store.ts';
 import { runSourceIngestExecutor } from './source-ingest/executor.ts';
 import { buildSourceRevertReport } from './source-ingest/revert.ts';
-import { listDueSourceRefreshes } from './source-ingest/freshness.ts';
+import { enqueueDueSourceRefreshJobs, listDueSourceRefreshes } from './source-ingest/freshness.ts';
 
 // --- Types ---
 
@@ -2972,6 +2972,7 @@ const source_sync_status: Operation = {
     source_object: { type: 'string', description: 'Optional source object filter' },
     limit: { type: 'number', description: 'Max sync-state rows to return (default 50)' },
   },
+  cliHints: { name: 'source-sync-status', positional: ['profile_id'] },
   handler: async (ctx, p) => {
     const clauses: string[] = [];
     const params: unknown[] = [];
@@ -2994,7 +2995,20 @@ const source_sync_status: Operation = {
          LIMIT $${params.length}`,
       params,
     );
-    return { rows, count: rows.length };
+    const summary = await ctx.engine.executeRaw(
+      `SELECT count(*)::int AS rows,
+              count(*) FILTER (WHERE last_result = 'failed')::int AS failed,
+              count(*) FILTER (WHERE stale_after IS NULL)::int AS unknown,
+              count(*) FILTER (WHERE stale_after IS NOT NULL AND stale_after < now())::int AS stale,
+              count(*) FILTER (WHERE stale_after IS NOT NULL AND stale_after >= now())::int AS fresh,
+              min(stale_after)::text AS next_due_at,
+              max(last_synced_at)::text AS last_synced_at,
+              max(run_id) AS last_run_id
+         FROM source_sync_state
+         ${where}`,
+      params.slice(0, -1),
+    );
+    return { rows, count: rows.length, summary: summary[0] ?? null };
   },
 };
 
@@ -3012,6 +3026,7 @@ const source_ingest: Operation = {
     require_clean_git: { type: 'boolean', description: 'Fail if the target source repo has uncommitted/untracked changes. Default true.' },
     allow_db_only: { type: 'boolean', description: 'Allow explicitly DB-only sources. Stage 3A still requires git-backed and rejects this for real writes.' },
     no_embed: { type: 'boolean', description: 'Skip embedding during pilot import. Default true.' },
+    changed_since: { type: 'boolean', description: 'Use connector fetchChangedSince when available and prior source_updated_at exists.' },
     job: { type: 'boolean', description: 'Submit as a Minion job instead of running inline.' },
     queue: { type: 'string', description: 'Minion queue name for --job (default: default).' },
     priority: { type: 'number', description: 'Minion job priority for --job (0 = highest, default 0).' },
@@ -3028,6 +3043,7 @@ const source_ingest: Operation = {
       ...(typeof p.require_clean_git === 'boolean' ? { require_clean_git: p.require_clean_git } : {}),
       ...(typeof p.allow_db_only === 'boolean' ? { allow_db_only: p.allow_db_only } : {}),
       ...(typeof p.no_embed === 'boolean' ? { no_embed: p.no_embed } : {}),
+      ...(typeof p.changed_since === 'boolean' ? { changed_since: p.changed_since } : {}),
     };
     if (p.job) {
       const { MinionQueue } = await import('./minions/queue.ts');
@@ -3076,28 +3092,13 @@ const source_refresh: Operation = {
       limit: typeof p.limit === 'number' ? p.limit : undefined,
     });
     if (ctx.dryRun || !p.enqueue) return { mode: 'report-only', count: due.length, due };
-    const { MinionQueue } = await import('./minions/queue.ts');
-    const queue = new MinionQueue(ctx.engine);
-    const jobs = [];
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    for (const row of due) {
-      const runId = `source-refresh-${row.profile_id}-${stamp}`;
-      const data = {
-        profile_id: row.profile_id,
-        run_id: runId,
-        ...(typeof p.require_clean_git === 'boolean' ? { require_clean_git: p.require_clean_git } : {}),
-        no_embed: p.no_embed !== false,
-      };
-      const job = await queue.add('source-ingest', data, {
-        queue: (p.queue as string) || 'default',
-        priority: typeof p.priority === 'number' ? p.priority : 0,
-        max_attempts: 1,
-        max_stalled: 5,
-        timeout_ms: typeof p.timeout_ms === 'number' ? p.timeout_ms : 10 * 60_000,
-        idempotency_key: `source-refresh:${row.profile_id}:${stamp}`,
-      });
-      jobs.push({ profile_id: row.profile_id, job_id: job.id, status: job.status, queue: job.queue, run_id: runId });
-    }
+    const jobs = await enqueueDueSourceRefreshJobs(ctx.engine, due, {
+      queue: (p.queue as string) || 'default',
+      priority: typeof p.priority === 'number' ? p.priority : 0,
+      timeout_ms: typeof p.timeout_ms === 'number' ? p.timeout_ms : 10 * 60_000,
+      ...(typeof p.require_clean_git === 'boolean' ? { require_clean_git: p.require_clean_git } : {}),
+      no_embed: p.no_embed !== false,
+    });
     return { mode: 'enqueue', count: due.length, due, jobs };
   },
 };

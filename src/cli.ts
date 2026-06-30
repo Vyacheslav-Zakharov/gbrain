@@ -938,6 +938,19 @@ export function formatResult(opName: string, result: unknown): string {
         `#${v.id}  ${v.snapshot_at?.toString().slice(0, 19) || '?'}  ${v.compiled_truth?.slice(0, 60) || ''}...`,
       ).join('\n') + '\n';
     }
+    case 'source_sync_status': {
+      const r = result as any;
+      const s = r.summary ?? {};
+      const lines = [
+        `source_sync_status rows=${s.rows ?? r.count ?? 0} fresh=${s.fresh ?? 0} stale=${s.stale ?? 0} unknown=${s.unknown ?? 0} failed=${s.failed ?? 0}`,
+        `next_due_at=${s.next_due_at ?? 'n/a'} last_synced_at=${s.last_synced_at ?? 'n/a'} last_run_id=${s.last_run_id ?? 'n/a'}`,
+      ];
+      if (Array.isArray(r.rows) && r.rows.length) {
+        lines.push('rows:');
+        for (const row of r.rows.slice(0, 20)) lines.push(`  ${row.profile_id}/${row.external_id} ${row.freshness} result=${row.last_result} slug=${row.slug}`);
+      }
+      return lines.join('\n') + '\n';
+    }
     case 'source_ingest': {
       const r = result as any;
       if (r?.submitted) {

@@ -1,4 +1,5 @@
 import type { SourceConnector, SourceObjectDescriptor, SourceRecord, SourceRecordBatch } from './types.ts';
+import { AppSheetVehicleConnector } from './appsheet-vehicles.ts';
 
 const vehicleRecords: SourceRecord[] = [
   {
@@ -78,5 +79,6 @@ export class FakeSourceConnector implements SourceConnector {
 
 export function getSourceConnector(id: string): SourceConnector | null {
   if (id === 'fake-source') return new FakeSourceConnector();
+  if (id === 'appsheet-vehicles') return new AppSheetVehicleConnector();
   return null;
 }

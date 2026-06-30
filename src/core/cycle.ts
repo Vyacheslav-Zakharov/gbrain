@@ -58,6 +58,7 @@ export type CyclePhase =
   | 'lint' | 'backlinks' | 'sync' | 'synthesize' | 'extract' | 'extract_facts'
   | 'resolve_symbol_edges'
   | 'patterns' | 'recompute_emotional_weight' | 'consolidate'
+  | 'source_refresh'
   // v0.36.1.0 Hindsight calibration wave:
   //  - propose_takes: LLM scans markdown prose, proposes gradeable claims
   //    to a review queue. User accepts/rejects via `gbrain takes propose`.
@@ -137,6 +138,9 @@ export const ALL_PHASES: CyclePhase[] = [
   // stay as audit trail. Placed AFTER patterns (graph-fresh) and BEFORE
   // embed (so the new takes get embedded same-cycle).
   'consolidate',
+  // v0.43 source-ingest Stage 4 — enqueue due source refresh jobs only;
+  // actual connector I/O happens in Minion source-ingest workers.
+  'source_refresh',
   // v0.36.1.0 Hindsight calibration wave. Ordering rationale:
   //   - propose_takes AFTER consolidate so the proposal LLM sees the
   //     freshly-consolidated takes when deciding what's NOT yet captured
@@ -218,6 +222,7 @@ export const PHASE_SCOPE: Record<CyclePhase, PhaseScope> = {
   patterns: 'mixed',
   recompute_emotional_weight: 'source',
   consolidate: 'source',
+  source_refresh: 'source',
   propose_takes: 'source',
   grade_takes: 'global',
   calibration_profile: 'global',
@@ -283,6 +288,7 @@ const NEEDS_LOCK_PHASES: ReadonlySet<CyclePhase> = new Set([
   // v0.29 — writes pages.emotional_weight column.
   'recompute_emotional_weight',
   'consolidate',
+  'source_refresh',
   // v0.36.1.0 — propose_takes / grade_takes / calibration_profile all
   // mutate DB state (take_proposals, take_grade_cache, calibration_profiles)
   // so they coordinate via the cycle lock.
@@ -1991,6 +1997,32 @@ export async function runCycle(
           dryRun,
           yieldDuringPhase: opts.yieldDuringPhase,
           signal: opts.signal,
+        }));
+        result.duration_ms = duration_ms;
+        phaseResults.push(result);
+        progress.finish();
+      }
+      await safeYield(opts.yieldBetweenPhases);
+    }
+
+    // ── Stage 4 source-ingest freshness: enqueue only ─────────────
+    if (phases.includes('source_refresh')) {
+      checkAborted(opts.signal);
+      if (!engine) {
+        phaseResults.push({
+          phase: 'source_refresh',
+          status: 'skipped',
+          duration_ms: 0,
+          summary: 'no database connected',
+          details: { reason: 'no_database' },
+        });
+      } else {
+        progress.start('cycle.source_refresh');
+        const { runPhaseSourceRefresh } = await import('./cycle/source-refresh.ts');
+        const { result, duration_ms } = await timePhase(() => runPhaseSourceRefresh(engine, {
+          dryRun,
+          sourceId: cycleSourceId,
+          queue: 'default',
         }));
         result.duration_ms = duration_ms;
         phaseResults.push(result);

@@ -9,6 +9,7 @@ export interface SourceIngestJobData {
   require_clean_git?: boolean;
   allow_db_only?: boolean;
   no_embed?: boolean;
+  changed_since?: boolean;
 }
 
 function parseBoolean(data: Record<string, unknown>, key: keyof SourceIngestJobData): boolean | undefined {
@@ -35,6 +36,7 @@ export function parseSourceIngestJobData(data: Record<string, unknown>): SourceI
     ...(parseBoolean(data, 'require_clean_git') !== undefined ? { require_clean_git: parseBoolean(data, 'require_clean_git') } : {}),
     ...(parseBoolean(data, 'allow_db_only') !== undefined ? { allow_db_only: parseBoolean(data, 'allow_db_only') } : {}),
     ...(parseBoolean(data, 'no_embed') !== undefined ? { no_embed: parseBoolean(data, 'no_embed') } : {}),
+    ...(parseBoolean(data, 'changed_since') !== undefined ? { changed_since: parseBoolean(data, 'changed_since') } : {}),
   };
 }
 

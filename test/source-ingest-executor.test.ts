@@ -8,7 +8,9 @@ import { putSourceIngestProfile, profileHash } from '../src/core/source-ingest/s
 import { runSourceIngestExecutor } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
-import { listDueSourceRefreshes, parseFreshnessPolicyMs } from '../src/core/source-ingest/freshness.ts';
+import { listDueSourceRefreshes, parseFreshnessPolicyMs, enqueueDueSourceRefreshJobs } from '../src/core/source-ingest/freshness.ts';
+import { rowToVehicleRecord } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
+import { runCycle } from '../src/core/cycle.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
@@ -54,6 +56,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await engine.executeRaw('DELETE FROM minion_jobs');
   await engine.executeRaw('DELETE FROM op_checkpoint_paths');
   await engine.executeRaw('DELETE FROM op_checkpoints');
   await engine.executeRaw('DELETE FROM source_sync_state');
@@ -264,6 +267,49 @@ describe('source-ingest Stage 3A executor', () => {
     expect(due).toHaveLength(1);
     expect(due[0]).toMatchObject({ profile_id: profile.profile_id, total_rows: 0, never_synced_rows: 1, reason: 'initial_sync' });
   }, 30000);
+
+  test('source_refresh enqueue is idempotent for the same freshness window', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-refresh-dedupe', no_embed: true });
+    await engine.executeRaw(`UPDATE source_sync_state SET stale_after = now() - interval '1 hour' WHERE profile_id = $1`, [profile.profile_id]);
+    const due = await listDueSourceRefreshes(engine, { profile_id: profile.profile_id });
+    const first = await enqueueDueSourceRefreshJobs(engine, due, { require_clean_git: false, no_embed: true, now: new Date('2026-07-01T00:00:00Z') });
+    const second = await enqueueDueSourceRefreshJobs(engine, due, { require_clean_git: false, no_embed: true, now: new Date('2026-07-01T00:05:00Z') });
+    expect(first[0].job_id).toBe(second[0].job_id);
+    expect(second[0].deduped).toBe(true);
+    const rows = await engine.executeRaw<{ count: string }>(`SELECT count(*)::text AS count FROM minion_jobs WHERE name = 'source-ingest'`);
+    expect(rows[0].count).toBe('1');
+  }, 30000);
+
+  test('source_refresh cycle phase enqueues jobs without connector IO', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-refresh-cycle', no_embed: true });
+    await engine.executeRaw(`UPDATE source_sync_state SET stale_after = now() - interval '1 hour' WHERE profile_id = $1`, [profile.profile_id]);
+    const report = await runCycle(engine, { brainDir: null, phases: ['source_refresh'] });
+    expect(report.phases[0]).toMatchObject({ phase: 'source_refresh', status: 'ok' });
+    const jobs = await engine.executeRaw<{ data: unknown }>(`SELECT data FROM minion_jobs WHERE name = 'source-ingest'`);
+    expect(jobs).toHaveLength(1);
+    const data = typeof jobs[0].data === 'string' ? JSON.parse(jobs[0].data) : jobs[0].data as Record<string, unknown>;
+    expect(data).toMatchObject({ profile_id: profile.profile_id, changed_since: true, no_embed: true });
+  }, 30000);
+
+  test('source_ingest changed_since no-ops when connector has no newer records', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-changed-full', no_embed: true });
+    const out = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-changed-empty', no_embed: true, changed_since: true });
+    expect(out.counts).toMatchObject({ sampled: 0, written: 0, unchanged: 0, skipped: 0, failed: 0 });
+    expect(out.git_commit?.committed).toBe(false);
+    expect(out.git_commit?.reason).toBe('no_files');
+  }, 30000);
+
+  test('AppSheet vehicle connector scaffold normalizes vehicle rows without live network', () => {
+    const rec = rowToVehicleRecord({ ID: 'car-1', ГосНомер: '777ABC02', Модель: 'MAN TGS', ДатаИзменения: '2026-06-30T10:00:00+05:00' });
+    expect(rec).toMatchObject({ external_id: 'car-1', source_updated_at: '2026-06-30T10:00:00+05:00' });
+    expect(rec.data).toMatchObject({ id: 'car-1', code: '777ABC02', name: 'MAN TGS', type: 'vehicle', is_group: false });
+  });
 
   test('source-ingest minion handler parses payload, updates progress, and runs executor', async () => {
     const repo = tempGitRepo();

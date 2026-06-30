@@ -110,5 +110,17 @@ describe('parseOpArgs', () => {
     expect(text).toContain('fake-source-vehicle-v1 source=shared rows=2 due=2 reason=stale');
     expect(text).toContain('job=20 status=waiting');
   });
+
+  test('source-sync-status CLI parses and formats summary', () => {
+    const op = operationsByName.source_sync_status;
+    expect(op.cliHints?.name).toBe('source-sync-status');
+    expect(parseOpArgs(op, ['fake-source-vehicle-v1'])).toEqual({ profile_id: 'fake-source-vehicle-v1' });
+    const text = formatResult('source_sync_status', {
+      summary: { rows: 2, fresh: 2, stale: 0, unknown: 0, failed: 0, next_due_at: '2026-08-01', last_run_id: 'run-1' },
+      rows: [{ profile_id: 'fake-source-vehicle-v1', external_id: 'veh-001', freshness: 'fresh', last_result: 'success', slug: 'source-ingest/vehicles/a-001' }],
+    });
+    expect(text).toContain('source_sync_status rows=2 fresh=2 stale=0 unknown=0 failed=0');
+    expect(text).toContain('fake-source-vehicle-v1/veh-001 fresh result=success');
+  });
 });
 
