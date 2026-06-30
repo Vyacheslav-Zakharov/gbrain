@@ -1,0 +1,98 @@
+import { describe, expect, test } from 'bun:test';
+import { FakeSourceConnector } from '../src/core/source-ingest/connectors/fake.ts';
+import { discoverSourceObject } from '../src/core/source-ingest/discovery.ts';
+import { validateSourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
+import { mergeManagedBlock, renderManagedBlock } from '../src/core/source-ingest/managed-block.ts';
+import { operationsByName, type OperationContext } from '../src/core/operations.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+
+const vehicleProfile = {
+  profile_id: 'fake-source-vehicle-v1',
+  status: 'reviewed',
+  source_connector: 'fake-source',
+  source_object: 'vehicle',
+  target: { gbrain_type: 'equipment', approved_source_id: 'shared', slug_template: 'assets/equipment/{{ code | slugify }}' },
+  selection: { exclude: [{ field: 'is_group', op: 'eq', value: true }] },
+  identity: { external_id_field: 'id', natural_key_fields: ['code'], display_name_field: 'name' },
+  freshness: { policy: 'P30D', on_access: 'acknowledge_when_stale', changed_since_field: 'updated_at' },
+  mapping: { frontmatter: { equipment_class: 'vehicle' } },
+  links: [
+    { id: 'located-at-facility', type: 'located_at', target: { type: 'facility', lookup: 'external_id', value_field: 'location_id' }, when: [{ field: 'location_id', op: 'exists' }] },
+  ],
+  update_policy: { mode: 'managed_block', preserve_manual_sections: true, field_allowlist: ['title', 'external_code', 'equipment_class', 'status'] },
+  security: { classification: 'shared', pii: true, pii_fields: ['plate', 'responsible_person_id'] },
+};
+
+function ctx(): OperationContext {
+  const engine = {
+    executeRaw: async (sql: string, params?: unknown[]) => {
+      if (sql.includes('FROM sources')) return params?.[0] === 'shared' ? [{ id: 'shared' }] : [];
+      if (sql.includes('FROM source_sync_state')) return [];
+      return [];
+    },
+  } as unknown as BrainEngine;
+  return { engine, config: { engine: 'pglite' }, logger: console, dryRun: false, remote: true, sourceId: 'shared' } as OperationContext;
+}
+
+describe('source-ingest Stage 1 contract', () => {
+  test('fake connector discovery profiles vehicle fields and folder-node signal', async () => {
+    const discovery = await discoverSourceObject(new FakeSourceConnector(), 'vehicle', 10);
+    expect(discovery.connectorId).toBe('fake-source');
+    expect(discovery.sampled).toBe(3);
+    expect(discovery.idCandidates).toContain('id');
+    expect(discovery.updatedAtCandidates).toContain('updated_at');
+    expect(discovery.fields.map(f => f.name)).toContain('is_group');
+  });
+
+  test('profile validator requires frozen approved_source_id for reviewed/active profiles', () => {
+    const ok = validateSourceIngestProfile(vehicleProfile);
+    expect(ok.ok).toBe(true);
+    const bad = validateSourceIngestProfile({ ...vehicleProfile, target: { ...vehicleProfile.target, approved_source_id: undefined } });
+    expect(bad.ok).toBe(false);
+    expect(bad.issues.map(i => i.code)).toContain('source_id_not_frozen');
+  });
+
+  test('profile validator rejects mutable source_sync frontmatter allowlist', () => {
+    const bad = validateSourceIngestProfile({
+      ...vehicleProfile,
+      update_policy: { ...vehicleProfile.update_policy, field_allowlist: ['title', 'source_sync.last_synced_at'] },
+    });
+    expect(bad.ok).toBe(false);
+    expect(bad.issues.map(i => i.code)).toContain('sync_metadata_in_frontmatter');
+  });
+
+  test('managed block insert and replace preserve manual sections around block', () => {
+    const first = mergeManagedBlock('Manual intro\n', 'fake-source-vehicle-v1', 'fake-source:vehicle:veh-001', 'Generated v1');
+    expect(first.action).toBe('inserted');
+    expect(first.content).toContain('Manual intro');
+    expect(first.content).toContain(renderManagedBlock('fake-source-vehicle-v1', 'fake-source:vehicle:veh-001', 'Generated v1'));
+    const second = mergeManagedBlock(first.content, 'fake-source-vehicle-v1', 'fake-source:vehicle:veh-001', 'Generated v2');
+    expect(second.action).toBe('replaced');
+    expect(second.content).toContain('Manual intro');
+    expect(second.content).toContain('Generated v2');
+    expect(second.content).not.toContain('Generated v1');
+  });
+
+  test('operations are registered with read-side MCP-safe and write-side localOnly split', () => {
+    for (const name of ['source_discover', 'source_profile_draft', 'source_validate_profile', 'source_dry_run', 'source_sync_status']) {
+      expect(operationsByName[name]).toBeTruthy();
+      expect(operationsByName[name].scope).toBe('read');
+      expect(operationsByName[name].localOnly).not.toBe(true);
+    }
+    for (const name of ['source_ingest', 'source_refresh', 'source_revert']) {
+      expect(operationsByName[name]).toBeTruthy();
+      expect(operationsByName[name].scope).toBe('write');
+      expect(operationsByName[name].localOnly).toBe(true);
+    }
+  });
+
+  test('source_dry_run returns rule-level counts and does not write', async () => {
+    const out = await operationsByName.source_dry_run.handler(ctx(), { profile: vehicleProfile, sample_limit: 10 }) as any;
+    expect(out.ok).toBe(true);
+    expect(out.dry_run).toBe(true);
+    expect(out.counts.sampled).toBe(3);
+    expect(out.counts.would_write).toBe(2);
+    expect(out.counts.skipped).toBe(1);
+    expect(out.link_rules[0].rule_id).toBe('located-at-facility');
+  });
+});

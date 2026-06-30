@@ -5367,6 +5367,80 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
   },
+  {
+    version: 120,
+    name: 'source_ingest_foundation',
+    // Stage 1 of Third-Party Source Ingest: profile/version storage plus
+    // mutable per-external-object sync state. Sync/freshness metadata lives
+    // here, NOT in page frontmatter, preserving import-file content_hash
+    // idempotency. Keep in sync with src/schema.sql, src/core/pglite-schema.ts,
+    // and generated src/core/schema-embedded.ts.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS source_ingest_profiles (
+        profile_id          TEXT PRIMARY KEY,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'draft'
+          CHECK (status IN ('draft', 'reviewed', 'active', 'paused', 'deprecated')),
+        approved_source_id  TEXT REFERENCES sources(id) ON DELETE RESTRICT,
+        target_type         TEXT NOT NULL,
+        profile_json        JSONB NOT NULL DEFAULT '{}'::jsonb,
+        profile_hash        TEXT NOT NULL,
+        current_version     INTEGER NOT NULL DEFAULT 1,
+        approved_by         TEXT,
+        approved_at         TIMESTAMPTZ,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS source_ingest_profile_versions (
+        profile_id      TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE CASCADE,
+        version         INTEGER NOT NULL,
+        profile_json    JSONB NOT NULL DEFAULT '{}'::jsonb,
+        profile_hash    TEXT NOT NULL,
+        created_by      TEXT,
+        change_note     TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (profile_id, version)
+      );
+
+      CREATE TABLE IF NOT EXISTS source_sync_state (
+        connector_id          TEXT NOT NULL,
+        source_object         TEXT NOT NULL,
+        external_id           TEXT NOT NULL,
+        slug                  TEXT NOT NULL,
+        approved_source_id    TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+        profile_id            TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
+        profile_version       INTEGER NOT NULL,
+        content_fingerprint   TEXT,
+        last_source_hash      TEXT,
+        source_updated_at     TIMESTAMPTZ,
+        last_synced_at        TIMESTAMPTZ,
+        stale_after           TIMESTAMPTZ,
+        freshness_policy      TEXT,
+        run_id                TEXT,
+        last_result           TEXT NOT NULL DEFAULT 'pending'
+          CHECK (last_result IN ('pending', 'success', 'unchanged', 'skipped', 'failed', 'archived')),
+        last_error            TEXT,
+        updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (connector_id, source_object, external_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS source_ingest_profiles_status_idx
+        ON source_ingest_profiles (status, connector_id, source_object);
+      CREATE INDEX IF NOT EXISTS source_ingest_profiles_source_idx
+        ON source_ingest_profiles (approved_source_id) WHERE approved_source_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS source_sync_state_source_slug_idx
+        ON source_sync_state (approved_source_id, slug);
+      CREATE INDEX IF NOT EXISTS source_sync_state_profile_idx
+        ON source_sync_state (profile_id, profile_version);
+      CREATE INDEX IF NOT EXISTS source_sync_state_stale_idx
+        ON source_sync_state (approved_source_id, stale_after) WHERE stale_after IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS source_sync_state_run_idx
+        ON source_sync_state (run_id) WHERE run_id IS NOT NULL;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

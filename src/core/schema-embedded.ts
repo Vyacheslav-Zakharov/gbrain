@@ -754,6 +754,74 @@ CREATE INDEX IF NOT EXISTS context_volunteer_events_src_time_idx
 CREATE INDEX IF NOT EXISTS context_volunteer_events_src_slug_idx
   ON context_volunteer_events (source_id, slug);
 
+-- ============================================================
+-- Source Ingest: third-party connector profiles + sync state
+-- ============================================================
+-- Mutable sync/freshness metadata lives in source_sync_state, NOT in page
+-- frontmatter, so import-file content_hash idempotency remains stable.
+CREATE TABLE IF NOT EXISTS source_ingest_profiles (
+  profile_id          TEXT PRIMARY KEY,
+  connector_id        TEXT NOT NULL,
+  source_object       TEXT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft', 'reviewed', 'active', 'paused', 'deprecated')),
+  approved_source_id  TEXT REFERENCES sources(id) ON DELETE RESTRICT,
+  target_type         TEXT NOT NULL,
+  profile_json        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  profile_hash        TEXT NOT NULL,
+  current_version     INTEGER NOT NULL DEFAULT 1,
+  approved_by         TEXT,
+  approved_at         TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS source_ingest_profile_versions (
+  profile_id      TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE CASCADE,
+  version         INTEGER NOT NULL,
+  profile_json    JSONB NOT NULL DEFAULT '{}'::jsonb,
+  profile_hash    TEXT NOT NULL,
+  created_by      TEXT,
+  change_note     TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (profile_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS source_sync_state (
+  connector_id          TEXT NOT NULL,
+  source_object         TEXT NOT NULL,
+  external_id           TEXT NOT NULL,
+  slug                  TEXT NOT NULL,
+  approved_source_id    TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  profile_id            TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
+  profile_version       INTEGER NOT NULL,
+  content_fingerprint   TEXT,
+  last_source_hash      TEXT,
+  source_updated_at     TIMESTAMPTZ,
+  last_synced_at        TIMESTAMPTZ,
+  stale_after           TIMESTAMPTZ,
+  freshness_policy      TEXT,
+  run_id                TEXT,
+  last_result           TEXT NOT NULL DEFAULT 'pending'
+    CHECK (last_result IN ('pending', 'success', 'unchanged', 'skipped', 'failed', 'archived')),
+  last_error            TEXT,
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (connector_id, source_object, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS source_ingest_profiles_status_idx
+  ON source_ingest_profiles (status, connector_id, source_object);
+CREATE INDEX IF NOT EXISTS source_ingest_profiles_source_idx
+  ON source_ingest_profiles (approved_source_id) WHERE approved_source_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS source_sync_state_source_slug_idx
+  ON source_sync_state (approved_source_id, slug);
+CREATE INDEX IF NOT EXISTS source_sync_state_profile_idx
+  ON source_sync_state (profile_id, profile_version);
+CREATE INDEX IF NOT EXISTS source_sync_state_stale_idx
+  ON source_sync_state (approved_source_id, stale_after) WHERE stale_after IS NOT NULL;
+CREATE INDEX IF NOT EXISTS source_sync_state_run_idx
+  ON source_sync_state (run_id) WHERE run_id IS NOT NULL;
+
 -- migration_impact_log moved BELOW minion_jobs (was here, lines 645-676)
 -- because its \`job_id BIGINT REFERENCES minion_jobs(id)\` FK requires
 -- minion_jobs to exist FIRST during SCHEMA_SQL replay. v0.41.25.0 fix.
@@ -1422,6 +1490,10 @@ BEGIN
     ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
     ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
     ALTER TABLE oauth_codes ENABLE ROW LEVEL SECURITY;
+    -- v0.42.54 Source Ingest foundation tables
+    ALTER TABLE source_ingest_profiles ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_ingest_profile_versions ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_sync_state ENABLE ROW LEVEL SECURITY;
     RAISE NOTICE 'RLS enabled on all tables (role % has BYPASSRLS)', current_user;
   ELSE
     RAISE WARNING 'Skipping RLS: role % does not have BYPASSRLS privilege. Run as postgres role to enable.', current_user;
