@@ -23,7 +23,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import type { BrainEngine } from '../core/engine.ts';
-import { operations, OperationError } from '../core/operations.ts';
+import { operations, operationsByName, OperationError } from '../core/operations.ts';
 import type { OperationContext, AuthInfo } from '../core/operations.ts';
 import { GBrainOAuthProvider, validateTokenEndpointAuthMethod } from '../core/oauth-provider.ts';
 import type { SqlQuery } from '../core/oauth-provider.ts';
@@ -1019,6 +1019,57 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       res.status(500).json({ error: msg });
+    }
+  });
+
+  // Source Ingest admin review/config console. Admin-authenticated and local/trusted:
+  // this is the human UI for configuring connectors and profiles before any write job.
+  app.get('/admin/api/source-ingest/overview', requireAdmin, async (_req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const [profiles, status, refresh, sources] = await Promise.all([
+        operationsByName.source_profile_get.handler(ctx, {}),
+        operationsByName.source_sync_status.handler(ctx, { limit: 200 }),
+        operationsByName.source_refresh.handler(ctx, {}),
+        engine.executeRaw('SELECT id, name, path, federated FROM sources ORDER BY id'),
+      ]);
+      res.json({
+        connectors: [
+          {
+            id: 'appsheet-vehicles',
+            displayName: 'AppSheet автотранспорт',
+            object: 'vehicle',
+            supportsChangedSince: true,
+            credentialMode: 'server-env',
+            requiredEnv: ['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY'],
+            fields: [
+              { key: 'tableName', label: 'AppSheet table name', defaultValue: 'Автотранспорт' },
+              { key: 'targetSourceId', label: 'Target GBrain source', defaultValue: 'shared' },
+              { key: 'slugPrefix', label: 'Slug prefix', defaultValue: 'source-ingest/vehicles' },
+              { key: 'freshnessPolicy', label: 'Freshness policy', defaultValue: 'P30D' },
+            ],
+            safety: ['Discovery/dry-run first', 'Review profile before approval', 'Refresh cycle enqueues Minion jobs only'],
+          },
+          { id: 'fake-source', displayName: 'Deterministic fake source', object: 'vehicle', supportsChangedSince: true, credentialMode: 'none' },
+        ],
+        profiles,
+        status,
+        refresh,
+        sources,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/refresh-report', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const profile_id = typeof req.body?.profile_id === 'string' ? req.body.profile_id : undefined;
+      const out = await operationsByName.source_refresh.handler(ctx, { ...(profile_id ? { profile_id } : {}) });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
     }
   });
 

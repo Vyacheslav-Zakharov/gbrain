@@ -52,4 +52,6 @@ export const api = {
     apiFetchText(`/admin/api/calibration/charts/${encodeURIComponent(type)}${holder ? `?holder=${encodeURIComponent(holder)}` : ''}`),
   // v0.41 D2 — live minion-jobs dashboard snapshot.
   jobsWatch: () => apiFetch('/admin/api/jobs/watch'),
+  sourceIngestOverview: () => apiFetch('/admin/api/source-ingest/overview'),
+  sourceIngestRefreshReport: (profile_id?: string) => apiFetch('/admin/api/source-ingest/refresh-report', { method: 'POST', body: JSON.stringify({ profile_id }) }),
 };
