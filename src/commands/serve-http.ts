@@ -1285,6 +1285,11 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         res.status(400).json({ error: 'approved_source_id_required' });
         return;
       }
+      const dry_run_target_source_id = typeof req.body?.dry_run_target_source_id === 'string' ? req.body.dry_run_target_source_id : undefined;
+      if (dry_run_target_source_id && dry_run_target_source_id !== approved_source_id) {
+        res.status(409).json({ error: 'dry_run_source_mismatch', dry_run_target_source_id, approved_source_id });
+        return;
+      }
       const out = await operationsByName.source_profile_put.handler(ctx, {
         profile: req.body.profile,
         approve: true,

@@ -96,6 +96,7 @@ export function SourceIngestPage() {
   const [discovery, setDiscovery] = useState<unknown>(null);
   const [draft, setDraft] = useState<unknown>(null);
   const [dryRun, setDryRun] = useState<unknown>(null);
+  const [dryRunSourceId, setDryRunSourceId] = useState<string | null>(null);
   const [approveResult, setApproveResult] = useState<unknown>(null);
   const [connectionTest, setConnectionTest] = useState<unknown>(null);
   const [secretAudit, setSecretAudit] = useState<unknown>(null);
@@ -133,7 +134,9 @@ export function SourceIngestPage() {
   const summary = data?.status.summary ?? {};
   const activeProfile = useMemo(() => (draft as Record<string, unknown> | null)?.profile ?? null, [draft]);
   const canDryRun = Boolean(activeProfile);
-  const canApprove = Boolean(activeProfile && dryRun && !(dryRun as Record<string, unknown>).error);
+  const dryRunMatchesCurrentSource = Boolean(dryRun && dryRunSourceId === form.target_source_id);
+  const dryRunSourceMismatch = Boolean(dryRun && dryRunSourceId && dryRunSourceId !== form.target_source_id);
+  const canApprove = Boolean(activeProfile && dryRun && dryRunMatchesCurrentSource && !(dryRun as Record<string, unknown>).error);
 
   const runStep = async (name: string, fn: () => Promise<void>) => {
     setBusy(name);
@@ -226,19 +229,25 @@ export function SourceIngestPage() {
     const out = await api.sourceIngestDraft(payload());
     setDraft(out);
     setDryRun(null);
+    setDryRunSourceId(null);
     setApproveResult(null);
   });
 
   const runDryRun = async () => runStep('dry-run', async () => {
     if (!activeProfile) return;
-    setDryRun(await api.sourceIngestDryRun({ profile: activeProfile, sample_limit: form.sample_limit }));
+    setDryRun(await api.sourceIngestDryRun({ profile: activeProfile, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
+    setDryRunSourceId(form.target_source_id);
   });
 
   const approveProfile = async () => runStep('approve', async () => {
     if (!activeProfile) return;
+    if (dryRunSourceId !== form.target_source_id) {
+      throw new Error(`dry_run_source_mismatch: dry-run was for ${dryRunSourceId ?? 'none'}, current target is ${form.target_source_id}. Run dry-run preview again before approving.`);
+    }
     const out = await api.sourceIngestApproveProfile({
       profile: activeProfile,
       approved_source_id: form.target_source_id,
+      dry_run_target_source_id: dryRunSourceId,
       change_note: `approved AppSheet vehicle profile from admin UI (${form.slug_prefix})`,
     });
     setApproveResult(out);
@@ -351,6 +360,7 @@ export function SourceIngestPage() {
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void draftProfile()}>{busy === 'draft' ? 'Drafting…' : 'Draft profile'}</button>
           <button className="btn btn-secondary" disabled={busy !== null || !canDryRun} onClick={() => void runDryRun()}>{busy === 'dry-run' ? 'Running…' : 'Dry-run preview'}</button>
           <button className="btn btn-primary" disabled={busy !== null || !canApprove} onClick={() => void approveProfile()}>{busy === 'approve' ? 'Approving…' : 'Approve profile'}</button>
+          {dryRunSourceMismatch && <span style={{ color: 'var(--warning)', alignSelf: 'center' }}>Target source changed from dry-run ({dryRunSourceId}) to {form.target_source_id}; run dry-run preview again.</span>}
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
           <div>
