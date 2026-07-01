@@ -1073,6 +1073,92 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  app.post('/admin/api/source-ingest/discover', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id : 'appsheet-vehicles';
+      const source_object = typeof req.body?.source_object === 'string' ? req.body.source_object : 'vehicle';
+      const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
+      const out = await operationsByName.source_discover.handler(ctx, { connector_id, source_object, sample_limit });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  function applySourceIngestUiOverrides(profile: unknown, body: Record<string, unknown>): Record<string, unknown> {
+    const raw = { ...((profile as Record<string, unknown>) || {}) };
+    const target = { ...((raw.target as Record<string, unknown>) || {}) };
+    const freshness = { ...((raw.freshness as Record<string, unknown>) || {}) };
+    if (typeof body.slug_prefix === 'string' && body.slug_prefix.trim()) {
+      target.slug_template = `${body.slug_prefix.trim().replace(/\/+$/g, '')}/{{ code | slugify }}`;
+    }
+    if (typeof body.target_source_id === 'string' && body.target_source_id.trim()) {
+      target.suggested_source_id = body.target_source_id.trim();
+    }
+    if (typeof body.freshness_policy === 'string' && body.freshness_policy.trim()) {
+      freshness.policy = body.freshness_policy.trim();
+    }
+    raw.target = target;
+    raw.freshness = freshness;
+    return raw;
+  }
+
+  app.post('/admin/api/source-ingest/draft', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id : 'appsheet-vehicles';
+      const source_object = typeof req.body?.source_object === 'string' ? req.body.source_object : 'vehicle';
+      const target_source_id = typeof req.body?.target_source_id === 'string' ? req.body.target_source_id : 'shared';
+      const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
+      const drafted = await operationsByName.source_profile_draft.handler(ctx, { connector_id, source_object, target_source_id, sample_limit });
+      const profile = applySourceIngestUiOverrides((drafted as any).profile, req.body || {});
+      res.json({ ...(drafted as Record<string, unknown>), profile });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/dry-run', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      if (!req.body?.profile || typeof req.body.profile !== 'object') {
+        res.status(400).json({ error: 'profile_required' });
+        return;
+      }
+      const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
+      const out = await operationsByName.source_dry_run.handler(ctx, { profile: req.body.profile, sample_limit });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/approve-profile', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      if (!req.body?.profile || typeof req.body.profile !== 'object') {
+        res.status(400).json({ error: 'profile_required' });
+        return;
+      }
+      const approved_source_id = typeof req.body?.approved_source_id === 'string' ? req.body.approved_source_id : undefined;
+      if (!approved_source_id) {
+        res.status(400).json({ error: 'approved_source_id_required' });
+        return;
+      }
+      const out = await operationsByName.source_profile_put.handler(ctx, {
+        profile: req.body.profile,
+        approve: true,
+        approved_source_id,
+        approved_by: 'admin-ui',
+        change_note: typeof req.body?.change_note === 'string' ? req.body.change_note : 'approved from admin source-ingest UI',
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
   // v0.36.1.0 (T15 / E6 / D23) — Calibration tab data endpoints.
   // Server-rendered SVG charts; admin SPA renders via TrustedSVG wrapper.
   // v0.36.1.0 (TD3) — pattern drill-down. Returns the source takes that
