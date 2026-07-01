@@ -2838,8 +2838,8 @@ const file_url: Operation = {
 
 // --- Source Ingest (Stage 1 contract) ---
 
-function resolveSourceConnectorOrThrow(connectorId: string) {
-  const connector = getSourceConnector(connectorId);
+function resolveSourceConnectorOrThrow(connectorId: string, connectorConfig?: Record<string, unknown>) {
+  const connector = getSourceConnector(connectorId, connectorConfig);
   if (!connector) {
     throw new OperationError(
       'invalid_params',
@@ -2859,9 +2859,10 @@ const source_discover: Operation = {
     connector_id: { type: 'string', required: true, description: 'Connector id, e.g. fake-source' },
     source_object: { type: 'string', required: true, description: 'Object/collection name, e.g. vehicle' },
     sample_limit: { type: 'number', description: 'Sample size for field profiling (default 50)' },
+    connector_config: { type: 'object', description: 'Non-secret connector config override, e.g. table_name. Secrets are never passed here.' },
   },
   handler: async (_ctx, p) => {
-    const connector = resolveSourceConnectorOrThrow(p.connector_id as string);
+    const connector = resolveSourceConnectorOrThrow(p.connector_id as string, p.connector_config as Record<string, unknown> | undefined);
     return discoverSourceObject(connector, p.source_object as string, (p.sample_limit as number | undefined) ?? 50);
   },
 };
@@ -2919,11 +2920,12 @@ const source_profile_draft: Operation = {
     source_object: { type: 'string', required: true },
     target_source_id: { type: 'string', description: 'Optional suggested source; returned as suggestion only, not executable approval.' },
     sample_limit: { type: 'number', description: 'Sample size for discovery (default 50)' },
+    connector_config: { type: 'object', description: 'Non-secret connector config override, e.g. table_name. Secrets are never passed here.' },
   },
   handler: async (_ctx, p) => {
     const connectorId = p.connector_id as string;
     const sourceObject = p.source_object as string;
-    const discovery = await discoverSourceObject(resolveSourceConnectorOrThrow(connectorId), sourceObject, (p.sample_limit as number | undefined) ?? 50);
+    const discovery = await discoverSourceObject(resolveSourceConnectorOrThrow(connectorId, p.connector_config as Record<string, unknown> | undefined), sourceObject, (p.sample_limit as number | undefined) ?? 50);
     const { profile, warnings } = draftSourceIngestProfile({ connectorId, sourceObject, discovery, targetSourceId: p.target_source_id as string | undefined });
     return { discovery, profile, warnings };
   },
@@ -2996,12 +2998,13 @@ const source_dry_run: Operation = {
   params: {
     profile: { type: 'object', required: true },
     sample_limit: { type: 'number', description: 'Sample size for preview (default 50)' },
+    connector_config: { type: 'object', description: 'Non-secret connector config override, e.g. table_name. Secrets are never passed here.' },
   },
   handler: async (ctx, p) => {
     const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, p.profile);
     if (!validation.ok || !validation.profile) return { ok: false, validation, dry_run: true };
     const profile = validation.profile;
-    const connector = resolveSourceConnectorOrThrow(profile.source_connector);
+    const connector = resolveSourceConnectorOrThrow(profile.source_connector, p.connector_config as Record<string, unknown> | undefined);
     const sample = await connector.sample(profile.source_object, (p.sample_limit as number | undefined) ?? 50);
     return { ...buildSourceDryRun(profile, sample), validation };
   },

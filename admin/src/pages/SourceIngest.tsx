@@ -43,6 +43,50 @@ function statusBadge(status: unknown) {
   return <span style={{ color }}>{s}</span>;
 }
 
+function asObj(x: unknown): Record<string, unknown> {
+  return x && typeof x === 'object' ? x as Record<string, unknown> : {};
+}
+
+function asArr<T = unknown>(x: unknown): T[] {
+  return Array.isArray(x) ? x as T[] : [];
+}
+
+function PreviewJson({ value, empty }: { value: unknown; empty: string }) {
+  return <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', maxHeight: 260, overflow: 'auto' }}>{value ? JSON.stringify(value, null, 2) : empty}</pre>;
+}
+
+function DiscoveryPreview({ value }: { value: unknown }) {
+  const d = asObj(value);
+  if (!value) return <div style={{ color: 'var(--text-muted)' }}>No discovery yet.</div>;
+  const fields = asArr<Record<string, unknown>>(d.fields);
+  return <div style={{ color: 'var(--text-secondary)' }}>
+    <div style={{ marginBottom: 8 }}><b>{val(d.connectorId)}</b> / {val(d.objectName)} · sampled {val(d.sampled)} · fields {fields.length}</div>
+    <div style={{ marginBottom: 8 }}>IDs: {asArr(d.idCandidates).map(String).join(', ') || '—'} · Updated: {asArr(d.updatedAtCandidates).map(String).join(', ') || '—'}</div>
+    {asArr(d.warnings).length > 0 && <div style={{ color: 'var(--warning)', marginBottom: 8 }}>Warnings: {asArr(d.warnings).map(String).join(', ')}</div>}
+    <table><thead><tr><th>field</th><th>types</th><th>null</th><th>samples</th></tr></thead><tbody>
+      {fields.slice(0, 12).map((f, i) => <tr key={i}><td className="mono">{val(f.name)}</td><td>{asArr(f.observedTypes).join(', ')}</td><td>{typeof f.nullRatio === 'number' ? `${Math.round(f.nullRatio * 100)}%` : '—'}</td><td className="mono">{asArr(f.samples).slice(0, 3).map(val).join(' · ')}</td></tr>)}
+    </tbody></table>
+  </div>;
+}
+
+function DryRunPreview({ value }: { value: unknown }) {
+  const d = asObj(value);
+  if (!value) return <div style={{ color: 'var(--text-muted)' }}>No dry-run yet.</div>;
+  const counts = asObj(d.counts);
+  const samplePages = asArr<Record<string, unknown>>(d.sample_pages);
+  const warnings = asArr(d.warnings);
+  return <div style={{ color: 'var(--text-secondary)' }}>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(90px, 1fr))', gap: 8, marginBottom: 10 }}>
+      {['sampled', 'would_write', 'skipped', 'slug_collisions'].map(k => <div className="metric" key={k}><div className="metric-value">{val(counts[k])}</div><div className="metric-label">{k}</div></div>)}
+    </div>
+    {warnings.length > 0 && <div style={{ color: 'var(--warning)', marginBottom: 8 }}>Warnings: {warnings.map(String).join(', ')}</div>}
+    <table><thead><tr><th>slug</th><th>title</th><th>external</th></tr></thead><tbody>
+      {samplePages.map((p, i) => <tr key={i}><td className="mono">{val(p.slug)}</td><td>{val(p.title)}</td><td className="mono">{val(p.external_id)}</td></tr>)}
+    </tbody></table>
+    {samplePages[0]?.managed_block_preview && <details style={{ marginTop: 8 }}><summary>First managed block preview</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto' }}>{String(samplePages[0].managed_block_preview)}</pre></details>}
+  </div>;
+}
+
 export function SourceIngestPage() {
   const [data, setData] = useState<SourceIngestOverview | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -244,15 +288,15 @@ export function SourceIngestPage() {
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
           <div>
             <h3 style={{ fontSize: 13, marginBottom: 8 }}>Discovery</h3>
-            <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', maxHeight: 260, overflow: 'auto' }}>{discovery ? JSON.stringify(discovery, null, 2) : 'No discovery yet.'}</pre>
+            <DiscoveryPreview value={discovery} />
           </div>
           <div>
             <h3 style={{ fontSize: 13, marginBottom: 8 }}>Draft profile</h3>
-            <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', maxHeight: 260, overflow: 'auto' }}>{draft ? JSON.stringify(draft, null, 2) : 'No draft yet.'}</pre>
+            <PreviewJson value={draft} empty="No draft yet." />
           </div>
           <div>
             <h3 style={{ fontSize: 13, marginBottom: 8 }}>Dry-run</h3>
-            <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', maxHeight: 260, overflow: 'auto' }}>{dryRun ? JSON.stringify(dryRun, null, 2) : 'No dry-run yet.'}</pre>
+            <DryRunPreview value={dryRun} />
           </div>
           <div>
             <h3 style={{ fontSize: 13, marginBottom: 8 }}>Approval</h3>

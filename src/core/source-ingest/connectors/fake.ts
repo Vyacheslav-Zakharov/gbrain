@@ -77,8 +77,11 @@ export class FakeSourceConnector implements SourceConnector {
   }
 }
 
-export function getSourceConnector(id: string): SourceConnector | null {
+export function getSourceConnector(id: string, config?: Record<string, unknown>): SourceConnector | null {
   if (id === 'fake-source') return new FakeSourceConnector();
-  if (id === 'appsheet-vehicles') return new AppSheetVehicleConnector();
+  if (id === 'appsheet-vehicles') return new AppSheetVehicleConnector({
+    tableName: typeof config?.table_name === 'string' ? config.table_name : undefined,
+    baseUrl: typeof config?.base_url === 'string' ? config.base_url : undefined,
+  });
   return null;
 }

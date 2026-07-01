@@ -10,7 +10,7 @@ import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
 import { listDueSourceRefreshes, parseFreshnessPolicyMs, enqueueDueSourceRefreshJobs } from '../src/core/source-ingest/freshness.ts';
 import { listSourceConnectorConfigs, putSourceConnectorConfig, sourceConnectorSecretStatus } from '../src/core/source-ingest/connector-config.ts';
-import { rowToVehicleRecord } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
+import { rowToVehicleRecord, AppSheetVehicleConnector } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
 import { runCycle } from '../src/core/cycle.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
@@ -328,6 +328,19 @@ describe('source-ingest Stage 3A executor', () => {
     const secrets = sourceConnectorSecretStatus('appsheet-vehicles');
     expect(secrets.required_env).toEqual(['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY']);
     expect(secrets.missing_env).toEqual(expect.arrayContaining(['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY']));
+  });
+
+  test('AppSheet connector uses saved table config without leaking credentials', async () => {
+    const calls: Array<{ url: string; body: any }> = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body || '{}')) });
+      return new Response(JSON.stringify([{ ID: 'truck-1', ГосНомер: '111AAA02', Модель: 'Kamaz', ДатаИзменения: '2026-07-01T10:00:00+05:00' }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const connector = new AppSheetVehicleConnector({ appId: 'app', accessKey: 'secret', tableName: 'Автотранспорт', fetchImpl });
+    const sample = await connector.sample('vehicle', 5);
+    expect(sample[0].external_id).toBe('truck-1');
+    expect(calls[0].url).toContain(encodeURIComponent('Автотранспорт'));
+    expect(JSON.stringify(calls[0].body)).not.toContain('secret');
   });
 
   test('AppSheet vehicle connector scaffold normalizes vehicle rows without live network', () => {

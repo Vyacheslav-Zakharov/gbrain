@@ -1089,13 +1089,44 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  function nonSecretConnectorConfigFromBody(body: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (typeof body.table_name === 'string' && body.table_name.trim()) out.table_name = body.table_name.trim();
+    if (typeof body.base_url === 'string' && body.base_url.trim()) out.base_url = body.base_url.trim();
+    if (body.connector_config && typeof body.connector_config === 'object') {
+      const raw = body.connector_config as Record<string, unknown>;
+      if (typeof raw.table_name === 'string' && raw.table_name.trim()) out.table_name = raw.table_name.trim();
+      if (typeof raw.base_url === 'string' && raw.base_url.trim()) out.base_url = raw.base_url.trim();
+    }
+    return out;
+  }
+
+  async function sourceIngestUiConfig(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const connector_id = typeof body.connector_id === 'string' ? body.connector_id : 'appsheet-vehicles';
+    const source_object = typeof body.source_object === 'string' ? body.source_object : 'vehicle';
+    const config_id = typeof body.config_id === 'string' ? body.config_id : `${connector_id}:${source_object}`;
+    const saved = await operationsByName.source_connector_config_get.handler(
+      { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true },
+      { config_id },
+    ) as { rows?: Array<Record<string, unknown>> };
+    const row = saved.rows?.[0];
+    return {
+      connector_id,
+      source_object,
+      target_source_id: typeof body.target_source_id === 'string' ? body.target_source_id : (typeof row?.target_source_id === 'string' ? row.target_source_id : 'shared'),
+      slug_prefix: typeof body.slug_prefix === 'string' ? body.slug_prefix : (typeof row?.slug_prefix === 'string' ? row.slug_prefix : 'source-ingest/vehicles'),
+      freshness_policy: typeof body.freshness_policy === 'string' ? body.freshness_policy : (typeof row?.freshness_policy === 'string' ? row.freshness_policy : 'P30D'),
+      table_name: typeof body.table_name === 'string' ? body.table_name : (typeof row?.table_name === 'string' ? row.table_name : 'Автотранспорт'),
+      connector_config: { ...(row?.config_json && typeof row.config_json === 'object' ? row.config_json as Record<string, unknown> : {}), ...nonSecretConnectorConfigFromBody(body) },
+    };
+  }
+
   app.post('/admin/api/source-ingest/discover', requireAdmin, express.json(), async (req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
     try {
-      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id : 'appsheet-vehicles';
-      const source_object = typeof req.body?.source_object === 'string' ? req.body.source_object : 'vehicle';
+      const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
       const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
-      const out = await operationsByName.source_discover.handler(ctx, { connector_id, source_object, sample_limit });
+      const out = await operationsByName.source_discover.handler(ctx, { connector_id: ui.connector_id, source_object: ui.source_object, sample_limit, connector_config: ui.connector_config });
       res.json(out);
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
@@ -1123,12 +1154,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   app.post('/admin/api/source-ingest/draft', requireAdmin, express.json(), async (req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
     try {
-      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id : 'appsheet-vehicles';
-      const source_object = typeof req.body?.source_object === 'string' ? req.body.source_object : 'vehicle';
-      const target_source_id = typeof req.body?.target_source_id === 'string' ? req.body.target_source_id : 'shared';
+      const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
       const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
-      const drafted = await operationsByName.source_profile_draft.handler(ctx, { connector_id, source_object, target_source_id, sample_limit });
-      const profile = applySourceIngestUiOverrides((drafted as any).profile, req.body || {});
+      const drafted = await operationsByName.source_profile_draft.handler(ctx, { connector_id: ui.connector_id, source_object: ui.source_object, target_source_id: ui.target_source_id, sample_limit, connector_config: ui.connector_config });
+      const profile = applySourceIngestUiOverrides((drafted as any).profile, ui);
       res.json({ ...(drafted as Record<string, unknown>), profile });
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
@@ -1143,7 +1172,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         return;
       }
       const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
-      const out = await operationsByName.source_dry_run.handler(ctx, { profile: req.body.profile, sample_limit });
+      const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
+      const out = await operationsByName.source_dry_run.handler(ctx, { profile: req.body.profile, sample_limit, connector_config: ui.connector_config });
       res.json(out);
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
