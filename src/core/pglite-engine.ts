@@ -495,7 +495,11 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='embedding_signature') AS pages_embedding_signature_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema='public' AND table_name='pages' AND column_name='links_extracted_at') AS pages_links_extracted_at_exists
+                WHERE table_schema='public' AND table_name='pages' AND column_name='links_extracted_at') AS pages_links_extracted_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='source_sync_state') AS source_sync_state_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='source_sync_state' AND column_name='managed_block_hash') AS source_sync_state_managed_block_hash_exists
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
@@ -538,6 +542,8 @@ export class PGLiteEngine implements BrainEngine {
       pages_generation_exists: boolean;
       pages_embedding_signature_exists: boolean;
       pages_links_extracted_at_exists: boolean;
+      source_sync_state_exists: boolean;
+      source_sync_state_managed_block_hash_exists: boolean;
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
@@ -614,6 +620,10 @@ export class PGLiteEngine implements BrainEngine {
     // it; pre-v112 brains crash without the column, so bootstrap adds it before
     // the CREATE INDEX runs. v112 runs later via runMigrations and is idempotent.
     const needsPagesLinksExtractedAt = probe.pages_exists && !probe.pages_links_extracted_at_exists;
+    // v124 (source_sync_state_managed_block_hash): new named sentinel column.
+    // Existing v120 brains have source_sync_state already, so CREATE TABLE IF
+    // NOT EXISTS in the schema blob is a no-op and cannot add the column.
+    const needsSourceSyncManagedBlockHash = probe.source_sync_state_exists && !probe.source_sync_state_managed_block_hash_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -625,7 +635,8 @@ export class PGLiteEngine implements BrainEngine {
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
-        && !needsPagesLinksExtractedAt) return;
+        && !needsPagesLinksExtractedAt
+        && !needsSourceSyncManagedBlockHash) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -870,6 +881,15 @@ export class PGLiteEngine implements BrainEngine {
       // v112 runs later via runMigrations and is idempotent.
       await this.db.exec(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS links_extracted_at TIMESTAMPTZ;
+      `);
+    }
+
+    if (needsSourceSyncManagedBlockHash) {
+      // v124: managed-block drift sentinel split from content_fingerprint.
+      // Backfill happens in the migration; bootstrap only makes the column
+      // visible before schema replay and early post-init code paths.
+      await this.db.exec(`
+        ALTER TABLE source_sync_state ADD COLUMN IF NOT EXISTS managed_block_hash TEXT;
       `);
     }
   }
