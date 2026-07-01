@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { fetchWithSSRFGuard, validateAndResolveUrl } from '../../ssrf-validate.ts';
 import type { SourceConnector, SourceObjectDescriptor, SourceRecord, SourceRecordBatch } from './types.ts';
 
 export interface AppSheetVehicleConnectorConfig {
@@ -60,10 +61,12 @@ export class AppSheetVehicleConnector implements SourceConnector {
       },
       Rows: [],
     };
-    const res = await this.fetchImpl(url, {
+    const res = await this.fetchAppSheet(url, {
       method: 'POST',
       headers: { 'ApplicationAccessKey': accessKey, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      maxRedirects: 3,
+      timeoutMs: 10000,
     });
     if (!res.ok) throw new Error(`AppSheet vehicle fetch failed: HTTP ${res.status}`);
     const json = await res.json() as unknown;
@@ -73,6 +76,19 @@ export class AppSheetVehicleConnector implements SourceConnector {
         ? ((json as Record<string, unknown>).Rows as unknown[])
         : [];
     return (rawRows as Record<string, unknown>[]).slice(0, opts.limit ?? rawRows.length);
+  }
+
+  private async fetchAppSheet(url: string, init: RequestInit & { maxRedirects?: number; timeoutMs?: number }): Promise<Response> {
+    if (this.fetchImpl === fetch) {
+      return fetchWithSSRFGuard(url, init);
+    }
+
+    // Test/custom fetch seam: still run the same SSRF validator before handing
+    // a credentialed AppSheet request to the injected fetch implementation.
+    const target = await validateAndResolveUrl(url);
+    const headers = new Headers(init.headers || {});
+    if (target.originalHost) headers.set('Host', target.originalHost);
+    return this.fetchImpl(target.resolvedUrl, { ...init, redirect: 'manual', headers });
   }
 }
 

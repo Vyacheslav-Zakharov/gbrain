@@ -415,11 +415,31 @@ describe('source-ingest Stage 3A executor', () => {
       calls.push({ url: String(url), body: JSON.parse(String(init?.body || '{}')) });
       return new Response(JSON.stringify([{ ID: 'truck-1', ГосНомер: '111AAA02', Модель: 'Kamaz', ДатаИзменения: '2026-07-01T10:00:00+05:00' }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
-    const connector = new AppSheetVehicleConnector({ appId: 'app', accessKey: 'secret', tableName: 'Автотранспорт', fetchImpl });
+    const connector = new AppSheetVehicleConnector({ appId: 'app', accessKey: 'secret', tableName: 'Автотранспорт', baseUrl: 'https://203.0.113.10/api/v2/apps', fetchImpl });
     const sample = await connector.sample('vehicle', 5);
     expect(sample[0].external_id).toBe('truck-1');
     expect(calls[0].url).toContain(encodeURIComponent('Автотранспорт'));
     expect(JSON.stringify(calls[0].body)).not.toContain('secret');
+  });
+
+  test('AppSheet connector rejects internal base_url before credentialed fetch', async () => {
+    let called = false;
+    const fetchImpl = (async () => {
+      called = true;
+      return new Response('[]', { status: 200 });
+    }) as unknown as typeof fetch;
+    const connector = new AppSheetVehicleConnector({
+      appId: 'app',
+      accessKey: 'secret',
+      tableName: 'Автотранспорт',
+      baseUrl: 'http://169.254.169.254/latest/meta-data',
+      fetchImpl,
+    });
+
+    const err = await connector.sample('vehicle', 1).catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String(err.message)).toContain('URL targets internal/private network');
+    expect(called).toBe(false);
   });
 
   test('AppSheet vehicle connector scaffold normalizes vehicle rows without live network', () => {
