@@ -14,6 +14,7 @@ import { validateSourceIngestProfile, type SourceFilterRule, type SourceIngestPr
 import { resolveSourceIngestStorageMode, type SourceIngestStorageMode } from './executor-preflight.ts';
 import { nextStaleAfter } from './freshness.ts';
 import { getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
+import { LockUnavailableError, withRefreshingLock } from '../db-lock.ts';
 
 export interface SourceIngestExecutorOptions {
   profile_id: string;
@@ -46,6 +47,10 @@ export interface SourceIngestExecutorResult {
   graph_writes: 'deferred';
   git_commit?: { committed: boolean; sha?: string; reason?: string };
   checkpoint: { op: string; fingerprint: string; loaded: number; cleared: boolean };
+}
+
+export function sourceIngestLockId(sourceId: string): string {
+  return `source-ingest:${sourceId}`;
 }
 
 interface ProfileRow {
@@ -306,6 +311,10 @@ export async function runSourceIngestExecutor(
   }
   if (storage.mode !== 'git-backed') throw new Error('Stage 3A executor requires git-backed source');
 
+  const lockId = sourceIngestLockId(sourceId);
+  try {
+    return await withRefreshingLock(engine, lockId, async () => {
+
   const runId = opts.run_id ?? `source-ingest-${new Date().toISOString().replace(/[:.]/g, '')}`;
   const configId = `${profile.source_connector}:${profile.source_object}`;
   const [savedConfig] = await listSourceConnectorConfigs(engine, configId);
@@ -462,4 +471,21 @@ export async function runSourceIngestExecutor(
     git_commit: gitCommit,
     checkpoint: { op: key.op, fingerprint: key.fingerprint, loaded: completed.size, cleared: failed === 0 },
   };
+    });
+  } catch (e) {
+    if (e instanceof LockUnavailableError) {
+      return {
+        ok: false,
+        run_id: opts.run_id ?? `source-ingest-${new Date().toISOString()}`,
+        profile_id: profile.profile_id,
+        source_id: sourceId,
+        storage: { mode: 'blocked', source_id: sourceId, reason: 'source_ingest_lock_busy' },
+        counts: { sampled: 0, written: 0, unchanged: 0, skipped: 0, failed: 0 },
+        results: [],
+        graph_writes: 'deferred',
+        checkpoint: { op: 'source_ingest', fingerprint: '', loaded: 0, cleared: false },
+      };
+    }
+    throw e;
+  }
 }

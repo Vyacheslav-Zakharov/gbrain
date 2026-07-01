@@ -5,7 +5,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { putSourceIngestProfile, profileHash } from '../src/core/source-ingest/store.ts';
-import { runSourceIngestExecutor } from '../src/core/source-ingest/executor.ts';
+import { runSourceIngestExecutor, sourceIngestLockId } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
 import { listDueSourceRefreshes, parseFreshnessPolicyMs, enqueueDueSourceRefreshJobs } from '../src/core/source-ingest/freshness.ts';
@@ -66,6 +66,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await engine.executeRaw('DELETE FROM gbrain_cycle_locks');
   await engine.executeRaw('DELETE FROM minion_jobs');
   await engine.executeRaw('DELETE FROM op_checkpoint_paths');
   await engine.executeRaw('DELETE FROM op_checkpoints');
@@ -146,6 +147,22 @@ describe('source-ingest Stage 3A executor', () => {
     expect(out.storage.mode).toBe('blocked');
     if (out.storage.mode === 'blocked') expect(out.storage.reason).toBe('dirty_git_tree');
     expect(await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' })).toBeNull();
+  }, 30000);
+
+  test('blocks concurrent source-ingest runs with the same per-source lock before writing', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await engine.executeRaw(
+      `INSERT INTO gbrain_cycle_locks (id, holder_pid, holder_host, acquired_at, ttl_expires_at, last_refreshed_at)
+       VALUES ($1, 999999, 'other-host', NOW(), NOW() + INTERVAL '30 minutes', NOW())`,
+      [sourceIngestLockId('shared')],
+    );
+    const out = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-lock-busy', no_embed: true });
+    expect(out.ok).toBe(false);
+    expect(out.storage.mode).toBe('blocked');
+    if (out.storage.mode === 'blocked') expect(out.storage.reason).toBe('source_ingest_lock_busy');
+    expect(await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' })).toBeNull();
+    expect(execFileSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).trim()).toBe('');
   }, 30000);
 
   test('warns when a human edited inside the managed block before refresh', async () => {
@@ -254,7 +271,7 @@ describe('source-ingest Stage 3A executor', () => {
   test('source_revert apply restores previous version for updated pages', async () => {
     const repo = tempGitRepo();
     await seed(repo);
-    const original = `---\ntype: equipment\ntitle: Existing A-001\nstatus: active\nsource_id: shared\n---\n\n# Existing A-001\n\nManual pre-source-ingest body.\n`;
+    const original = `---\ntype: equipment\ntitle: Existing A-001\nstatus: active\nsource_id: shared\nequipment:\n  identifiers:\n    vin: VIN-001\n  tags:\n    - nested\n    - revert\n---\n\n# Existing A-001\n\nManual pre-source-ingest body.\n`;
     await importFromContent(engine, 'source-ingest/vehicles/a-001', original, {
       noEmbed: true,
       sourceId: 'shared',
@@ -267,7 +284,13 @@ describe('source-ingest Stage 3A executor', () => {
     expect(report.pages.find(p => p.slug === 'source-ingest/vehicles/a-001')).toMatchObject({ revert_action: 'reverted-version' });
     const reverted = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
     expect(reverted?.compiled_truth).toContain('Manual pre-source-ingest body.');
-    expect(readFileSync(join(repo, 'source-ingest/vehicles/a-001.md'), 'utf8')).toContain('Manual pre-source-ingest body.');
+    const restoredFile = readFileSync(join(repo, 'source-ingest/vehicles/a-001.md'), 'utf8');
+    expect(restoredFile).toContain('Manual pre-source-ingest body.');
+    expect(restoredFile).toContain('equipment:\n');
+    expect(restoredFile).toContain('identifiers:\n    vin: VIN-001');
+    expect(restoredFile).toContain('tags:\n    - nested\n    - revert');
+    const restoredPage = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect((restoredPage?.frontmatter.equipment as Record<string, unknown>)?.identifiers).toMatchObject({ vin: 'VIN-001' });
     expect(report.git_commit?.committed).toBe(true);
   }, 30000);
 

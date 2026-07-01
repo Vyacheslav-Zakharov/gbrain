@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
+import { safeDump as yamlSafeDump } from 'js-yaml';
 import type { BrainEngine } from '../engine.ts';
 import { importFromContent } from '../import-file.ts';
 import { writePageThrough } from '../write-through.ts';
@@ -49,16 +50,9 @@ export interface SourceRevertOptions {
   no_embed?: boolean;
 }
 
-function yamlScalar(v: unknown): string {
-  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  const s = String(v ?? '');
-  if (/^[A-Za-z0-9_./:-]+$/.test(s)) return s;
-  return JSON.stringify(s);
-}
-
 function markdownFromVersion(frontmatter: Record<string, unknown>, body: string): string {
-  const fm = ['---', ...Object.entries(frontmatter).map(([k, v]) => `${k}: ${yamlScalar(v)}`), '---', ''].join('\n');
-  return `${fm}\n${body}`;
+  const yaml = yamlSafeDump(frontmatter, { noRefs: true, lineWidth: -1, sortKeys: false }).trimEnd();
+  return `---\n${yaml}\n---\n\n${body}`;
 }
 
 function gitStatusForPaths(localPath: string, paths: string[]): string {
