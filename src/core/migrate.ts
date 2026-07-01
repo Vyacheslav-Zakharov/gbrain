@@ -5414,6 +5414,7 @@ export const MIGRATIONS: Migration[] = [
         profile_id            TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
         profile_version       INTEGER NOT NULL,
         content_fingerprint   TEXT,
+        managed_block_hash    TEXT,
         last_source_hash      TEXT,
         source_updated_at     TIMESTAMPTZ,
         last_synced_at        TIMESTAMPTZ,
@@ -5552,6 +5553,22 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
     sqlFor: { pglite: `SELECT 1;` },
+  },
+  {
+    version: 124,
+    name: 'source_sync_state_managed_block_hash',
+    // Stage 3D hardening: keep the managed-block drift sentinel in a named
+    // column instead of overloading content_fingerprint, which can later track
+    // whole-page/content fingerprints without breaking user-edit detection.
+    idempotent: true,
+    sql: `
+      ALTER TABLE source_sync_state
+        ADD COLUMN IF NOT EXISTS managed_block_hash TEXT;
+      UPDATE source_sync_state
+         SET managed_block_hash = content_fingerprint
+       WHERE managed_block_hash IS NULL
+         AND content_fingerprint IS NOT NULL;
+    `,
   },
 ];
 

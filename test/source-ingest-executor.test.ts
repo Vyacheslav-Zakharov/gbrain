@@ -108,13 +108,14 @@ describe('source-ingest Stage 3A executor', () => {
     const page = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
     expect(page?.type).toBe('equipment');
     expect(page?.frontmatter.source_ingest).toMatchObject({ profile_id: profile.profile_id, external_ref: 'fake-source:vehicle:veh-001', run_id: 'run-test-1' });
-    const rows = await engine.executeRaw<{ run_id: string; last_result: string; content_fingerprint: string }>(
-      `SELECT run_id, last_result, content_fingerprint FROM source_sync_state WHERE external_id = $1`,
+    const rows = await engine.executeRaw<{ run_id: string; last_result: string; content_fingerprint: string; managed_block_hash: string }>(
+      `SELECT run_id, last_result, content_fingerprint, managed_block_hash FROM source_sync_state WHERE external_id = $1`,
       ['veh-001'],
     );
     expect(rows[0].run_id).toBe('run-test-1');
     expect(rows[0].last_result).toBe('success');
     expect(rows[0].content_fingerprint.length).toBeGreaterThan(10);
+    expect(rows[0].managed_block_hash).toBe(rows[0].content_fingerprint);
     expect(execFileSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).trim()).toBe('');
     expect(execFileSync('git', ['-C', repo, 'log', '-1', '--oneline'], { encoding: 'utf8' })).toContain('source-ingest run_id=run-test-1');
   }, 30000);
@@ -361,6 +362,26 @@ describe('source-ingest Stage 3A executor', () => {
     expect(jobs).toHaveLength(1);
     const data = typeof jobs[0].data === 'string' ? JSON.parse(jobs[0].data) : jobs[0].data as Record<string, unknown>;
     expect(data).toMatchObject({ profile_id: profile.profile_id, changed_since: true, no_embed: true });
+  }, 30000);
+
+  test('source_refresh source filter is applied before limit', async () => {
+    const sharedRepo = tempGitRepo();
+    const internalRepo = tempGitRepo();
+    await seed(sharedRepo);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES ($1,$2,$3,'{"federated": true}'::jsonb)
+       ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+      ['internal-equipment', 'internal-equipment', internalRepo],
+    );
+    await putSourceIngestProfile(engine, {
+      ...profile,
+      profile_id: 'fake-source-vehicle-internal-v1',
+      target: { ...profile.target, approved_source_id: 'internal-equipment', slug_template: 'source-ingest/internal-vehicles/{{ code | slugify }}' },
+    }, { createdBy: 'test', changeNote: 'seed internal' });
+
+    const due = await listDueSourceRefreshes(engine, { source_id: 'internal-equipment', limit: 1 });
+    expect(due).toHaveLength(1);
+    expect(due[0]).toMatchObject({ profile_id: 'fake-source-vehicle-internal-v1', approved_source_id: 'internal-equipment' });
   }, 30000);
 
   test('source_ingest changed_since no-ops when connector has no newer records', async () => {

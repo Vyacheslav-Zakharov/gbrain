@@ -792,6 +792,7 @@ CREATE TABLE IF NOT EXISTS source_sync_state (
   profile_id            TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
   profile_version       INTEGER NOT NULL,
   content_fingerprint   TEXT,
+  managed_block_hash    TEXT,
   last_source_hash      TEXT,
   source_updated_at     TIMESTAMPTZ,
   last_synced_at        TIMESTAMPTZ,

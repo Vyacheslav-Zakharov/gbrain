@@ -182,14 +182,15 @@ async function writeSyncState(engine: BrainEngine, args: {
   await engine.executeRaw(
     `INSERT INTO source_sync_state
        (connector_id, source_object, external_id, slug, approved_source_id, profile_id, profile_version,
-        content_fingerprint, last_source_hash, source_updated_at, last_synced_at, stale_after, freshness_policy, run_id, last_result, last_error, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now(),$11,$12,$13,$14,$15,now())
+        content_fingerprint, managed_block_hash, last_source_hash, source_updated_at, last_synced_at, stale_after, freshness_policy, run_id, last_result, last_error, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,$10,now(),$11,$12,$13,$14,$15,now())
      ON CONFLICT (connector_id, source_object, external_id) DO UPDATE SET
        slug = EXCLUDED.slug,
        approved_source_id = EXCLUDED.approved_source_id,
        profile_id = EXCLUDED.profile_id,
        profile_version = EXCLUDED.profile_version,
        content_fingerprint = EXCLUDED.content_fingerprint,
+       managed_block_hash = EXCLUDED.managed_block_hash,
        last_source_hash = EXCLUDED.last_source_hash,
        source_updated_at = EXCLUDED.source_updated_at,
        last_synced_at = EXCLUDED.last_synced_at,
@@ -379,11 +380,12 @@ export async function runSourceIngestExecutor(
       renderedPath = `${rendered.slug}.md`;
       const existingBlock = existing ? existingManagedBlock(existing.compiled_truth) : null;
       const warnings: string[] = [];
-      const oldState = await engine.executeRaw<{ content_fingerprint: string | null }>(
-        `SELECT content_fingerprint FROM source_sync_state WHERE connector_id = $1 AND source_object = $2 AND external_id = $3`,
+      const oldState = await engine.executeRaw<{ managed_block_hash: string | null; content_fingerprint: string | null }>(
+        `SELECT managed_block_hash, content_fingerprint FROM source_sync_state WHERE connector_id = $1 AND source_object = $2 AND external_id = $3`,
         [profile.source_connector, profile.source_object, record.external_id],
       );
-      if (existingBlock && oldState[0]?.content_fingerprint && hashText(existingBlock) !== oldState[0].content_fingerprint) {
+      const priorManagedHash = oldState[0]?.managed_block_hash ?? oldState[0]?.content_fingerprint;
+      if (existingBlock && priorManagedHash && hashText(existingBlock) !== priorManagedHash) {
         warnings.push('managed_block_user_edit_overwritten');
       }
       const beforeHash = existing?.content_hash ?? null;
