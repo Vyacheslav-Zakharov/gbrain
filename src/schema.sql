@@ -1561,6 +1561,10 @@ BEGIN
     ALTER TABLE source_ingest_profiles ENABLE ROW LEVEL SECURITY;
     ALTER TABLE source_ingest_profile_versions ENABLE ROW LEVEL SECURITY;
     ALTER TABLE source_sync_state ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_ingest_run_items ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_connector_configs ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_connector_secrets ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_connector_secret_audit ENABLE ROW LEVEL SECURITY;
     RAISE NOTICE 'RLS enabled on all tables (role % has BYPASSRLS)', current_user;
   ELSE
     RAISE WARNING 'Skipping RLS: role % does not have BYPASSRLS privilege. Run as postgres role to enable.', current_user;

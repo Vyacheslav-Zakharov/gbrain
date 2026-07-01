@@ -5529,6 +5529,30 @@ export const MIGRATIONS: Migration[] = [
         ON source_connector_secret_audit (config_id, created_at DESC);
     `,
   },
+  {
+    version: 123,
+    name: 'source_ingest_rls_hardening',
+    // Stage 3B/B1 hardening: source-ingest ledger + connector config/secret
+    // tables are local/admin surfaces, not anon-readable PostgREST tables.
+    // PGLite has no RLS engine; Postgres enables RLS only when the migration
+    // role can do so safely.
+    idempotent: true,
+    sql: `
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          ALTER TABLE source_ingest_run_items ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE source_connector_configs ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE source_connector_secrets ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE source_connector_secret_audit ENABLE ROW LEVEL SECURITY;
+        END IF;
+      END $$;
+    `,
+    sqlFor: { pglite: `SELECT 1;` },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

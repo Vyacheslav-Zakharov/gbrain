@@ -22,6 +22,7 @@ import { rowToVehicleRecord, AppSheetVehicleConnector } from '../src/core/source
 import { runCycle } from '../src/core/cycle.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
+import { withEnv } from './helpers/with-env.ts';
 import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
 
 let engine: PGLiteEngine;
@@ -372,41 +373,48 @@ describe('source-ingest Stage 3A executor', () => {
     expect(secrets.missing_keys).toEqual(expect.arrayContaining(['app_id', 'access_key']));
   });
 
-  test('DB-backed AppSheet secrets rotate, mask, audit, and delete without exposing values in status', async () => {
-    const repo = tempGitRepo();
-    await seed(repo);
-    await putSourceConnectorConfig(engine, {
-      connector_id: 'appsheet-vehicles',
-      source_object: 'vehicle',
-      display_name: 'AppSheet автотранспорт',
-      table_name: 'Автотранспорт',
-      target_source_id: 'shared',
-      slug_prefix: 'source-ingest/vehicles',
-      freshness_policy: 'P30D',
-      enabled: true,
-      config_json: { table_name: 'Автотранспорт' },
-    }, { actor: 'test' });
+  test('DB-backed AppSheet secrets rotate encrypted-at-rest, mask, audit, and delete without exposing values in status', async () => {
+    await withEnv({ GBRAIN_SOURCE_CONNECTOR_SECRET_KEY: 'test-source-connector-secret-key' }, async () => {
+      const repo = tempGitRepo();
+      await seed(repo);
+      await putSourceConnectorConfig(engine, {
+        connector_id: 'appsheet-vehicles',
+        source_object: 'vehicle',
+        display_name: 'AppSheet автотранспорт',
+        table_name: 'Автотранспорт',
+        target_source_id: 'shared',
+        slug_prefix: 'source-ingest/vehicles',
+        freshness_policy: 'P30D',
+        enabled: true,
+        config_json: { table_name: 'Автотранспорт' },
+      }, { actor: 'test' });
 
-    const rotated = await putSourceConnectorSecrets(engine, {
-      connector_id: 'appsheet-vehicles',
-      source_object: 'vehicle',
-      secret_json: { app_id: 'app-123456', access_key: 'key-secret-7890' },
-    }, { actor: 'admin:test' });
-    expect(rotated).toMatchObject({ configured: true, storage: 'db', updated_by: 'admin:test' });
-    expect(rotated.masked).toEqual({ app_id: '••••3456', access_key: '••••7890' });
-    expect(JSON.stringify(rotated)).not.toContain('key-secret-7890');
+      const rotated = await putSourceConnectorSecrets(engine, {
+        connector_id: 'appsheet-vehicles',
+        source_object: 'vehicle',
+        secret_json: { app_id: 'app-123456', access_key: 'key-secret-7890' },
+      }, { actor: 'admin:test' });
+      expect(rotated).toMatchObject({ configured: true, storage: 'db', updated_by: 'admin:test' });
+      expect(rotated.masked).toEqual({ app_id: '••••3456', access_key: '••••7890' });
+      expect(JSON.stringify(rotated)).not.toContain('key-secret-7890');
 
-    const secretConfig = await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle');
-    expect(secretConfig).toEqual({ app_id: 'app-123456', access_key: 'key-secret-7890' });
-    const audit = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
-    expect(audit[0]).toMatchObject({ action: 'rotate', actor: 'admin:test', secret_keys: ['access_key', 'app_id'] });
-    expect(JSON.stringify(audit)).not.toContain('key-secret-7890');
+      const raw = await engine.executeRaw<{ secret_json: Record<string, unknown> }>(`SELECT secret_json FROM source_connector_secrets WHERE config_id = $1`, ['appsheet-vehicles:vehicle']);
+      expect(raw[0].secret_json.__encrypted).toBe(true);
+      expect(JSON.stringify(raw[0].secret_json)).not.toContain('key-secret-7890');
+      expect(JSON.stringify(raw[0].secret_json)).not.toContain('app-123456');
 
-    const deleted = await deleteSourceConnectorSecrets(engine, { connector_id: 'appsheet-vehicles', source_object: 'vehicle' }, { actor: 'admin:test' });
-    expect(deleted.configured).toBe(false);
-    expect((await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle'))).toEqual({});
-    const auditAfterDelete = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
-    expect(auditAfterDelete[0]).toMatchObject({ action: 'delete', actor: 'admin:test' });
+      const secretConfig = await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle');
+      expect(secretConfig).toEqual({ app_id: 'app-123456', access_key: 'key-secret-7890' });
+      const audit = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
+      expect(audit[0]).toMatchObject({ action: 'rotate', actor: 'admin:test', secret_keys: ['access_key', 'app_id'] });
+      expect(JSON.stringify(audit)).not.toContain('key-secret-7890');
+
+      const deleted = await deleteSourceConnectorSecrets(engine, { connector_id: 'appsheet-vehicles', source_object: 'vehicle' }, { actor: 'admin:test' });
+      expect(deleted.configured).toBe(false);
+      expect((await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle'))).toEqual({});
+      const auditAfterDelete = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
+      expect(auditAfterDelete[0]).toMatchObject({ action: 'delete', actor: 'admin:test' });
+    });
   });
 
   test('AppSheet connector uses saved table config without leaking credentials', async () => {

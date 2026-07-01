@@ -1,3 +1,7 @@
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { homedir } from 'os';
+import { dirname, join } from 'path';
 import type { BrainEngine } from '../engine.ts';
 import { executeRawJsonb } from '../sql-query.ts';
 
@@ -64,6 +68,66 @@ export interface SourceConnectorSecretAuditRow {
 
 const APPSHEET_SECRET_KEYS = ['app_id', 'access_key'];
 const APPSHEET_ENV_KEYS = ['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY'];
+const SECRET_ENVELOPE_MARKER = '__encrypted';
+
+function keyFilePath(): string {
+  return process.env.GBRAIN_SOURCE_CONNECTOR_SECRET_KEY_FILE
+    || join(process.env.GBRAIN_HOME || join(homedir(), '.gbrain'), 'source-connector-secrets.key');
+}
+
+function decodeKeyMaterial(raw: string): Buffer {
+  const trimmed = raw.trim();
+  if (/^[0-9a-f]{64}$/i.test(trimmed)) return Buffer.from(trimmed, 'hex');
+  try {
+    const b64 = Buffer.from(trimmed, 'base64');
+    if (b64.length === 32) return b64;
+  } catch {}
+  return createHash('sha256').update(trimmed).digest();
+}
+
+function connectorSecretKey(): Buffer {
+  const envKey = process.env.GBRAIN_SOURCE_CONNECTOR_SECRET_KEY || process.env.GBRAIN_SECRET_KEY;
+  if (envKey && envKey.trim()) return decodeKeyMaterial(envKey);
+  const p = keyFilePath();
+  if (existsSync(p)) return decodeKeyMaterial(readFileSync(p, 'utf8'));
+  mkdirSync(dirname(p), { recursive: true });
+  const generated = randomBytes(32).toString('base64');
+  writeFileSync(p, generated, { encoding: 'utf8', mode: 0o600 });
+  try { chmodSync(p, 0o600); } catch {}
+  return Buffer.from(generated, 'base64');
+}
+
+function encryptSecretJson(secretJson: Record<string, string>): Record<string, unknown> {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', connectorSecretKey(), iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(secretJson), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    [SECRET_ENVELOPE_MARKER]: true,
+    version: 1,
+    alg: 'aes-256-gcm',
+    iv: iv.toString('base64'),
+    tag: tag.toString('base64'),
+    ciphertext: ciphertext.toString('base64'),
+  };
+}
+
+function decryptSecretJson(raw: Record<string, unknown>): Record<string, unknown> {
+  if (raw?.[SECRET_ENVELOPE_MARKER] !== true) return raw || {};
+  if (raw.alg !== 'aes-256-gcm' || raw.version !== 1) throw new Error('unsupported_secret_envelope');
+  if (typeof raw.iv !== 'string' || typeof raw.tag !== 'string' || typeof raw.ciphertext !== 'string') {
+    throw new Error('invalid_secret_envelope');
+  }
+  const decipher = createDecipheriv('aes-256-gcm', connectorSecretKey(), Buffer.from(raw.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(raw.tag, 'base64'));
+  const plaintext = Buffer.concat([decipher.update(Buffer.from(raw.ciphertext, 'base64')), decipher.final()]).toString('utf8');
+  const parsed = JSON.parse(plaintext) as unknown;
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+}
+
+export function isEncryptedConnectorSecretEnvelope(raw: Record<string, unknown>): boolean {
+  return raw?.[SECRET_ENVELOPE_MARKER] === true;
+}
 
 export function defaultSourceConnectorConfigId(connectorId: string, sourceObject: string): string {
   return `${connectorId}:${sourceObject}`;
@@ -206,7 +270,7 @@ export async function listSourceConnectorSecrets(engine: BrainEngine, configId?:
        ORDER BY updated_at DESC`,
     params,
   );
-  return rows.map(row => ({ ...row, secret_json: (row.secret_json || {}) as Record<string, unknown> }));
+  return rows.map(row => ({ ...row, secret_json: decryptSecretJson((row.secret_json || {}) as Record<string, unknown>) }));
 }
 
 export async function getSourceConnectorSecretConfig(engine: BrainEngine, connectorId: string, sourceObject: string): Promise<Record<string, string>> {
@@ -230,6 +294,7 @@ export async function putSourceConnectorSecrets(
   const secretJson = normalizeSecrets(input.secret_json);
   const keys = Object.keys(secretJson).sort();
   if (keys.length === 0) throw new Error('no_supported_secret_keys');
+  const storedSecretJson = encryptSecretJson(secretJson);
   await executeRawJsonb(
     engine,
     `INSERT INTO source_connector_secrets
@@ -242,7 +307,7 @@ export async function putSourceConnectorSecrets(
        updated_by = EXCLUDED.updated_by,
        updated_at = now()`,
     [configId, input.connector_id, input.source_object, opts.actor ?? 'local', opts.actor ?? 'local'],
-    [secretJson],
+    [storedSecretJson],
   );
   await executeRawJsonb(
     engine,
