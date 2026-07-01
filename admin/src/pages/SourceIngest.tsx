@@ -15,6 +15,7 @@ interface SourceIngestOverview {
   profiles: { rows: Array<{ profile_id: string; status: string; current_version: number; profile_json: unknown }>; count: number };
   status: { rows: Array<Record<string, unknown>>; summary?: Record<string, unknown> };
   refresh: { count: number; due?: Array<Record<string, unknown>> };
+  connector_configs?: { rows: Array<Record<string, unknown>>; count: number };
   sources: Array<{ id: string; name: string; path?: string; federated?: boolean }>;
 }
 
@@ -77,6 +78,9 @@ export function SourceIngestPage() {
   useEffect(() => { void load(); }, []);
 
   const appSheet = data?.connectors.find(c => c.id === 'appsheet-vehicles');
+  const savedConfig = data?.connector_configs?.rows?.find(c => c.connector_id === form.connector_id && c.source_object === form.source_object);
+  const secretStatus = (savedConfig?.secrets as Record<string, unknown> | undefined)
+    || { configured: false, missing_env: appSheet?.requiredEnv ?? [], required_env: appSheet?.requiredEnv ?? [] };
   const summary = data?.status.summary ?? {};
   const activeProfile = useMemo(() => (draft as Record<string, unknown> | null)?.profile ?? null, [draft]);
   const canDryRun = Boolean(activeProfile);
@@ -97,10 +101,38 @@ export function SourceIngestPage() {
     slug_prefix: form.slug_prefix,
     freshness_policy: form.freshness_policy,
     sample_limit: form.sample_limit,
-    // Table name is intentionally UI-visible config, not a credential. The current
-    // connector reads its default from server env/config; persistence lands in the
-    // next slice once connector config storage exists.
+    // Table name is non-secret UI config. It can be saved through
+    // source_connector_configs; AppSheet credentials remain server-side only.
     table_name: form.table_name,
+  });
+
+  const configPayload = () => ({
+    config_id: `${form.connector_id}:${form.source_object}`,
+    connector_id: form.connector_id,
+    source_object: form.source_object,
+    display_name: form.connector_id === 'appsheet-vehicles' ? 'AppSheet автотранспорт' : form.connector_id,
+    table_name: form.table_name,
+    target_source_id: form.target_source_id,
+    slug_prefix: form.slug_prefix,
+    freshness_policy: form.freshness_policy,
+    enabled: true,
+    config_json: { table_name: form.table_name },
+  });
+
+  const applySavedConfig = () => {
+    if (!savedConfig) return;
+    setForm({
+      ...form,
+      table_name: String(savedConfig.table_name ?? form.table_name),
+      target_source_id: String(savedConfig.target_source_id ?? form.target_source_id),
+      slug_prefix: String(savedConfig.slug_prefix ?? form.slug_prefix),
+      freshness_policy: String(savedConfig.freshness_policy ?? form.freshness_policy),
+    });
+  };
+
+  const saveConfig = async () => runStep('save-config', async () => {
+    await api.sourceIngestSaveConfig(configPayload());
+    await load();
   });
 
   const refreshReport = async () => runStep('refresh-report', async () => {
@@ -184,7 +216,17 @@ export function SourceIngestPage() {
           </label>
         </div>
         <div style={{ marginTop: 12, color: 'var(--text-secondary)' }}>
-          Credentials are server-side only: {(appSheet?.requiredEnv ?? []).map(e => <code key={e} style={{ marginRight: 8 }}>{e}</code>)}
+          Credentials are server-side only: {((secretStatus.required_env as string[]) ?? appSheet?.requiredEnv ?? []).map(e => <code key={e} style={{ marginRight: 8 }}>{e}</code>)}
+          <span style={{ marginLeft: 8, color: secretStatus.configured ? 'var(--success)' : 'var(--warning)' }}>
+            {secretStatus.configured ? 'configured' : `missing: ${((secretStatus.missing_env as string[]) ?? []).join(', ') || 'unknown'}`}
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void saveConfig()}>{busy === 'save-config' ? 'Saving…' : 'Save config'}</button>
+          <button className="btn btn-secondary" disabled={busy !== null || !savedConfig} onClick={applySavedConfig}>Load saved config</button>
+          <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>
+            saved: {savedConfig ? `${savedConfig.config_id} · ${savedConfig.enabled ? 'enabled' : 'disabled'}` : 'none'}
+          </span>
         </div>
         <ul style={{ marginTop: 10, paddingLeft: 18, color: 'var(--text-secondary)' }}>
           {(appSheet?.safety ?? []).map(s => <li key={s}>{s}</li>)}

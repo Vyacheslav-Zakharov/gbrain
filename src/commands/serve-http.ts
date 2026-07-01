@@ -1027,11 +1027,12 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   app.get('/admin/api/source-ingest/overview', requireAdmin, async (_req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
     try {
-      const [profiles, status, refresh, sources] = await Promise.all([
+      const [profiles, status, refresh, sources, connectorConfigs] = await Promise.all([
         operationsByName.source_profile_get.handler(ctx, {}),
         operationsByName.source_sync_status.handler(ctx, { limit: 200 }),
         operationsByName.source_refresh.handler(ctx, {}),
-        engine.executeRaw('SELECT id, name, path, federated FROM sources ORDER BY id'),
+        engine.executeRaw(`SELECT id, name, local_path AS path, (config->>'federated')::boolean AS federated FROM sources ORDER BY id`),
+        operationsByName.source_connector_config_get.handler(ctx, {}),
       ]);
       res.json({
         connectors: [
@@ -1056,6 +1057,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         status,
         refresh,
         sources,
+        connector_configs: connectorConfigs,
       });
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
@@ -1067,6 +1069,20 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     try {
       const profile_id = typeof req.body?.profile_id === 'string' ? req.body.profile_id : undefined;
       const out = await operationsByName.source_refresh.handler(ctx, { ...(profile_id ? { profile_id } : {}) });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/save-config', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      if (!req.body?.config || typeof req.body.config !== 'object') {
+        res.status(400).json({ error: 'config_required' });
+        return;
+      }
+      const out = await operationsByName.source_connector_config_put.handler(ctx, { config: req.body.config });
       res.json(out);
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });

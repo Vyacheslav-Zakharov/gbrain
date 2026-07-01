@@ -818,6 +818,27 @@ CREATE INDEX IF NOT EXISTS source_sync_state_stale_idx
 CREATE INDEX IF NOT EXISTS source_sync_state_run_idx
   ON source_sync_state (run_id) WHERE run_id IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS source_connector_configs (
+  config_id           TEXT PRIMARY KEY,
+  connector_id        TEXT NOT NULL,
+  source_object       TEXT NOT NULL,
+  display_name        TEXT NOT NULL,
+  table_name          TEXT,
+  target_source_id    TEXT REFERENCES sources(id) ON DELETE RESTRICT,
+  slug_prefix         TEXT NOT NULL DEFAULT '',
+  freshness_policy    TEXT,
+  enabled             BOOLEAN NOT NULL DEFAULT false,
+  config_json         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by          TEXT,
+  updated_by          TEXT,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS source_connector_configs_connector_idx
+  ON source_connector_configs (connector_id, source_object);
+CREATE INDEX IF NOT EXISTS source_connector_configs_enabled_idx
+  ON source_connector_configs (enabled, connector_id, source_object);
+
 -- migration_impact_log moved BELOW minion_jobs (was here, lines 645-676)
 -- because its `job_id BIGINT REFERENCES minion_jobs(id)` FK requires
 -- minion_jobs to exist FIRST during SCHEMA_SQL replay. v0.41.25.0 fix.

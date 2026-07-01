@@ -52,6 +52,7 @@ import { buildSourceDryRun } from './source-ingest/dry-run.ts';
 import { sourceIngestProfileJsonSchema } from './source-ingest/profile-schema.ts';
 import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
 import { listSourceIngestProfiles, putSourceIngestProfile } from './source-ingest/store.ts';
+import { listSourceConnectorConfigs, putSourceConnectorConfig, sourceConnectorSecretStatus } from './source-ingest/connector-config.ts';
 import { runSourceIngestExecutor } from './source-ingest/executor.ts';
 import { buildSourceRevertReport } from './source-ingest/revert.ts';
 import { enqueueDueSourceRefreshJobs, listDueSourceRefreshes } from './source-ingest/freshness.ts';
@@ -2865,6 +2866,50 @@ const source_discover: Operation = {
   },
 };
 
+const source_connector_config_get: Operation = {
+  name: 'source_connector_config_get',
+  description: 'Read persisted non-secret source connector configuration plus server-side secret readiness. Read-only; MCP-safe.',
+  scope: 'read',
+  params: {
+    config_id: { type: 'string', description: 'Optional connector config id, e.g. appsheet-vehicles:vehicle' },
+  },
+  handler: async (ctx, p) => {
+    const rows = await listSourceConnectorConfigs(ctx.engine, p.config_id as string | undefined);
+    return { rows: rows.map(row => ({ ...row, secrets: sourceConnectorSecretStatus(row.connector_id) })), count: rows.length };
+  },
+};
+
+const source_connector_config_put: Operation = {
+  name: 'source_connector_config_put',
+  description: 'LOCAL/TRUSTED: persist non-secret source connector configuration for the admin review console. Secrets remain server-side env/config only.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    config: { type: 'object', required: true, description: 'Non-secret connector config JSON' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_config_put is local/trusted only.');
+    const raw = p.config as Record<string, unknown>;
+    const connector_id = String(raw.connector_id || '');
+    const source_object = String(raw.source_object || '');
+    if (!connector_id || !source_object) throw new OperationError('invalid_params', 'connector_id and source_object are required.');
+    const saved = await putSourceConnectorConfig(ctx.engine, {
+      config_id: typeof raw.config_id === 'string' ? raw.config_id : undefined,
+      connector_id,
+      source_object,
+      display_name: typeof raw.display_name === 'string' ? raw.display_name : undefined,
+      table_name: typeof raw.table_name === 'string' ? raw.table_name : null,
+      target_source_id: typeof raw.target_source_id === 'string' ? raw.target_source_id : null,
+      slug_prefix: typeof raw.slug_prefix === 'string' ? raw.slug_prefix : '',
+      freshness_policy: typeof raw.freshness_policy === 'string' ? raw.freshness_policy : null,
+      enabled: Boolean(raw.enabled),
+      config_json: (raw.config_json && typeof raw.config_json === 'object' ? raw.config_json : {}) as Record<string, unknown>,
+    }, { actor: 'local' });
+    return { ok: true, saved: { ...saved, secrets: sourceConnectorSecretStatus(saved.connector_id) } };
+  },
+};
+
 const source_profile_draft: Operation = {
   name: 'source_profile_draft',
   description: 'Draft an editable source-ingest profile from connector discovery. Does not approve or freeze source_id; human review is required before ingest.',
@@ -5423,7 +5468,8 @@ export const operations: Operation[] = [
   // Ingest log
   log_ingest, get_ingest_log,
   // Source Ingest (third-party connectors; Stage 1 read contracts + local write skeletons)
-  source_discover, source_profile_draft, source_validate_profile, source_profile_get, source_profile_put, source_dry_run, source_sync_status,
+  source_discover, source_connector_config_get, source_connector_config_put,
+  source_profile_draft, source_validate_profile, source_profile_get, source_profile_put, source_dry_run, source_sync_status,
   source_ingest, source_refresh, source_revert,
   // Files
   file_list, file_upload, file_url,

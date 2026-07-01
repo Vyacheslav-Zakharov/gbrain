@@ -9,6 +9,7 @@ import { runSourceIngestExecutor } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
 import { listDueSourceRefreshes, parseFreshnessPolicyMs, enqueueDueSourceRefreshJobs } from '../src/core/source-ingest/freshness.ts';
+import { listSourceConnectorConfigs, putSourceConnectorConfig, sourceConnectorSecretStatus } from '../src/core/source-ingest/connector-config.ts';
 import { rowToVehicleRecord } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
 import { runCycle } from '../src/core/cycle.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
@@ -60,6 +61,7 @@ beforeEach(async () => {
   await engine.executeRaw('DELETE FROM op_checkpoint_paths');
   await engine.executeRaw('DELETE FROM op_checkpoints');
   await engine.executeRaw('DELETE FROM source_sync_state');
+  await engine.executeRaw('DELETE FROM source_connector_configs');
   await engine.executeRaw('DELETE FROM source_ingest_profile_versions');
   await engine.executeRaw('DELETE FROM source_ingest_profiles');
   await engine.executeRaw('DELETE FROM content_chunks');
@@ -304,6 +306,29 @@ describe('source-ingest Stage 3A executor', () => {
     expect(out.git_commit?.committed).toBe(false);
     expect(out.git_commit?.reason).toBe('no_files');
   }, 30000);
+
+  test('source connector config persists non-secret AppSheet vehicle settings and redacts secrets', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await putSourceConnectorConfig(engine, {
+      connector_id: 'appsheet-vehicles',
+      source_object: 'vehicle',
+      display_name: 'AppSheet автотранспорт',
+      table_name: 'Автотранспорт',
+      target_source_id: 'shared',
+      slug_prefix: 'source-ingest/vehicles',
+      freshness_policy: 'P30D',
+      enabled: true,
+      config_json: { table_name: 'Автотранспорт' },
+    }, { actor: 'test' });
+    const rows = await listSourceConnectorConfigs(engine, 'appsheet-vehicles:vehicle');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ connector_id: 'appsheet-vehicles', source_object: 'vehicle', table_name: 'Автотранспорт', enabled: true });
+    expect(JSON.stringify(rows[0])).not.toContain('APPSHEET_VEHICLES_ACCESS_KEY=');
+    const secrets = sourceConnectorSecretStatus('appsheet-vehicles');
+    expect(secrets.required_env).toEqual(['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY']);
+    expect(secrets.missing_env).toEqual(expect.arrayContaining(['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY']));
+  });
 
   test('AppSheet vehicle connector scaffold normalizes vehicle rows without live network', () => {
     const rec = rowToVehicleRecord({ ID: 'car-1', ГосНомер: '777ABC02', Модель: 'MAN TGS', ДатаИзменения: '2026-06-30T10:00:00+05:00' });
