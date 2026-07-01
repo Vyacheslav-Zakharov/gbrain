@@ -1133,6 +1133,43 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  app.post('/admin/api/source-ingest/test-connection', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    const started = Date.now();
+    try {
+      const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
+      const secrets = operationsByName.source_connector_config_get
+        ? (((await operationsByName.source_connector_config_get.handler(ctx, { config_id: `${ui.connector_id}:${ui.source_object}` })) as { rows?: Array<Record<string, unknown>> }).rows?.[0]?.secrets as Record<string, unknown> | undefined)
+        : undefined;
+      const out = await operationsByName.source_discover.handler(ctx, {
+        connector_id: ui.connector_id,
+        source_object: ui.source_object,
+        sample_limit: 1,
+        connector_config: ui.connector_config,
+      }) as Record<string, unknown>;
+      res.json({
+        ok: true,
+        status: 'connection_ok',
+        connector_id: ui.connector_id,
+        source_object: ui.source_object,
+        table_name: ui.table_name,
+        elapsed_ms: Date.now() - started,
+        sampled: out.sampled ?? 0,
+        fields_count: Array.isArray(out.fields) ? out.fields.length : 0,
+        id_candidates: out.idCandidates ?? [],
+        updated_at_candidates: out.updatedAtCandidates ?? [],
+        secrets: secrets ?? null,
+      });
+    } catch (e) {
+      res.status(200).json({
+        ok: false,
+        status: 'connection_failed',
+        elapsed_ms: Date.now() - started,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
   function applySourceIngestUiOverrides(profile: unknown, body: Record<string, unknown>): Record<string, unknown> {
     const raw = { ...((profile as Record<string, unknown>) || {}) };
     const target = { ...((raw.target as Record<string, unknown>) || {}) };

@@ -55,6 +55,7 @@ export const api = {
   sourceIngestOverview: () => apiFetch('/admin/api/source-ingest/overview'),
   sourceIngestRefreshReport: (profile_id?: string) => apiFetch('/admin/api/source-ingest/refresh-report', { method: 'POST', body: JSON.stringify({ profile_id }) }),
   sourceIngestSaveConfig: (config: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/save-config', { method: 'POST', body: JSON.stringify({ config }) }),
+  sourceIngestTestConnection: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/test-connection', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestDiscover: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/discover', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestDraft: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/draft', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestDryRun: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/dry-run', { method: 'POST', body: JSON.stringify(payload) }),

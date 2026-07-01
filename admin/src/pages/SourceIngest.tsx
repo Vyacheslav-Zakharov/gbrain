@@ -96,6 +96,7 @@ export function SourceIngestPage() {
   const [draft, setDraft] = useState<unknown>(null);
   const [dryRun, setDryRun] = useState<unknown>(null);
   const [approveResult, setApproveResult] = useState<unknown>(null);
+  const [connectionTest, setConnectionTest] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [form, setForm] = useState<ReviewForm>({
     connector_id: 'appsheet-vehicles',
@@ -177,6 +178,10 @@ export function SourceIngestPage() {
   const saveConfig = async () => runStep('save-config', async () => {
     await api.sourceIngestSaveConfig(configPayload());
     await load();
+  });
+
+  const testConnection = async () => runStep('test-connection', async () => {
+    setConnectionTest(await api.sourceIngestTestConnection(payload()));
   });
 
   const refreshReport = async () => runStep('refresh-report', async () => {
@@ -267,11 +272,24 @@ export function SourceIngestPage() {
         </div>
         <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void saveConfig()}>{busy === 'save-config' ? 'Saving…' : 'Save config'}</button>
+          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void testConnection()}>{busy === 'test-connection' ? 'Testing…' : 'Test connection'}</button>
           <button className="btn btn-secondary" disabled={busy !== null || !savedConfig} onClick={applySavedConfig}>Load saved config</button>
           <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>
             saved: {savedConfig ? `${savedConfig.config_id} · ${savedConfig.enabled ? 'enabled' : 'disabled'}` : 'none'}
           </span>
         </div>
+        {connectionTest !== null && (() => {
+          const t = asObj(connectionTest);
+          const ok = t.ok === true;
+          return <div style={{ marginTop: 12, padding: 10, borderRadius: 6, background: ok ? 'rgba(16, 185, 129, 0.12)' : 'rgba(245, 158, 11, 0.12)', color: ok ? 'var(--success)' : 'var(--warning)' }}>
+            <b>{ok ? 'connection ok' : 'connection failed'}</b>
+            <span style={{ marginLeft: 8, color: 'var(--text-secondary)' }}>
+              {ok
+                ? `sampled ${val(t.sampled)} · fields ${val(t.fields_count)} · ${val(t.elapsed_ms)} ms`
+                : val(t.error)}
+            </span>
+          </div>;
+        })()}
         <ul style={{ marginTop: 10, paddingLeft: 18, color: 'var(--text-secondary)' }}>
           {(appSheet?.safety ?? []).map(s => <li key={s}>{s}</li>)}
         </ul>
