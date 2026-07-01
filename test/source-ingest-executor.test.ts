@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execFileSync } from 'child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -68,6 +68,7 @@ beforeEach(async () => {
   await engine.executeRaw('DELETE FROM minion_jobs');
   await engine.executeRaw('DELETE FROM op_checkpoint_paths');
   await engine.executeRaw('DELETE FROM op_checkpoints');
+  await engine.executeRaw('DELETE FROM source_ingest_run_items');
   await engine.executeRaw('DELETE FROM source_sync_state');
   await engine.executeRaw('DELETE FROM source_connector_configs');
   await engine.executeRaw('DELETE FROM source_ingest_profile_versions');
@@ -185,6 +186,39 @@ describe('source-ingest Stage 3A executor', () => {
     expect(out.results.find(r => r.external_id === 'veh-002')).toMatchObject({ status: 'written' });
     expect(out.checkpoint.cleared).toBe(true);
     expect(await engine.getPage('source-ingest/vehicles/a-002', { sourceId: 'shared' })).toBeTruthy();
+  }, 30000);
+
+  test('source_revert uses append-only run ledger even after later run overwrites source_sync_state.run_id', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-ledger-a', limit: 1, no_embed: true });
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-ledger-b', limit: 1, no_embed: true });
+    const state = await engine.executeRaw<{ run_id: string }>(`SELECT run_id FROM source_sync_state WHERE external_id = 'veh-001'`);
+    expect(state[0].run_id).toBe('run-ledger-b');
+    const report = await buildSourceRevertReport(engine, 'run-ledger-a');
+    expect(report.counts.affected).toBe(1);
+    expect(report.pages[0]).toMatchObject({ slug: 'source-ingest/vehicles/a-001', revert_action: 'would-soft-delete' });
+  }, 30000);
+
+  test('failed write-through cleans DB orphan and leaves git tree clean for next preflight', async () => {
+    const repo = tempGitRepo();
+    mkdirSync(join(repo, 'source-ingest/vehicles/a-002.md'), { recursive: true });
+    writeFileSync(join(repo, 'source-ingest/vehicles/a-002.md/placeholder'), 'directory conflict for write-through\n');
+    execFileSync('git', ['add', 'source-ingest/vehicles/a-002.md/placeholder'], { cwd: repo });
+    execFileSync('git', ['commit', '-q', '-m', 'seed conflicting path'], { cwd: repo });
+    await seed(repo);
+
+    const out = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-partial-fail', no_embed: true });
+    expect(out.ok).toBe(false);
+    expect(out.results.find(r => r.external_id === 'veh-001')).toMatchObject({ status: 'written' });
+    expect(out.results.find(r => r.external_id === 'veh-002')?.status).toBe('failed');
+    expect(execFileSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).trim()).toBe('');
+    expect(await engine.getPage('source-ingest/vehicles/a-002', { sourceId: 'shared' })).toBeNull();
+    const failedRows = await engine.executeRaw<{ action: string; last_result: string }>(`SELECT action, last_result FROM source_ingest_run_items WHERE run_id = $1 AND external_id = 'veh-002'`, ['run-partial-fail']);
+    expect(failedRows[0]).toEqual({ action: 'failed', last_result: 'failed' });
+
+    const next = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-after-partial-fail', limit: 1, no_embed: true });
+    expect(next.storage.mode).toBe('git-backed');
   }, 30000);
 
   test('source_revert report-only lists pages touched by run_id without mutating', async () => {

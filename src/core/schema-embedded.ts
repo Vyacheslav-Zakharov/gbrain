@@ -822,6 +822,31 @@ CREATE INDEX IF NOT EXISTS source_sync_state_stale_idx
 CREATE INDEX IF NOT EXISTS source_sync_state_run_idx
   ON source_sync_state (run_id) WHERE run_id IS NOT NULL;
 
+
+
+CREATE TABLE IF NOT EXISTS source_ingest_run_items (
+  run_id              TEXT NOT NULL,
+  connector_id        TEXT NOT NULL,
+  source_object       TEXT NOT NULL,
+  external_id         TEXT NOT NULL,
+  slug                TEXT NOT NULL,
+  approved_source_id  TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  profile_id          TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
+  profile_version     INTEGER NOT NULL,
+  action              TEXT NOT NULL CHECK (action IN ('created','updated','unchanged','skipped','failed')),
+  prior_version_id    BIGINT,
+  last_result         TEXT NOT NULL CHECK (last_result IN ('success','unchanged','skipped','failed')),
+  last_error          TEXT,
+  source_updated_at   TIMESTAMPTZ,
+  source_hash         TEXT,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (run_id, connector_id, source_object, external_id)
+);
+CREATE INDEX IF NOT EXISTS source_ingest_run_items_run_idx
+  ON source_ingest_run_items (run_id, approved_source_id, slug);
+CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
+  ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS source_connector_configs (
   config_id           TEXT PRIMARY KEY,
   connector_id        TEXT NOT NULL,

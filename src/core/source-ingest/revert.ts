@@ -16,6 +16,8 @@ export interface SourceRevertReportRow {
   last_result: string | null;
   last_error: string | null;
   last_synced_at: string | null;
+  action: 'created' | 'updated' | 'unchanged' | 'skipped' | 'failed';
+  prior_version_id: number | null;
 }
 
 export type SourceRevertAction = 'would-review' | 'would-soft-delete' | 'would-revert-version' | 'noop' | 'blocked' | 'soft-deleted' | 'reverted-version';
@@ -78,8 +80,8 @@ function commitRevert(localPath: string, paths: string[], runId: string) {
 async function loadRows(engine: BrainEngine, runId: string): Promise<SourceRevertReportRow[]> {
   return await engine.executeRaw<SourceRevertReportRow>(
     `SELECT connector_id, source_object, external_id, slug, approved_source_id, profile_id, profile_version,
-            last_result, last_error, last_synced_at
-       FROM source_sync_state
+            last_result, last_error, created_at::text AS last_synced_at, action, prior_version_id
+       FROM source_ingest_run_items
       WHERE run_id = $1
       ORDER BY slug, external_id`,
     [runId],
@@ -109,7 +111,7 @@ export async function buildSourceRevertReport(engine: BrainEngine, runId: string
     const externalRef = `${r.connector_id}:${r.source_object}:${r.external_id}`;
     const page = await engine.getPage(r.slug, { sourceId: r.approved_source_id });
     const versions = page ? await engine.getVersions(r.slug, { sourceId: r.approved_source_id }) : [];
-    const latestVersion = versions[0];
+    const priorVersion = r.prior_version_id ? versions.find(v => Number(v.id) === Number(r.prior_version_id)) : versions[0];
     const base: SourceRevertPageResult = {
       slug: r.slug,
       source_id: r.approved_source_id,
@@ -118,11 +120,11 @@ export async function buildSourceRevertReport(engine: BrainEngine, runId: string
       last_result: r.last_result,
       revert_action: 'would-review',
     };
-    if (r.last_result === 'unchanged') {
+    if (r.action === 'unchanged' || r.last_result === 'unchanged') {
       pages.push({ ...base, revert_action: apply ? 'noop' : 'noop', reason: 'run_did_not_change_page' });
       continue;
     }
-    if (r.last_result === 'failed') {
+    if (r.action === 'failed' || r.last_result === 'failed') {
       pages.push({ ...base, revert_action: apply ? 'blocked' : 'blocked', reason: 'failed_run_row_not_revertible' });
       continue;
     }
@@ -140,7 +142,7 @@ export async function buildSourceRevertReport(engine: BrainEngine, runId: string
     const relPath = `${r.slug}.md`;
     const absPath = localPath ? join(localPath, relPath) : null;
 
-    if (!latestVersion) {
+    if (r.action === 'created') {
       if (!apply) {
         pages.push({ ...base, revert_action: 'would-soft-delete', reason: 'created_by_run_no_prior_version' });
         continue;
@@ -154,11 +156,15 @@ export async function buildSourceRevertReport(engine: BrainEngine, runId: string
       continue;
     }
 
-    if (!apply) {
-      pages.push({ ...base, revert_action: 'would-revert-version', version_id: latestVersion.id });
+    if (!priorVersion) {
+      pages.push({ ...base, revert_action: apply ? 'blocked' : 'blocked', reason: 'prior_version_not_found' });
       continue;
     }
-    const md = markdownFromVersion(latestVersion.frontmatter, latestVersion.compiled_truth);
+    if (!apply) {
+      pages.push({ ...base, revert_action: 'would-revert-version', version_id: priorVersion.id });
+      continue;
+    }
+    const md = markdownFromVersion(priorVersion.frontmatter, priorVersion.compiled_truth);
     const imported = await importFromContent(engine, r.slug, md, {
       sourceId: r.approved_source_id,
       sourcePath: relPath,
@@ -169,16 +175,16 @@ export async function buildSourceRevertReport(engine: BrainEngine, runId: string
       remote: false,
     });
     if (imported.status === 'error') {
-      pages.push({ ...base, revert_action: 'blocked', version_id: latestVersion.id, reason: imported.error ?? 'import_error' });
+      pages.push({ ...base, revert_action: 'blocked', version_id: priorVersion.id, reason: imported.error ?? 'import_error' });
       continue;
     }
     const wt = await writePageThrough(engine, r.slug, { sourceId: r.approved_source_id });
     if (wt.error || wt.skipped) {
-      pages.push({ ...base, revert_action: 'blocked', version_id: latestVersion.id, reason: wt.error ?? wt.skipped });
+      pages.push({ ...base, revert_action: 'blocked', version_id: priorVersion.id, reason: wt.error ?? wt.skipped });
       continue;
     }
     if (wt.path) touchedPaths.push(relPath);
-    pages.push({ ...base, revert_action: 'reverted-version', version_id: latestVersion.id });
+    pages.push({ ...base, revert_action: 'reverted-version', version_id: priorVersion.id });
   }
 
   let git_commit: SourceRevertReport['git_commit'];

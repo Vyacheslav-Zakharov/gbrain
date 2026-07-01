@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
+import { existsSync, rmSync } from 'fs';
 import type { BrainEngine } from '../engine.ts';
 import { importFromContent } from '../import-file.ts';
 import { writePageThrough } from '../write-through.ts';
@@ -213,6 +214,69 @@ async function writeSyncState(engine: BrainEngine, args: {
   );
 }
 
+async function appendRunItem(engine: BrainEngine, args: {
+  profile: SourceIngestProfile;
+  profileVersion: number;
+  record: SourceRecord;
+  slug: string;
+  runId: string;
+  action: 'created' | 'updated' | 'unchanged' | 'skipped' | 'failed';
+  priorVersionId?: number | null;
+  result: 'success' | 'unchanged' | 'skipped' | 'failed';
+  error?: string | null;
+}) {
+  await engine.executeRaw(
+    `INSERT INTO source_ingest_run_items
+       (run_id, connector_id, source_object, external_id, slug, approved_source_id, profile_id, profile_version,
+        action, prior_version_id, last_result, last_error, source_updated_at, source_hash)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+     ON CONFLICT (run_id, connector_id, source_object, external_id) DO UPDATE SET
+       slug = EXCLUDED.slug,
+       approved_source_id = EXCLUDED.approved_source_id,
+       profile_id = EXCLUDED.profile_id,
+       profile_version = EXCLUDED.profile_version,
+       action = EXCLUDED.action,
+       prior_version_id = EXCLUDED.prior_version_id,
+       last_result = EXCLUDED.last_result,
+       last_error = EXCLUDED.last_error,
+       source_updated_at = EXCLUDED.source_updated_at,
+       source_hash = EXCLUDED.source_hash,
+       created_at = now()`,
+    [
+      args.runId,
+      args.profile.source_connector,
+      args.profile.source_object,
+      args.record.external_id,
+      args.slug,
+      args.profile.target.approved_source_id,
+      args.profile.profile_id,
+      args.profileVersion,
+      args.action,
+      args.priorVersionId ?? null,
+      args.result,
+      args.error ?? null,
+      args.record.source_updated_at ?? null,
+      hashText(stableJson(args.record.data)),
+    ],
+  );
+}
+
+function cleanupUncommittedPath(localPath: string, relPath: string) {
+  if (!relPath) return;
+  let tracked = false;
+  try {
+    execFileSync('git', ['-C', localPath, 'ls-files', '--error-unmatch', relPath], { encoding: 'utf8', stdio: 'pipe' });
+    tracked = true;
+  } catch {}
+  try {
+    execFileSync('git', ['-C', localPath, 'restore', '--staged', '--worktree', '--', relPath], { encoding: 'utf8' });
+  } catch {}
+  if (!tracked) {
+    const abs = `${localPath.replace(/\/$/, '')}/${relPath}`;
+    if (existsSync(abs)) rmSync(abs, { force: true });
+  }
+}
+
 async function commitGitBackedRun(localPath: string, filePaths: string[], runId: string, profileId: string) {
   const unique = [...new Set(filePaths)].filter(Boolean);
   if (unique.length === 0) return { committed: false, reason: 'no_files' };
@@ -255,7 +319,7 @@ export async function runSourceIngestExecutor(
     const sinceRows = await engine.executeRaw<{ since: string | null }>(
       `SELECT max(source_updated_at)::text AS since
          FROM source_sync_state
-        WHERE profile_id = $1 AND connector_id = $2 AND source_object = $3`,
+        WHERE profile_id = $1 AND connector_id = $2 AND source_object = $3 AND last_result <> 'failed'`,
       [profile.profile_id, profile.source_connector, profile.source_object],
     );
     const since = sinceRows[0]?.since;
@@ -277,6 +341,7 @@ export async function runSourceIngestExecutor(
   const completed = new Set(await loadOpCheckpoint(engine, key));
   const results: SourceIngestRecordResult[] = [];
   const writtenPaths: string[] = [];
+  let lastRecordCommit: SourceIngestExecutorResult['git_commit'];
 
   for (const record of limited) {
     const checkpointKey = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
@@ -289,12 +354,20 @@ export async function runSourceIngestExecutor(
       results.push({ external_id: record.external_id, status: 'skipped', reason: 'checkpoint_completed' });
       continue;
     }
+    let renderedSlug = renderSlugTemplate(profile.target.slug_template, record.data);
+    let renderedPath = `${renderedSlug}.md`;
+    let createdThisRecord = false;
     try {
-      const existing = await engine.getPage(renderSlugTemplate(profile.target.slug_template, record.data), { sourceId });
+      const existing = await engine.getPage(renderedSlug, { sourceId });
+      createdThisRecord = !existing;
+      const priorVersions = existing ? await engine.getVersions(renderedSlug, { sourceId }) : [];
+      const priorVersionId = priorVersions[0]?.id ?? null;
       const existingRunId = existing?.frontmatter && typeof existing.frontmatter.source_ingest === 'object'
         ? (existing.frontmatter.source_ingest as Record<string, unknown>).run_id
         : undefined;
       const rendered = renderMarkdown(profile, record, existing?.compiled_truth ?? null, typeof existingRunId === 'string' ? existingRunId : runId);
+      renderedSlug = rendered.slug;
+      renderedPath = `${rendered.slug}.md`;
       const existingBlock = existing ? existingManagedBlock(existing.compiled_truth) : null;
       const warnings: string[] = [];
       const oldState = await engine.executeRaw<{ content_fingerprint: string | null }>(
@@ -321,9 +394,9 @@ export async function runSourceIngestExecutor(
         logger,
       });
       if (!writeThrough.written) throw new Error(`write-through failed: ${writeThrough.skipped || writeThrough.error || 'unknown'}`);
-      if (writeThrough.path) writtenPaths.push(writeThrough.path);
       const after = await engine.getPage(rendered.slug, { sourceId });
       const status = beforeHash && after?.content_hash === beforeHash ? 'unchanged' : 'written';
+      if (writeThrough.path && status !== 'unchanged') writtenPaths.push(writeThrough.path);
       await writeSyncState(engine, {
         profile,
         profileVersion: version,
@@ -334,19 +407,41 @@ export async function runSourceIngestExecutor(
         sourceHash: hashText(stableJson(record.data)),
         result: status === 'unchanged' ? 'unchanged' : 'success',
       });
+      await appendRunItem(engine, {
+        profile,
+        profileVersion: version,
+        record,
+        slug: rendered.slug,
+        runId,
+        action: status === 'unchanged' ? 'unchanged' : (createdThisRecord ? 'created' : 'updated'),
+        priorVersionId,
+        result: status === 'unchanged' ? 'unchanged' : 'success',
+      });
+      if (status !== 'unchanged' && writeThrough.path) {
+        lastRecordCommit = await commitGitBackedRun(storage.local_path, [writeThrough.path], runId, profile.profile_id);
+      }
       await appendCompleted(engine, key, [checkpointKey]);
       completed.add(checkpointKey);
       results.push({ external_id: record.external_id, slug: rendered.slug, status, warnings, content_hash: after?.content_hash ?? null, write_through: writeThrough });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      results.push({ external_id: record.external_id, status: 'failed', reason: msg });
-      await writeSyncState(engine, { profile, profileVersion: version, record, slug: renderSlugTemplate(profile.target.slug_template, record.data), runId, managedBlockHash: '', sourceHash: hashText(stableJson(record.data)), result: 'failed', error: msg });
+      if (createdThisRecord) {
+        try { await engine.softDeletePage(renderedSlug, { sourceId }); } catch {}
+      }
+      if (storage.mode === 'git-backed') cleanupUncommittedPath(storage.local_path, renderedPath);
+      results.push({ external_id: record.external_id, slug: renderedSlug, status: 'failed', reason: msg });
+      await writeSyncState(engine, { profile, profileVersion: version, record, slug: renderedSlug, runId, managedBlockHash: '', sourceHash: hashText(stableJson(record.data)), result: 'failed', error: msg });
+      await appendRunItem(engine, { profile, profileVersion: version, record, slug: renderedSlug, runId, action: 'failed', result: 'failed', error: msg });
     }
   }
   const failed = results.filter(r => r.status === 'failed').length;
   let gitCommit: SourceIngestExecutorResult['git_commit'] = { committed: false, reason: failed === 0 ? 'no_changes' : 'failed_records' };
   if (failed === 0) {
-    gitCommit = await commitGitBackedRun(storage.local_path, writtenPaths, runId, profile.profile_id);
+    const status = execFileSync('git', ['-C', storage.local_path, 'status', '--porcelain', '--', ...[...new Set(writtenPaths)]], { encoding: 'utf8' });
+    if (status.trim()) gitCommit = await commitGitBackedRun(storage.local_path, writtenPaths, runId, profile.profile_id);
+    else if (lastRecordCommit) gitCommit = lastRecordCommit;
+    else if (writtenPaths.length > 0 || results.some(r => r.status === 'unchanged')) gitCommit = { committed: false, reason: 'no_changes' };
+    else gitCommit = { committed: false, reason: 'no_files' };
     await clearOpCheckpoint(engine, key);
   }
   return {
