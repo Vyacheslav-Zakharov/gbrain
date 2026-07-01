@@ -70,21 +70,46 @@ function DiscoveryPreview({ value }: { value: unknown }) {
   </div>;
 }
 
-function DryRunPreview({ value }: { value: unknown }) {
+function maskDryRunPreviewText(text: string, piiFields: string[]): string {
+  let out = text;
+  for (const field of piiFields) {
+    const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    out = out.replace(new RegExp(`(-\\s*${escaped}\\s*:\\s*)(.*)`, 'gi'), '$1[PII masked]');
+  }
+  return out;
+}
+
+function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; currentTargetSourceId: string }) {
   const d = asObj(value);
   if (!value) return <div style={{ color: 'var(--text-muted)' }}>No dry-run yet.</div>;
   const counts = asObj(d.counts);
   const samplePages = asArr<Record<string, unknown>>(d.sample_pages);
   const warnings = asArr(d.warnings);
+  const sensitivity = asObj(d.routing_sensitivity);
+  const piiFields = asArr(sensitivity.pii_fields).map(String);
+  const hasPii = sensitivity.pii === true || piiFields.length > 0;
+  const routedSource = String(sensitivity.approved_source_id ?? currentTargetSourceId ?? '—');
+  const crossSource = routedSource !== '—' && currentTargetSourceId && routedSource !== currentTargetSourceId;
+  const firstPreview = samplePages[0]?.managed_block_preview
+    ? maskDryRunPreviewText(String(samplePages[0].managed_block_preview), piiFields)
+    : '';
   return <div style={{ color: 'var(--text-secondary)' }}>
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(90px, 1fr))', gap: 8, marginBottom: 10 }}>
       {['sampled', 'would_write', 'skipped', 'slug_collisions'].map(k => <div className="metric" key={k}><div className="metric-value">{val(counts[k])}</div><div className="metric-label">{k}</div></div>)}
     </div>
+    <div style={{ marginBottom: 10, padding: 10, borderRadius: 6, background: hasPii || crossSource ? 'rgba(245, 158, 11, 0.12)' : 'rgba(16, 185, 129, 0.10)', color: hasPii || crossSource ? 'var(--warning)' : 'var(--success)' }}>
+      <b>Routing / sensitivity</b>
+      <div style={{ marginTop: 4, color: 'var(--text-secondary)' }}>
+        target source: <code>{currentTargetSourceId || '—'}</code> · dry-run source: <code>{routedSource}</code> · classification: <code>{val(sensitivity.classification)}</code> · pii: <code>{String(hasPii)}</code>
+      </div>
+      <div style={{ marginTop: 4, color: 'var(--text-secondary)' }}>pii_fields: {piiFields.length ? piiFields.map(f => <code key={f} style={{ marginRight: 6 }}>{f}</code>) : '—'}</div>
+      {crossSource && <div style={{ marginTop: 4 }}>Cross-source mismatch: dry-run routing source differs from selected target source.</div>}
+    </div>
     {warnings.length > 0 && <div style={{ color: 'var(--warning)', marginBottom: 8 }}>Warnings: {warnings.map(String).join(', ')}</div>}
     <table><thead><tr><th>slug</th><th>title</th><th>external</th></tr></thead><tbody>
-      {samplePages.map((p, i) => <tr key={i}><td className="mono">{val(p.slug)}</td><td>{val(p.title)}</td><td className="mono">{val(p.external_id)}</td></tr>)}
+      {samplePages.map((p, i) => <tr key={i}><td className="mono">{val(p.slug)}</td><td>{hasPii ? '[PII masked]' : val(p.title)}</td><td className="mono">{val(p.external_id)}</td></tr>)}
     </tbody></table>
-    {samplePages[0]?.managed_block_preview && <details style={{ marginTop: 8 }}><summary>First managed block preview</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto' }}>{String(samplePages[0].managed_block_preview)}</pre></details>}
+    {firstPreview && <details style={{ marginTop: 8 }}><summary>First managed block preview (PII fields masked)</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto' }}>{firstPreview}</pre></details>}
   </div>;
 }
 
@@ -97,6 +122,7 @@ export function SourceIngestPage() {
   const [draft, setDraft] = useState<unknown>(null);
   const [dryRun, setDryRun] = useState<unknown>(null);
   const [dryRunSourceId, setDryRunSourceId] = useState<string | null>(null);
+  const [sensitivityAck, setSensitivityAck] = useState(false);
   const [approveResult, setApproveResult] = useState<unknown>(null);
   const [connectionTest, setConnectionTest] = useState<unknown>(null);
   const [secretAudit, setSecretAudit] = useState<unknown>(null);
@@ -134,9 +160,15 @@ export function SourceIngestPage() {
   const summary = data?.status.summary ?? {};
   const activeProfile = useMemo(() => (draft as Record<string, unknown> | null)?.profile ?? null, [draft]);
   const canDryRun = Boolean(activeProfile);
+  const dryRunSensitivity = asObj(asObj(dryRun).routing_sensitivity);
+  const dryRunPiiFields = asArr(dryRunSensitivity.pii_fields).map(String);
+  const dryRunHasPii = dryRunSensitivity.pii === true || dryRunPiiFields.length > 0;
+  const dryRunRoutedSource = String(dryRunSensitivity.approved_source_id ?? dryRunSourceId ?? form.target_source_id ?? '');
+  const dryRunCrossSource = Boolean(dryRun && dryRunRoutedSource && form.target_source_id && dryRunRoutedSource !== form.target_source_id);
+  const requiresSensitivityAck = Boolean(dryRun && (dryRunHasPii || dryRunCrossSource));
   const dryRunMatchesCurrentSource = Boolean(dryRun && dryRunSourceId === form.target_source_id);
   const dryRunSourceMismatch = Boolean(dryRun && dryRunSourceId && dryRunSourceId !== form.target_source_id);
-  const canApprove = Boolean(activeProfile && dryRun && dryRunMatchesCurrentSource && !(dryRun as Record<string, unknown>).error);
+  const canApprove = Boolean(activeProfile && dryRun && dryRunMatchesCurrentSource && (!requiresSensitivityAck || sensitivityAck) && !(dryRun as Record<string, unknown>).error);
 
   const runStep = async (name: string, fn: () => Promise<void>) => {
     setBusy(name);
@@ -230,6 +262,7 @@ export function SourceIngestPage() {
     setDraft(out);
     setDryRun(null);
     setDryRunSourceId(null);
+    setSensitivityAck(false);
     setApproveResult(null);
   });
 
@@ -237,12 +270,16 @@ export function SourceIngestPage() {
     if (!activeProfile) return;
     setDryRun(await api.sourceIngestDryRun({ profile: activeProfile, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
     setDryRunSourceId(form.target_source_id);
+    setSensitivityAck(false);
   });
 
   const approveProfile = async () => runStep('approve', async () => {
     if (!activeProfile) return;
     if (dryRunSourceId !== form.target_source_id) {
       throw new Error(`dry_run_source_mismatch: dry-run was for ${dryRunSourceId ?? 'none'}, current target is ${form.target_source_id}. Run dry-run preview again before approving.`);
+    }
+    if (requiresSensitivityAck && !sensitivityAck) {
+      throw new Error('sensitivity_ack_required: acknowledge PII/cross-source routing before approving.');
     }
     const out = await api.sourceIngestApproveProfile({
       profile: activeProfile,
@@ -362,6 +399,10 @@ export function SourceIngestPage() {
           <button className="btn btn-primary" disabled={busy !== null || !canApprove} onClick={() => void approveProfile()}>{busy === 'approve' ? 'Approving…' : 'Approve profile'}</button>
           {dryRunSourceMismatch && <span style={{ color: 'var(--warning)', alignSelf: 'center' }}>Target source changed from dry-run ({dryRunSourceId}) to {form.target_source_id}; run dry-run preview again.</span>}
         </div>
+        {requiresSensitivityAck && <label style={{ display: 'block', marginBottom: 12, padding: 10, borderRadius: 6, background: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)' }}>
+          <input type="checkbox" checked={sensitivityAck} onChange={e => setSensitivityAck(e.target.checked)} style={{ marginRight: 8 }} />
+          I acknowledge this dry-run targets <code>{form.target_source_id}</code>, classification <code>{val(dryRunSensitivity.classification)}</code>, PII fields <code>{dryRunPiiFields.join(', ') || '—'}</code>, and any cross-source routing warnings.
+        </label>}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
           <div>
             <h3 style={{ fontSize: 13, marginBottom: 8 }}>Discovery</h3>
@@ -373,7 +414,7 @@ export function SourceIngestPage() {
           </div>
           <div>
             <h3 style={{ fontSize: 13, marginBottom: 8 }}>Dry-run</h3>
-            <DryRunPreview value={dryRun} />
+            <DryRunPreview value={dryRun} currentTargetSourceId={form.target_source_id} />
           </div>
           <div>
             <h3 style={{ fontSize: 13, marginBottom: 8 }}>Approval</h3>
