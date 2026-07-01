@@ -324,8 +324,35 @@ export async function runSourceIngestExecutor(
   const connector = getSourceConnector(profile.source_connector, connectorConfig);
   if (!connector) throw new Error(`connector not found: ${profile.source_connector}`);
   const records: SourceRecord[] = [];
+  const seenExternalIds = new Set<string>();
   let iterable: AsyncIterable<{ records: SourceRecord[]; cursor?: string | null }> | undefined;
-  if (opts.changed_since && connector.fetchChangedSince) {
+  let forceFullScanForFailedRetry = false;
+  if (opts.changed_since) {
+    const failedRows = await engine.executeRaw<{ external_id: string }>(
+      `SELECT external_id
+         FROM source_sync_state
+        WHERE profile_id = $1 AND connector_id = $2 AND source_object = $3 AND last_result = 'failed'
+        ORDER BY updated_at ASC, external_id ASC`,
+      [profile.profile_id, profile.source_connector, profile.source_object],
+    );
+    if (failedRows.length > 0) {
+      if (connector.fetchById) {
+        for (const row of failedRows) {
+          const failedRecord = await connector.fetchById(profile.source_object, row.external_id);
+          if (failedRecord && !seenExternalIds.has(failedRecord.external_id)) {
+            records.push(failedRecord);
+            seenExternalIds.add(failedRecord.external_id);
+          }
+        }
+      } else {
+        // Without point lookup support, a changed-since cursor can skip older
+        // failed rows forever. Fall back to a full scan so failed records get
+        // another attempt rather than becoming invisible.
+        forceFullScanForFailedRetry = true;
+      }
+    }
+  }
+  if (opts.changed_since && connector.fetchChangedSince && !forceFullScanForFailedRetry) {
     const sinceRows = await engine.executeRaw<{ since: string | null }>(
       `SELECT max(source_updated_at)::text AS since
          FROM source_sync_state
@@ -340,7 +367,11 @@ export async function runSourceIngestExecutor(
     iterable = connector.fetchAll(profile.source_object);
   }
   for await (const batch of iterable) {
-    for (const r of batch.records) records.push(r);
+    for (const r of batch.records) {
+      if (seenExternalIds.has(r.external_id)) continue;
+      records.push(r);
+      seenExternalIds.add(r.external_id);
+    }
     if (opts.limit && records.length >= opts.limit) break;
   }
   const limited = opts.limit ? records.slice(0, opts.limit) : records;

@@ -394,6 +394,25 @@ describe('source-ingest Stage 3A executor', () => {
     expect(out.git_commit?.reason).toBe('no_files');
   }, 30000);
 
+  test('source_ingest changed_since retries failed rows even when older than successful cursor', async () => {
+    const repo = tempGitRepo();
+    mkdirSync(join(repo, 'source-ingest/vehicles/a-001.md'), { recursive: true });
+    writeFileSync(join(repo, 'source-ingest/vehicles/a-001.md/placeholder'), 'directory conflict for write-through\n');
+    execFileSync('git', ['add', 'source-ingest/vehicles/a-001.md/placeholder'], { cwd: repo });
+    execFileSync('git', ['commit', '-q', '-m', 'seed older conflicting path'], { cwd: repo });
+    await seed(repo);
+
+    const first = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-changed-fail-older', no_embed: true });
+    expect(first.ok).toBe(false);
+    expect(first.results.find(r => r.external_id === 'veh-001')?.status).toBe('failed');
+    expect(first.results.find(r => r.external_id === 'veh-002')?.status).toBe('written');
+
+    const retry = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-changed-retry-failed', no_embed: true, changed_since: true });
+    expect(retry.counts.sampled).toBe(1);
+    expect(retry.results.map(r => r.external_id)).toEqual(['veh-001']);
+    expect(retry.results[0]).toMatchObject({ external_id: 'veh-001', status: 'failed' });
+  }, 30000);
+
   test('source connector config persists non-secret AppSheet vehicle settings and redacts secrets', async () => {
     const repo = tempGitRepo();
     await seed(repo);
