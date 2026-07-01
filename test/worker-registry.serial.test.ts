@@ -10,12 +10,17 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { execFileSync, spawn } from 'child_process';
 
 let home: string;
 const origHome = process.env.GBRAIN_HOME;
+
+function currentProcessStartedAtMs(): number {
+  return Date.now() - Math.floor(process.uptime() * 1000);
+}
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'gbrain-reg-'));
@@ -45,32 +50,49 @@ describe('classifyLiveness (Codex #9)', () => {
 
 describe('register + read round trip', () => {
   test('registerWorker writes under gbrainPath; readWorkers returns the live worker', async () => {
-    const { registerWorker, readWorkers, workerRegistryDir } = await reg();
+    const { registerWorker, readWorkers, workerRegistryDir, currentBrainId } = await reg();
     expect(workerRegistryDir()).toBe(join(home, '.gbrain', 'workers'));
 
+    const child = spawn('sleep', ['5'], { stdio: 'ignore' });
+    if (!child.pid) throw new Error('failed to spawn live test process');
+    const childStartedAt = Date.parse(execFileSync('ps', ['-o', 'lstart=', '-p', String(child.pid)], { encoding: 'utf8' }).trim());
+    expect(Number.isNaN(childStartedAt)).toBe(false);
+
     const cleanup = registerWorker({
-      pid: process.pid, // a definitely-alive pid
+      pid: child.pid, // a definitely-alive, freshly-started pid
       queue: 'default',
       nice_requested: 10,
       nice_effective: 10,
-      started_at: Date.now(),
+      // Match the same `ps lstart` clock/parser used by readWorkers' PID-reuse
+      // guard. GitHub runners/local shells can have timezone skew between
+      // Date.now() and Date.parse(ps lstart), which made this test flaky.
+      started_at: childStartedAt,
     });
+    try {
+      const files = readdirSync(workerRegistryDir());
+      expect(files).toEqual([`worker-${child.pid}.json`]);
+      const entry = JSON.parse(readFileSync(join(workerRegistryDir(), files[0]!), 'utf8'));
+      expect(entry.brain_id).toBe(currentBrainId());
+      expect(() => process.kill(child.pid!, 0)).not.toThrow();
+      const live = readWorkers(() => 10); // inject niceness read
+      expect(live.length).toBe(1);
+      expect(live[0]!.pid).toBe(child.pid);
+      expect(live[0]!.queue).toBe('default');
+      expect(live[0]!.nice_requested).toBe(10);
+      expect(live[0]!.nice_now).toBe(10);
 
-    const live = readWorkers(() => 10); // inject niceness read
-    expect(live.length).toBe(1);
-    expect(live[0]!.pid).toBe(process.pid);
-    expect(live[0]!.queue).toBe('default');
-    expect(live[0]!.nice_requested).toBe(10);
-    expect(live[0]!.nice_now).toBe(10);
-
-    cleanup();
-    expect(readWorkers(() => 10).length).toBe(0);
+      cleanup();
+      expect(readWorkers(() => 10).length).toBe(0);
+    } finally {
+      cleanup();
+      try { child.kill('SIGTERM'); } catch { /* ignore */ }
+    }
   });
 
   test('cleanup unlinks the entry file', async () => {
     const { registerWorker, workerRegistryDir } = await reg();
     const cleanup = registerWorker({
-      pid: process.pid, queue: 'q', nice_requested: null, nice_effective: 0, started_at: Date.now(),
+      pid: process.pid, queue: 'q', nice_requested: null, nice_effective: 0, started_at: currentProcessStartedAtMs(),
     });
     expect(readdirSync(workerRegistryDir()).length).toBe(1);
     cleanup();
