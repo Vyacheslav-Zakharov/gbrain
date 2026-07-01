@@ -80,6 +80,8 @@ export class FakeSourceConnector implements SourceConnector {
 export function getSourceConnector(id: string, config?: Record<string, unknown>): SourceConnector | null {
   if (id === 'fake-source') return new FakeSourceConnector();
   if (id === 'appsheet-vehicles') return new AppSheetVehicleConnector({
+    appId: typeof config?.app_id === 'string' ? config.app_id : (typeof config?.appId === 'string' ? config.appId : undefined),
+    accessKey: typeof config?.access_key === 'string' ? config.access_key : (typeof config?.accessKey === 'string' ? config.accessKey : undefined),
     tableName: typeof config?.table_name === 'string' ? config.table_name : undefined,
     baseUrl: typeof config?.base_url === 'string' ? config.base_url : undefined,
   });

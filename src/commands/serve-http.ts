@@ -43,6 +43,7 @@ import {
   type IngestionContentType,
   type IngestionEvent,
 } from '../core/ingestion/types.ts';
+import { getSourceConnectorSecretConfig } from '../core/source-ingest/connector-config.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -1041,7 +1042,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
             displayName: 'AppSheet автотранспорт',
             object: 'vehicle',
             supportsChangedSince: true,
-            credentialMode: 'server-env',
+            credentialMode: 'db-or-server-env',
+            requiredKeys: ['app_id', 'access_key'],
             requiredEnv: ['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY'],
             fields: [
               { key: 'tableName', label: 'AppSheet table name', defaultValue: 'Автотранспорт' },
@@ -1075,6 +1077,11 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  function adminActor(req: Request): string {
+    const sessionId = (req.cookies as Record<string, string>)?.gbrain_admin || 'unknown';
+    return `admin-ui:${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}`;
+  }
+
   app.post('/admin/api/source-ingest/save-config', requireAdmin, express.json(), async (req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
     try {
@@ -1082,7 +1089,58 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         res.status(400).json({ error: 'config_required' });
         return;
       }
-      const out = await operationsByName.source_connector_config_put.handler(ctx, { config: req.body.config });
+      const out = await operationsByName.source_connector_config_put.handler(ctx, { config: req.body.config, actor: adminActor(req) });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/save-secret', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id : 'appsheet-vehicles';
+      const source_object = typeof req.body?.source_object === 'string' ? req.body.source_object : 'vehicle';
+      if (!req.body?.secrets || typeof req.body.secrets !== 'object') {
+        res.status(400).json({ error: 'secrets_required' });
+        return;
+      }
+      const out = await operationsByName.source_connector_secret_put.handler(ctx, {
+        config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : `${connector_id}:${source_object}`,
+        connector_id,
+        source_object,
+        secrets: req.body.secrets,
+        actor: adminActor(req),
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/delete-secret', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id : 'appsheet-vehicles';
+      const source_object = typeof req.body?.source_object === 'string' ? req.body.source_object : 'vehicle';
+      const out = await operationsByName.source_connector_secret_delete.handler(ctx, {
+        config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : `${connector_id}:${source_object}`,
+        connector_id,
+        source_object,
+        actor: adminActor(req),
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/secret-audit', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const config_id = typeof req.query?.config_id === 'string' ? req.query.config_id : undefined;
+      const limit = typeof req.query?.limit === 'string' ? Number(req.query.limit) : undefined;
+      const out = await operationsByName.source_connector_secret_audit.handler(ctx, { config_id, limit });
       res.json(out);
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
@@ -1110,6 +1168,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       { config_id },
     ) as { rows?: Array<Record<string, unknown>> };
     const row = saved.rows?.[0];
+    const nonSecretConfig = { ...(row?.config_json && typeof row.config_json === 'object' ? row.config_json as Record<string, unknown> : {}), ...nonSecretConnectorConfigFromBody(body) };
+    const secretConfig = await getSourceConnectorSecretConfig(engine, connector_id, source_object);
     return {
       connector_id,
       source_object,
@@ -1117,7 +1177,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       slug_prefix: typeof body.slug_prefix === 'string' ? body.slug_prefix : (typeof row?.slug_prefix === 'string' ? row.slug_prefix : 'source-ingest/vehicles'),
       freshness_policy: typeof body.freshness_policy === 'string' ? body.freshness_policy : (typeof row?.freshness_policy === 'string' ? row.freshness_policy : 'P30D'),
       table_name: typeof body.table_name === 'string' ? body.table_name : (typeof row?.table_name === 'string' ? row.table_name : 'Автотранспорт'),
-      connector_config: { ...(row?.config_json && typeof row.config_json === 'object' ? row.config_json as Record<string, unknown> : {}), ...nonSecretConnectorConfigFromBody(body) },
+      connector_config: { ...nonSecretConfig, ...secretConfig },
     };
   }
 
@@ -1138,9 +1198,6 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     const started = Date.now();
     try {
       const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
-      const secrets = operationsByName.source_connector_config_get
-        ? (((await operationsByName.source_connector_config_get.handler(ctx, { config_id: `${ui.connector_id}:${ui.source_object}` })) as { rows?: Array<Record<string, unknown>> }).rows?.[0]?.secrets as Record<string, unknown> | undefined)
-        : undefined;
       const out = await operationsByName.source_discover.handler(ctx, {
         connector_id: ui.connector_id,
         source_object: ui.source_object,
@@ -1158,7 +1215,6 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         fields_count: Array.isArray(out.fields) ? out.fields.length : 0,
         id_candidates: out.idCandidates ?? [],
         updated_at_candidates: out.updatedAtCandidates ?? [],
-        secrets: secrets ?? null,
       });
     } catch (e) {
       res.status(200).json({

@@ -5472,6 +5472,40 @@ export const MIGRATIONS: Migration[] = [
         ON source_connector_configs (enabled, connector_id, source_object);
     `,
   },
+  {
+    version: 122,
+    name: 'source_connector_secret_storage',
+    // Stage 5D Source Ingest UI: DB-backed connector secret storage. Secrets
+    // are kept out of profile JSON and GBrain pages; reads expose only masked
+    // status plus audit metadata.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS source_connector_secrets (
+        config_id           TEXT PRIMARY KEY REFERENCES source_connector_configs(config_id) ON DELETE CASCADE,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        secret_json         JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_by          TEXT,
+        updated_by          TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_connector_secrets_connector_idx
+        ON source_connector_secrets (connector_id, source_object);
+      CREATE TABLE IF NOT EXISTS source_connector_secret_audit (
+        id                  BIGSERIAL PRIMARY KEY,
+        config_id           TEXT NOT NULL,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        action              TEXT NOT NULL CHECK (action IN ('rotate','delete')),
+        actor               TEXT,
+        secret_keys         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_connector_secret_audit_config_idx
+        ON source_connector_secret_audit (config_id, created_at DESC);
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

@@ -8,6 +8,7 @@ interface SourceIngestOverview {
     object: string;
     supportsChangedSince: boolean;
     credentialMode: string;
+    requiredKeys?: string[];
     requiredEnv?: string[];
     fields?: Array<{ key: string; label: string; defaultValue: string }>;
     safety?: string[];
@@ -97,7 +98,9 @@ export function SourceIngestPage() {
   const [dryRun, setDryRun] = useState<unknown>(null);
   const [approveResult, setApproveResult] = useState<unknown>(null);
   const [connectionTest, setConnectionTest] = useState<unknown>(null);
+  const [secretAudit, setSecretAudit] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [secretForm, setSecretForm] = useState({ app_id: '', access_key: '' });
   const [form, setForm] = useState<ReviewForm>({
     connector_id: 'appsheet-vehicles',
     source_object: 'vehicle',
@@ -124,8 +127,9 @@ export function SourceIngestPage() {
 
   const appSheet = data?.connectors.find(c => c.id === 'appsheet-vehicles');
   const savedConfig = data?.connector_configs?.rows?.find(c => c.connector_id === form.connector_id && c.source_object === form.source_object);
+  const configId = `${form.connector_id}:${form.source_object}`;
   const secretStatus = (savedConfig?.secrets as Record<string, unknown> | undefined)
-    || { configured: false, missing_env: appSheet?.requiredEnv ?? [], required_env: appSheet?.requiredEnv ?? [] };
+    || { configured: false, missing_keys: appSheet?.requiredKeys ?? [], required_keys: appSheet?.requiredKeys ?? [], missing_env: appSheet?.requiredEnv ?? [], required_env: appSheet?.requiredEnv ?? [], masked: {}, storage: 'none' };
   const summary = data?.status.summary ?? {};
   const activeProfile = useMemo(() => (draft as Record<string, unknown> | null)?.profile ?? null, [draft]);
   const canDryRun = Boolean(activeProfile);
@@ -178,6 +182,30 @@ export function SourceIngestPage() {
   const saveConfig = async () => runStep('save-config', async () => {
     await api.sourceIngestSaveConfig(configPayload());
     await load();
+  });
+
+  const rotateSecret = async () => runStep('save-secret', async () => {
+    await api.sourceIngestSaveConfig(configPayload());
+    await api.sourceIngestSaveSecret({
+      config_id: configId,
+      connector_id: form.connector_id,
+      source_object: form.source_object,
+      secrets: secretForm,
+    });
+    setSecretForm({ app_id: '', access_key: '' });
+    await load();
+    setConnectionTest(await api.sourceIngestTestConnection(payload()));
+    setSecretAudit(await api.sourceIngestSecretAudit(configId));
+  });
+
+  const deleteSecret = async () => runStep('delete-secret', async () => {
+    await api.sourceIngestDeleteSecret({ config_id: configId, connector_id: form.connector_id, source_object: form.source_object });
+    await load();
+    setSecretAudit(await api.sourceIngestSecretAudit(configId));
+  });
+
+  const loadSecretAudit = async () => runStep('secret-audit', async () => {
+    setSecretAudit(await api.sourceIngestSecretAudit(configId));
   });
 
   const testConnection = async () => runStep('test-connection', async () => {
@@ -265,11 +293,32 @@ export function SourceIngestPage() {
           </label>
         </div>
         <div style={{ marginTop: 12, color: 'var(--text-secondary)' }}>
-          Credentials are server-side only: {((secretStatus.required_env as string[]) ?? appSheet?.requiredEnv ?? []).map(e => <code key={e} style={{ marginRight: 8 }}>{e}</code>)}
+          Credential storage: <b>{val(secretStatus.storage)}</b>
           <span style={{ marginLeft: 8, color: secretStatus.configured ? 'var(--success)' : 'var(--warning)' }}>
-            {secretStatus.configured ? 'configured' : `missing: ${((secretStatus.missing_env as string[]) ?? []).join(', ') || 'unknown'}`}
+            {secretStatus.configured ? 'configured' : `missing: ${((secretStatus.missing_keys as string[]) ?? []).join(', ') || 'unknown'}`}
           </span>
+          <div style={{ marginTop: 6 }}>
+            Masked: {Object.entries(asObj(secretStatus.masked)).map(([k, v]) => <span key={k} style={{ marginRight: 10 }}><code>{k}</code> {String(v)}</span>)}
+            {Object.keys(asObj(secretStatus.masked)).length === 0 && '—'}
+          </div>
+          <div style={{ marginTop: 6, fontSize: 12 }}>
+            Updated: {val(secretStatus.updated_by)} · {val(secretStatus.updated_at)}
+          </div>
         </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 12 }}>
+          <label>App ID
+            <input type="password" autoComplete="off" value={secretForm.app_id} onChange={e => setSecretForm({ ...secretForm, app_id: e.target.value })} placeholder="saved separately; never shown back" />
+          </label>
+          <label>Access Key
+            <input type="password" autoComplete="off" value={secretForm.access_key} onChange={e => setSecretForm({ ...secretForm, access_key: e.target.value })} placeholder="saved separately; never shown back" />
+          </label>
+        </div>
+        <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+          <button className="btn btn-secondary" disabled={busy !== null || !secretForm.app_id || !secretForm.access_key} onClick={() => void rotateSecret()}>{busy === 'save-secret' ? 'Saving secret…' : 'Rotate/save secret + test'}</button>
+          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void deleteSecret()}>{busy === 'delete-secret' ? 'Deleting…' : 'Delete secret'}</button>
+          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void loadSecretAudit()}>{busy === 'secret-audit' ? 'Loading audit…' : 'Audit'}</button>
+        </div>
+        {secretAudit !== null && <details open style={{ marginTop: 10 }}><summary>Secret audit</summary><PreviewJson value={secretAudit} empty="No audit." /></details>}
         <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void saveConfig()}>{busy === 'save-config' ? 'Saving…' : 'Save config'}</button>
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void testConnection()}>{busy === 'test-connection' ? 'Testing…' : 'Test connection'}</button>

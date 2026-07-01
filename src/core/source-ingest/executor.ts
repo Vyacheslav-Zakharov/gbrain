@@ -12,6 +12,7 @@ import { profileHash, stableJson } from './store.ts';
 import { validateSourceIngestProfile, type SourceFilterRule, type SourceIngestProfile } from './profile-schema.ts';
 import { resolveSourceIngestStorageMode, type SourceIngestStorageMode } from './executor-preflight.ts';
 import { nextStaleAfter } from './freshness.ts';
+import { getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
 
 export interface SourceIngestExecutorOptions {
   profile_id: string;
@@ -242,7 +243,11 @@ export async function runSourceIngestExecutor(
   if (storage.mode !== 'git-backed') throw new Error('Stage 3A executor requires git-backed source');
 
   const runId = opts.run_id ?? `source-ingest-${new Date().toISOString().replace(/[:.]/g, '')}`;
-  const connector = getSourceConnector(profile.source_connector);
+  const configId = `${profile.source_connector}:${profile.source_object}`;
+  const [savedConfig] = await listSourceConnectorConfigs(engine, configId);
+  const secretConfig = await getSourceConnectorSecretConfig(engine, profile.source_connector, profile.source_object);
+  const connectorConfig = { ...(savedConfig?.config_json || {}), ...secretConfig };
+  const connector = getSourceConnector(profile.source_connector, connectorConfig);
   if (!connector) throw new Error(`connector not found: ${profile.source_connector}`);
   const records: SourceRecord[] = [];
   let iterable: AsyncIterable<{ records: SourceRecord[]; cursor?: string | null }> | undefined;

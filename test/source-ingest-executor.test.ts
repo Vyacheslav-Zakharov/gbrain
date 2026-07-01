@@ -9,7 +9,15 @@ import { runSourceIngestExecutor } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
 import { listDueSourceRefreshes, parseFreshnessPolicyMs, enqueueDueSourceRefreshJobs } from '../src/core/source-ingest/freshness.ts';
-import { listSourceConnectorConfigs, putSourceConnectorConfig, sourceConnectorSecretStatus } from '../src/core/source-ingest/connector-config.ts';
+import {
+  deleteSourceConnectorSecrets,
+  getSourceConnectorSecretConfig,
+  listSourceConnectorConfigs,
+  listSourceConnectorSecretAudit,
+  putSourceConnectorConfig,
+  putSourceConnectorSecrets,
+  sourceConnectorSecretStatus,
+} from '../src/core/source-ingest/connector-config.ts';
 import { rowToVehicleRecord, AppSheetVehicleConnector } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
 import { runCycle } from '../src/core/cycle.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
@@ -325,9 +333,46 @@ describe('source-ingest Stage 3A executor', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ connector_id: 'appsheet-vehicles', source_object: 'vehicle', table_name: 'Автотранспорт', enabled: true });
     expect(JSON.stringify(rows[0])).not.toContain('APPSHEET_VEHICLES_ACCESS_KEY=');
-    const secrets = sourceConnectorSecretStatus('appsheet-vehicles');
-    expect(secrets.required_env).toEqual(['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY']);
-    expect(secrets.missing_env).toEqual(expect.arrayContaining(['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY']));
+    const secrets = await sourceConnectorSecretStatus(engine, 'appsheet-vehicles');
+    expect(secrets.required_keys).toEqual(['app_id', 'access_key']);
+    expect(secrets.missing_keys).toEqual(expect.arrayContaining(['app_id', 'access_key']));
+  });
+
+  test('DB-backed AppSheet secrets rotate, mask, audit, and delete without exposing values in status', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await putSourceConnectorConfig(engine, {
+      connector_id: 'appsheet-vehicles',
+      source_object: 'vehicle',
+      display_name: 'AppSheet автотранспорт',
+      table_name: 'Автотранспорт',
+      target_source_id: 'shared',
+      slug_prefix: 'source-ingest/vehicles',
+      freshness_policy: 'P30D',
+      enabled: true,
+      config_json: { table_name: 'Автотранспорт' },
+    }, { actor: 'test' });
+
+    const rotated = await putSourceConnectorSecrets(engine, {
+      connector_id: 'appsheet-vehicles',
+      source_object: 'vehicle',
+      secret_json: { app_id: 'app-123456', access_key: 'key-secret-7890' },
+    }, { actor: 'admin:test' });
+    expect(rotated).toMatchObject({ configured: true, storage: 'db', updated_by: 'admin:test' });
+    expect(rotated.masked).toEqual({ app_id: '••••3456', access_key: '••••7890' });
+    expect(JSON.stringify(rotated)).not.toContain('key-secret-7890');
+
+    const secretConfig = await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle');
+    expect(secretConfig).toEqual({ app_id: 'app-123456', access_key: 'key-secret-7890' });
+    const audit = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
+    expect(audit[0]).toMatchObject({ action: 'rotate', actor: 'admin:test', secret_keys: ['access_key', 'app_id'] });
+    expect(JSON.stringify(audit)).not.toContain('key-secret-7890');
+
+    const deleted = await deleteSourceConnectorSecrets(engine, { connector_id: 'appsheet-vehicles', source_object: 'vehicle' }, { actor: 'admin:test' });
+    expect(deleted.configured).toBe(false);
+    expect((await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle'))).toEqual({});
+    const auditAfterDelete = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
+    expect(auditAfterDelete[0]).toMatchObject({ action: 'delete', actor: 'admin:test' });
   });
 
   test('AppSheet connector uses saved table config without leaking credentials', async () => {

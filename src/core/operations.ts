@@ -52,7 +52,15 @@ import { buildSourceDryRun } from './source-ingest/dry-run.ts';
 import { sourceIngestProfileJsonSchema } from './source-ingest/profile-schema.ts';
 import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
 import { listSourceIngestProfiles, putSourceIngestProfile } from './source-ingest/store.ts';
-import { listSourceConnectorConfigs, putSourceConnectorConfig, sourceConnectorSecretStatus } from './source-ingest/connector-config.ts';
+import {
+  deleteSourceConnectorSecrets,
+  getSourceConnectorSecretConfig,
+  listSourceConnectorConfigs,
+  listSourceConnectorSecretAudit,
+  putSourceConnectorConfig,
+  putSourceConnectorSecrets,
+  sourceConnectorSecretStatus,
+} from './source-ingest/connector-config.ts';
 import { runSourceIngestExecutor } from './source-ingest/executor.ts';
 import { buildSourceRevertReport } from './source-ingest/revert.ts';
 import { enqueueDueSourceRefreshJobs, listDueSourceRefreshes } from './source-ingest/freshness.ts';
@@ -2869,25 +2877,32 @@ const source_discover: Operation = {
 
 const source_connector_config_get: Operation = {
   name: 'source_connector_config_get',
-  description: 'Read persisted non-secret source connector configuration plus server-side secret readiness. Read-only; MCP-safe.',
+  description: 'Read persisted non-secret source connector configuration plus masked secret readiness. Read-only; MCP-safe.',
   scope: 'read',
   params: {
     config_id: { type: 'string', description: 'Optional connector config id, e.g. appsheet-vehicles:vehicle' },
   },
   handler: async (ctx, p) => {
     const rows = await listSourceConnectorConfigs(ctx.engine, p.config_id as string | undefined);
-    return { rows: rows.map(row => ({ ...row, secrets: sourceConnectorSecretStatus(row.connector_id) })), count: rows.length };
+    return {
+      rows: await Promise.all(rows.map(async row => ({
+        ...row,
+        secrets: await sourceConnectorSecretStatus(ctx.engine, row.connector_id, row.config_id),
+      }))),
+      count: rows.length,
+    };
   },
 };
 
 const source_connector_config_put: Operation = {
   name: 'source_connector_config_put',
-  description: 'LOCAL/TRUSTED: persist non-secret source connector configuration for the admin review console. Secrets remain server-side env/config only.',
+  description: 'LOCAL/TRUSTED: persist non-secret source connector configuration for the admin review console. Secrets are stored separately in source_connector_secrets.',
   scope: 'write',
   mutating: true,
   localOnly: true,
   params: {
     config: { type: 'object', required: true, description: 'Non-secret connector config JSON' },
+    actor: { type: 'string', description: 'Audit actor label supplied by trusted admin UI/CLI' },
   },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_config_put is local/trusted only.');
@@ -2895,6 +2910,7 @@ const source_connector_config_put: Operation = {
     const connector_id = String(raw.connector_id || '');
     const source_object = String(raw.source_object || '');
     if (!connector_id || !source_object) throw new OperationError('invalid_params', 'connector_id and source_object are required.');
+    const actor = typeof p.actor === 'string' && p.actor.trim() ? p.actor.trim() : 'local';
     const saved = await putSourceConnectorConfig(ctx.engine, {
       config_id: typeof raw.config_id === 'string' ? raw.config_id : undefined,
       connector_id,
@@ -2906,9 +2922,78 @@ const source_connector_config_put: Operation = {
       freshness_policy: typeof raw.freshness_policy === 'string' ? raw.freshness_policy : null,
       enabled: Boolean(raw.enabled),
       config_json: (raw.config_json && typeof raw.config_json === 'object' ? raw.config_json : {}) as Record<string, unknown>,
-    }, { actor: 'local' });
-    return { ok: true, saved: { ...saved, secrets: sourceConnectorSecretStatus(saved.connector_id) } };
+    }, { actor });
+    return { ok: true, saved: { ...saved, secrets: await sourceConnectorSecretStatus(ctx.engine, saved.connector_id, saved.config_id) } };
   },
+};
+
+const source_connector_secret_put: Operation = {
+  name: 'source_connector_secret_put',
+  description: 'LOCAL/TRUSTED: rotate source connector credentials in DB-backed secret storage. Returns masked status only.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    config_id: { type: 'string', description: 'Optional connector config id, e.g. appsheet-vehicles:vehicle' },
+    connector_id: { type: 'string', required: true },
+    source_object: { type: 'string', required: true },
+    secrets: { type: 'object', required: true, description: 'Secret values, e.g. app_id/access_key. Never returned.' },
+    actor: { type: 'string', description: 'Audit actor label supplied by trusted admin UI/CLI' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_secret_put is local/trusted only.');
+    const connector_id = String(p.connector_id || '');
+    const source_object = String(p.source_object || '');
+    if (!connector_id || !source_object) throw new OperationError('invalid_params', 'connector_id and source_object are required.');
+    const actor = typeof p.actor === 'string' && p.actor.trim() ? p.actor.trim() : 'local';
+    const status = await putSourceConnectorSecrets(ctx.engine, {
+      config_id: typeof p.config_id === 'string' ? p.config_id : undefined,
+      connector_id,
+      source_object,
+      secret_json: (p.secrets && typeof p.secrets === 'object' ? p.secrets : {}) as Record<string, unknown>,
+    }, { actor });
+    return { ok: true, secrets: status };
+  },
+};
+
+const source_connector_secret_delete: Operation = {
+  name: 'source_connector_secret_delete',
+  description: 'LOCAL/TRUSTED: delete source connector credentials from DB-backed secret storage. Audit row is retained without values.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    config_id: { type: 'string', description: 'Optional connector config id, e.g. appsheet-vehicles:vehicle' },
+    connector_id: { type: 'string', required: true },
+    source_object: { type: 'string', required: true },
+    actor: { type: 'string', description: 'Audit actor label supplied by trusted admin UI/CLI' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_secret_delete is local/trusted only.');
+    const connector_id = String(p.connector_id || '');
+    const source_object = String(p.source_object || '');
+    if (!connector_id || !source_object) throw new OperationError('invalid_params', 'connector_id and source_object are required.');
+    const actor = typeof p.actor === 'string' && p.actor.trim() ? p.actor.trim() : 'local';
+    const status = await deleteSourceConnectorSecrets(ctx.engine, {
+      config_id: typeof p.config_id === 'string' ? p.config_id : undefined,
+      connector_id,
+      source_object,
+    }, { actor });
+    return { ok: true, secrets: status };
+  },
+};
+
+const source_connector_secret_audit: Operation = {
+  name: 'source_connector_secret_audit',
+  description: 'Read source connector credential audit trail. Values are never stored in audit rows.',
+  scope: 'read',
+  params: {
+    config_id: { type: 'string', description: 'Optional connector config id, e.g. appsheet-vehicles:vehicle' },
+    limit: { type: 'number', description: 'Max audit rows (default 20)' },
+  },
+  handler: async (ctx, p) => ({
+    rows: await listSourceConnectorSecretAudit(ctx.engine, p.config_id as string | undefined, (p.limit as number | undefined) ?? 20),
+  }),
 };
 
 const source_profile_draft: Operation = {
@@ -5472,6 +5557,7 @@ export const operations: Operation[] = [
   log_ingest, get_ingest_log,
   // Source Ingest (third-party connectors; Stage 1 read contracts + local write skeletons)
   source_discover, source_connector_config_get, source_connector_config_put,
+  source_connector_secret_put, source_connector_secret_delete, source_connector_secret_audit,
   source_profile_draft, source_validate_profile, source_profile_get, source_profile_put, source_dry_run, source_sync_status,
   source_ingest, source_refresh, source_revert,
   // Files
