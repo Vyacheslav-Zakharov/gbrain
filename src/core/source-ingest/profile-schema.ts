@@ -21,11 +21,28 @@ export interface SourceLinkRule {
   confidence?: number;
 }
 
+export interface SourceTransformProfileSource {
+  alias: string;
+  connector?: string;
+  object: string;
+  fields?: string[];
+  sample_limit?: number;
+}
+
+export interface SourceTransformProfile {
+  engine?: 'pglite';
+  sources: SourceTransformProfileSource[];
+  sql: string;
+  primary_key_field?: string;
+  updated_at_field?: string;
+}
+
 export interface SourceIngestProfile {
   profile_id: string;
   status: SourceIngestProfileStatus;
   source_connector: string;
   source_object: string;
+  transform?: SourceTransformProfile;
   owner?: string;
   target: {
     gbrain_type: string;
@@ -52,6 +69,7 @@ export interface ValidationIssue {
 const SOURCE_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
 const PROFILE_ID_RE = /^[a-z0-9][a-z0-9-]{1,96}$/;
 const FIELD_PATH_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
+const SQL_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -120,6 +138,28 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
   if (isObject(p.freshness)) {
     if (p.freshness.on_access !== undefined && !['none', 'banner', 'enqueue_refresh', 'acknowledge_when_stale'].includes(String(p.freshness.on_access))) issues.push(issue('freshness.on_access', 'invalid_on_access', 'Unsupported on_access refresh behavior.'));
     if (p.freshness.changed_since_field !== undefined) validateFieldPath('freshness.changed_since_field', p.freshness.changed_since_field, issues);
+  }
+
+  if (p.transform !== undefined) {
+    if (!isObject(p.transform)) {
+      issues.push(issue('transform', 'invalid_transform', 'transform must be an object.'));
+    } else {
+      const t = p.transform as Record<string, unknown>;
+      if (t.engine !== undefined && t.engine !== 'pglite') issues.push(issue('transform.engine', 'invalid_transform_engine', 'Only pglite transform engine is supported.'));
+      if (typeof t.sql !== 'string' || !/^\s*(select|with)\b/i.test(t.sql)) issues.push(issue('transform.sql', 'invalid_transform_sql', 'Transform SQL must start with SELECT or WITH.'));
+      if (typeof t.sql === 'string' && t.sql.trim().replace(/;\s*$/, '').includes(';')) issues.push(issue('transform.sql', 'multiple_statements', 'Only one transform SELECT statement is allowed.'));
+      if (!Array.isArray(t.sources) || t.sources.length === 0) {
+        issues.push(issue('transform.sources', 'required', 'Transform requires at least one source alias.'));
+      } else {
+        t.sources.forEach((src, i) => {
+          if (!isObject(src)) { issues.push(issue(`transform.sources.${i}`, 'invalid_source', 'Source must be an object.')); return; }
+          if (typeof src.alias !== 'string' || !SQL_IDENT_RE.test(src.alias)) issues.push(issue(`transform.sources.${i}.alias`, 'invalid_alias', 'Alias must be a SQL identifier.'));
+          if (src.connector !== undefined && typeof src.connector !== 'string') issues.push(issue(`transform.sources.${i}.connector`, 'invalid_connector', 'Connector must be a string.'));
+          if (typeof src.object !== 'string' || !src.object) issues.push(issue(`transform.sources.${i}.object`, 'required', 'Source object is required.'));
+          if (src.fields !== undefined && !Array.isArray(src.fields)) issues.push(issue(`transform.sources.${i}.fields`, 'invalid_fields', 'fields must be an array.'));
+        });
+      }
+    }
   }
 
   if (p.links !== undefined) {

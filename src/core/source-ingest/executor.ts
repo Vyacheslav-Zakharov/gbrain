@@ -15,6 +15,7 @@ import { validateSourceIngestProfile, type SourceFilterRule, type SourceIngestPr
 import { resolveSourceIngestStorageMode, type SourceIngestStorageMode } from './executor-preflight.ts';
 import { nextStaleAfter } from './freshness.ts';
 import { getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
+import { buildProfileAllRecords } from './source-fetch.ts';
 import { LockUnavailableError, withRefreshingLock } from '../db-lock.ts';
 
 export interface SourceIngestExecutorOptions {
@@ -325,12 +326,19 @@ export async function runSourceIngestExecutor(
   const connector = getSourceConnector(profile.source_connector, connectorConfig);
   if (!connector) throw new Error(`connector not found: ${profile.source_connector}`);
   const records: SourceRecord[] = [];
-  const seenExternalIds = new Set<string>();
+  const transformedRecords = await buildProfileAllRecords(profile, {
+    engine,
+    connectorConfigOverride: connectorConfig,
+    defaultConnector: profile.source_connector,
+    defaultObject: profile.source_object,
+  });
+  if (transformedRecords) records.push(...transformedRecords);
+  const seenExternalIds = new Set(records.map(r => r.external_id));
   let iterable: AsyncIterable<{ records: SourceRecord[]; cursor?: string | null }> | undefined;
   let forceFullScanForFailedRetry = false;
   const fetchFields = Array.isArray(profile.mapping?.source_fields) ? profile.mapping.source_fields : profile.update_policy.field_allowlist;
   const fetchOpts = fetchFields?.length ? { fields: fetchFields } : {};
-  if (opts.changed_since) {
+  if (!transformedRecords && opts.changed_since) {
     const failedRows = await engine.executeRaw<{ external_id: string }>(
       `SELECT external_id
          FROM source_sync_state
@@ -355,7 +363,7 @@ export async function runSourceIngestExecutor(
       }
     }
   }
-  if (opts.changed_since && connector.fetchChangedSince && !forceFullScanForFailedRetry) {
+  if (!transformedRecords && opts.changed_since && connector.fetchChangedSince && !forceFullScanForFailedRetry) {
     const sinceRows = await engine.executeRaw<{ since: string | null }>(
       `SELECT max(source_updated_at)::text AS since
          FROM source_sync_state
@@ -365,17 +373,19 @@ export async function runSourceIngestExecutor(
     const since = sinceRows[0]?.since;
     if (since) iterable = connector.fetchChangedSince(profile.source_object, since, fetchOpts);
   }
-  if (!iterable) {
+  if (!transformedRecords && !iterable) {
     if (!connector.fetchAll) throw new Error(`connector does not support fetchAll: ${profile.source_connector}`);
     iterable = connector.fetchAll(profile.source_object, fetchOpts);
   }
-  for await (const batch of iterable) {
-    for (const r of batch.records) {
-      if (seenExternalIds.has(r.external_id)) continue;
-      records.push(r);
-      seenExternalIds.add(r.external_id);
+  if (iterable) {
+    for await (const batch of iterable) {
+      for (const r of batch.records) {
+        if (seenExternalIds.has(r.external_id)) continue;
+        records.push(r);
+        seenExternalIds.add(r.external_id);
+      }
+      if (opts.limit && records.length >= opts.limit) break;
     }
-    if (opts.limit && records.length >= opts.limit) break;
   }
   const limited = opts.limit ? records.slice(0, opts.limit) : records;
   const key: OpCheckpointKey = {

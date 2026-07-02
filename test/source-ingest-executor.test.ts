@@ -22,10 +22,11 @@ import { rowToVehicleRecord, AppSheetVehicleConnector, sourceFieldsToAppSheetCol
 import { runCycle } from '../src/core/cycle.ts';
 import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
 import { draftSourceIngestProfile } from '../src/core/source-ingest/draft.ts';
+import { buildProfileSampleRecords } from '../src/core/source-ingest/source-fetch.ts';
+import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { withEnv } from './helpers/with-env.ts';
-import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
 
 let engine: PGLiteEngine;
 const tempDirs: string[] = [];
@@ -187,6 +188,64 @@ describe('source-ingest Stage 3A executor', () => {
     expect(out.sample_pages[0].article_markdown_preview).toContain('Toyota Hilux 2021');
     expect(out.sample_pages[1].article_markdown_preview).toContain('Hyundai Porter 2020');
     expect(out.sample_pages[0].article_empty_slots).toEqual([]);
+  });
+
+  test('SQL transform can join multiple source objects and aggregate before dry-run mapping', async () => {
+    const transformedProfile: SourceIngestProfile = {
+      ...profile,
+      profile_id: 'fake-source-vehicle-transform-v1',
+      transform: {
+        engine: 'pglite',
+        primary_key_field: 'id',
+        updated_at_field: 'updated_at',
+        sources: [
+          { alias: 'vehicles', connector: 'fake-source', object: 'vehicle', fields: ['id', 'code', 'name', 'status', 'is_group', 'updated_at'] },
+          { alias: 'acts', connector: 'fake-source', object: 'measurement_acts', fields: ['id', 'vehicle_id', 'status'] },
+        ],
+        sql: `
+          SELECT
+            v.id,
+            v.code,
+            v.name,
+            v.status,
+            v.updated_at,
+            COUNT(a.id)::int AS active_act_count
+          FROM vehicles v
+          LEFT JOIN acts a ON a.vehicle_id = v.id AND a.status = 'active'
+          WHERE v.is_group = false AND v.status = 'active'
+          GROUP BY v.id, v.code, v.name, v.status, v.updated_at
+          ORDER BY v.code
+        `,
+      },
+      mapping: {
+        ...profile.mapping,
+        article_template: {
+          sections: {
+            title: '{{ name }}',
+            summary: '{{ name }} — активных актов: {{ active_act_count }}.',
+          },
+        },
+      },
+      update_policy: { ...profile.update_policy, field_allowlist: ['code', 'name', 'status', 'active_act_count'] },
+    };
+
+    const sample = await buildProfileSampleRecords(transformedProfile, 10, { defaultConnector: 'fake-source', defaultObject: 'vehicle' });
+    expect(sample.map(r => r.external_id)).toEqual(['veh-001']);
+    expect(sample[0].data).toMatchObject({ code: 'A-001', active_act_count: 2 });
+    const dry = buildSourceDryRun(transformedProfile, sample);
+    expect(dry.sample_pages[0]?.article_markdown_preview).toContain('активных актов: 2');
+
+    const repo = tempGitRepo();
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES ($1,$2,$3,'{"federated": true}'::jsonb)
+       ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+      ['shared', 'shared', repo],
+    );
+    await putSourceIngestProfile(engine, transformedProfile, { createdBy: 'test', changeNote: 'transform-seed' });
+    const out = await runSourceIngestExecutor(engine, { profile_id: transformedProfile.profile_id, run_id: 'run-transform-test', no_embed: true });
+    expect(out.counts.written).toBe(1);
+    const page = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(page?.compiled_truth).toContain('активных актов: 2');
   });
 
   test('second identical run is unchanged and preserves page content_hash', async () => {

@@ -37,10 +37,17 @@ const peopleRecords: SourceRecord[] = [
   { external_id: 'emp-002', source_updated_at: '2026-06-11T12:00:00+05:00', data: { id: 'emp-002', full_name: 'Example Person Two', department_id: 'dep-ops', position_id: 'pos-mechanic', updated_at: '2026-06-11T12:00:00+05:00' } },
 ];
 
+const measurementActRecords: SourceRecord[] = [
+  { external_id: 'act-001', source_updated_at: '2026-06-22T09:00:00+05:00', data: { id: 'act-001', vehicle_id: 'veh-001', status: 'active', kind: 'inspection', updated_at: '2026-06-22T09:00:00+05:00' } },
+  { external_id: 'act-002', source_updated_at: '2026-06-23T09:00:00+05:00', data: { id: 'act-002', vehicle_id: 'veh-001', status: 'active', kind: 'repair', updated_at: '2026-06-23T09:00:00+05:00' } },
+  { external_id: 'act-003', source_updated_at: '2026-06-24T09:00:00+05:00', data: { id: 'act-003', vehicle_id: 'veh-002', status: 'cancelled', kind: 'inspection', updated_at: '2026-06-24T09:00:00+05:00' } },
+];
+
 const recordsByObject: Record<string, SourceRecord[]> = {
   vehicle: vehicleRecords,
   equipment: equipmentRecords,
   people: peopleRecords,
+  measurement_acts: measurementActRecords,
 };
 
 export class FakeSourceConnector implements SourceConnector {
@@ -52,6 +59,7 @@ export class FakeSourceConnector implements SourceConnector {
       { name: 'vehicle', displayName: 'Vehicles', estimatedCount: vehicleRecords.length, supportsChangedSince: true },
       { name: 'equipment', displayName: 'Equipment', estimatedCount: equipmentRecords.length, supportsChangedSince: true },
       { name: 'people', displayName: 'People', estimatedCount: peopleRecords.length, supportsChangedSince: true },
+      { name: 'measurement_acts', displayName: 'Measurement Acts', estimatedCount: measurementActRecords.length, supportsChangedSince: true },
     ];
   }
 

@@ -49,6 +49,7 @@ import { getSourceConnector } from './source-ingest/connectors/fake.ts';
 import { discoverSourceObject } from './source-ingest/discovery.ts';
 import { draftSourceIngestProfile } from './source-ingest/draft.ts';
 import { buildSourceDryRun } from './source-ingest/dry-run.ts';
+import { buildProfileSampleRecords } from './source-ingest/source-fetch.ts';
 import { sourceIngestProfileJsonSchema } from './source-ingest/profile-schema.ts';
 import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
 import { listSourceIngestProfiles, putSourceIngestProfile } from './source-ingest/store.ts';
@@ -3091,9 +3092,12 @@ const source_dry_run: Operation = {
     const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, p.profile);
     if (!validation.ok || !validation.profile) return { ok: false, validation, dry_run: true };
     const profile = validation.profile;
-    const connector = resolveSourceConnectorOrThrow(profile.source_connector, p.connector_config as Record<string, unknown> | undefined);
-    const profileFields = Array.isArray(profile.mapping?.source_fields) ? profile.mapping.source_fields : profile.update_policy.field_allowlist;
-    const sample = await connector.sample(profile.source_object, (p.sample_limit as number | undefined) ?? 50, profileFields?.length ? { fields: profileFields } : {});
+    const sample = await buildProfileSampleRecords(profile, (p.sample_limit as number | undefined) ?? 50, {
+      engine: ctx.engine,
+      connectorConfigOverride: p.connector_config as Record<string, unknown> | undefined,
+      defaultConnector: profile.source_connector,
+      defaultObject: profile.source_object,
+    });
     return { ...buildSourceDryRun(profile, sample), validation };
   },
 };
