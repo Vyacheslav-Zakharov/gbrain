@@ -328,6 +328,8 @@ export async function runSourceIngestExecutor(
   const seenExternalIds = new Set<string>();
   let iterable: AsyncIterable<{ records: SourceRecord[]; cursor?: string | null }> | undefined;
   let forceFullScanForFailedRetry = false;
+  const fetchFields = Array.isArray(profile.mapping?.source_fields) ? profile.mapping.source_fields : profile.update_policy.field_allowlist;
+  const fetchOpts = fetchFields?.length ? { fields: fetchFields } : {};
   if (opts.changed_since) {
     const failedRows = await engine.executeRaw<{ external_id: string }>(
       `SELECT external_id
@@ -339,7 +341,7 @@ export async function runSourceIngestExecutor(
     if (failedRows.length > 0) {
       if (connector.fetchById) {
         for (const row of failedRows) {
-          const failedRecord = await connector.fetchById(profile.source_object, row.external_id);
+          const failedRecord = await connector.fetchById(profile.source_object, row.external_id, fetchOpts);
           if (failedRecord && !seenExternalIds.has(failedRecord.external_id)) {
             records.push(failedRecord);
             seenExternalIds.add(failedRecord.external_id);
@@ -361,11 +363,11 @@ export async function runSourceIngestExecutor(
       [profile.profile_id, profile.source_connector, profile.source_object],
     );
     const since = sinceRows[0]?.since;
-    if (since) iterable = connector.fetchChangedSince(profile.source_object, since);
+    if (since) iterable = connector.fetchChangedSince(profile.source_object, since, fetchOpts);
   }
   if (!iterable) {
     if (!connector.fetchAll) throw new Error(`connector does not support fetchAll: ${profile.source_connector}`);
-    iterable = connector.fetchAll(profile.source_object);
+    iterable = connector.fetchAll(profile.source_object, fetchOpts);
   }
   for await (const batch of iterable) {
     for (const r of batch.records) {

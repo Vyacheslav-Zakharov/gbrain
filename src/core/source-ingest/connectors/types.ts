@@ -37,12 +37,16 @@ export interface DiscoveryProfile {
   samples: SourceRecord[];
 }
 
+export interface SourceFetchOptions {
+  fields?: string[];
+}
+
 export interface SourceConnector {
   id: string;
   displayName: string;
   listObjects(): Promise<SourceObjectDescriptor[]>;
-  sample(objectName: string, limit: number): Promise<SourceRecord[]>;
-  fetchAll?(objectName: string, cursor?: string): AsyncIterable<SourceRecordBatch>;
-  fetchChangedSince?(objectName: string, since: string): AsyncIterable<SourceRecordBatch>;
-  fetchById?(objectName: string, id: string): Promise<SourceRecord | null>;
+  sample(objectName: string, limit: number, opts?: SourceFetchOptions): Promise<SourceRecord[]>;
+  fetchAll?(objectName: string, cursorOrOpts?: string | SourceFetchOptions, opts?: SourceFetchOptions): AsyncIterable<SourceRecordBatch>;
+  fetchChangedSince?(objectName: string, since: string, opts?: SourceFetchOptions): AsyncIterable<SourceRecordBatch>;
+  fetchById?(objectName: string, id: string, opts?: SourceFetchOptions): Promise<SourceRecord | null>;
 }

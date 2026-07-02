@@ -53,10 +53,10 @@ export function profileRecords(connectorId: string, objectName: string, records:
   return { connectorId, objectName, totalEstimate, sampled: records.length, fields, idCandidates, updatedAtCandidates, parentCandidates, warnings, samples: records };
 }
 
-export async function discoverSourceObject(connector: SourceConnector, objectName: string, limit = 50): Promise<DiscoveryProfile> {
+export async function discoverSourceObject(connector: SourceConnector, objectName: string, limit = 50, opts: { fields?: string[] } = {}): Promise<DiscoveryProfile> {
   const objects = await connector.listObjects();
   const descriptor = objects.find(o => o.name === objectName);
   if (!descriptor) throw new Error(`Object '${objectName}' is not exposed by connector '${connector.id}'`);
-  const records = await connector.sample(objectName, limit);
+  const records = await connector.sample(objectName, limit, { fields: opts.fields });
   return profileRecords(connector.id, objectName, records, descriptor.estimatedCount);
 }

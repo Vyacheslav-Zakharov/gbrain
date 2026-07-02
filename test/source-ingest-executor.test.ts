@@ -18,7 +18,7 @@ import {
   putSourceConnectorSecrets,
   sourceConnectorSecretStatus,
 } from '../src/core/source-ingest/connector-config.ts';
-import { rowToVehicleRecord, AppSheetVehicleConnector } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
+import { rowToVehicleRecord, AppSheetVehicleConnector, sourceFieldsToAppSheetColumns } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
 import { runCycle } from '../src/core/cycle.ts';
 import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
 import { draftSourceIngestProfile } from '../src/core/source-ingest/draft.ts';
@@ -547,6 +547,22 @@ describe('source-ingest Stage 3A executor', () => {
       const auditAfterDelete = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
       expect(auditAfterDelete[0]).toMatchObject({ action: 'delete', actor: 'admin:test' });
     });
+  });
+
+  test('AppSheet connector projects selected fields into ColumnNames request property', async () => {
+    const calls: Array<{ url: string; body: any }> = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body || '{}')) });
+      return new Response(JSON.stringify([{ ID: 'truck-1', ГосНомер: '111AAA02', Модель: 'Kamaz', ДатаИзменения: '2026-07-01T10:00:00+05:00', related_measurementacts: ['x'] }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const connector = new AppSheetVehicleConnector({ appId: 'app', accessKey: 'secret', tableName: 'Автотранспорт', baseUrl: 'https://203.0.113.10/api/v2/apps', fetchImpl });
+    await connector.sample('vehicle', 5, { fields: ['id', 'code', 'name', 'status'] });
+    const columnNames = calls[0].body.Properties.ColumnNames;
+    expect(columnNames).toEqual(sourceFieldsToAppSheetColumns(['id', 'code', 'name', 'status']));
+    expect(columnNames).toContain('ID');
+    expect(columnNames).toContain('ГосНомер');
+    expect(columnNames).not.toContain('related_measurementacts');
+    expect(JSON.stringify(calls[0].body)).not.toContain('secret');
   });
 
   test('AppSheet connector uses saved table config without leaking credentials', async () => {

@@ -3011,8 +3011,8 @@ const source_profile_draft: Operation = {
   handler: async (_ctx, p) => {
     const connectorId = p.connector_id as string;
     const sourceObject = p.source_object as string;
-    const discovery = await discoverSourceObject(resolveSourceConnectorOrThrow(connectorId, p.connector_config as Record<string, unknown> | undefined), sourceObject, (p.sample_limit as number | undefined) ?? 50);
     const selectedFields = Array.isArray(p.selected_fields) ? p.selected_fields.map(String).filter(Boolean) : undefined;
+    const discovery = await discoverSourceObject(resolveSourceConnectorOrThrow(connectorId, p.connector_config as Record<string, unknown> | undefined), sourceObject, (p.sample_limit as number | undefined) ?? 50, selectedFields?.length ? { fields: selectedFields } : {});
     const { profile, warnings } = draftSourceIngestProfile({ connectorId, sourceObject, discovery, targetSourceId: p.target_source_id as string | undefined, selectedFields });
     return { discovery, profile, warnings };
   },
@@ -3092,7 +3092,8 @@ const source_dry_run: Operation = {
     if (!validation.ok || !validation.profile) return { ok: false, validation, dry_run: true };
     const profile = validation.profile;
     const connector = resolveSourceConnectorOrThrow(profile.source_connector, p.connector_config as Record<string, unknown> | undefined);
-    const sample = await connector.sample(profile.source_object, (p.sample_limit as number | undefined) ?? 50);
+    const profileFields = Array.isArray(profile.mapping?.source_fields) ? profile.mapping.source_fields : profile.update_policy.field_allowlist;
+    const sample = await connector.sample(profile.source_object, (p.sample_limit as number | undefined) ?? 50, profileFields?.length ? { fields: profileFields } : {});
     return { ...buildSourceDryRun(profile, sample), validation };
   },
 };
