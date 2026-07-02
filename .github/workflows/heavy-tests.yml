@@ -1,16 +1,15 @@
 name: Heavy Tests
 
 # Heavy ops-shape tests under tests/heavy/. Cost minutes per run; NOT part
-# of default PR CI. Two triggers:
-#   - Nightly schedule (catches regressions within 24h of merge to master).
+# of default PR CI. The upstream nightly cron is removed in this private
+# fork (it billed ~25 Actions minutes every day regardless of activity).
+# Two triggers remain:
 #   - On-demand opt-in via PR label `heavy-tests` (slow loop kept off by default).
 #   - Manual workflow_dispatch for triage.
 #
 # See CLAUDE.md "tests/heavy/*.sh" entry and tests/heavy/README.md.
 
 on:
-  schedule:
-    - cron: '17 8 * * *'  # 08:17 UTC daily — staggered to avoid noisy slots
   pull_request:
     # `synchronize` + `reopened` fire on subsequent pushes / reopens — without
     # them, a PR labeled `heavy-tests` would NEVER re-run heavy on later

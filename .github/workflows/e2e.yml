@@ -1,12 +1,10 @@
 name: E2E Tests
 
+# Manual-only in this private fork: push/PR triggers plus the nightly cron
+# billed ~25-30 Actions minutes per run, and tier2 spends OpenAI/Anthropic
+# API credits on every run. Trigger on demand from the Actions tab
+# (Run workflow) / `gh workflow run e2e.yml`.
 on:
-  push:
-    branches: [master]
-  pull_request:
-    branches: [master]
-  schedule:
-    - cron: '0 6 * * *'  # Nightly at 6am UTC
   workflow_dispatch:
 
 permissions:
