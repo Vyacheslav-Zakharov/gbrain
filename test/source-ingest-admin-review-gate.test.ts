@@ -26,6 +26,7 @@ describe('source-ingest admin review gates', () => {
 
   test('PII/cross-source dry-runs require explicit acknowledgement and article preview exposes mapping review surface', () => {
     const ui = sourceIngestUi();
+    const server = serveHttp();
 
     expect(ui).toContain('Routing / sensitivity');
     expect(ui).toContain('pii_fields:');
@@ -45,6 +46,10 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Transform sources JSON');
     expect(ui).toContain('raw.transform = transformConfig');
     expect(ui).toContain('mutating SQL is rejected server-side');
+    expect(ui).toContain('Preview transform rows');
+    expect(ui).toContain('Transform result rows');
+    expect(ui).toContain('sourceIngestTransformPreview');
+    expect(server).toContain('/admin/api/source-ingest/transform-preview');
     expect(ui).toContain('(!requiresSensitivityAck || sensitivityAck)');
   });
 });

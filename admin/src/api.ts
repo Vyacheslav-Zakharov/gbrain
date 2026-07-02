@@ -62,5 +62,6 @@ export const api = {
   sourceIngestDiscover: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/discover', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestDraft: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/draft', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestDryRun: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/dry-run', { method: 'POST', body: JSON.stringify(payload) }),
+  sourceIngestTransformPreview: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/transform-preview', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestApproveProfile: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/approve-profile', { method: 'POST', body: JSON.stringify(payload) }),
 };

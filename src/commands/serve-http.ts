@@ -44,6 +44,7 @@ import {
   type IngestionEvent,
 } from '../core/ingestion/types.ts';
 import { getSourceConnectorSecretConfig } from '../core/source-ingest/connector-config.ts';
+import { buildProfileSampleRecords } from '../core/source-ingest/source-fetch.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -1269,6 +1270,29 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
       const out = await operationsByName.source_dry_run.handler(ctx, { profile: req.body.profile, sample_limit, connector_config: ui.connector_config });
       res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/transform-preview', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    try {
+      if (!req.body?.profile || typeof req.body.profile !== 'object') {
+        res.status(400).json({ error: 'profile_required' });
+        return;
+      }
+      const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
+      const profile = req.body.profile as Record<string, unknown>;
+      const connector = typeof profile.source_connector === 'string' ? profile.source_connector : 'appsheet-vehicles';
+      const object = typeof profile.source_object === 'string' ? profile.source_object : 'vehicle';
+      const ui = await sourceIngestUiConfig({ ...(req.body || {}) as Record<string, unknown>, connector_id: connector, source_object: object });
+      const records = await buildProfileSampleRecords(req.body.profile, sample_limit, {
+        engine,
+        connectorConfigOverride: ui.connector_config as Record<string, unknown>,
+        defaultConnector: connector,
+        defaultObject: object,
+      });
+      res.json({ ok: true, count: records.length, records: records.map(r => ({ external_id: r.external_id, source_updated_at: r.source_updated_at, data: r.data })) });
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
     }

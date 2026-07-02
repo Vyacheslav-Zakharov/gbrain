@@ -130,6 +130,23 @@ function defaultTransformSources(form: ReviewForm, fields: string[]): string {
   ], null, 2);
 }
 
+function TransformResultPreview({ value }: { value: unknown }) {
+  const v = asObj(value);
+  if (!value) return <div style={{ color: 'var(--text-muted)' }}>No transform preview yet.</div>;
+  const records = asArr<Record<string, unknown>>(v.records);
+  if (v.error) return <div style={{ color: 'var(--error)' }}>{String(v.error)}</div>;
+  const keys = Array.from(new Set(records.flatMap(r => Object.keys(asObj(r.data))))).slice(0, 12);
+  return <div style={{ color: 'var(--text-secondary)' }}>
+    <div style={{ marginBottom: 8 }}><b>Transform result rows</b>: {val(v.count)}</div>
+    {records.length === 0 ? <div style={{ color: 'var(--warning)' }}>SQL returned no rows.</div> : <table><thead><tr><th>external_id</th>{keys.map(k => <th key={k}>{k}</th>)}</tr></thead><tbody>
+      {records.slice(0, 10).map((r, i) => {
+        const data = asObj(r.data);
+        return <tr key={i}><td className="mono">{val(r.external_id)}</td>{keys.map(k => <td key={k} className="mono">{val(data[k])}</td>)}</tr>;
+      })}
+    </tbody></table>}
+  </div>;
+}
+
 function DiscoveryPreview({ value }: { value: unknown }) {
   const d = asObj(value);
   if (!value) return <div style={{ color: 'var(--text-muted)' }}>No discovery yet.</div>;
@@ -185,6 +202,7 @@ export function SourceIngestPage() {
   const [discovery, setDiscovery] = useState<unknown>(null);
   const [draft, setDraft] = useState<unknown>(null);
   const [dryRun, setDryRun] = useState<unknown>(null);
+  const [transformPreview, setTransformPreview] = useState<unknown>(null);
   const [dryRunSourceId, setDryRunSourceId] = useState<string | null>(null);
   const [sensitivityAck, setSensitivityAck] = useState(false);
   const [approveResult, setApproveResult] = useState<unknown>(null);
@@ -262,6 +280,7 @@ export function SourceIngestPage() {
     return raw;
   }, [activeProfile, articleSections, selectedSourceFields, transformConfig]);
   const canDryRun = Boolean(profileForReview);
+  const canTransformPreview = Boolean(profileForReview && transformEnabled && transformSources.length > 0 && transformSql.trim());
   const dryRunSensitivity = asObj(asObj(dryRun).routing_sensitivity);
   const dryRunPiiFields = asArr(dryRunSensitivity.pii_fields).map(String);
   const dryRunHasPii = dryRunSensitivity.pii === true || dryRunPiiFields.length > 0;
@@ -373,6 +392,7 @@ export function SourceIngestPage() {
     if (!transformSourcesText) setTransformSourcesText(defaultTransformSources(form, selected));
     if (!articleDirty) setArticleSections(makeDefaultArticleSections(selected));
     setDryRun(null);
+    setTransformPreview(null);
     setDryRunSourceId(null);
     setApproveResult(null);
   });
@@ -388,6 +408,7 @@ export function SourceIngestPage() {
     if (!articleDirty && Object.keys(sections).length > 0) setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])) });
     setDraft(out);
     setDryRun(null);
+    setTransformPreview(null);
     setDryRunSourceId(null);
     setSensitivityAck(false);
     setApproveResult(null);
@@ -397,6 +418,7 @@ export function SourceIngestPage() {
     setArticleDirty(true);
     setArticleSections(prev => ({ ...prev, [key]: value }));
     setDryRun(null);
+    setTransformPreview(null);
     setDryRunSourceId(null);
     setSensitivityAck(false);
     setApproveResult(null);
@@ -414,6 +436,7 @@ export function SourceIngestPage() {
       return next;
     });
     setDryRun(null);
+    setTransformPreview(null);
     setDryRunSourceId(null);
     setSensitivityAck(false);
     setApproveResult(null);
@@ -423,16 +446,23 @@ export function SourceIngestPage() {
     setSelectedSourceFields(fields);
     if (!articleDirty) setArticleSections(makeDefaultArticleSections(fields));
     setDryRun(null);
+    setTransformPreview(null);
     setDryRunSourceId(null);
     setApproveResult(null);
   };
 
   const invalidateTransformPreview = () => {
     setDryRun(null);
+    setTransformPreview(null);
     setDryRunSourceId(null);
     setSensitivityAck(false);
     setApproveResult(null);
   };
+
+  const runTransformPreview = async () => runStep('transform-preview', async () => {
+    if (!profileForReview) return;
+    setTransformPreview(await api.sourceIngestTransformPreview({ profile: profileForReview, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
+  });
 
   const runDryRun = async () => runStep('dry-run', async () => {
     if (!profileForReview) return;
@@ -607,6 +637,13 @@ export function SourceIngestPage() {
           <div style={{ gridColumn: '1 / -1', color: transformSources.length > 0 && transformSql.trim() ? 'var(--text-muted)' : 'var(--warning)', fontSize: 12 }}>
             Parsed sources: {transformSources.length}. SQL is sent only inside profile dry-run/approval; mutating SQL is rejected server-side.
           </div>
+          <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 10, alignItems: 'center' }}>
+            <button className="btn btn-secondary" disabled={busy !== null || !canTransformPreview} onClick={() => void runTransformPreview()}>{busy === 'transform-preview' ? 'Previewing transform…' : 'Preview transform rows'}</button>
+            <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Inspect SQL result before article mapping and approval.</span>
+          </div>
+          {transformPreview !== null && <div style={{ gridColumn: '1 / -1', border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+            <TransformResultPreview value={transformPreview} />
+          </div>}
         </div>}
       </section>
 
