@@ -499,7 +499,11 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name='source_sync_state') AS source_sync_state_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema='public' AND table_name='source_sync_state' AND column_name='managed_block_hash') AS source_sync_state_managed_block_hash_exists
+                WHERE table_schema='public' AND table_name='source_sync_state' AND column_name='managed_block_hash') AS source_sync_state_managed_block_hash_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='source_ingest_profiles') AS source_ingest_profiles_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='source_ingest_run_items') AS source_ingest_run_items_exists
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
@@ -544,6 +548,8 @@ export class PGLiteEngine implements BrainEngine {
       pages_links_extracted_at_exists: boolean;
       source_sync_state_exists: boolean;
       source_sync_state_managed_block_hash_exists: boolean;
+      source_ingest_profiles_exists: boolean;
+      source_ingest_run_items_exists: boolean;
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
@@ -624,6 +630,9 @@ export class PGLiteEngine implements BrainEngine {
     // Existing v120 brains have source_sync_state already, so CREATE TABLE IF
     // NOT EXISTS in the schema blob is a no-op and cannot add the column.
     const needsSourceSyncManagedBlockHash = probe.source_sync_state_exists && !probe.source_sync_state_managed_block_hash_exists;
+    // v125 (source_ingest_run_items_backfill): repair brains stamped at v120+
+    // before the append-only run ledger table was folded into v120.
+    const needsSourceIngestRunItems = probe.source_ingest_profiles_exists && !probe.source_ingest_run_items_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -636,7 +645,8 @@ export class PGLiteEngine implements BrainEngine {
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
         && !needsPagesLinksExtractedAt
-        && !needsSourceSyncManagedBlockHash) return;
+        && !needsSourceSyncManagedBlockHash
+        && !needsSourceIngestRunItems) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -890,6 +900,37 @@ export class PGLiteEngine implements BrainEngine {
       // visible before schema replay and early post-init code paths.
       await this.db.exec(`
         ALTER TABLE source_sync_state ADD COLUMN IF NOT EXISTS managed_block_hash TEXT;
+      `);
+    }
+
+    if (needsSourceIngestRunItems) {
+      // v125: append-only source-ingest run ledger. Existing v120 brains can
+      // have profiles/sync state but no run ledger because the DDL was folded
+      // into an already-applied migration. Create the table before schema replay
+      // and before v123/v125 migration SQL can reference it.
+      await this.db.exec(`
+        CREATE TABLE IF NOT EXISTS source_ingest_run_items (
+          run_id              TEXT NOT NULL,
+          connector_id        TEXT NOT NULL,
+          source_object       TEXT NOT NULL,
+          external_id         TEXT NOT NULL,
+          slug                TEXT NOT NULL,
+          approved_source_id  TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+          profile_id          TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
+          profile_version     INTEGER NOT NULL,
+          action              TEXT NOT NULL CHECK (action IN ('created','updated','unchanged','skipped','failed')),
+          prior_version_id    BIGINT,
+          last_result         TEXT NOT NULL CHECK (last_result IN ('success','unchanged','skipped','failed')),
+          last_error          TEXT,
+          source_updated_at   TIMESTAMPTZ,
+          source_hash         TEXT,
+          created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (run_id, connector_id, source_object, external_id)
+        );
+        CREATE INDEX IF NOT EXISTS source_ingest_run_items_run_idx
+          ON source_ingest_run_items (run_id, approved_source_id, slug);
+        CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
+          ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
       `);
     }
   }

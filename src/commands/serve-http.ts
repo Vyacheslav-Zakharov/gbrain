@@ -45,6 +45,7 @@ import {
 } from '../core/ingestion/types.ts';
 import { getSourceConnectorSecretConfig } from '../core/source-ingest/connector-config.ts';
 import { buildProfileSampleRecords } from '../core/source-ingest/source-fetch.ts';
+import { profileHash } from '../core/source-ingest/store.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -593,6 +594,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     standardHeaders: true,
     legacyHeaders: false,
     message: 'Too many magic-link attempts. Wait a minute before trying again.',
+  });
+
+  const mcpRateLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { jsonrpc: '2.0', error: { code: -32000, message: 'Too many MCP requests. Try again in a minute.' }, id: null },
   });
 
   app.post('/token', ccRateLimiter, express.urlencoded({ extended: false }), async (req, res, next) => {
@@ -1259,6 +1268,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  const sourceIngestDryRunApprovals = new Map<string, { profile_hash: string; approved_source_id: string; ack: boolean; requires_ack: boolean; at: number }>();
+  const sourceIngestDryRunKey = (req: Request) => String(req.cookies?.gbrain_admin || req.ip || 'admin-local');
+
   app.post('/admin/api/source-ingest/dry-run', requireAdmin, express.json(), async (req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
     try {
@@ -1267,8 +1279,26 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         return;
       }
       const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
-      const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
+      const profile = req.body.profile as Record<string, unknown>;
+      const connector = typeof profile.source_connector === 'string' ? profile.source_connector : 'appsheet-vehicles';
+      const object = typeof profile.source_object === 'string' ? profile.source_object : 'vehicle';
+      const ui = await sourceIngestUiConfig({ ...(req.body || {}) as Record<string, unknown>, connector_id: connector, source_object: object });
       const out = await operationsByName.source_dry_run.handler(ctx, { profile: req.body.profile, sample_limit, connector_config: ui.connector_config });
+      const outObj = out as Record<string, unknown>;
+      if (typeof outObj.profile_hash === 'string' && outObj.ok !== false) {
+        const sensitivity = (outObj.routing_sensitivity && typeof outObj.routing_sensitivity === 'object') ? outObj.routing_sensitivity as Record<string, unknown> : {};
+        const piiFields = Array.isArray(sensitivity.pii_fields) ? sensitivity.pii_fields : [];
+        const approvedSourceId = String(ui.target_source_id);
+        const routedSource = typeof sensitivity.approved_source_id === 'string' ? sensitivity.approved_source_id : approvedSourceId;
+        const requiresAck = sensitivity.pii === true || piiFields.length > 0 || routedSource !== approvedSourceId;
+        sourceIngestDryRunApprovals.set(sourceIngestDryRunKey(req), {
+          profile_hash: outObj.profile_hash,
+          approved_source_id: approvedSourceId,
+          ack: req.body?.sensitivity_ack === true,
+          requires_ack: requiresAck,
+          at: Date.now(),
+        });
+      }
       res.json(out);
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
@@ -1310,6 +1340,33 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         res.status(400).json({ error: 'approved_source_id_required' });
         return;
       }
+      const dry_run_profile_hash = typeof req.body?.profile_hash === 'string' ? req.body.profile_hash : undefined;
+      if (!dry_run_profile_hash) {
+        res.status(400).json({ error: 'profile_hash_required' });
+        return;
+      }
+      const actualProfileHash = profileHash(req.body.profile as any);
+      if (dry_run_profile_hash !== actualProfileHash) {
+        res.status(409).json({ error: 'profile_hash_mismatch', profile_hash: dry_run_profile_hash, actual_profile_hash: actualProfileHash });
+        return;
+      }
+      const lastDryRun = sourceIngestDryRunApprovals.get(sourceIngestDryRunKey(req));
+      if (!lastDryRun || lastDryRun.profile_hash !== dry_run_profile_hash) {
+        res.status(409).json({ error: 'dry_run_profile_hash_mismatch', profile_hash: dry_run_profile_hash, last_profile_hash: lastDryRun?.profile_hash ?? null });
+        return;
+      }
+      if (lastDryRun.approved_source_id !== approved_source_id) {
+        res.status(409).json({ error: 'dry_run_source_mismatch', dry_run_target_source_id: lastDryRun.approved_source_id, approved_source_id });
+        return;
+      }
+      if (req.body?.sensitivity_ack === true) {
+        lastDryRun.ack = true;
+        sourceIngestDryRunApprovals.set(sourceIngestDryRunKey(req), lastDryRun);
+      }
+      if (lastDryRun.requires_ack && !lastDryRun.ack) {
+        res.status(409).json({ error: 'sensitivity_ack_required' });
+        return;
+      }
       const dry_run_target_source_id = typeof req.body?.dry_run_target_source_id === 'string' ? req.body.dry_run_target_source_id : undefined;
       if (dry_run_target_source_id && dry_run_target_source_id !== approved_source_id) {
         res.status(409).json({ error: 'dry_run_source_mismatch', dry_run_target_source_id, approved_source_id });
@@ -1319,6 +1376,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         profile: req.body.profile,
         approve: true,
         approved_source_id,
+        profile_hash: dry_run_profile_hash,
         approved_by: 'admin-ui',
         change_note: typeof req.body?.change_note === 'string' ? req.body.change_note : 'approved from admin source-ingest UI',
       });
@@ -1740,7 +1798,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
   });
 
-  app.post('/mcp', requireBearerAuth({ verifier: oauthProvider }), async (req: Request, res: Response) => {
+  app.post('/mcp', mcpRateLimiter, requireBearerAuth({ verifier: oauthProvider }), async (req: Request, res: Response) => {
     const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;
 

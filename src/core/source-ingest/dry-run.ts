@@ -65,6 +65,31 @@ function managedBody(profile: SourceIngestProfile, record: SourceRecord): string
   return lines.join('\n');
 }
 
+const PII_MASK = '[PII masked]';
+
+function maskPiiData(data: Record<string, unknown>, piiFields: string[]): Record<string, unknown> {
+  const pii = new Set(piiFields.filter(Boolean));
+  if (pii.size === 0) return data;
+  const visit = (value: unknown, path: string): unknown => {
+    if (pii.has(path)) return PII_MASK;
+    if (Array.isArray(value)) return value.map((v, i) => visit(v, `${path}.${i}`));
+    if (value && typeof value === 'object' && !(value instanceof Date)) {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([k, v]) => {
+        const childPath = path ? `${path}.${k}` : k;
+        return [k, pii.has(k) || pii.has(childPath) ? PII_MASK : visit(v, childPath)];
+      }));
+    }
+    return value;
+  };
+  return visit(data, '') as Record<string, unknown>;
+}
+
+function maskRecordForPreview(profile: SourceIngestProfile, record: SourceRecord): SourceRecord {
+  const fields = profile.security.pii_fields || [];
+  if (!profile.security.pii && fields.length === 0) return record;
+  return { ...record, data: maskPiiData(record.data, fields) };
+}
+
 function samplePage(profile: SourceIngestProfile, record: SourceRecord) {
   const slug = renderSlugTemplate(profile.target.slug_template, record.data);
   const externalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
@@ -172,7 +197,7 @@ export function buildSourceDryRun(profile: SourceIngestProfile, sample: SourceRe
     if (decision.include) candidates.push(record);
     else skipped.push({ external_id: record.external_id, reason: decision.reason || 'filtered' });
   }
-  const pages = candidates.map(r => samplePage(profile, r));
+  const pages = candidates.map(r => samplePage(profile, maskRecordForPreview(profile, r)));
   const linkRules = (profile.links || []).map(rule => summarizeLinkRule(rule, candidates));
   const slugCollisions = detectSlugCollisions(pages);
   return {

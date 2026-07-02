@@ -5545,10 +5545,18 @@ export const MIGRATIONS: Migration[] = [
       BEGIN
         SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
         IF has_bypass THEN
-          ALTER TABLE source_ingest_run_items ENABLE ROW LEVEL SECURITY;
-          ALTER TABLE source_connector_configs ENABLE ROW LEVEL SECURITY;
-          ALTER TABLE source_connector_secrets ENABLE ROW LEVEL SECURITY;
-          ALTER TABLE source_connector_secret_audit ENABLE ROW LEVEL SECURITY;
+          IF to_regclass('public.source_ingest_run_items') IS NOT NULL THEN
+            ALTER TABLE source_ingest_run_items ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_connector_configs') IS NOT NULL THEN
+            ALTER TABLE source_connector_configs ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_connector_secrets') IS NOT NULL THEN
+            ALTER TABLE source_connector_secrets ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_connector_secret_audit') IS NOT NULL THEN
+            ALTER TABLE source_connector_secret_audit ENABLE ROW LEVEL SECURITY;
+          END IF;
         END IF;
       END $$;
     `,
@@ -5568,6 +5576,39 @@ export const MIGRATIONS: Migration[] = [
          SET managed_block_hash = content_fingerprint
        WHERE managed_block_hash IS NULL
          AND content_fingerprint IS NOT NULL;
+    `,
+  },
+  {
+    version: 125,
+    name: 'source_ingest_run_items_backfill',
+    // Safety repair for brains that applied v120 before the append-only run
+    // ledger DDL was folded into it. Such brains are stamped >=120 but lack
+    // source_ingest_run_items; keep this idempotent and do not rewrite v120
+    // history.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS source_ingest_run_items (
+        run_id              TEXT NOT NULL,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        external_id         TEXT NOT NULL,
+        slug                TEXT NOT NULL,
+        approved_source_id  TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+        profile_id          TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
+        profile_version     INTEGER NOT NULL,
+        action              TEXT NOT NULL CHECK (action IN ('created','updated','unchanged','skipped','failed')),
+        prior_version_id    BIGINT,
+        last_result         TEXT NOT NULL CHECK (last_result IN ('success','unchanged','skipped','failed')),
+        last_error          TEXT,
+        source_updated_at   TIMESTAMPTZ,
+        source_hash         TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (run_id, connector_id, source_object, external_id)
+      );
+      CREATE INDEX IF NOT EXISTS source_ingest_run_items_run_idx
+        ON source_ingest_run_items (run_id, approved_source_id, slug);
+      CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
+        ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
     `,
   },
 ];

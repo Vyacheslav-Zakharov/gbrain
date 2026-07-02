@@ -23,10 +23,12 @@ import { runCycle } from '../src/core/cycle.ts';
 import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
 import { draftSourceIngestProfile } from '../src/core/source-ingest/draft.ts';
 import { buildProfileSampleRecords } from '../src/core/source-ingest/source-fetch.ts';
+import { executeSourceTransform } from '../src/core/source-ingest/transform.ts';
 import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { operationsByName } from '../src/core/operations.ts';
 
 let engine: PGLiteEngine;
 const tempDirs: string[] = [];
@@ -190,6 +192,65 @@ describe('source-ingest Stage 3A executor', () => {
     expect(out.sample_pages[0].article_empty_slots).toEqual([]);
   });
 
+  test('dry-run masks PII fields in expanded server preview', () => {
+    const piiProfile: SourceIngestProfile = {
+      ...profile,
+      security: { ...profile.security, pii: true, pii_fields: ['name', 'vin', 'owner.email'] },
+      mapping: {
+        ...profile.mapping,
+        article_template: {
+          sections: {
+            title: '{{ name }}',
+            summary: 'VIN {{ vin }} owner {{ owner.email }} code {{ code }}',
+          },
+        },
+      },
+      update_policy: { ...profile.update_policy, field_allowlist: ['code', 'name', 'vin', 'owner.email'] },
+    };
+    const out = buildSourceDryRun(piiProfile, [{
+      external_id: 'veh-pii',
+      source_updated_at: null,
+      data: { id: 'veh-pii', code: 'A-PII', name: 'Secret Driver', vin: 'VIN-SECRET-123', owner: { email: 'secret@example.com' } },
+    }]);
+    const raw = JSON.stringify(out.sample_pages[0]);
+    expect(raw).toContain('[PII masked]');
+    expect(raw).not.toContain('Secret Driver');
+    expect(raw).not.toContain('VIN-SECRET-123');
+    expect(raw).not.toContain('secret@example.com');
+    expect(raw).toContain('A-PII');
+  });
+
+  test('source_dry_run returns profile_hash and source_profile_put approve requires matching dry-run hash', async () => {
+    const ctx = { engine, config: {}, logger: console, sourceId: 'default', remote: false, dryRun: false } as any;
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES ($1,$2,$3,'{"federated": true}'::jsonb)
+       ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+      ['shared', 'shared', tempGitRepo()],
+    );
+    const dry = await operationsByName.source_dry_run.handler({ ...ctx, dryRun: true }, { profile, sample_limit: 2 });
+    const dryHash = String((dry as Record<string, unknown>).profile_hash);
+    expect(dryHash).toBe(profileHash(profile));
+
+    await expect(operationsByName.source_profile_put.handler(ctx, {
+      profile,
+      approve: true,
+      approved_source_id: 'shared',
+      approved_by: 'test',
+    })).rejects.toThrow('profile_hash from the last dry-run is required');
+
+    await expect(operationsByName.source_profile_put.handler(ctx, {
+      profile,
+      approve: true,
+      approved_source_id: 'shared',
+      approved_by: 'test',
+      profile_hash: 'bad-hash',
+    })).rejects.toThrow('profile_hash_mismatch');
+  });
+
+  test('source-ingest uses the same per-source lock namespace as gbrain sync', () => {
+    expect(sourceIngestLockId('shared')).toBe('gbrain-sync:shared');
+  });
+
   test('SQL transform can join multiple source objects and aggregate before dry-run mapping', async () => {
     const transformedProfile: SourceIngestProfile = {
       ...profile,
@@ -247,6 +308,119 @@ describe('source-ingest Stage 3A executor', () => {
     const page = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
     expect(page?.compiled_truth).toContain('активных актов: 2');
   });
+
+  test('SQL transform enforces row cap before materializing preview samples', async () => {
+    const manyRowsProfile: SourceIngestProfile = {
+      ...profile,
+      profile_id: 'fake-source-transform-rowcap-v1',
+      transform: {
+        engine: 'pglite',
+        primary_key_field: 'id',
+        sources: [{ alias: 'vehicles', connector: 'fake-source', object: 'vehicle', fields: ['id', 'code', 'is_group'] }],
+        sql: `
+          SELECT v.id || '-' || gs.n AS id, v.code, gs.n
+          FROM vehicles v
+          CROSS JOIN generate_series(1, 10) AS gs(n)
+          WHERE v.is_group = false
+          ORDER BY v.code, gs.n
+        `,
+      },
+    };
+
+    await expect(buildProfileSampleRecords(manyRowsProfile, 2, { defaultConnector: 'fake-source', defaultObject: 'vehicle' }))
+      .rejects.toThrow('transform_row_cap_exceeded: result exceeds 2 rows');
+  });
+
+  test('SQL transform aborts long-running work without blocking other JS timers', async () => {
+    const started = Date.now();
+    const timer = new Promise<'timer'>(resolve => setTimeout(() => resolve('timer'), 20));
+    const transform = executeSourceTransform(
+      {
+        engine: 'pglite',
+        primary_key_field: 'n',
+        sources: [{ alias: 'source', object: 'vehicle' }],
+        sql: 'SELECT n FROM generate_series(1, 1000000000) AS gs(n)',
+      },
+      async () => [],
+      { timeoutMs: 100, rowLimit: 1000 },
+    );
+
+    await expect(timer).resolves.toBe('timer');
+    await expect(transform).rejects.toThrow('transform_timeout: exceeded 100ms');
+    expect(Date.now() - started).toBeLessThan(3_000);
+  }, 5000);
+
+  test('SQL transform coerces timestamptz updated_at_field into source_updated_at', async () => {
+    const result = await executeSourceTransform(
+      {
+        engine: 'pglite',
+        primary_key_field: 'id',
+        updated_at_field: 'updated_at',
+        sources: [{ alias: 'source', object: 'vehicle' }],
+        sql: `SELECT 'veh-ts'::text AS id, max(ts)::timestamptz AS updated_at FROM (VALUES ('2026-07-01T10:00:00Z'::timestamptz)) AS t(ts)`,
+      },
+      async () => [],
+    );
+    expect(result.records[0].source_updated_at).toBe('2026-07-01T10:00:00.000Z');
+  });
+
+  test('SQL transform rejects missing and null primary keys instead of row-N fallback', async () => {
+    await expect(executeSourceTransform(
+      {
+        engine: 'pglite',
+        sources: [{ alias: 'source', object: 'vehicle' }],
+        sql: 'SELECT 1 AS id',
+      },
+      async () => [],
+    )).rejects.toThrow('invalid transform SQL: primary_key_field_required');
+
+    await expect(executeSourceTransform(
+      {
+        engine: 'pglite',
+        primary_key_field: 'id',
+        sources: [{ alias: 'source', object: 'vehicle' }],
+        sql: 'SELECT NULL::text AS id',
+      },
+      async () => [],
+    )).rejects.toThrow('transform_primary_key_missing: id');
+  });
+
+  test('failed rows are retried on next transform run', async () => {
+    const repo = tempGitRepo();
+    mkdirSync(join(repo, 'source-ingest/vehicles/a-002.md'), { recursive: true });
+    writeFileSync(join(repo, 'source-ingest/vehicles/a-002.md/placeholder'), 'untracked directory conflict for transform retry\n');
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES ($1,$2,$3,'{"federated": true}'::jsonb)
+       ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+      ['shared', 'shared', repo],
+    );
+    const transformedProfile: SourceIngestProfile = {
+      ...profile,
+      profile_id: 'fake-source-transform-retry-v1',
+      transform: {
+        engine: 'pglite',
+        primary_key_field: 'id',
+        updated_at_field: 'updated_at',
+        sources: [{ alias: 'vehicles', connector: 'fake-source', object: 'vehicle', fields: ['id', 'code', 'name', 'status', 'is_group', 'updated_at'] }],
+        sql: `SELECT id, code, name, status, updated_at FROM vehicles WHERE is_group = false ORDER BY code`,
+      },
+    };
+    await putSourceIngestProfile(engine, transformedProfile, { createdBy: 'test', changeNote: 'transform-retry-seed' });
+
+    const first = await runSourceIngestExecutor(engine, { profile_id: transformedProfile.profile_id, run_id: 'run-transform-partial-fail', require_clean_git: false, no_embed: true });
+    expect(first.ok).toBe(false);
+    expect(first.results.find(r => r.external_id === 'veh-002')?.status).toBe('failed');
+    rmSync(join(repo, 'source-ingest/vehicles/a-002.md'), { recursive: true, force: true });
+
+    const second = await runSourceIngestExecutor(engine, { profile_id: transformedProfile.profile_id, run_id: 'run-transform-retry', changed_since: true, require_clean_git: false, no_embed: true });
+    expect(second.results.find(r => r.external_id === 'veh-002')?.status).toBe('written');
+    const retried = await engine.executeRaw<{ run_id: string; last_result: string }>(
+      `SELECT run_id, last_result FROM source_sync_state WHERE profile_id = $1 AND external_id = 'veh-002'`,
+      [transformedProfile.profile_id],
+    );
+    expect(retried[0]).toEqual({ run_id: 'run-transform-retry', last_result: 'success' });
+    expect(await engine.getPage('source-ingest/vehicles/a-002', { sourceId: 'shared' })).toBeTruthy();
+  }, 30000);
 
   test('second identical run is unchanged and preserves page content_hash', async () => {
     const repo = tempGitRepo();
@@ -317,6 +491,27 @@ describe('source-ingest Stage 3A executor', () => {
     const refreshed = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
     expect(refreshed?.compiled_truth).toContain('- status: active');
   }, 30000);
+
+  test('blocks transform sub-sources that are not fake-source in Stage 3A', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    const badProfile: SourceIngestProfile = {
+      ...profile,
+      profile_id: 'fake-source-transform-bad',
+      transform: {
+        engine: 'pglite',
+        primary_key_field: 'id',
+        sources: [
+          { alias: 'vehicles', connector: 'appsheet-vehicles', object: 'vehicle', fields: ['id', 'code'] },
+        ],
+        sql: 'SELECT id, code FROM vehicles',
+      },
+    };
+    await putSourceIngestProfile(engine, badProfile, { createdBy: 'test', changeNote: 'bad transform connector' });
+
+    await expect(runSourceIngestExecutor(engine, { profile_id: badProfile.profile_id, run_id: 'run-transform-bad', no_embed: true }))
+      .rejects.toThrow('Stage 3A executor only allows fake-source transform sources: vehicles uses appsheet-vehicles');
+  });
 
   test('resumes from op-checkpoint and skips completed external refs', async () => {
     const repo = tempGitRepo();
@@ -637,6 +832,24 @@ describe('source-ingest Stage 3A executor', () => {
     expect(JSON.stringify(calls[0].body)).not.toContain('secret');
   });
 
+  test('AppSheet connector validates changed-since timestamp before building Selector', async () => {
+    let called = false;
+    const fetchImpl = (async () => {
+      called = true;
+      return new Response('[]', { status: 200 });
+    }) as unknown as typeof fetch;
+    const connector = new AppSheetVehicleConnector({ appId: 'app', accessKey: 'secret', tableName: 'Автотранспорт', baseUrl: 'https://203.0.113.10/api/v2/apps', fetchImpl });
+
+    const err = await (async () => {
+      for await (const _batch of connector.fetchChangedSince('vehicle', '2026-07-01T10:00:00Z" OR TRUE')) {
+        // no-op
+      }
+    })().catch(e => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(String(err.message)).toContain('invalid AppSheet changed-since timestamp');
+    expect(called).toBe(false);
+  });
+
   test('AppSheet connector rejects internal base_url before credentialed fetch', async () => {
     let called = false;
     const fetchImpl = (async () => {
@@ -661,6 +874,11 @@ describe('source-ingest Stage 3A executor', () => {
     const rec = rowToVehicleRecord({ ID: 'car-1', ГосНомер: '777ABC02', Модель: 'MAN TGS', ДатаИзменения: '2026-06-30T10:00:00+05:00' });
     expect(rec).toMatchObject({ external_id: 'car-1', source_updated_at: '2026-06-30T10:00:00+05:00' });
     expect(rec.data).toMatchObject({ id: 'car-1', code: '777ABC02', name: 'MAN TGS', type: 'vehicle', is_group: false });
+  });
+
+  test('AppSheet vehicle connector fails closed when no stable id column exists', () => {
+    expect(() => rowToVehicleRecord({ Модель: 'MAN TGS', ДатаИзменения: '2026-06-30T10:00:00+05:00' }))
+      .toThrow('AppSheet vehicle row is missing a stable identity column');
   });
 
   test('source-ingest minion handler parses payload, updates progress, and runs executor', async () => {

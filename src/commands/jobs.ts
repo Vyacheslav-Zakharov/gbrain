@@ -1890,7 +1890,9 @@ export async function registerBuiltinHandlers(
     // GC stale op_checkpoints rows (folded scope item +C from review).
     const { purgeStaleCheckpoints } = await import('../core/op-checkpoint.ts');
     const checkpointsPurged = await purgeStaleCheckpoints(engine, 7);
-    return { pagesPurged, sourcesPurged, checkpointsPurged, dryRun };
+    const { purgeStaleSourceIngestRunItems } = await import('../core/source-ingest/ledger.ts');
+    const sourceIngestRunItemsPurged = await purgeStaleSourceIngestRunItems(engine, 7);
+    return { pagesPurged, sourcesPurged, checkpointsPurged, sourceIngestRunItemsPurged, dryRun };
   });
 
   // Phase-wrapper handlers — each delegates to runCycle({ phases: [name] }).

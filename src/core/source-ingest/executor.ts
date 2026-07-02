@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
-import { existsSync, rmSync } from 'fs';
+import { existsSync, lstatSync, readdirSync, rmSync } from 'fs';
 import type { BrainEngine } from '../engine.ts';
 import { importFromContent } from '../import-file.ts';
 import { writePageThrough } from '../write-through.ts';
@@ -16,7 +16,8 @@ import { resolveSourceIngestStorageMode, type SourceIngestStorageMode } from './
 import { nextStaleAfter } from './freshness.ts';
 import { getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
 import { buildProfileAllRecords } from './source-fetch.ts';
-import { LockUnavailableError, withRefreshingLock } from '../db-lock.ts';
+import { normalizeTransformConfig } from './transform.ts';
+import { LockUnavailableError, withRefreshingLock, syncLockId } from '../db-lock.ts';
 
 export interface SourceIngestExecutorOptions {
   profile_id: string;
@@ -52,7 +53,19 @@ export interface SourceIngestExecutorResult {
 }
 
 export function sourceIngestLockId(sourceId: string): string {
-  return `source-ingest:${sourceId}`;
+  return syncLockId(sourceId);
+}
+
+function assertStage3AFakeSourceOnly(profile: SourceIngestProfile): void {
+  if (profile.source_connector !== 'fake-source') throw new Error('Stage 3A executor only allows fake-source');
+  const transform = normalizeTransformConfig(profile.transform);
+  if (!transform) return;
+  for (const source of transform.sources) {
+    const connector = source.connector || profile.source_connector;
+    if (connector !== 'fake-source') {
+      throw new Error(`Stage 3A executor only allows fake-source transform sources: ${source.alias} uses ${connector}`);
+    }
+  }
 }
 
 interface ProfileRow {
@@ -280,8 +293,18 @@ function cleanupUncommittedPath(localPath: string, relPath: string) {
     execFileSync('git', ['-C', localPath, 'restore', '--staged', '--worktree', '--', relPath], { encoding: 'utf8' });
   } catch {}
   if (!tracked) {
-    const abs = `${localPath.replace(/\/$/, '')}/${relPath}`;
-    if (existsSync(abs)) rmSync(abs, { force: true });
+    const root = localPath.replace(/\/$/, '');
+    const abs = `${root}/${relPath}`;
+    if (existsSync(abs) && (!tracked || lstatSync(abs).isDirectory())) rmSync(abs, { recursive: true, force: true });
+    const slash = relPath.lastIndexOf('/');
+    const relDir = slash >= 0 ? relPath.slice(0, slash) : '';
+    const base = slash >= 0 ? relPath.slice(slash + 1) : relPath;
+    const absDir = relDir ? `${root}/${relDir}` : root;
+    if (existsSync(absDir)) {
+      for (const entry of readdirSync(absDir)) {
+        if (entry.startsWith(`${base}.tmp.`)) rmSync(`${absDir}/${entry}`, { recursive: true, force: true });
+      }
+    }
   }
 }
 
@@ -291,7 +314,7 @@ async function commitGitBackedRun(localPath: string, filePaths: string[], runId:
   execFileSync('git', ['-C', localPath, 'add', '--', ...unique], { encoding: 'utf8' });
   const status = execFileSync('git', ['-C', localPath, 'status', '--porcelain', '--', ...unique], { encoding: 'utf8' });
   if (!status.trim()) return { committed: false, reason: 'no_changes' };
-  execFileSync('git', ['-C', localPath, 'commit', '-m', `source-ingest run_id=${runId} profile=${profileId}`, '--', ...unique], { encoding: 'utf8' });
+  execFileSync('git', ['-C', localPath, 'commit', '-m', `source-ingest run_id=${runId} profile=${profileId}`], { encoding: 'utf8' });
   const sha = execFileSync('git', ['-C', localPath, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
   return { committed: true, sha };
 }
@@ -302,10 +325,10 @@ export async function runSourceIngestExecutor(
   logger: { warn(msg: string): void } = console,
 ): Promise<SourceIngestExecutorResult> {
   const { profile, version, hash } = await loadProfile(engine, opts.profile_id);
-  if (profile.source_connector !== 'fake-source') throw new Error('Stage 3A executor only allows fake-source');
+  assertStage3AFakeSourceOnly(profile);
   const sourceId = profile.target.approved_source_id;
   if (!sourceId) throw new Error('profile target approved_source_id is required');
-  const storage = await resolveSourceIngestStorageMode(engine, sourceId, {
+  let storage = await resolveSourceIngestStorageMode(engine, sourceId, {
     requireCleanGit: opts.require_clean_git ?? true,
     allowDbOnly: opts.allow_db_only ?? false,
   });
@@ -317,6 +340,14 @@ export async function runSourceIngestExecutor(
   const lockId = sourceIngestLockId(sourceId);
   try {
     return await withRefreshingLock(engine, lockId, async () => {
+      storage = await resolveSourceIngestStorageMode(engine, sourceId, {
+        requireCleanGit: opts.require_clean_git ?? true,
+        allowDbOnly: opts.allow_db_only ?? false,
+      });
+      if (storage.mode === 'blocked') {
+        return { ok: false, run_id: opts.run_id ?? `source-ingest-${new Date().toISOString()}`, profile_id: profile.profile_id, source_id: sourceId, storage, counts: { sampled: 0, written: 0, unchanged: 0, skipped: 0, failed: 0 }, results: [], graph_writes: 'deferred', checkpoint: { op: 'source_ingest', fingerprint: '', loaded: 0, cleared: false } };
+      }
+      if (storage.mode !== 'git-backed') throw new Error('Stage 3A executor requires git-backed source');
 
   const runId = opts.run_id ?? `source-ingest-${new Date().toISOString().replace(/[:.]/g, '')}`;
   const configId = `${profile.source_connector}:${profile.source_object}`;
@@ -481,7 +512,7 @@ export async function runSourceIngestExecutor(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (createdThisRecord) {
-        try { await engine.softDeletePage(renderedSlug, { sourceId }); } catch {}
+        try { await engine.deletePage(renderedSlug, { sourceId }); } catch {}
       }
       if (storage.mode === 'git-backed') cleanupUncommittedPath(storage.local_path, renderedPath);
       results.push({ external_id: record.external_id, slug: renderedSlug, status: 'failed', reason: msg });

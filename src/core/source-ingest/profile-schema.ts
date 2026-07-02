@@ -148,6 +148,7 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
       if (t.engine !== undefined && t.engine !== 'pglite') issues.push(issue('transform.engine', 'invalid_transform_engine', 'Only pglite transform engine is supported.'));
       if (typeof t.sql !== 'string' || !/^\s*(select|with)\b/i.test(t.sql)) issues.push(issue('transform.sql', 'invalid_transform_sql', 'Transform SQL must start with SELECT or WITH.'));
       if (typeof t.sql === 'string' && t.sql.trim().replace(/;\s*$/, '').includes(';')) issues.push(issue('transform.sql', 'multiple_statements', 'Only one transform SELECT statement is allowed.'));
+      if (typeof t.primary_key_field !== 'string' || !SQL_IDENT_RE.test(t.primary_key_field)) issues.push(issue('transform.primary_key_field', 'required', 'Transform profiles must define a stable primary_key_field.'));
       if (!Array.isArray(t.sources) || t.sources.length === 0) {
         issues.push(issue('transform.sources', 'required', 'Transform requires at least one source alias.'));
       } else {

@@ -5,6 +5,7 @@ import { validateSourceIngestProfile } from '../src/core/source-ingest/profile-s
 import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
 import { mergeManagedBlock, renderManagedBlock } from '../src/core/source-ingest/managed-block.ts';
 import { operationsByName, type OperationContext } from '../src/core/operations.ts';
+import { profileHash } from '../src/core/source-ingest/store.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
 const vehicleProfile = {
@@ -74,12 +75,15 @@ describe('source-ingest Stage 1 contract', () => {
     expect(second.content).not.toContain('Generated v1');
   });
 
-  test('operations are registered with read-side MCP-safe and write-side localOnly split', () => {
-    for (const name of ['source_discover', 'source_profile_draft', 'source_validate_profile', 'source_profile_get', 'source_dry_run', 'source_sync_status']) {
+  test('operations are registered with remote-safe read split and local-only dry-run/write gates', () => {
+    for (const name of ['source_discover', 'source_profile_draft', 'source_validate_profile', 'source_profile_get', 'source_sync_status']) {
       expect(operationsByName[name]).toBeTruthy();
       expect(operationsByName[name].scope).toBe('read');
       expect(operationsByName[name].localOnly).not.toBe(true);
     }
+    expect(operationsByName.source_dry_run).toBeTruthy();
+    expect(operationsByName.source_dry_run.scope).toBe('read');
+    expect(operationsByName.source_dry_run.localOnly).toBe(true);
     for (const name of ['source_profile_put', 'source_ingest', 'source_refresh', 'source_revert']) {
       expect(operationsByName[name]).toBeTruthy();
       expect(operationsByName[name].scope).toBe('write');
@@ -88,7 +92,11 @@ describe('source-ingest Stage 1 contract', () => {
   });
 
   test('source_dry_run returns rule-level counts, stratified samples, and managed-block previews', async () => {
-    const out = await operationsByName.source_dry_run.handler(ctx(), { profile: vehicleProfile, sample_limit: 10 }) as any;
+    const piiPreviewProfile = {
+      ...vehicleProfile,
+      update_policy: { ...vehicleProfile.update_policy, field_allowlist: [...vehicleProfile.update_policy.field_allowlist, 'plate'] },
+    };
+    const out = await operationsByName.source_dry_run.handler(ctx(), { profile: piiPreviewProfile, sample_limit: 10 }) as any;
     expect(out.ok).toBe(true);
     expect(out.dry_run).toBe(true);
     expect(out.counts.sampled).toBe(3);
@@ -101,6 +109,10 @@ describe('source-ingest Stage 1 contract', () => {
     expect(out.stratified_samples.worst_case.most_null_fields.external_id).toBeTruthy();
     expect(out.sample_pages[0].managed_block_preview).toContain('gbrain-source-sync:start');
     expect(out.sample_pages[0].slug).toBe('assets/equipment/a-001');
+    expect(out.sample_pages[0].managed_block_preview).not.toContain('001AAA02');
+    expect(out.sample_pages[0].article_markdown_preview).not.toContain('001AAA02');
+    expect(out.sample_pages[0].managed_block_preview).toContain('[PII masked]');
+    expect(out.sample_pages[0].article_markdown_preview).not.toContain('emp-001');
     expect(out.deferred_checks).toContain('cross_source_edge_resolution_deferred_until_target_resolver_stage');
     expect(out.deferred_checks).toContain('managed_block_before_after_diff_deferred_until_update_path');
     expect(out.warnings).toContain('shared_profile_has_pii_candidates');
@@ -139,10 +151,12 @@ describe('source-ingest Stage 1 contract', () => {
       },
     } as unknown as BrainEngine;
     const localCtx = { engine, config: { engine: 'pglite' }, logger: console, dryRun: false, remote: false, sourceId: 'shared' } as OperationContext;
+    const profileToApprove = { ...vehicleProfile, status: 'draft', target: { ...vehicleProfile.target, approved_source_id: undefined } };
     const out = await operationsByName.source_profile_put.handler(localCtx, {
-      profile: { ...vehicleProfile, status: 'draft', target: { ...vehicleProfile.target, approved_source_id: undefined } },
+      profile: profileToApprove,
       approve: true,
       approved_source_id: 'shared',
+      profile_hash: profileHash(profileToApprove as any),
       approved_by: 'tester',
       change_note: 'approve vehicle profile',
     }) as any;

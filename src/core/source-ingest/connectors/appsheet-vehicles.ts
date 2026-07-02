@@ -1,4 +1,3 @@
-import { randomUUID } from 'crypto';
 import { fetchWithSSRFGuard, validateAndResolveUrl } from '../../ssrf-validate.ts';
 import type { SourceConnector, SourceObjectDescriptor, SourceRecord, SourceRecordBatch, SourceFetchOptions } from './types.ts';
 
@@ -52,7 +51,7 @@ export class AppSheetVehicleConnector implements SourceConnector {
     }
     const url = `${this.baseUrl}/${encodeURIComponent(appId)}/tables/${encodeURIComponent(this.tableName)}/Action`;
     const selectorParts = opts.since
-      ? [`[updated_at] > "${opts.since}"`]
+      ? [`[updated_at] > ${JSON.stringify(normalizeAppSheetSince(opts.since))}`]
       : [];
     const requestedColumns = sourceFieldsToAppSheetColumns(opts.fields);
     const body: Record<string, unknown> = {
@@ -93,6 +92,18 @@ export class AppSheetVehicleConnector implements SourceConnector {
     if (target.originalHost) headers.set('Host', target.originalHost);
     return this.fetchImpl(target.resolvedUrl, { ...init, redirect: 'manual', headers });
   }
+}
+
+function normalizeAppSheetSince(since: string): string {
+  const trimmed = since.trim();
+  if (!trimmed || /["\\]/.test(trimmed)) {
+    throw new Error('invalid AppSheet changed-since timestamp');
+  }
+  const ms = Date.parse(trimmed);
+  if (!Number.isFinite(ms)) {
+    throw new Error('invalid AppSheet changed-since timestamp');
+  }
+  return new Date(ms).toISOString();
 }
 
 const VEHICLE_FIELD_COLUMN_MAP: Record<string, string[]> = {
@@ -141,7 +152,11 @@ function pick(row: Record<string, unknown>, names: string[]): unknown {
 }
 
 export function rowToVehicleRecord(row: Record<string, unknown>): SourceRecord {
-  const id = String(pick(row, ['id', 'ID', 'key', 'Key', 'код', 'Код']) ?? pick(row, ['plate', 'ГосНомер', 'госномер']) ?? randomUUID());
+  const rawId = pick(row, ['id', 'ID', 'key', 'Key', 'код', 'Код']) ?? pick(row, ['plate', 'ГосНомер', 'госномер']);
+  if (rawId === undefined || rawId === null || rawId === '') {
+    throw new Error('AppSheet vehicle row is missing a stable identity column; configure/allowlist id, ID, key, Key, код, Код, plate, or ГосНомер before ingest.');
+  }
+  const id = String(rawId);
   const updated = pick(row, ['updated_at', 'UpdatedAt', 'ДатаИзменения', 'modified_at']);
   const code = pick(row, ['code', 'Код', 'plate', 'ГосНомер', 'name', 'Наименование']) ?? id;
   const name = pick(row, ['name', 'Наименование', 'Марка', 'model', 'Модель']) ?? code;

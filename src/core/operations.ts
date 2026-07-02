@@ -52,7 +52,7 @@ import { buildSourceDryRun } from './source-ingest/dry-run.ts';
 import { buildProfileSampleRecords } from './source-ingest/source-fetch.ts';
 import { sourceIngestProfileJsonSchema } from './source-ingest/profile-schema.ts';
 import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
-import { listSourceIngestProfiles, putSourceIngestProfile } from './source-ingest/store.ts';
+import { listSourceIngestProfiles, putSourceIngestProfile, profileHash } from './source-ingest/store.ts';
 import {
   deleteSourceConnectorSecrets,
   getSourceConnectorSecretConfig,
@@ -3057,6 +3057,7 @@ const source_profile_put: Operation = {
     approve: { type: 'boolean', description: 'When true, require/freeze approved_source_id and mark profile reviewed unless already active.' },
     approved_source_id: { type: 'string', description: 'Source id to freeze on approval' },
     approved_by: { type: 'string', description: 'Reviewer identity' },
+    profile_hash: { type: 'string', description: 'Profile hash returned by the last dry-run preview; required for approve=true.' },
     change_note: { type: 'string', description: 'Version note' },
   },
   handler: async (ctx, p) => {
@@ -3064,6 +3065,13 @@ const source_profile_put: Operation = {
     const raw = { ...(p.profile as Record<string, unknown>) } as Record<string, unknown>;
     const target = { ...((raw.target as Record<string, unknown>) || {}) };
     if (p.approve) {
+      if (typeof p.profile_hash !== 'string' || !p.profile_hash) throw new OperationError('invalid_params', 'profile_hash from the last dry-run is required when approve=true.');
+      const preApprovalValidation = await validateSourceIngestProfileAgainstBrain(ctx.engine, raw);
+      if (!preApprovalValidation.ok || !preApprovalValidation.profile) return { ok: false, validation: preApprovalValidation };
+      const actualPreApprovalHash = profileHash(preApprovalValidation.profile);
+      if (p.profile_hash !== actualPreApprovalHash) {
+        throw new OperationError('conflict', 'profile_hash_mismatch: run dry-run preview again before approving this profile.');
+      }
       const approvedSourceId = (p.approved_source_id as string | undefined) || (target.approved_source_id as string | undefined);
       if (!approvedSourceId) throw new OperationError('invalid_params', 'approved_source_id is required when approve=true.');
       target.approved_source_id = approvedSourceId;
@@ -3083,6 +3091,7 @@ const source_dry_run: Operation = {
   name: 'source_dry_run',
   description: 'Apply a source-ingest profile to connector samples without writing pages, links, timeline, or sync state. Returns counts, skipped records, sensitivity hints, and link-rule coverage.',
   scope: 'read',
+  localOnly: true,
   params: {
     profile: { type: 'object', required: true },
     sample_limit: { type: 'number', description: 'Sample size for preview (default 50)' },
@@ -3098,7 +3107,7 @@ const source_dry_run: Operation = {
       defaultConnector: profile.source_connector,
       defaultObject: profile.source_object,
     });
-    return { ...buildSourceDryRun(profile, sample), validation };
+    return { ...buildSourceDryRun(profile, sample), validation, profile_hash: profileHash(profile) };
   },
 };
 

@@ -1289,6 +1289,16 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
     } catch {
       // Non-fatal: op_checkpoints table may not exist yet on pre-v67 brains.
     }
+    // Source-ingest run ledger is append-only for revert/reporting; sweep it
+    // with the same conservative 7-day window so long-lived brains do not grow
+    // unbounded.
+    let purgedSourceIngestRunItems = 0;
+    try {
+      const { purgeStaleSourceIngestRunItems } = await import('./source-ingest/ledger.ts');
+      purgedSourceIngestRunItems = await purgeStaleSourceIngestRunItems(engine, 7);
+    } catch {
+      // Non-fatal: source-ingest tables may not exist on older brains.
+    }
     // v0.37.x — TX3 / A5: GC stale brainstorm checkpoints (filesystem-side).
     // 7-day mtime window mirrors op_checkpoints. Wrapped in try/catch
     // because the brainstorm dir may not exist on a brain that's never
@@ -1327,6 +1337,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
       summary:
         `purged ${purgedSources.length} source(s), ${purgedPages.count} page(s), ` +
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
+        `${purgedSourceIngestRunItems} stale source-ingest run item(s), ` +
         `${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s), ` +
         `${purgedBatchRetryAuditFiles} stale batch-retry audit file(s), ` +
         `and ${purgedVolunteerEvents} stale volunteer event(s)`,
@@ -1338,6 +1349,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         purged_sources: purgedSources,
         purged_page_slugs: purgedPages.slugs,
         purged_checkpoints_count: purgedCheckpoints,
+        purged_source_ingest_run_items_count: purgedSourceIngestRunItems,
         purged_brainstorm_checkpoints_count: purgedBrainstormCheckpoints,
         purged_batch_retry_audit_files_count: purgedBatchRetryAuditFiles,
         purged_volunteer_events_count: purgedVolunteerEvents,

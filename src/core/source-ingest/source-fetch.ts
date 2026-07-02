@@ -47,8 +47,8 @@ export async function buildProfileSampleRecords(profile: SourceIngestProfile, li
   if (!transform) {
     return fetchSourceSample(ctx, { alias: 'source', connector: profile.source_connector, object: profile.source_object }, limit, profile);
   }
-  const result = await executeSourceTransform(transform, async source => fetchSourceSample(ctx, source, source.sample_limit ?? limit, profile));
-  return result.records.slice(0, limit);
+  const result = await executeSourceTransform(transform, async source => fetchSourceSample(ctx, source, source.sample_limit ?? limit, profile), { rowLimit: limit });
+  return result.records;
 }
 
 export async function fetchAllSourceRecords(ctx: SourceFetchContext, source: SourceTransformSource, profile?: SourceIngestProfile): Promise<SourceRecord[]> {

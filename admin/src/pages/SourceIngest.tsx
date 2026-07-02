@@ -188,8 +188,8 @@ function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; curre
     <table><thead><tr><th>slug</th><th>title</th><th>external</th><th>empty template slots</th></tr></thead><tbody>
       {samplePages.map((p, i) => <tr key={i}><td className="mono">{val(p.slug)}</td><td>{hasPii ? '[PII masked]' : val(p.title)}</td><td className="mono">{val(p.external_id)}</td><td>{asArr(p.article_empty_slots).map(String).join(', ') || '—'}</td></tr>)}
     </tbody></table>
-    {samplePages.length > 0 && <details style={{ marginTop: 8 }}><summary>Rendered article previews</summary>
-      {samplePages.map((p, i) => <details key={i} style={{ marginTop: 8 }} open={i === 0}><summary>{val(p.slug)} · {val(p.title)}</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}>{String(p.article_markdown_preview || p.managed_block_preview || '')}</pre></details>)}
+    {samplePages.length > 0 && <details style={{ marginTop: 8 }}><summary>{hasPii ? 'Rendered article previews (PII fields masked)' : 'Rendered article previews'}</summary>
+      {samplePages.map((p, i) => <details key={i} style={{ marginTop: 8 }} open={i === 0}><summary>{val(p.slug)} · {hasPii ? '[PII masked]' : val(p.title)}</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}>{String(p.article_markdown_preview || p.managed_block_preview || '')}</pre></details>)}
     </details>}
   </div>;
 }
@@ -288,8 +288,9 @@ export function SourceIngestPage() {
   const dryRunCrossSource = Boolean(dryRun && dryRunRoutedSource && form.target_source_id && dryRunRoutedSource !== form.target_source_id);
   const requiresSensitivityAck = Boolean(dryRun && (dryRunHasPii || dryRunCrossSource));
   const dryRunMatchesCurrentSource = Boolean(dryRun && dryRunSourceId === form.target_source_id);
+  const dryRunProfileHash = typeof (dryRun as Record<string, unknown> | null)?.profile_hash === 'string' ? String((dryRun as Record<string, unknown>).profile_hash) : '';
   const dryRunSourceMismatch = Boolean(dryRun && dryRunSourceId && dryRunSourceId !== form.target_source_id);
-  const canApprove = Boolean(activeProfile && dryRun && dryRunMatchesCurrentSource && (!requiresSensitivityAck || sensitivityAck) && !(dryRun as Record<string, unknown>).error);
+  const canApprove = Boolean(activeProfile && dryRun && dryRunProfileHash && dryRunMatchesCurrentSource && (!requiresSensitivityAck || sensitivityAck) && !(dryRun as Record<string, unknown>).error);
 
   const runStep = async (name: string, fn: () => Promise<void>) => {
     setBusy(name);
@@ -342,6 +343,11 @@ export function SourceIngestPage() {
     if (typeof savedJson.transform_sql === 'string') setTransformSql(savedJson.transform_sql);
     if (typeof savedJson.transform_primary_key === 'string') setTransformPrimaryKey(savedJson.transform_primary_key);
     if (typeof savedJson.transform_updated_at === 'string') setTransformUpdatedAt(savedJson.transform_updated_at);
+    setDryRun(null);
+    setTransformPreview(null);
+    setDryRunSourceId(null);
+    setSensitivityAck(false);
+    setApproveResult(null);
   };
 
   const saveConfig = async () => runStep('save-config', async () => {
@@ -459,14 +465,19 @@ export function SourceIngestPage() {
     setApproveResult(null);
   };
 
+  const updateFormAndInvalidate = (patch: Partial<ReviewForm>) => {
+    setForm(prev => ({ ...prev, ...patch }));
+    invalidateTransformPreview();
+  };
+
   const runTransformPreview = async () => runStep('transform-preview', async () => {
     if (!profileForReview) return;
-    setTransformPreview(await api.sourceIngestTransformPreview({ profile: profileForReview, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
+    setTransformPreview(await api.sourceIngestTransformPreview({ ...payload(), profile: profileForReview, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
   });
 
   const runDryRun = async () => runStep('dry-run', async () => {
     if (!profileForReview) return;
-    setDryRun(await api.sourceIngestDryRun({ profile: profileForReview, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
+    setDryRun(await api.sourceIngestDryRun({ ...payload(), profile: profileForReview, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
     setDryRunSourceId(form.target_source_id);
     setSensitivityAck(false);
   });
@@ -483,6 +494,8 @@ export function SourceIngestPage() {
       profile: profileForReview,
       approved_source_id: form.target_source_id,
       dry_run_target_source_id: dryRunSourceId,
+      profile_hash: dryRunProfileHash,
+      sensitivity_ack: sensitivityAck,
       change_note: `approved AppSheet vehicle profile from admin UI (${form.slug_prefix})`,
     });
     setApproveResult(out);
@@ -511,29 +524,29 @@ export function SourceIngestPage() {
         <h2 className="section-title">1. Configure connector: AppSheet автотранспорт</h2>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
           <label>Connector
-            <select value={form.connector_id} onChange={e => setForm({ ...form, connector_id: e.target.value })}>
+            <select value={form.connector_id} onChange={e => updateFormAndInvalidate({ connector_id: e.target.value })}>
               {data.connectors.map(c => <option key={c.id} value={c.id}>{c.displayName} ({c.id})</option>)}
             </select>
           </label>
           <label>Source object
-            <input value={form.source_object} onChange={e => setForm({ ...form, source_object: e.target.value })} />
+            <input value={form.source_object} onChange={e => updateFormAndInvalidate({ source_object: e.target.value })} />
           </label>
           <label>AppSheet table name
-            <input value={form.table_name} onChange={e => setForm({ ...form, table_name: e.target.value })} />
+            <input value={form.table_name} onChange={e => updateFormAndInvalidate({ table_name: e.target.value })} />
           </label>
           <label>Target GBrain source
-            <select value={form.target_source_id} onChange={e => setForm({ ...form, target_source_id: e.target.value })}>
+            <select value={form.target_source_id} onChange={e => updateFormAndInvalidate({ target_source_id: e.target.value })}>
               {data.sources.map(s => <option key={s.id} value={s.id}>{s.id} · {s.name}</option>)}
             </select>
           </label>
           <label>Slug prefix
-            <input value={form.slug_prefix} onChange={e => setForm({ ...form, slug_prefix: e.target.value })} />
+            <input value={form.slug_prefix} onChange={e => updateFormAndInvalidate({ slug_prefix: e.target.value })} />
           </label>
           <label>Freshness policy
-            <input value={form.freshness_policy} onChange={e => setForm({ ...form, freshness_policy: e.target.value })} />
+            <input value={form.freshness_policy} onChange={e => updateFormAndInvalidate({ freshness_policy: e.target.value })} />
           </label>
           <label>Sample limit
-            <input type="number" min={1} max={200} value={form.sample_limit} onChange={e => setForm({ ...form, sample_limit: Number(e.target.value) || 25 })} />
+            <input type="number" min={1} max={200} value={form.sample_limit} onChange={e => updateFormAndInvalidate({ sample_limit: Number(e.target.value) || 25 })} />
           </label>
         </div>
         <div style={{ marginTop: 12, color: 'var(--text-secondary)' }}>
