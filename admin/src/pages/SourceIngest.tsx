@@ -115,6 +115,21 @@ function PreviewJson({ value, empty }: { value: unknown; empty: string }) {
   return <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', maxHeight: 260, overflow: 'auto' }}>{value ? JSON.stringify(value, null, 2) : empty}</pre>;
 }
 
+function parseJsonArray(text: string): unknown[] {
+  try {
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function defaultTransformSources(form: ReviewForm, fields: string[]): string {
+  return JSON.stringify([
+    { alias: 'main', connector: form.connector_id, object: form.source_object, fields },
+  ], null, 2);
+}
+
 function DiscoveryPreview({ value }: { value: unknown }) {
   const d = asObj(value);
   if (!value) return <div style={{ color: 'var(--text-muted)' }}>No discovery yet.</div>;
@@ -190,6 +205,11 @@ export function SourceIngestPage() {
   const [articleDirty, setArticleDirty] = useState(false);
   const [selectedSourceFields, setSelectedSourceFields] = useState<string[]>([]);
   const [activeSection, setActiveSection] = useState<string>('summary');
+  const [transformEnabled, setTransformEnabled] = useState(false);
+  const [transformSourcesText, setTransformSourcesText] = useState('');
+  const [transformSql, setTransformSql] = useState('');
+  const [transformPrimaryKey, setTransformPrimaryKey] = useState('id');
+  const [transformUpdatedAt, setTransformUpdatedAt] = useState('updated_at');
 
   const load = async () => {
     try {
@@ -215,6 +235,17 @@ export function SourceIngestPage() {
   const selectedSourceFieldSet = new Set(selectedSourceFields);
   const includedDiscoveryFields = discoveredFields.filter(f => selectedSourceFieldSet.has(String(f.name)));
   const activeProfile = useMemo(() => (draft as Record<string, unknown> | null)?.profile ?? null, [draft]);
+  const transformSources = useMemo(() => parseJsonArray(transformSourcesText), [transformSourcesText]);
+  const transformConfig = useMemo(() => {
+    if (!transformEnabled) return undefined;
+    return {
+      engine: 'pglite',
+      primary_key_field: transformPrimaryKey || 'id',
+      updated_at_field: transformUpdatedAt || 'updated_at',
+      sources: transformSources,
+      sql: transformSql,
+    };
+  }, [transformEnabled, transformPrimaryKey, transformUpdatedAt, transformSources, transformSql]);
   const profileForReview = useMemo(() => {
     if (!activeProfile) return null;
     const raw = { ...(activeProfile as Record<string, unknown>) };
@@ -226,8 +257,10 @@ export function SourceIngestPage() {
     mapping.source_fields = selectedSourceFields;
     raw.mapping = mapping;
     raw.update_policy = { ...asObj(raw.update_policy), field_allowlist: selectedSourceFields };
+    if (transformConfig) raw.transform = transformConfig;
+    else delete raw.transform;
     return raw;
-  }, [activeProfile, articleSections, selectedSourceFields]);
+  }, [activeProfile, articleSections, selectedSourceFields, transformConfig]);
   const canDryRun = Boolean(profileForReview);
   const dryRunSensitivity = asObj(asObj(dryRun).routing_sensitivity);
   const dryRunPiiFields = asArr(dryRunSensitivity.pii_fields).map(String);
@@ -270,7 +303,7 @@ export function SourceIngestPage() {
     slug_prefix: form.slug_prefix,
     freshness_policy: form.freshness_policy,
     enabled: true,
-    config_json: { table_name: form.table_name, selected_fields: selectedSourceFields },
+    config_json: { table_name: form.table_name, selected_fields: selectedSourceFields, transform_enabled: transformEnabled, transform_sources: parseJsonArray(transformSourcesText), transform_sql: transformSql, transform_primary_key: transformPrimaryKey, transform_updated_at: transformUpdatedAt },
   });
 
   const applySavedConfig = () => {
@@ -285,6 +318,11 @@ export function SourceIngestPage() {
       freshness_policy: String(savedConfig.freshness_policy ?? form.freshness_policy),
     });
     if (savedFields.length > 0) setSelectedSourceFields(savedFields);
+    if (savedJson.transform_enabled === true) setTransformEnabled(true);
+    if (Array.isArray(savedJson.transform_sources)) setTransformSourcesText(JSON.stringify(savedJson.transform_sources, null, 2));
+    if (typeof savedJson.transform_sql === 'string') setTransformSql(savedJson.transform_sql);
+    if (typeof savedJson.transform_primary_key === 'string') setTransformPrimaryKey(savedJson.transform_primary_key);
+    if (typeof savedJson.transform_updated_at === 'string') setTransformUpdatedAt(savedJson.transform_updated_at);
   };
 
   const saveConfig = async () => runStep('save-config', async () => {
@@ -332,6 +370,7 @@ export function SourceIngestPage() {
     const selected = fields.filter(f => !isNoisySourceField(f)).map(f => String(f.name)).filter(Boolean);
     setDiscovery(out);
     setSelectedSourceFields(selected);
+    if (!transformSourcesText) setTransformSourcesText(defaultTransformSources(form, selected));
     if (!articleDirty) setArticleSections(makeDefaultArticleSections(selected));
     setDryRun(null);
     setDryRunSourceId(null);
@@ -385,6 +424,13 @@ export function SourceIngestPage() {
     if (!articleDirty) setArticleSections(makeDefaultArticleSections(fields));
     setDryRun(null);
     setDryRunSourceId(null);
+    setApproveResult(null);
+  };
+
+  const invalidateTransformPreview = () => {
+    setDryRun(null);
+    setDryRunSourceId(null);
+    setSensitivityAck(false);
     setApproveResult(null);
   };
 
@@ -537,7 +583,35 @@ export function SourceIngestPage() {
       </section>
 
       <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
-        <h2 className="section-title">2. Review workflow</h2>
+        <h2 className="section-title">2. Optional SQL transform</h2>
+        <label style={{ display: 'block', marginBottom: 10 }}>
+          <input type="checkbox" checked={transformEnabled} onChange={e => { setTransformEnabled(e.target.checked); if (!transformSourcesText) setTransformSourcesText(defaultTransformSources(form, selectedSourceFields)); invalidateTransformPreview(); }} style={{ marginRight: 8 }} />
+          Enable SQL transform before mapping
+        </label>
+        <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 10 }}>
+          Use this for multi-source joins, counts and complex WHERE logic. Sources are loaded as temporary PGlite tables under their alias; the SQL result becomes the record stream for dry-run/import.
+        </div>
+        {transformEnabled && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+          <label>Primary key field in SQL result
+            <input value={transformPrimaryKey} onChange={e => { setTransformPrimaryKey(e.target.value); invalidateTransformPreview(); }} placeholder="id" />
+          </label>
+          <label>Updated-at field in SQL result
+            <input value={transformUpdatedAt} onChange={e => { setTransformUpdatedAt(e.target.value); invalidateTransformPreview(); }} placeholder="updated_at" />
+          </label>
+          <label style={{ gridColumn: '1 / -1' }}>Transform sources JSON
+            <textarea rows={7} value={transformSourcesText} onChange={e => { setTransformSourcesText(e.target.value); invalidateTransformPreview(); }} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} />
+          </label>
+          <label style={{ gridColumn: '1 / -1' }}>Read-only SQL
+            <textarea rows={9} value={transformSql} onChange={e => { setTransformSql(e.target.value); invalidateTransformPreview(); }} placeholder={"SELECT main.id, main.code, main.name, main.updated_at\nFROM main\nWHERE main.status = 'active'"} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} />
+          </label>
+          <div style={{ gridColumn: '1 / -1', color: transformSources.length > 0 && transformSql.trim() ? 'var(--text-muted)' : 'var(--warning)', fontSize: 12 }}>
+            Parsed sources: {transformSources.length}. SQL is sent only inside profile dry-run/approval; mutating SQL is rejected server-side.
+          </div>
+        </div>}
+      </section>
+
+      <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
+        <h2 className="section-title">3. Review workflow</h2>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void discover()}>{busy === 'discover' ? 'Discovering…' : 'Discover'}</button>
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void draftProfile()}>{busy === 'draft' ? 'Drafting…' : 'Draft profile'}</button>
@@ -602,7 +676,7 @@ export function SourceIngestPage() {
       </section>
 
       <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
-        <h2 className="section-title">3. Profiles / refresh</h2>
+        <h2 className="section-title">4. Profiles / refresh</h2>
         <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
           <select value={selectedProfile} onChange={e => setSelectedProfile(e.target.value)}>
             <option value="">All profiles</option>

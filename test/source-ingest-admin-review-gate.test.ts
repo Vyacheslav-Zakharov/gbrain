@@ -40,6 +40,11 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('articleDirty');
     expect(ui).toContain('Rendered article previews');
     expect(ui).toContain('empty template slots');
+    expect(ui).toContain('Optional SQL transform');
+    expect(ui).toContain('Enable SQL transform before mapping');
+    expect(ui).toContain('Transform sources JSON');
+    expect(ui).toContain('raw.transform = transformConfig');
+    expect(ui).toContain('mutating SQL is rejected server-side');
     expect(ui).toContain('(!requiresSensitivityAck || sensitivityAck)');
   });
 });
