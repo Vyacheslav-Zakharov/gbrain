@@ -11,10 +11,23 @@ export interface DraftSourceIngestProfileOptions {
   sourceObject: string;
   discovery: DiscoveryProfile;
   targetSourceId?: string | null;
+  selectedFields?: string[];
+}
+
+function filterDiscovery(discovery: DiscoveryProfile, selectedFields?: string[]): DiscoveryProfile {
+  if (!selectedFields || selectedFields.length === 0) return discovery;
+  const selected = new Set(selectedFields);
+  return {
+    ...discovery,
+    fields: discovery.fields.filter(f => selected.has(f.name)),
+    idCandidates: discovery.idCandidates.filter(f => selected.has(f)),
+    updatedAtCandidates: discovery.updatedAtCandidates.filter(f => selected.has(f)),
+  };
 }
 
 export function draftSourceIngestProfile(opts: DraftSourceIngestProfileOptions): { profile: SourceIngestProfile & { target: SourceIngestProfile['target'] & { suggested_source_id?: string | null } }; warnings: string[] } {
-  const { connectorId, sourceObject, discovery, targetSourceId } = opts;
+  const { connectorId, sourceObject, targetSourceId } = opts;
+  const discovery = filterDiscovery(opts.discovery, opts.selectedFields);
   const idField = discovery.idCandidates.includes('id') ? 'id' : (discovery.idCandidates[0] || 'id');
   const updatedAt = discovery.updatedAtCandidates[0];
   const isVehicle = sourceObject === 'vehicle';
@@ -52,12 +65,12 @@ export function draftSourceIngestProfile(opts: DraftSourceIngestProfileOptions):
         on_access: 'acknowledge_when_stale',
         ...(updatedAt ? { changed_since_field: updatedAt } : {}),
       },
-      mapping: { frontmatter: isVehicle ? { equipment_class: 'vehicle' } : {}, ...(isVehicle ? { article_template: defaultEquipmentArticleTemplate() } : {}) },
+      mapping: { frontmatter: isVehicle ? { equipment_class: 'vehicle' } : {}, ...(isVehicle ? { article_template: defaultEquipmentArticleTemplate(discovery.fields.map(f => f.name)), source_fields: discovery.fields.map(f => f.name) } : {}) },
       links: isVehicle ? [
         { id: 'part-of-parent-equipment', type: 'part_of', target: { type: 'equipment', lookup: 'external_id', value_field: 'parent_id' }, when: [{ field: 'parent_id', op: 'exists' }], confidence: 0.7 },
         { id: 'located-at-facility', type: 'located_at', target: { type: 'facility', lookup: 'external_id', value_field: 'location_id' }, when: [{ field: 'location_id', op: 'exists' }], confidence: 0.7 },
       ] : [],
-      update_policy: { mode: 'managed_block', preserve_manual_sections: true, field_allowlist: ['title', 'external_code', 'equipment_class', 'status'] },
+      update_policy: { mode: 'managed_block', preserve_manual_sections: true, field_allowlist: discovery.fields.map(f => f.name) },
       security: { classification: targetSourceId === 'shared' ? 'shared' : 'internal', pii: isVehicle && discovery.fields.some(f => /responsible|person|plate/i.test(f.name)), pii_fields: piiFields },
       review: { drafted_by: 'agent', approved_by: null, approved_at: null },
     },

@@ -1249,7 +1249,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     try {
       const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
       const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
-      const drafted = await operationsByName.source_profile_draft.handler(ctx, { connector_id: ui.connector_id, source_object: ui.source_object, target_source_id: ui.target_source_id, sample_limit, connector_config: ui.connector_config });
+      const selected_fields = Array.isArray(req.body?.selected_fields) ? req.body.selected_fields.map(String).filter(Boolean) : undefined;
+      const drafted = await operationsByName.source_profile_draft.handler(ctx, { connector_id: ui.connector_id, source_object: ui.source_object, target_source_id: ui.target_source_id, sample_limit, connector_config: ui.connector_config, selected_fields });
       const profile = applySourceIngestUiOverrides((drafted as any).profile, ui);
       res.json({ ...(drafted as Record<string, unknown>), profile });
     } catch (e) {

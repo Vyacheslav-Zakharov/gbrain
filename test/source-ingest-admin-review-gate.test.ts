@@ -34,6 +34,10 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('sensitivity_ack_required');
     expect(ui).toContain('[PII masked]');
     expect(ui).toContain('Article mapping editor');
+    expect(ui).toContain('Fields to carry forward');
+    expect(ui).toContain('Exclude noisy');
+    expect(ui).toContain('selected_fields: selectedSourceFields');
+    expect(ui).toContain('articleDirty');
     expect(ui).toContain('Rendered article previews');
     expect(ui).toContain('empty template slots');
     expect(ui).toContain('(!requiresSensitivityAck || sensitivityAck)');

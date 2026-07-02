@@ -3006,12 +3006,14 @@ const source_profile_draft: Operation = {
     target_source_id: { type: 'string', description: 'Optional suggested source; returned as suggestion only, not executable approval.' },
     sample_limit: { type: 'number', description: 'Sample size for discovery (default 50)' },
     connector_config: { type: 'object', description: 'Non-secret connector config override, e.g. table_name. Secrets are never passed here.' },
+    selected_fields: { type: 'array', items: { type: 'string' }, description: 'Optional source field allowlist selected by the admin UI before drafting.' },
   },
   handler: async (_ctx, p) => {
     const connectorId = p.connector_id as string;
     const sourceObject = p.source_object as string;
     const discovery = await discoverSourceObject(resolveSourceConnectorOrThrow(connectorId, p.connector_config as Record<string, unknown> | undefined), sourceObject, (p.sample_limit as number | undefined) ?? 50);
-    const { profile, warnings } = draftSourceIngestProfile({ connectorId, sourceObject, discovery, targetSourceId: p.target_source_id as string | undefined });
+    const selectedFields = Array.isArray(p.selected_fields) ? p.selected_fields.map(String).filter(Boolean) : undefined;
+    const { profile, warnings } = draftSourceIngestProfile({ connectorId, sourceObject, discovery, targetSourceId: p.target_source_id as string | undefined, selectedFields });
     return { discovery, profile, warnings };
   },
 };

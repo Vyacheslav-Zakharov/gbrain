@@ -33,14 +33,49 @@ interface ReviewForm {
 const DEFAULT_ARTICLE_SECTIONS: Record<string, string> = {
   title: '{{ name }}',
   summary: '{{ name }} — единица автотранспорта/оборудования группы Аверс. Код: {{ code }}.',
-  characteristics_type: '{{ vehicle_class }}',
-  characteristics_model: '{{ model }}',
+  characteristics_type: '',
+  characteristics_model: '',
   characteristics_status: '{{ status }}',
-  characteristics_inventory: '{{ external_code }}',
-  links: '- Находится на площадке (located_at): {{ location_id }}\n- Входит в состав узла (part_of): {{ parent_id }}',
+  characteristics_inventory: '{{ code }}',
+  links: '',
   notes: 'Данные импортированы из AppSheet. Ручные пояснения можно добавлять вне managed block.',
   timeline: '',
 };
+
+function firstField(fields: Set<string>, candidates: string[]): string {
+  return candidates.find(f => fields.has(f)) || '';
+}
+
+function makeDefaultArticleSections(fieldNames: string[]): Record<string, string> {
+  const fields = new Set(fieldNames);
+  const titleField = firstField(fields, ['name', 'title', 'code', 'id']);
+  const codeField = firstField(fields, ['code', 'external_code', 'id']);
+  const typeField = firstField(fields, ['vehicle_class', 'equipment_class', 'type']);
+  const modelField = firstField(fields, ['model', 'manufacturer_model', 'name']);
+  const statusField = firstField(fields, ['status', 'state']);
+  const inventoryField = firstField(fields, ['external_code', 'inventory_number', 'serial_number', 'code']);
+  const links = [
+    fields.has('location_id') ? '- Находится на площадке (located_at): {{ location_id }}' : '',
+    fields.has('parent_id') ? '- Входит в состав узла (part_of): {{ parent_id }}' : '',
+  ].filter(Boolean).join('\n');
+  return {
+    ...DEFAULT_ARTICLE_SECTIONS,
+    title: titleField ? `{{ ${titleField} }}` : '',
+    summary: `${titleField ? `{{ ${titleField} }}` : 'Единица автотранспорта/оборудования группы Аверс'}${codeField ? ` — код: {{ ${codeField} }}.` : '.'}`,
+    characteristics_type: typeField ? `{{ ${typeField} }}` : '',
+    characteristics_model: modelField ? `{{ ${modelField} }}` : '',
+    characteristics_status: statusField ? `{{ ${statusField} }}` : '',
+    characteristics_inventory: inventoryField ? `{{ ${inventoryField} }}` : '',
+    links,
+  };
+}
+
+function isNoisySourceField(field: Record<string, unknown>): boolean {
+  const name = String(field.name ?? '').toLowerCase();
+  const samples = asArr(field.samples).map(v => String(v ?? ''));
+  const types = asArr(field.observedTypes).map(v => String(v ?? '').toLowerCase());
+  return name.startsWith('related') || name.includes('related_') || name.includes('measurementacts') || types.some(t => t.includes('array') || t.includes('object')) || samples.some(s => s.length > 500 || s.split(',').length > 20);
+}
 
 const SECTION_LABELS: Record<string, string> = {
   title: 'Заголовок H1 / frontmatter title',
@@ -152,6 +187,8 @@ export function SourceIngestPage() {
     sample_limit: 25,
   });
   const [articleSections, setArticleSections] = useState<Record<string, string>>(DEFAULT_ARTICLE_SECTIONS);
+  const [articleDirty, setArticleDirty] = useState(false);
+  const [selectedSourceFields, setSelectedSourceFields] = useState<string[]>([]);
   const [activeSection, setActiveSection] = useState<string>('summary');
 
   const load = async () => {
@@ -174,6 +211,9 @@ export function SourceIngestPage() {
   const secretStatus = (savedConfig?.secrets as Record<string, unknown> | undefined)
     || { configured: false, missing_keys: appSheet?.requiredKeys ?? [], required_keys: appSheet?.requiredKeys ?? [], missing_env: appSheet?.requiredEnv ?? [], required_env: appSheet?.requiredEnv ?? [], masked: {}, storage: 'none' };
   const summary = data?.status.summary ?? {};
+  const discoveredFields = asArr<Record<string, unknown>>(asObj(discovery).fields);
+  const selectedSourceFieldSet = new Set(selectedSourceFields);
+  const includedDiscoveryFields = discoveredFields.filter(f => selectedSourceFieldSet.has(String(f.name)));
   const activeProfile = useMemo(() => (draft as Record<string, unknown> | null)?.profile ?? null, [draft]);
   const profileForReview = useMemo(() => {
     if (!activeProfile) return null;
@@ -183,9 +223,11 @@ export function SourceIngestPage() {
       ...(asObj(mapping.article_template)),
       sections: articleSections,
     };
+    mapping.source_fields = selectedSourceFields;
     raw.mapping = mapping;
+    raw.update_policy = { ...asObj(raw.update_policy), field_allowlist: selectedSourceFields };
     return raw;
-  }, [activeProfile, articleSections]);
+  }, [activeProfile, articleSections, selectedSourceFields]);
   const canDryRun = Boolean(profileForReview);
   const dryRunSensitivity = asObj(asObj(dryRun).routing_sensitivity);
   const dryRunPiiFields = asArr(dryRunSensitivity.pii_fields).map(String);
@@ -215,6 +257,7 @@ export function SourceIngestPage() {
     // Table name is non-secret UI config. It can be saved through
     // source_connector_configs; AppSheet credentials remain server-side only.
     table_name: form.table_name,
+    selected_fields: selectedSourceFields,
   });
 
   const configPayload = () => ({
@@ -227,11 +270,13 @@ export function SourceIngestPage() {
     slug_prefix: form.slug_prefix,
     freshness_policy: form.freshness_policy,
     enabled: true,
-    config_json: { table_name: form.table_name },
+    config_json: { table_name: form.table_name, selected_fields: selectedSourceFields },
   });
 
   const applySavedConfig = () => {
     if (!savedConfig) return;
+    const savedJson = asObj(savedConfig.config_json);
+    const savedFields = asArr(savedJson.selected_fields).map(String).filter(Boolean);
     setForm({
       ...form,
       table_name: String(savedConfig.table_name ?? form.table_name),
@@ -239,6 +284,7 @@ export function SourceIngestPage() {
       slug_prefix: String(savedConfig.slug_prefix ?? form.slug_prefix),
       freshness_policy: String(savedConfig.freshness_policy ?? form.freshness_policy),
     });
+    if (savedFields.length > 0) setSelectedSourceFields(savedFields);
   };
 
   const saveConfig = async () => runStep('save-config', async () => {
@@ -281,7 +327,15 @@ export function SourceIngestPage() {
   });
 
   const discover = async () => runStep('discover', async () => {
-    setDiscovery(await api.sourceIngestDiscover(payload()));
+    const out = await api.sourceIngestDiscover(payload());
+    const fields = asArr<Record<string, unknown>>(asObj(out).fields);
+    const selected = fields.filter(f => !isNoisySourceField(f)).map(f => String(f.name)).filter(Boolean);
+    setDiscovery(out);
+    setSelectedSourceFields(selected);
+    if (!articleDirty) setArticleSections(makeDefaultArticleSections(selected));
+    setDryRun(null);
+    setDryRunSourceId(null);
+    setApproveResult(null);
   });
 
   const draftProfile = async () => runStep('draft', async () => {
@@ -290,7 +344,9 @@ export function SourceIngestPage() {
     const mapping = asObj(profile.mapping);
     const articleTemplate = asObj(mapping.article_template);
     const sections = asObj(articleTemplate.sections);
-    if (Object.keys(sections).length > 0) setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])) });
+    const draftedFields = asArr(mapping.source_fields).map(String).filter(Boolean);
+    if (draftedFields.length > 0 && selectedSourceFields.length === 0) setSelectedSourceFields(draftedFields);
+    if (!articleDirty && Object.keys(sections).length > 0) setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])) });
     setDraft(out);
     setDryRun(null);
     setDryRunSourceId(null);
@@ -299,6 +355,7 @@ export function SourceIngestPage() {
   });
 
   const updateArticleSection = (key: string, value: string) => {
+    setArticleDirty(true);
     setArticleSections(prev => ({ ...prev, [key]: value }));
     setDryRun(null);
     setDryRunSourceId(null);
@@ -309,6 +366,26 @@ export function SourceIngestPage() {
   const insertFieldToken = (field: string) => {
     const token = `{{ ${field} }}`;
     updateArticleSection(activeSection, `${articleSections[activeSection] || ''}${articleSections[activeSection] ? ' ' : ''}${token}`);
+  };
+
+  const setFieldSelected = (field: string, checked: boolean) => {
+    setSelectedSourceFields(prev => {
+      const next = checked ? Array.from(new Set([...prev, field])) : prev.filter(f => f !== field);
+      if (!articleDirty) setArticleSections(makeDefaultArticleSections(next));
+      return next;
+    });
+    setDryRun(null);
+    setDryRunSourceId(null);
+    setSensitivityAck(false);
+    setApproveResult(null);
+  };
+
+  const selectAllFields = (fields: string[]) => {
+    setSelectedSourceFields(fields);
+    if (!articleDirty) setArticleSections(makeDefaultArticleSections(fields));
+    setDryRun(null);
+    setDryRunSourceId(null);
+    setApproveResult(null);
   };
 
   const runDryRun = async () => runStep('dry-run', async () => {
@@ -430,6 +507,30 @@ export function SourceIngestPage() {
             </span>
           </div>;
         })()}
+        {discoveredFields.length > 0 && <div style={{ marginTop: 14, border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 8 }}>
+            <div>
+              <b>Fields to carry forward</b>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>Uncheck noisy AppSheet relation/list fields before Draft profile. Only selected fields are shown in the mapper and passed into the drafted profile.</div>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn btn-secondary" type="button" onClick={() => selectAllFields(discoveredFields.map(f => String(f.name)).filter(Boolean))}>Select all</button>
+              <button className="btn btn-secondary" type="button" onClick={() => selectAllFields(discoveredFields.filter(f => !isNoisySourceField(f)).map(f => String(f.name)).filter(Boolean))}>Exclude noisy</button>
+            </div>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 6, maxHeight: 260, overflow: 'auto' }}>
+            {discoveredFields.map(f => {
+              const name = String(f.name);
+              const noisy = isNoisySourceField(f);
+              return <label key={name} style={{ display: 'block', padding: 6, borderRadius: 6, background: selectedSourceFieldSet.has(name) ? 'rgba(16, 185, 129, 0.08)' : 'rgba(148, 163, 184, 0.08)' }}>
+                <input type="checkbox" checked={selectedSourceFieldSet.has(name)} onChange={e => setFieldSelected(name, e.target.checked)} style={{ marginRight: 6 }} />
+                <code>{name}</code>{noisy && <span style={{ color: 'var(--warning)', marginLeft: 6 }}>noisy</span>}
+                <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 11 }}>{asArr(f.samples).slice(0, 2).map(val).join(' · ') || '—'}</span>
+              </label>;
+            })}
+          </div>
+          <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 8 }}>Selected {selectedSourceFields.length} of {discoveredFields.length}. If you change selection after dry-run, run Draft profile/Dry-run again before approval.</div>
+        </div>}
         <ul style={{ marginTop: 10, paddingLeft: 18, color: 'var(--text-secondary)' }}>
           {(appSheet?.safety ?? []).map(s => <li key={s}>{s}</li>)}
         </ul>
@@ -449,8 +550,9 @@ export function SourceIngestPage() {
             <h3 style={{ fontSize: 13, marginBottom: 8 }}>Source fields</h3>
             <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>Click a field to insert <code>{'{{ field }}'}</code> into the active template box.</div>
             <div style={{ maxHeight: 360, overflow: 'auto' }}>
-              {asArr<Record<string, unknown>>(asObj(discovery).fields).length === 0 && <div style={{ color: 'var(--text-muted)' }}>Run Discover first.</div>}
-              {asArr<Record<string, unknown>>(asObj(discovery).fields).map(f => <button key={String(f.name)} className="btn btn-secondary" style={{ display: 'block', width: '100%', marginBottom: 6, textAlign: 'left' }} onClick={() => insertFieldToken(String(f.name))}>
+              {discoveredFields.length === 0 && <div style={{ color: 'var(--text-muted)' }}>Run Discover first.</div>}
+              {discoveredFields.length > 0 && includedDiscoveryFields.length === 0 && <div style={{ color: 'var(--warning)' }}>No fields selected in Configure connector.</div>}
+              {includedDiscoveryFields.map(f => <button key={String(f.name)} className="btn btn-secondary" style={{ display: 'block', width: '100%', marginBottom: 6, textAlign: 'left' }} onClick={() => insertFieldToken(String(f.name))}>
                 <span className="mono">{val(f.name)}</span>
                 <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 11 }}>{asArr(f.samples).slice(0, 2).map(val).join(' · ') || '—'}</span>
               </button>)}

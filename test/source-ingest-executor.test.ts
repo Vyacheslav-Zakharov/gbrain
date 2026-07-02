@@ -21,6 +21,7 @@ import {
 import { rowToVehicleRecord, AppSheetVehicleConnector } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
 import { runCycle } from '../src/core/cycle.ts';
 import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
+import { draftSourceIngestProfile } from '../src/core/source-ingest/draft.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -138,6 +139,42 @@ describe('source-ingest Stage 3A executor', () => {
     expect(execFileSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).trim()).toBe('');
     expect(execFileSync('git', ['-C', repo, 'log', '-1', '--oneline'], { encoding: 'utf8' })).toContain('source-ingest run_id=run-test-1');
   }, 30000);
+
+  test('draft template only uses selected discovery fields and drops noisy/unselected fields', () => {
+    const discovery = {
+      connectorId: 'appsheet-vehicles',
+      objectName: 'vehicle',
+      sampled: 2,
+      fields: [
+        { name: 'id', observedTypes: ['string'], nullRatio: 0, samples: ['veh-1'], cardinality: 1 },
+        { name: 'code', observedTypes: ['string'], nullRatio: 0, samples: ['A-001'], cardinality: 1 },
+        { name: 'name', observedTypes: ['string'], nullRatio: 0, samples: ['Toyota Hilux'], cardinality: 1 },
+        { name: 'status', observedTypes: ['string'], nullRatio: 0, samples: ['active'], cardinality: 1 },
+        { name: 'related_measurementacts', observedTypes: ['array'], nullRatio: 0, samples: ['x,y,z'], cardinality: 1 },
+      ],
+      idCandidates: ['id', 'code'],
+      updatedAtCandidates: ['updated_at'],
+      parentCandidates: [],
+      samples: [],
+      warnings: [],
+    };
+    const { profile: drafted } = draftSourceIngestProfile({
+      connectorId: 'appsheet-vehicles',
+      sourceObject: 'vehicle',
+      discovery,
+      targetSourceId: 'shared',
+      selectedFields: ['id', 'code', 'name', 'status'],
+    });
+    const raw = JSON.stringify(drafted.mapping?.article_template?.sections || {});
+    expect(raw).toContain('{{ name }}');
+    expect(raw).toContain('{{ code }}');
+    expect(raw).toContain('{{ status }}');
+    expect(raw).not.toContain('{{ model }}');
+    expect(raw).not.toContain('external_code');
+    expect(raw).not.toContain('related_measurementacts');
+    expect(drafted.update_policy.field_allowlist).toEqual(['id', 'code', 'name', 'status']);
+    expect(drafted.mapping?.source_fields).toEqual(['id', 'code', 'name', 'status']);
+  });
 
   test('dry-run renders article template previews for multiple rows', () => {
     const sample = [
