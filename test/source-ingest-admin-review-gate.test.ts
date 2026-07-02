@@ -24,7 +24,7 @@ describe('source-ingest admin review gates', () => {
     expect(server).toContain('res.status(409)');
   });
 
-  test('PII/cross-source dry-runs require explicit acknowledgement and mask preview text', () => {
+  test('PII/cross-source dry-runs require explicit acknowledgement and article preview exposes mapping review surface', () => {
     const ui = sourceIngestUi();
 
     expect(ui).toContain('Routing / sensitivity');
@@ -33,8 +33,9 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('sensitivityAck');
     expect(ui).toContain('sensitivity_ack_required');
     expect(ui).toContain('[PII masked]');
-    expect(ui).toContain('First managed block preview (PII fields masked)');
+    expect(ui).toContain('Article mapping editor');
+    expect(ui).toContain('Rendered article previews');
+    expect(ui).toContain('empty template slots');
     expect(ui).toContain('(!requiresSensitivityAck || sensitivityAck)');
-    expect(ui).toContain('maskDryRunPreviewText');
   });
 });

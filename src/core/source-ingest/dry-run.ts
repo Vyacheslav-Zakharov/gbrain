@@ -1,6 +1,7 @@
 import type { SourceRecord } from './connectors/types.ts';
 import type { SourceFilterRule, SourceIngestProfile, SourceLinkRule } from './profile-schema.ts';
 import { renderManagedBlock } from './managed-block.ts';
+import { renderArticleTemplate } from './template-renderer.ts';
 
 function flatten(obj: Record<string, unknown>, prefix = ''): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -67,21 +68,22 @@ function managedBody(profile: SourceIngestProfile, record: SourceRecord): string
 function samplePage(profile: SourceIngestProfile, record: SourceRecord) {
   const slug = renderSlugTemplate(profile.target.slug_template, record.data);
   const externalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
-  const title = String(valueAt(record.data, profile.identity.display_name_field) ?? record.external_id);
+  const article = renderArticleTemplate(profile, record);
   const block = renderManagedBlock(profile.profile_id, externalRef, managedBody(profile, record));
   return {
     external_id: record.external_id,
     slug,
-    title,
+    title: article.title,
     source_ingest: { profile_id: profile.profile_id, external_ref: externalRef },
     managed_block_preview: block,
     managed_block_length: block.length,
-    null_field_count: Object.values(flatten(record.data)).filter(v => v === null || v === undefined || v === '').length,
+    article_markdown_preview: article.body,
+    article_empty_slots: article.emptySlots,
+    article_rendered_fields: article.renderedFields,
+    null_field_count: Object.values(flatten(record.data)).filter(v => v === null || v === undefined || v === '').length + article.emptySlots.length,
     frontmatter_preview: {
-      type: profile.target.gbrain_type,
-      title,
+      ...article.frontmatter,
       source_ingest: { profile_id: profile.profile_id, external_ref: externalRef },
-      ...(profile.mapping?.frontmatter || {}),
     },
   };
 }

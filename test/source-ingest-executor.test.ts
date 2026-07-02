@@ -20,6 +20,7 @@ import {
 } from '../src/core/source-ingest/connector-config.ts';
 import { rowToVehicleRecord, AppSheetVehicleConnector } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
 import { runCycle } from '../src/core/cycle.ts';
+import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -49,7 +50,22 @@ const profile: SourceIngestProfile = {
   selection: { exclude: [{ field: 'is_group', op: 'eq', value: true }] },
   identity: { external_id_field: 'id', natural_key_fields: ['code'], display_name_field: 'name' },
   freshness: { policy: 'P30D', on_access: 'acknowledge_when_stale', changed_since_field: 'updated_at' },
-  mapping: { frontmatter: { equipment_class: 'vehicle' } },
+  mapping: {
+    frontmatter: { equipment_class: 'vehicle' },
+    article_template: {
+      sections: {
+        title: '{{ name }}',
+        summary: '{{ name }} — тестовая единица техники. Код: {{ code }}.',
+        characteristics_type: '{{ vehicle_class }}',
+        characteristics_model: '{{ model }} {{ year }}',
+        characteristics_status: '{{ status }}',
+        characteristics_inventory: '{{ code }}',
+        links: '- Находится на площадке (located_at): {{ location_id }}',
+        notes: 'Пилотная карточка source-ingest.',
+        timeline: '',
+      },
+    },
+  },
   links: [{ id: 'located-at-facility', type: 'located_at', target: { type: 'facility', lookup: 'external_id', value_field: 'location_id' }, when: [{ field: 'location_id', op: 'exists' }] }],
   update_policy: { mode: 'managed_block', preserve_manual_sections: true, field_allowlist: ['code', 'model', 'year', 'status', 'vehicle_class', 'location_id'] },
   security: { classification: 'shared', pii: true, pii_fields: ['plate', 'responsible_person_id'] },
@@ -107,6 +123,9 @@ describe('source-ingest Stage 3A executor', () => {
     expect(out.results.every(r => r.status !== 'failed')).toBe(true);
     const page = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
     expect(page?.type).toBe('equipment');
+    expect(page?.compiled_truth).toContain('## Характеристики');
+    expect(page?.compiled_truth).toContain('Пилотная карточка source-ingest.');
+    expect(page?.compiled_truth).toContain('<!-- gbrain-source-sync:start');
     expect(page?.frontmatter.source_ingest).toMatchObject({ profile_id: profile.profile_id, external_ref: 'fake-source:vehicle:veh-001', run_id: 'run-test-1' });
     const rows = await engine.executeRaw<{ run_id: string; last_result: string; content_fingerprint: string; managed_block_hash: string }>(
       `SELECT run_id, last_result, content_fingerprint, managed_block_hash FROM source_sync_state WHERE external_id = $1`,
@@ -119,6 +138,19 @@ describe('source-ingest Stage 3A executor', () => {
     expect(execFileSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).trim()).toBe('');
     expect(execFileSync('git', ['-C', repo, 'log', '-1', '--oneline'], { encoding: 'utf8' })).toContain('source-ingest run_id=run-test-1');
   }, 30000);
+
+  test('dry-run renders article template previews for multiple rows', () => {
+    const sample = [
+      { external_id: 'veh-001', data: { id: 'veh-001', code: 'A-001', name: 'Toyota Hilux A001', vehicle_class: 'pickup', model: 'Toyota Hilux', year: 2021, status: 'active', is_group: false, location_id: 'facility-almaty-yard' } },
+      { external_id: 'veh-002', data: { id: 'veh-002', code: 'A-002', name: 'Hyundai Porter A002', vehicle_class: 'truck', model: 'Hyundai Porter', year: 2020, status: 'repair', is_group: false, location_id: 'facility-almaty-yard' } },
+    ];
+    const out = buildSourceDryRun(profile, sample);
+    expect(out.sample_pages.length).toBe(2);
+    expect(out.sample_pages[0].article_markdown_preview).toContain('## Характеристики');
+    expect(out.sample_pages[0].article_markdown_preview).toContain('Toyota Hilux 2021');
+    expect(out.sample_pages[1].article_markdown_preview).toContain('Hyundai Porter 2020');
+    expect(out.sample_pages[0].article_empty_slots).toEqual([]);
+  });
 
   test('second identical run is unchanged and preserves page content_hash', async () => {
     const repo = tempGitRepo();

@@ -35,7 +35,7 @@ export interface SourceIngestProfile {
   selection?: { include?: SourceFilterRule[]; exclude?: SourceFilterRule[] };
   identity: { external_id_field: string; natural_key_fields?: string[]; display_name_field: string };
   freshness?: { policy?: string; on_access?: SourceIngestOnAccess; changed_since_field?: string };
-  mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown> };
+  mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown>; article_template?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, string> } };
   links?: SourceLinkRule[];
   update_policy: { mode: SourceIngestUpdateMode; preserve_manual_sections: true; field_allowlist?: string[] };
   security: { classification: 'public' | 'shared' | 'internal' | 'restricted'; pii: boolean; pii_fields?: string[] };

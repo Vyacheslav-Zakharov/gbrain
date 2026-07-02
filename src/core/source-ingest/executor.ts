@@ -9,6 +9,7 @@ import { getSourceConnector } from './connectors/fake.ts';
 import type { SourceRecord } from './connectors/types.ts';
 import { renderManagedBlock, mergeManagedBlock, SOURCE_SYNC_BEGIN, SOURCE_SYNC_END } from './managed-block.ts';
 import { renderSlugTemplate } from './dry-run.ts';
+import { renderArticleTemplate } from './template-renderer.ts';
 import { profileHash, stableJson } from './store.ts';
 import { validateSourceIngestProfile, type SourceFilterRule, type SourceIngestProfile } from './profile-schema.ts';
 import { resolveSourceIngestStorageMode, type SourceIngestStorageMode } from './executor-preflight.ts';
@@ -128,17 +129,17 @@ function yamlScalar(v: unknown): string {
 function renderMarkdown(profile: SourceIngestProfile, record: SourceRecord, existingBody: string | null, runIdForFrontmatter: string) {
   const slug = renderSlugTemplate(profile.target.slug_template, record.data);
   const externalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
-  const title = String(valueAt(record.data, profile.identity.display_name_field) ?? record.external_id);
+  const article = renderArticleTemplate(profile, record);
   const generatedBlock = renderManagedBlock(profile.profile_id, externalRef, managedBody(profile, record));
+  const articleBodyWithBlock = `${article.body.trimEnd()}\n\n${generatedBlock}\n`;
   const mergedBody = existingBody
     ? mergeManagedBlock(existingBody, profile.profile_id, externalRef, managedBody(profile, record)).content
-    : `# ${title}\n\n${generatedBlock}\n\n## Notes\n\nПилотная запись source-ingest. Ручной текст вне managed block сохраняется при refresh.\n`;
+    : articleBodyWithBlock;
   const frontmatter: Record<string, unknown> = {
+    ...article.frontmatter,
     type: profile.target.gbrain_type,
-    title,
-    status: 'draft',
+    title: article.title,
     source_id: profile.target.approved_source_id,
-    ...(profile.mapping?.frontmatter || {}),
   };
   const fm = [
     '---',
@@ -150,7 +151,7 @@ function renderMarkdown(profile: SourceIngestProfile, record: SourceRecord, exis
     '---',
     '',
   ].join('\n');
-  return { slug, externalRef, title, generatedBlock, managedBlockHash: hashText(generatedBlock), markdown: fm + mergedBody };
+  return { slug, externalRef, title: article.title, generatedBlock, managedBlockHash: hashText(generatedBlock), markdown: fm + mergedBody };
 }
 
 async function loadProfile(engine: BrainEngine, profileId: string): Promise<{ profile: SourceIngestProfile; version: number; hash: string }> {

@@ -1,5 +1,6 @@
 import type { DiscoveryProfile } from './connectors/types.ts';
 import type { SourceIngestProfile } from './profile-schema.ts';
+import { defaultEquipmentArticleTemplate } from './template-renderer.ts';
 
 function safeKebab(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'item';
@@ -51,7 +52,7 @@ export function draftSourceIngestProfile(opts: DraftSourceIngestProfileOptions):
         on_access: 'acknowledge_when_stale',
         ...(updatedAt ? { changed_since_field: updatedAt } : {}),
       },
-      mapping: { frontmatter: isVehicle ? { equipment_class: 'vehicle' } : {} },
+      mapping: { frontmatter: isVehicle ? { equipment_class: 'vehicle' } : {}, ...(isVehicle ? { article_template: defaultEquipmentArticleTemplate() } : {}) },
       links: isVehicle ? [
         { id: 'part-of-parent-equipment', type: 'part_of', target: { type: 'equipment', lookup: 'external_id', value_field: 'parent_id' }, when: [{ field: 'parent_id', op: 'exists' }], confidence: 0.7 },
         { id: 'located-at-facility', type: 'located_at', target: { type: 'facility', lookup: 'external_id', value_field: 'location_id' }, when: [{ field: 'location_id', op: 'exists' }], confidence: 0.7 },

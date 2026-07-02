@@ -30,6 +30,30 @@ interface ReviewForm {
   sample_limit: number;
 }
 
+const DEFAULT_ARTICLE_SECTIONS: Record<string, string> = {
+  title: '{{ name }}',
+  summary: '{{ name }} — единица автотранспорта/оборудования группы Аверс. Код: {{ code }}.',
+  characteristics_type: '{{ vehicle_class }}',
+  characteristics_model: '{{ model }}',
+  characteristics_status: '{{ status }}',
+  characteristics_inventory: '{{ external_code }}',
+  links: '- Находится на площадке (located_at): {{ location_id }}\n- Входит в состав узла (part_of): {{ parent_id }}',
+  notes: 'Данные импортированы из AppSheet. Ручные пояснения можно добавлять вне managed block.',
+  timeline: '',
+};
+
+const SECTION_LABELS: Record<string, string> = {
+  title: 'Заголовок H1 / frontmatter title',
+  summary: 'Описание под заголовком',
+  characteristics_type: 'Характеристики → Тип',
+  characteristics_model: 'Характеристики → Производитель/модель',
+  characteristics_status: 'Характеристики → Состояние',
+  characteristics_inventory: 'Характеристики → Инвентарный/серийный №',
+  links: 'Связи',
+  notes: 'Заметки',
+  timeline: 'Timeline',
+};
+
 function val(x: unknown): string {
   return x === null || x === undefined || x === '' ? '—' : String(x);
 }
@@ -70,15 +94,6 @@ function DiscoveryPreview({ value }: { value: unknown }) {
   </div>;
 }
 
-function maskDryRunPreviewText(text: string, piiFields: string[]): string {
-  let out = text;
-  for (const field of piiFields) {
-    const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    out = out.replace(new RegExp(`(-\\s*${escaped}\\s*:\\s*)(.*)`, 'gi'), '$1[PII masked]');
-  }
-  return out;
-}
-
 function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; currentTargetSourceId: string }) {
   const d = asObj(value);
   if (!value) return <div style={{ color: 'var(--text-muted)' }}>No dry-run yet.</div>;
@@ -90,9 +105,6 @@ function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; curre
   const hasPii = sensitivity.pii === true || piiFields.length > 0;
   const routedSource = String(sensitivity.approved_source_id ?? currentTargetSourceId ?? '—');
   const crossSource = routedSource !== '—' && currentTargetSourceId && routedSource !== currentTargetSourceId;
-  const firstPreview = samplePages[0]?.managed_block_preview
-    ? maskDryRunPreviewText(String(samplePages[0].managed_block_preview), piiFields)
-    : '';
   return <div style={{ color: 'var(--text-secondary)' }}>
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(90px, 1fr))', gap: 8, marginBottom: 10 }}>
       {['sampled', 'would_write', 'skipped', 'slug_collisions'].map(k => <div className="metric" key={k}><div className="metric-value">{val(counts[k])}</div><div className="metric-label">{k}</div></div>)}
@@ -106,10 +118,12 @@ function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; curre
       {crossSource && <div style={{ marginTop: 4 }}>Cross-source mismatch: dry-run routing source differs from selected target source.</div>}
     </div>
     {warnings.length > 0 && <div style={{ color: 'var(--warning)', marginBottom: 8 }}>Warnings: {warnings.map(String).join(', ')}</div>}
-    <table><thead><tr><th>slug</th><th>title</th><th>external</th></tr></thead><tbody>
-      {samplePages.map((p, i) => <tr key={i}><td className="mono">{val(p.slug)}</td><td>{hasPii ? '[PII masked]' : val(p.title)}</td><td className="mono">{val(p.external_id)}</td></tr>)}
+    <table><thead><tr><th>slug</th><th>title</th><th>external</th><th>empty template slots</th></tr></thead><tbody>
+      {samplePages.map((p, i) => <tr key={i}><td className="mono">{val(p.slug)}</td><td>{hasPii ? '[PII masked]' : val(p.title)}</td><td className="mono">{val(p.external_id)}</td><td>{asArr(p.article_empty_slots).map(String).join(', ') || '—'}</td></tr>)}
     </tbody></table>
-    {firstPreview && <details style={{ marginTop: 8 }}><summary>First managed block preview (PII fields masked)</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 220, overflow: 'auto' }}>{firstPreview}</pre></details>}
+    {samplePages.length > 0 && <details style={{ marginTop: 8 }}><summary>Rendered article previews</summary>
+      {samplePages.map((p, i) => <details key={i} style={{ marginTop: 8 }} open={i === 0}><summary>{val(p.slug)} · {val(p.title)}</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}>{String(p.article_markdown_preview || p.managed_block_preview || '')}</pre></details>)}
+    </details>}
   </div>;
 }
 
@@ -137,6 +151,8 @@ export function SourceIngestPage() {
     freshness_policy: 'P30D',
     sample_limit: 25,
   });
+  const [articleSections, setArticleSections] = useState<Record<string, string>>(DEFAULT_ARTICLE_SECTIONS);
+  const [activeSection, setActiveSection] = useState<string>('summary');
 
   const load = async () => {
     try {
@@ -159,7 +175,18 @@ export function SourceIngestPage() {
     || { configured: false, missing_keys: appSheet?.requiredKeys ?? [], required_keys: appSheet?.requiredKeys ?? [], missing_env: appSheet?.requiredEnv ?? [], required_env: appSheet?.requiredEnv ?? [], masked: {}, storage: 'none' };
   const summary = data?.status.summary ?? {};
   const activeProfile = useMemo(() => (draft as Record<string, unknown> | null)?.profile ?? null, [draft]);
-  const canDryRun = Boolean(activeProfile);
+  const profileForReview = useMemo(() => {
+    if (!activeProfile) return null;
+    const raw = { ...(activeProfile as Record<string, unknown>) };
+    const mapping = { ...(asObj(raw.mapping)) };
+    mapping.article_template = {
+      ...(asObj(mapping.article_template)),
+      sections: articleSections,
+    };
+    raw.mapping = mapping;
+    return raw;
+  }, [activeProfile, articleSections]);
+  const canDryRun = Boolean(profileForReview);
   const dryRunSensitivity = asObj(asObj(dryRun).routing_sensitivity);
   const dryRunPiiFields = asArr(dryRunSensitivity.pii_fields).map(String);
   const dryRunHasPii = dryRunSensitivity.pii === true || dryRunPiiFields.length > 0;
@@ -259,6 +286,11 @@ export function SourceIngestPage() {
 
   const draftProfile = async () => runStep('draft', async () => {
     const out = await api.sourceIngestDraft(payload());
+    const profile = asObj((out as Record<string, unknown>).profile);
+    const mapping = asObj(profile.mapping);
+    const articleTemplate = asObj(mapping.article_template);
+    const sections = asObj(articleTemplate.sections);
+    if (Object.keys(sections).length > 0) setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])) });
     setDraft(out);
     setDryRun(null);
     setDryRunSourceId(null);
@@ -266,15 +298,28 @@ export function SourceIngestPage() {
     setApproveResult(null);
   });
 
+  const updateArticleSection = (key: string, value: string) => {
+    setArticleSections(prev => ({ ...prev, [key]: value }));
+    setDryRun(null);
+    setDryRunSourceId(null);
+    setSensitivityAck(false);
+    setApproveResult(null);
+  };
+
+  const insertFieldToken = (field: string) => {
+    const token = `{{ ${field} }}`;
+    updateArticleSection(activeSection, `${articleSections[activeSection] || ''}${articleSections[activeSection] ? ' ' : ''}${token}`);
+  };
+
   const runDryRun = async () => runStep('dry-run', async () => {
-    if (!activeProfile) return;
-    setDryRun(await api.sourceIngestDryRun({ profile: activeProfile, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
+    if (!profileForReview) return;
+    setDryRun(await api.sourceIngestDryRun({ profile: profileForReview, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
     setDryRunSourceId(form.target_source_id);
     setSensitivityAck(false);
   });
 
   const approveProfile = async () => runStep('approve', async () => {
-    if (!activeProfile) return;
+    if (!profileForReview) return;
     if (dryRunSourceId !== form.target_source_id) {
       throw new Error(`dry_run_source_mismatch: dry-run was for ${dryRunSourceId ?? 'none'}, current target is ${form.target_source_id}. Run dry-run preview again before approving.`);
     }
@@ -282,7 +327,7 @@ export function SourceIngestPage() {
       throw new Error('sensitivity_ack_required: acknowledge PII/cross-source routing before approving.');
     }
     const out = await api.sourceIngestApproveProfile({
-      profile: activeProfile,
+      profile: profileForReview,
       approved_source_id: form.target_source_id,
       dry_run_target_source_id: dryRunSourceId,
       change_note: `approved AppSheet vehicle profile from admin UI (${form.slug_prefix})`,
@@ -398,6 +443,37 @@ export function SourceIngestPage() {
           <button className="btn btn-secondary" disabled={busy !== null || !canDryRun} onClick={() => void runDryRun()}>{busy === 'dry-run' ? 'Running…' : 'Dry-run preview'}</button>
           <button className="btn btn-primary" disabled={busy !== null || !canApprove} onClick={() => void approveProfile()}>{busy === 'approve' ? 'Approving…' : 'Approve profile'}</button>
           {dryRunSourceMismatch && <span style={{ color: 'var(--warning)', alignSelf: 'center' }}>Target source changed from dry-run ({dryRunSourceId}) to {form.target_source_id}; run dry-run preview again.</span>}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 320px) 1fr', gap: 14, marginBottom: 14 }}>
+          <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+            <h3 style={{ fontSize: 13, marginBottom: 8 }}>Source fields</h3>
+            <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>Click a field to insert <code>{'{{ field }}'}</code> into the active template box.</div>
+            <div style={{ maxHeight: 360, overflow: 'auto' }}>
+              {asArr<Record<string, unknown>>(asObj(discovery).fields).length === 0 && <div style={{ color: 'var(--text-muted)' }}>Run Discover first.</div>}
+              {asArr<Record<string, unknown>>(asObj(discovery).fields).map(f => <button key={String(f.name)} className="btn btn-secondary" style={{ display: 'block', width: '100%', marginBottom: 6, textAlign: 'left' }} onClick={() => insertFieldToken(String(f.name))}>
+                <span className="mono">{val(f.name)}</span>
+                <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 11 }}>{asArr(f.samples).slice(0, 2).map(val).join(' · ') || '—'}</span>
+              </button>)}
+            </div>
+          </div>
+          <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+            <h3 style={{ fontSize: 13, marginBottom: 8 }}>Article mapping editor — equipment template</h3>
+            <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 10 }}>
+              Write static text and insert source-field tokens. Dry-run preview renders the final Markdown for several input rows. Editing mapping invalidates the previous dry-run/approval.
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              {Object.entries(articleSections).map(([key, value]) => <label key={key} style={{ display: 'block' }}>
+                {SECTION_LABELS[key] || key}
+                <textarea
+                  rows={key === 'links' || key === 'notes' ? 4 : 2}
+                  value={value}
+                  onFocus={() => setActiveSection(key)}
+                  onChange={e => updateArticleSection(key, e.target.value)}
+                  style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                />
+              </label>)}
+            </div>
+          </div>
         </div>
         {requiresSensitivityAck && <label style={{ display: 'block', marginBottom: 12, padding: 10, borderRadius: 6, background: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)' }}>
           <input type="checkbox" checked={sensitivityAck} onChange={e => setSensitivityAck(e.target.checked)} style={{ marginRight: 8 }} />
