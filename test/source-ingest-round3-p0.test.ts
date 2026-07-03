@@ -1,7 +1,8 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { LATEST_VERSION, runMigrations, MIGRATIONS } from '../src/core/migrate.ts';
 import { purgeStaleSourceIngestRunItems } from '../src/core/source-ingest/ledger.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 async function hasTable(engine: PGLiteEngine, table: string): Promise<boolean> {
   const rows = await engine.executeRaw<{ exists: boolean }>(
@@ -25,27 +26,36 @@ async function hasIndex(engine: PGLiteEngine, index: string): Promise<boolean> {
   return rows[0]?.exists === true;
 }
 
+let engine: PGLiteEngine;
+
+beforeAll(async () => {
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
+});
+
+afterAll(async () => {
+  await engine.disconnect();
+});
+
+beforeEach(async () => {
+  await resetPgliteState(engine);
+});
+
 describe('source-ingest round3 P0 hardening', () => {
   test('v120-stamped brain missing source_ingest_run_items upgrades without crash and recreates ledger', async () => {
-    const engine = new PGLiteEngine();
-    await engine.connect({});
-    try {
-      await engine.initSchema();
-      await engine.executeRaw(`DROP TABLE IF EXISTS source_ingest_run_items`);
-      await engine.setConfig('version', '120');
+    await engine.executeRaw(`DROP TABLE IF EXISTS source_ingest_run_items`);
+    await engine.setConfig('version', '120');
 
-      const result = await runMigrations(engine);
+    const result = await runMigrations(engine);
 
-      expect(result.applied).toBe(5);
-      expect(result.current).toBe(LATEST_VERSION);
-      expect(await hasTable(engine, 'source_ingest_run_items')).toBe(true);
-      expect(await hasIndex(engine, 'source_ingest_run_items_run_idx')).toBe(true);
-      expect(await hasIndex(engine, 'source_ingest_run_items_external_idx')).toBe(true);
-      const version = await engine.getConfig('version');
-      expect(Number(version)).toBe(LATEST_VERSION);
-    } finally {
-      await engine.disconnect();
-    }
+    expect(result.applied).toBe(LATEST_VERSION - 120);
+    expect(result.current).toBe(LATEST_VERSION);
+    expect(await hasTable(engine, 'source_ingest_run_items')).toBe(true);
+    expect(await hasIndex(engine, 'source_ingest_run_items_run_idx')).toBe(true);
+    expect(await hasIndex(engine, 'source_ingest_run_items_external_idx')).toBe(true);
+    const version = await engine.getConfig('version');
+    expect(Number(version)).toBe(LATEST_VERSION);
   }, 30000);
 
   test('v123 source-ingest RLS migration is guarded against missing tables', () => {
@@ -57,36 +67,29 @@ describe('source-ingest round3 P0 hardening', () => {
   });
 
   test('source-ingest run ledger GC prunes stale rows and keeps recent rows', async () => {
-    const engine = new PGLiteEngine();
-    await engine.connect({});
-    try {
-      await engine.initSchema();
-      await engine.executeRaw(`INSERT INTO sources (id, name, config) VALUES ('shared', 'shared', '{}'::jsonb) ON CONFLICT (id) DO NOTHING`);
-      await engine.executeRaw(`
-        INSERT INTO source_ingest_profiles
-          (profile_id, connector_id, source_object, status, approved_source_id, target_type, profile_json, profile_hash)
-        VALUES
-          ('fake-source-vehicle-v1', 'fake-source', 'vehicle', 'reviewed', 'shared', 'equipment', '{}'::jsonb, 'hash')
-        ON CONFLICT (profile_id) DO NOTHING
-      `);
-      await engine.executeRaw(`
-        INSERT INTO source_ingest_run_items
-          (run_id, connector_id, source_object, external_id, slug, approved_source_id, profile_id, profile_version,
-           action, last_result, created_at)
-        VALUES
-          ('old-run', 'fake-source', 'vehicle', 'old', 'old-slug', 'shared', 'fake-source-vehicle-v1', 1,
-           'created', 'success', now() - interval '8 days'),
-          ('new-run', 'fake-source', 'vehicle', 'new', 'new-slug', 'shared', 'fake-source-vehicle-v1', 1,
-           'created', 'success', now())
-      `);
+    await engine.executeRaw(`INSERT INTO sources (id, name, config) VALUES ('shared', 'shared', '{}'::jsonb) ON CONFLICT (id) DO NOTHING`);
+    await engine.executeRaw(`
+      INSERT INTO source_ingest_profiles
+        (profile_id, connector_id, source_object, status, approved_source_id, target_type, profile_json, profile_hash)
+      VALUES
+        ('fake-source-vehicle-v1', 'fake-source', 'vehicle', 'reviewed', 'shared', 'equipment', '{}'::jsonb, 'hash')
+      ON CONFLICT (profile_id) DO NOTHING
+    `);
+    await engine.executeRaw(`
+      INSERT INTO source_ingest_run_items
+        (run_id, connector_id, source_object, external_id, slug, approved_source_id, profile_id, profile_version,
+         action, last_result, created_at)
+      VALUES
+        ('old-run', 'fake-source', 'vehicle', 'old', 'old-slug', 'shared', 'fake-source-vehicle-v1', 1,
+         'created', 'success', now() - interval '8 days'),
+        ('new-run', 'fake-source', 'vehicle', 'new', 'new-slug', 'shared', 'fake-source-vehicle-v1', 1,
+         'created', 'success', now())
+    `);
 
-      const purged = await purgeStaleSourceIngestRunItems(engine, 7);
-      const remaining = await engine.executeRaw<{ run_id: string }>(`SELECT run_id FROM source_ingest_run_items ORDER BY run_id`);
+    const purged = await purgeStaleSourceIngestRunItems(engine, 7);
+    const remaining = await engine.executeRaw<{ run_id: string }>(`SELECT run_id FROM source_ingest_run_items ORDER BY run_id`);
 
-      expect(purged).toBe(1);
-      expect(remaining.map(r => r.run_id)).toEqual(['new-run']);
-    } finally {
-      await engine.disconnect();
-    }
+    expect(purged).toBe(1);
+    expect(remaining.map(r => r.run_id)).toEqual(['new-run']);
   }, 30000);
 });

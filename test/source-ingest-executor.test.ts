@@ -17,6 +17,7 @@ import {
   putSourceConnectorConfig,
   putSourceConnectorSecrets,
   sourceConnectorSecretStatus,
+  sourceTableSummariesFromConfigs,
 } from '../src/core/source-ingest/connector-config.ts';
 import { rowToVehicleRecord, AppSheetVehicleConnector, sourceFieldsToAppSheetColumns } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
 import { runCycle } from '../src/core/cycle.ts';
@@ -24,6 +25,7 @@ import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
 import { draftSourceIngestProfile } from '../src/core/source-ingest/draft.ts';
 import { buildProfileSampleRecords } from '../src/core/source-ingest/source-fetch.ts';
 import { executeSourceTransform } from '../src/core/source-ingest/transform.ts';
+import { renderArticleTemplate, renderTemplateString } from '../src/core/source-ingest/template-renderer.ts';
 import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
@@ -362,6 +364,36 @@ describe('source-ingest Stage 3A executor', () => {
       async () => [],
     );
     expect(result.records[0].source_updated_at).toBe('2026-07-01T10:00:00.000Z');
+  });
+
+  test('SQL transform preserves empty text and serializes large bigint-like values safely', async () => {
+    const result = await executeSourceTransform(
+      {
+        engine: 'pglite',
+        primary_key_field: 'id',
+        sources: [{ alias: 'source', object: 'vehicle' }],
+        sql: "SELECT 'veh-big'::text AS id, ''::text AS note, 9007199254740993::bigint AS big_code",
+      },
+      async () => [],
+    );
+    expect(result.records[0].data.note).toBe('');
+    expect(result.records[0].data.big_code).toBe('9007199254740993');
+  });
+
+  test('template renderer rejects unknown filters and keeps markdown title single-line/capped', () => {
+    const emptySlots: string[] = [];
+    const rendered = renderTemplateString('{{ name | unknown }}', { external_id: 'x', data: { name: 'Secret' } }, emptySlots);
+    expect(rendered).toBe('');
+    expect(emptySlots).toContain('name (unknown filter: unknown)');
+    const article = renderArticleTemplate({
+      ...profile,
+      mapping: {
+        ...profile.mapping,
+        article_template: { sections: { title: '{{ name }}', notes: 'ok' } },
+      },
+    }, { external_id: 'x', data: { name: 'Line 1\nLine 2' } });
+    expect(article.title).toBe('Line 1 Line 2');
+    expect(article.body).toContain('# Line 1 Line 2\n');
   });
 
   test('SQL transform rejects missing and null primary keys instead of row-N fallback', async () => {
@@ -754,9 +786,46 @@ describe('source-ingest Stage 3A executor', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ connector_id: 'appsheet-vehicles', source_object: 'vehicle', table_name: 'Автотранспорт', enabled: true });
     expect(JSON.stringify(rows[0])).not.toContain('APPSHEET_VEHICLES_ACCESS_KEY=');
+    const summaries = sourceTableSummariesFromConfigs(rows);
+    expect(summaries[0]).toMatchObject({
+      source_table_id: 'appsheet-vehicles:vehicle',
+      connector_id: 'appsheet-vehicles',
+      table_name: 'Автотранспорт',
+      primary_key_field: null,
+      updated_at_field: null,
+      enabled: true,
+    });
     const secrets = await sourceConnectorSecretStatus(engine, 'appsheet-vehicles');
     expect(secrets.required_keys).toEqual(['app_id', 'access_key']);
     expect(secrets.missing_keys).toEqual(expect.arrayContaining(['app_id', 'access_key']));
+  });
+
+  test('scaffold connector secrets advertise required keys without exposing values', async () => {
+    await withEnv({ GOOGLE_APPLICATION_CREDENTIALS: undefined }, async () => {
+      const repo = tempGitRepo();
+      await seed(repo);
+      await putSourceConnectorConfig(engine, {
+        config_id: 'bigquery:table:dataset.vehicle-costs',
+        connector_id: 'bigquery',
+        source_object: 'table',
+        display_name: 'BigQuery vehicle costs',
+        table_name: 'dataset.vehicle_costs',
+        enabled: true,
+        config_json: { table_name: 'dataset.vehicle_costs', primary_key_field: 'vehicleID', updated_at_field: 'updated_at' },
+      }, { actor: 'test' });
+      const before = await sourceConnectorSecretStatus(engine, 'bigquery', 'bigquery:table:dataset.vehicle-costs');
+      expect(before).toMatchObject({ configured: false, missing_keys: ['service_account_json'] });
+      const rotated = await putSourceConnectorSecrets(engine, {
+        config_id: 'bigquery:table:dataset.vehicle-costs',
+        connector_id: 'bigquery',
+        source_object: 'table',
+        secret_json: { serviceAccountJson: '{"client_email":"svc@example.com","private_key":"SECRET"}' },
+      }, { actor: 'admin:test' });
+      expect(rotated.configured).toBe(true);
+      expect(JSON.stringify(rotated)).not.toContain('SECRET');
+      const secretConfig = await getSourceConnectorSecretConfig(engine, 'bigquery', 'table', 'bigquery:table:dataset.vehicle-costs');
+      expect(secretConfig.service_account_json).toContain('svc@example.com');
+    });
   });
 
   test('DB-backed AppSheet secrets rotate encrypted-at-rest, mask, audit, and delete without exposing values in status', async () => {
@@ -791,6 +860,10 @@ describe('source-ingest Stage 3A executor', () => {
 
       const secretConfig = await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle');
       expect(secretConfig).toEqual({ app_id: 'app-123456', access_key: 'key-secret-7890' });
+      expect(await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle', 'appsheet-vehicles:vehicle:vehicles'))
+        .toEqual({ app_id: 'app-123456', access_key: 'key-secret-7890' });
+      expect(await sourceConnectorSecretStatus(engine, 'appsheet-vehicles', 'appsheet-vehicles:vehicle:vehicles', 'vehicle'))
+        .toMatchObject({ configured: true, storage: 'db' });
       const audit = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
       expect(audit[0]).toMatchObject({ action: 'rotate', actor: 'admin:test', secret_keys: ['access_key', 'app_id'] });
       expect(JSON.stringify(audit)).not.toContain('key-secret-7890');
@@ -816,6 +889,32 @@ describe('source-ingest Stage 3A executor', () => {
     expect(columnNames).toContain('ID');
     expect(columnNames).toContain('ГосНомер');
     expect(columnNames).not.toContain('related_measurementacts');
+    expect(JSON.stringify(calls[0].body)).not.toContain('secret');
+  });
+
+  test('AppSheet connector supports arbitrary table configs with explicit primary/update fields', async () => {
+    const calls: Array<{ url: string; body: any }> = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body || '{}')) });
+      return new Response(JSON.stringify([
+        { repairID: 'rep-1', vehicleID: 'veh-001', title: 'Замена масла', updatedAt: '2026-07-02T12:00:00+05:00', amount: 12000 },
+      ]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const connector = new AppSheetVehicleConnector({
+      appId: 'app',
+      accessKey: 'secret',
+      tableName: 'repairs',
+      primaryKeyField: 'repairID',
+      updatedAtField: 'updatedAt',
+      baseUrl: 'https://203.0.113.10/api/v2/apps',
+      fetchImpl,
+    });
+
+    const sample = await connector.sample('vehicle', 5, { fields: ['repairID', 'vehicleID', 'title', 'amount'] });
+    expect(sample[0]).toMatchObject({ external_id: 'rep-1', source_updated_at: '2026-07-02T12:00:00+05:00' });
+    expect(sample[0].data).toMatchObject({ id: 'rep-1', code: 'rep-1', name: 'Замена масла', type: 'repairs', vehicleID: 'veh-001', amount: 12000 });
+    expect(calls[0].url).toContain('/tables/repairs/Action');
+    expect(calls[0].body.Properties.ColumnNames).toEqual(['repairID', 'updatedAt', 'vehicleID', 'title', 'amount']);
     expect(JSON.stringify(calls[0].body)).not.toContain('secret');
   });
 

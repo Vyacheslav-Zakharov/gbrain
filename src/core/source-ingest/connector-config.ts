@@ -66,6 +66,22 @@ export interface SourceConnectorSecretAuditRow {
   created_at: string;
 }
 
+export interface SourceTableSummary {
+  source_table_id: string;
+  connector_id: string;
+  source_object: string;
+  table_name: string | null;
+  display_name: string;
+  primary_key_field: string | null;
+  updated_at_field: string | null;
+  target_source_id: string | null;
+  slug_prefix: string;
+  freshness_policy: string | null;
+  enabled: boolean;
+  fields: string[];
+  updated_at: string;
+}
+
 const APPSHEET_SECRET_KEYS = ['app_id', 'access_key'];
 const APPSHEET_ENV_KEYS = ['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY'];
 const SECRET_ENVELOPE_MARKER = '__encrypted';
@@ -129,29 +145,50 @@ export function isEncryptedConnectorSecretEnvelope(raw: Record<string, unknown>)
   return raw?.[SECRET_ENVELOPE_MARKER] === true;
 }
 
-export function defaultSourceConnectorConfigId(connectorId: string, sourceObject: string): string {
-  return `${connectorId}:${sourceObject}`;
+export function safeSourceTableSuffix(raw: string): string {
+  return raw.toLowerCase().trim().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'default';
+}
+
+export function defaultSourceConnectorConfigId(connectorId: string, sourceObject: string, tableName?: string | null): string {
+  const table = typeof tableName === 'string' && tableName.trim() && tableName.trim() !== sourceObject ? `:${safeSourceTableSuffix(tableName)}` : '';
+  return `${connectorId}:${sourceObject}${table}`;
 }
 
 function requiredSecretKeys(connectorId: string): string[] {
-  return connectorId === 'appsheet-vehicles' ? APPSHEET_SECRET_KEYS : [];
+  if (connectorId === 'appsheet-vehicles') return APPSHEET_SECRET_KEYS;
+  if (connectorId === 'bigquery') return ['service_account_json'];
+  if (connectorId === 'postgres') return ['connection_string'];
+  if (connectorId === 'supabase') return ['project_url', 'service_role_key'];
+  if (connectorId === 'bitrix') return ['base_url', 'access_token'];
+  if (connectorId === 'unf') return ['base_url', 'auth_code'];
+  return [];
 }
 
 function requiredEnvKeys(connectorId: string): string[] {
-  return connectorId === 'appsheet-vehicles' ? APPSHEET_ENV_KEYS : [];
+  if (connectorId === 'appsheet-vehicles') return APPSHEET_ENV_KEYS;
+  if (connectorId === 'bigquery') return ['GOOGLE_APPLICATION_CREDENTIALS'];
+  return [];
 }
 
 function normalizeSecretKey(key: string): string {
   if (key === 'appId') return 'app_id';
   if (key === 'accessKey') return 'access_key';
+  if (key === 'serviceRoleKey') return 'service_role_key';
+  if (key === 'accessToken') return 'access_token';
+  if (key === 'authCode') return 'auth_code';
+  if (key === 'connectionString') return 'connection_string';
+  if (key === 'serviceAccountJson') return 'service_account_json';
+  if (key === 'projectUrl') return 'project_url';
+  if (key === 'baseUrl') return 'base_url';
   return key;
 }
 
-function normalizeSecrets(raw: Record<string, unknown>): Record<string, string> {
+function normalizeSecrets(connectorId: string, raw: Record<string, unknown>): Record<string, string> {
+  const supported = requiredSecretKeys(connectorId);
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(raw)) {
     const key = normalizeSecretKey(k);
-    if (!requiredSecretKeys('appsheet-vehicles').includes(key)) continue;
+    if (!supported.includes(key)) continue;
     if (typeof v !== 'string' || !v.trim()) continue;
     out[key] = v.trim();
   }
@@ -164,17 +201,37 @@ function maskSecret(value: unknown): string {
   return value.length <= 4 ? '••••' : `••••${tail}`;
 }
 
-export async function sourceConnectorSecretStatus(engine: BrainEngine, connectorId: string, configId?: string): Promise<SourceConnectorSecretStatus> {
+function legacyConfigIdForSecretFallback(connectorId: string, sourceObject: string, configId?: string): string | null {
+  const legacy = defaultSourceConnectorConfigId(connectorId, sourceObject);
+  if (!configId || configId === legacy) return null;
+  return configId.startsWith(`${legacy}:`) ? legacy : null;
+}
+
+async function sourceConnectorSecretRowWithLegacyFallback(
+  engine: BrainEngine,
+  connectorId: string,
+  sourceObject: string,
+  configId?: string,
+): Promise<SourceConnectorSecretRow | undefined> {
+  const id = configId || defaultSourceConnectorConfigId(connectorId, sourceObject);
+  const [exact] = await listSourceConnectorSecrets(engine, id);
+  if (exact) return exact;
+  const legacyId = legacyConfigIdForSecretFallback(connectorId, sourceObject, id);
+  if (!legacyId) return undefined;
+  const [legacy] = await listSourceConnectorSecrets(engine, legacyId);
+  return legacy;
+}
+
+export async function sourceConnectorSecretStatus(engine: BrainEngine, connectorId: string, configId?: string, sourceObject = 'vehicle'): Promise<SourceConnectorSecretStatus> {
   const required_keys = requiredSecretKeys(connectorId);
   const required_env = requiredEnvKeys(connectorId);
   if (required_keys.length === 0) return { credential_mode: 'none', required_keys: [], required_env: [], configured: true, missing_keys: [], missing_env: [], masked: {}, storage: 'none' };
 
-  const id = configId || defaultSourceConnectorConfigId(connectorId, 'vehicle');
-  const [row] = await listSourceConnectorSecrets(engine, id);
+  const row = await sourceConnectorSecretRowWithLegacyFallback(engine, connectorId, sourceObject, configId);
   const dbSecrets = row?.secret_json || {};
-  const envSecrets: Record<string, string | undefined> = connectorId === 'appsheet-vehicles'
-    ? { app_id: process.env.APPSHEET_VEHICLES_APP_ID, access_key: process.env.APPSHEET_VEHICLES_ACCESS_KEY }
-    : {};
+  const envSecrets: Record<string, string | undefined> = {};
+  if (connectorId === 'appsheet-vehicles') Object.assign(envSecrets, { app_id: process.env.APPSHEET_VEHICLES_APP_ID, access_key: process.env.APPSHEET_VEHICLES_ACCESS_KEY });
+  if (connectorId === 'bigquery') Object.assign(envSecrets, { service_account_json: process.env.GOOGLE_APPLICATION_CREDENTIALS });
   const missing_keys = required_keys.filter(k => !(typeof dbSecrets[k] === 'string' && String(dbSecrets[k]).trim()) && !(typeof envSecrets[k] === 'string' && String(envSecrets[k]).trim()));
   const missing_env = required_env.filter(k => !process.env[k]);
   const masked: Record<string, string> = {};
@@ -212,6 +269,31 @@ export async function listSourceConnectorConfigs(engine: BrainEngine, configId?:
     params,
   );
   return rows.map(row => ({ ...row, config_json: (row.config_json || {}) as Record<string, unknown> }));
+}
+
+export function sourceTableSummaryFromConfig(row: SourceConnectorConfigRow): SourceTableSummary {
+  const cfg = row.config_json || {};
+  const fields = Array.isArray(cfg.selected_fields) ? cfg.selected_fields.map(String).filter(Boolean) : [];
+  const tableName = row.table_name || (typeof cfg.table_name === 'string' ? cfg.table_name : null);
+  return {
+    source_table_id: row.config_id,
+    connector_id: row.connector_id,
+    source_object: row.source_object,
+    table_name: tableName,
+    display_name: row.display_name || tableName || row.source_object,
+    primary_key_field: typeof cfg.primary_key_field === 'string' && cfg.primary_key_field.trim() ? cfg.primary_key_field.trim() : null,
+    updated_at_field: typeof cfg.updated_at_field === 'string' && cfg.updated_at_field.trim() ? cfg.updated_at_field.trim() : null,
+    target_source_id: row.target_source_id,
+    slug_prefix: row.slug_prefix,
+    freshness_policy: row.freshness_policy,
+    enabled: row.enabled,
+    fields,
+    updated_at: row.updated_at,
+  };
+}
+
+export function sourceTableSummariesFromConfigs(rows: SourceConnectorConfigRow[]): SourceTableSummary[] {
+  return rows.map(sourceTableSummaryFromConfig);
 }
 
 export async function putSourceConnectorConfig(
@@ -273,14 +355,13 @@ export async function listSourceConnectorSecrets(engine: BrainEngine, configId?:
   return rows.map(row => ({ ...row, secret_json: decryptSecretJson((row.secret_json || {}) as Record<string, unknown>) }));
 }
 
-export async function getSourceConnectorSecretConfig(engine: BrainEngine, connectorId: string, sourceObject: string): Promise<Record<string, string>> {
-  const configId = defaultSourceConnectorConfigId(connectorId, sourceObject);
-  const [row] = await listSourceConnectorSecrets(engine, configId);
+export async function getSourceConnectorSecretConfig(engine: BrainEngine, connectorId: string, sourceObject: string, configIdOverride?: string): Promise<Record<string, string>> {
+  const configId = configIdOverride || defaultSourceConnectorConfigId(connectorId, sourceObject);
+  const row = await sourceConnectorSecretRowWithLegacyFallback(engine, connectorId, sourceObject, configId);
   const raw = row?.secret_json || {};
   const out: Record<string, string> = {};
-  if (connectorId === 'appsheet-vehicles') {
-    if (typeof raw.app_id === 'string' && raw.app_id.trim()) out.app_id = raw.app_id.trim();
-    if (typeof raw.access_key === 'string' && raw.access_key.trim()) out.access_key = raw.access_key.trim();
+  for (const key of requiredSecretKeys(connectorId)) {
+    if (typeof raw[key] === 'string' && raw[key].trim()) out[key] = raw[key].trim();
   }
   return out;
 }
@@ -291,7 +372,7 @@ export async function putSourceConnectorSecrets(
   opts: { actor?: string } = {},
 ): Promise<SourceConnectorSecretStatus> {
   const configId = input.config_id || defaultSourceConnectorConfigId(input.connector_id, input.source_object);
-  const secretJson = normalizeSecrets(input.secret_json);
+  const secretJson = normalizeSecrets(input.connector_id, input.secret_json);
   const keys = Object.keys(secretJson).sort();
   if (keys.length === 0) throw new Error('no_supported_secret_keys');
   const storedSecretJson = encryptSecretJson(secretJson);
@@ -317,7 +398,7 @@ export async function putSourceConnectorSecrets(
     [configId, input.connector_id, input.source_object, 'rotate', opts.actor ?? 'local'],
     [{ keys }],
   );
-  return sourceConnectorSecretStatus(engine, input.connector_id, configId);
+  return sourceConnectorSecretStatus(engine, input.connector_id, configId, input.source_object);
 }
 
 export async function deleteSourceConnectorSecrets(
@@ -337,7 +418,7 @@ export async function deleteSourceConnectorSecrets(
     [configId, input.connector_id, input.source_object, 'delete', opts.actor ?? 'local'],
     [{ keys }],
   );
-  return sourceConnectorSecretStatus(engine, input.connector_id, configId);
+  return sourceConnectorSecretStatus(engine, input.connector_id, configId, input.source_object);
 }
 
 export async function listSourceConnectorSecretAudit(engine: BrainEngine, configId?: string, limit = 20): Promise<SourceConnectorSecretAuditRow[]> {

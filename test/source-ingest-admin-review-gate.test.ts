@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { sourceIngestConnectorDescriptors } from '../src/core/source-ingest/connector-registry.ts';
 
 const root = process.cwd();
 const sourceIngestUi = () => readFileSync(join(root, 'admin/src/pages/SourceIngest.tsx'), 'utf8');
@@ -51,5 +52,30 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('sourceIngestTransformPreview');
     expect(server).toContain('/admin/api/source-ingest/transform-preview');
     expect(ui).toContain('(!requiresSensitivityAck || sensitivityAck)');
+    expect(ui).toContain('article_sections: articleSections');
+    expect(ui).toContain('setTransformEnabled(savedJson.transform_enabled === true)');
+    expect(ui).toContain('setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS');
+    expect(ui).toContain('Source table / connector config');
+    expect(ui).toContain('safeSourceTableId(form.connector_id, form.source_object, form.table_name)');
+    expect(ui).toContain('Primary key field');
+    expect(ui).toContain("table_name: 'vehicles'");
+    expect(ui).toContain("primary_key_field: 'vehicleID'");
+    expect(ui).toContain('source_table_id: safeSourceTableId');
+    expect(ui).toContain('Article freshness policy');
+    expect(server).toContain('defaultSourceConnectorConfigId(connector_id, source_object');
+    expect(server).toContain('source_tables: sourceTableSummariesFromConfigs');
+    expect(ui).toContain('Saved source tables');
+    expect(ui).toContain('Use in transform sources');
+    expect(server).toContain('sourceIngestConnectorDescriptors()');
+    expect(ui).toContain('Scaffold only: можно сохранить source table config');
+  });
+
+  test('connector registry exposes scaffold connector types without enabling live IO implicitly', () => {
+    const connectors = sourceIngestConnectorDescriptors();
+    expect(connectors.map(c => c.id)).toEqual(expect.arrayContaining(['appsheet-vehicles', 'fake-source', 'bigquery', 'postgres', 'supabase', 'bitrix', 'unf']));
+    expect(connectors.find(c => c.id === 'appsheet-vehicles')).toMatchObject({ status: 'implemented', object: 'vehicle' });
+    expect(connectors.find(c => c.id === 'bigquery')).toMatchObject({ status: 'scaffold', object: 'table', credentialMode: 'db-or-server-env' });
+    expect(connectors.find(c => c.id === 'unf')).toMatchObject({ status: 'scaffold', object: 'endpoint' });
+    expect(connectors.find(c => c.id === 'bigquery')?.fields?.some(f => f.key === 'primaryKeyField')).toBe(true);
   });
 });

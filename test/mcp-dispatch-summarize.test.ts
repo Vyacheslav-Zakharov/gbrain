@@ -75,6 +75,23 @@ describe('summarizeMcpParams — declared-keys allow-list', () => {
     expect(serialized).not.toContain('bar');
   });
 
+  test('code traversal logs show whether source_id was supplied', () => {
+    const missingSource = summarizeMcpParams('code_blast', {
+      symbol: 'sourceIngestUiConfig',
+      depth: 3,
+      max_nodes: 100,
+    }) as ParamSummary;
+    expect(missingSource.declared_keys).toEqual(['depth', 'max_nodes', 'symbol']);
+
+    const withSource = summarizeMcpParams('code_blast', {
+      symbol: 'sourceIngestUiConfig',
+      source_id: 'internal-it',
+      depth: 3,
+      max_nodes: 100,
+    }) as ParamSummary;
+    expect(withSource.declared_keys).toEqual(['depth', 'max_nodes', 'source_id', 'symbol']);
+  });
+
   test('null/undefined params return null (caller writes SQL NULL)', () => {
     expect(summarizeMcpParams('put_page', null)).toBeNull();
     expect(summarizeMcpParams('put_page', undefined)).toBeNull();

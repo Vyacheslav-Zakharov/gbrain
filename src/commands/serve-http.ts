@@ -43,9 +43,13 @@ import {
   type IngestionContentType,
   type IngestionEvent,
 } from '../core/ingestion/types.ts';
-import { getSourceConnectorSecretConfig } from '../core/source-ingest/connector-config.ts';
+import { defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, sourceTableSummariesFromConfigs } from '../core/source-ingest/connector-config.ts';
 import { buildProfileSampleRecords } from '../core/source-ingest/source-fetch.ts';
 import { profileHash } from '../core/source-ingest/store.ts';
+import { validateSourceIngestProfile } from '../core/source-ingest/profile-schema.ts';
+import { sourceIngestConnectorDescriptors } from '../core/source-ingest/connector-registry.ts';
+import { getSourceConnector } from '../core/source-ingest/connectors/fake.ts';
+import { recordSourceConnectorTest } from '../core/source-ingest/catalog.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -1038,41 +1042,123 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   app.get('/admin/api/source-ingest/overview', requireAdmin, async (_req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
     try {
-      const [profiles, status, refresh, sources, connectorConfigs] = await Promise.all([
+      const [profiles, status, refresh, sources, connectorConfigs, catalogTree] = await Promise.all([
         operationsByName.source_profile_get.handler(ctx, {}),
         operationsByName.source_sync_status.handler(ctx, { limit: 200 }),
         operationsByName.source_refresh.handler(ctx, {}),
         engine.executeRaw(`SELECT id, name, local_path AS path, (config->>'federated')::boolean AS federated FROM sources ORDER BY id`),
         operationsByName.source_connector_config_get.handler(ctx, {}),
+        operationsByName.source_ingest_tree.handler(ctx, {}),
       ]);
+      const connectorConfigRows = Array.isArray((connectorConfigs as any)?.rows) ? (connectorConfigs as any).rows : [];
       res.json({
-        connectors: [
-          {
-            id: 'appsheet-vehicles',
-            displayName: 'AppSheet автотранспорт',
-            object: 'vehicle',
-            supportsChangedSince: true,
-            credentialMode: 'db-or-server-env',
-            requiredKeys: ['app_id', 'access_key'],
-            requiredEnv: ['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY'],
-            fields: [
-              { key: 'tableName', label: 'AppSheet table name', defaultValue: 'Автотранспорт' },
-              { key: 'targetSourceId', label: 'Target GBrain source', defaultValue: 'shared' },
-              { key: 'slugPrefix', label: 'Slug prefix', defaultValue: 'source-ingest/vehicles' },
-              { key: 'freshnessPolicy', label: 'Freshness policy', defaultValue: 'P30D' },
-            ],
-            safety: ['Discovery/dry-run first', 'Review profile before approval', 'Refresh cycle enqueues Minion jobs only'],
-          },
-          { id: 'fake-source', displayName: 'Deterministic fake source', object: 'vehicle', supportsChangedSince: true, credentialMode: 'none' },
-        ],
+        connectors: sourceIngestConnectorDescriptors(),
         profiles,
         status,
         refresh,
         sources,
         connector_configs: connectorConfigs,
+        source_tables: sourceTableSummariesFromConfigs(connectorConfigRows as any),
+        catalog_tree: catalogTree,
       });
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/catalog/tree', requireAdmin, async (_req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      res.json(await operationsByName.source_ingest_tree.handler(ctx, {}));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/connector', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const connector_id = typeof body.connector_id === 'string' ? body.connector_id.trim() : '';
+      const kind = typeof body.kind === 'string' ? body.kind.trim() : '';
+      const display_name = typeof body.display_name === 'string' ? body.display_name.trim() : connector_id;
+      if (!connector_id || !kind) {
+        res.status(400).json({ error: 'connector_id_and_kind_required' });
+        return;
+      }
+      const out = await operationsByName.source_connector_upsert.handler(ctx, {
+        connector_id,
+        kind,
+        display_name,
+        config_json: body.config_json && typeof body.config_json === 'object' ? body.config_json : {},
+        enabled: typeof body.enabled === 'boolean' ? body.enabled : true,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/connector/delete', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id.trim() : '';
+      if (!connector_id) {
+        res.status(400).json({ error: 'connector_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_connector_delete.handler(ctx, { connector_id }));
+    } catch (e) {
+      res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  async function sourceConnectorRuntimeConfig(body: Record<string, unknown>): Promise<{ connectorId: string; objectName: string; config: Record<string, unknown> }> {
+    const connectorId = typeof body.connector_id === 'string' ? body.connector_id.trim() : 'appsheet-vehicles';
+    const objectName = typeof body.source_object === 'string' ? body.source_object.trim() : 'vehicle';
+    const tableName = typeof body.table_name === 'string' ? body.table_name.trim() : undefined;
+    const configId = typeof body.config_id === 'string' ? body.config_id : defaultSourceConnectorConfigId(connectorId, objectName, tableName);
+    const saved = await operationsByName.source_connector_list.handler(
+      { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true },
+      { connector_id: connectorId },
+    ) as { rows?: Array<Record<string, unknown>> };
+    const row = saved.rows?.[0];
+    const rowConfig = row?.config_json && typeof row.config_json === 'object' ? row.config_json as Record<string, unknown> : {};
+    const secretConfig = await getSourceConnectorSecretConfig(engine, connectorId, objectName, configId);
+    return { connectorId, objectName, config: { ...rowConfig, ...nonSecretConnectorConfigFromBody(body), ...secretConfig } };
+  }
+
+  app.post('/admin/api/source-ingest/catalog/connector/list-objects', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    try {
+      const { connectorId, config: runtimeConfig } = await sourceConnectorRuntimeConfig((req.body || {}) as Record<string, unknown>);
+      const connector = getSourceConnector(connectorId, runtimeConfig);
+      if (!connector) {
+        res.status(400).json({ ok: false, error: `unsupported_connector: ${connectorId}` });
+        return;
+      }
+      const objects = await connector.listObjects();
+      res.json({ ok: true, connector_id: connectorId, objects });
+    } catch (e) {
+      res.status(200).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/connector/test', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const started = Date.now();
+    try {
+      const { connectorId, objectName, config: runtimeConfig } = await sourceConnectorRuntimeConfig((req.body || {}) as Record<string, unknown>);
+      const connector = getSourceConnector(connectorId, runtimeConfig);
+      if (!connector) {
+        res.status(400).json({ ok: false, status: 'unsupported_connector', connector_id: connectorId });
+        return;
+      }
+      const objects = await connector.listObjects();
+      await recordSourceConnectorTest(engine, connectorId, true);
+      res.json({ ok: true, status: 'connection_ok', connector_id: connectorId, source_object: objectName, elapsed_ms: Date.now() - started, objects });
+    } catch (e) {
+      const connectorId = typeof req.body?.connector_id === 'string' ? req.body.connector_id : '';
+      if (connectorId) await recordSourceConnectorTest(engine, connectorId, false).catch(() => undefined);
+      res.status(200).json({ ok: false, status: 'connection_failed', elapsed_ms: Date.now() - started, error: e instanceof Error ? e.message : String(e) });
     }
   });
 
@@ -1160,10 +1246,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   function nonSecretConnectorConfigFromBody(body: Record<string, unknown>): Record<string, unknown> {
     const out: Record<string, unknown> = {};
     if (typeof body.table_name === 'string' && body.table_name.trim()) out.table_name = body.table_name.trim();
+    if (typeof body.primary_key_field === 'string' && body.primary_key_field.trim()) out.primary_key_field = body.primary_key_field.trim();
+    if (typeof body.updated_at_field === 'string' && body.updated_at_field.trim()) out.updated_at_field = body.updated_at_field.trim();
     if (typeof body.base_url === 'string' && body.base_url.trim()) out.base_url = body.base_url.trim();
     if (body.connector_config && typeof body.connector_config === 'object') {
       const raw = body.connector_config as Record<string, unknown>;
       if (typeof raw.table_name === 'string' && raw.table_name.trim()) out.table_name = raw.table_name.trim();
+      if (typeof raw.primary_key_field === 'string' && raw.primary_key_field.trim()) out.primary_key_field = raw.primary_key_field.trim();
+      if (typeof raw.updated_at_field === 'string' && raw.updated_at_field.trim()) out.updated_at_field = raw.updated_at_field.trim();
       if (typeof raw.base_url === 'string' && raw.base_url.trim()) out.base_url = raw.base_url.trim();
     }
     return out;
@@ -1172,21 +1262,24 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   async function sourceIngestUiConfig(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const connector_id = typeof body.connector_id === 'string' ? body.connector_id : 'appsheet-vehicles';
     const source_object = typeof body.source_object === 'string' ? body.source_object : 'vehicle';
-    const config_id = typeof body.config_id === 'string' ? body.config_id : `${connector_id}:${source_object}`;
+    const config_id = typeof body.config_id === 'string' ? body.config_id : defaultSourceConnectorConfigId(connector_id, source_object, typeof body.table_name === 'string' ? body.table_name : undefined);
     const saved = await operationsByName.source_connector_config_get.handler(
       { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true },
       { config_id },
     ) as { rows?: Array<Record<string, unknown>> };
     const row = saved.rows?.[0];
     const nonSecretConfig = { ...(row?.config_json && typeof row.config_json === 'object' ? row.config_json as Record<string, unknown> : {}), ...nonSecretConnectorConfigFromBody(body) };
-    const secretConfig = await getSourceConnectorSecretConfig(engine, connector_id, source_object);
+    const secretConfig = await getSourceConnectorSecretConfig(engine, connector_id, source_object, config_id);
     return {
       connector_id,
       source_object,
       target_source_id: typeof body.target_source_id === 'string' ? body.target_source_id : (typeof row?.target_source_id === 'string' ? row.target_source_id : 'shared'),
       slug_prefix: typeof body.slug_prefix === 'string' ? body.slug_prefix : (typeof row?.slug_prefix === 'string' ? row.slug_prefix : 'source-ingest/vehicles'),
       freshness_policy: typeof body.freshness_policy === 'string' ? body.freshness_policy : (typeof row?.freshness_policy === 'string' ? row.freshness_policy : 'P30D'),
-      table_name: typeof body.table_name === 'string' ? body.table_name : (typeof row?.table_name === 'string' ? row.table_name : 'Автотранспорт'),
+      table_name: typeof body.table_name === 'string' ? body.table_name : (typeof row?.table_name === 'string' ? row.table_name : 'vehicles'),
+      primary_key_field: typeof body.primary_key_field === 'string' ? body.primary_key_field : (typeof nonSecretConfig.primary_key_field === 'string' ? nonSecretConfig.primary_key_field : 'vehicleID'),
+      updated_at_field: typeof body.updated_at_field === 'string' ? body.updated_at_field : (typeof nonSecretConfig.updated_at_field === 'string' ? nonSecretConfig.updated_at_field : ''),
+      source_table_id: config_id,
       connector_config: { ...nonSecretConfig, ...secretConfig },
     };
   }
@@ -1241,7 +1334,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     const target = { ...((raw.target as Record<string, unknown>) || {}) };
     const freshness = { ...((raw.freshness as Record<string, unknown>) || {}) };
     if (typeof body.slug_prefix === 'string' && body.slug_prefix.trim()) {
-      target.slug_template = `${body.slug_prefix.trim().replace(/\/+$/g, '')}/{{ code | slugify }}`;
+      const keyField = typeof body.primary_key_field === 'string' && body.primary_key_field.trim() ? body.primary_key_field.trim() : 'id';
+      target.slug_template = `${body.slug_prefix.trim().replace(/\/+$/g, '')}/{{ ${keyField} | slugify }}`;
     }
     if (typeof body.target_source_id === 'string' && body.target_source_id.trim()) {
       target.suggested_source_id = body.target_source_id.trim();
@@ -1260,7 +1354,16 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
       const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
       const selected_fields = Array.isArray(req.body?.selected_fields) ? req.body.selected_fields.map(String).filter(Boolean) : undefined;
-      const drafted = await operationsByName.source_profile_draft.handler(ctx, { connector_id: ui.connector_id, source_object: ui.source_object, target_source_id: ui.target_source_id, sample_limit, connector_config: ui.connector_config, selected_fields });
+      const drafted = await operationsByName.source_profile_draft.handler(ctx, {
+        connector_id: ui.connector_id,
+        source_object: ui.source_object,
+        target_source_id: ui.target_source_id,
+        sample_limit,
+        connector_config: ui.connector_config,
+        selected_fields,
+        primary_key_field: ui.primary_key_field,
+        updated_at_field: ui.updated_at_field,
+      });
       const profile = applySourceIngestUiOverrides((drafted as any).profile, ui);
       res.json({ ...(drafted as Record<string, unknown>), profile });
     } catch (e) {
@@ -1305,24 +1408,51 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  function clampSourceIngestPreviewLimit(raw: unknown, fallback = 25, max = 100): number {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(1, Math.floor(n)));
+  }
+
+  function capSourceIngestPreviewPayload(records: Array<{ external_id: string; source_updated_at: string | null; data: Record<string, unknown> }>, maxBytes = 262_144) {
+    const capped: typeof records = [];
+    let truncated = false;
+    for (const record of records) {
+      const next = [...capped, record];
+      if (Buffer.byteLength(JSON.stringify(next), 'utf8') > maxBytes) {
+        truncated = true;
+        break;
+      }
+      capped.push(record);
+    }
+    return { records: capped, truncated };
+  }
+
   app.post('/admin/api/source-ingest/transform-preview', requireAdmin, express.json(), async (req: Request, res: Response) => {
     try {
       if (!req.body?.profile || typeof req.body.profile !== 'object') {
         res.status(400).json({ error: 'profile_required' });
         return;
       }
-      const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
-      const profile = req.body.profile as Record<string, unknown>;
+      const sample_limit = clampSourceIngestPreviewLimit(req.body?.sample_limit);
+      const validation = validateSourceIngestProfile(req.body.profile);
+      if (!validation.ok || !validation.profile) {
+        res.status(400).json({ ok: false, error: 'invalid_profile', validation });
+        return;
+      }
+      const profile = validation.profile as unknown as Record<string, unknown>;
       const connector = typeof profile.source_connector === 'string' ? profile.source_connector : 'appsheet-vehicles';
       const object = typeof profile.source_object === 'string' ? profile.source_object : 'vehicle';
       const ui = await sourceIngestUiConfig({ ...(req.body || {}) as Record<string, unknown>, connector_id: connector, source_object: object });
-      const records = await buildProfileSampleRecords(req.body.profile, sample_limit, {
+      const records = await buildProfileSampleRecords(validation.profile, sample_limit, {
         engine,
         connectorConfigOverride: ui.connector_config as Record<string, unknown>,
         defaultConnector: connector,
         defaultObject: object,
       });
-      res.json({ ok: true, count: records.length, records: records.map(r => ({ external_id: r.external_id, source_updated_at: r.source_updated_at, data: r.data })) });
+      const previewRecords = records.map(r => ({ external_id: r.external_id, source_updated_at: r.source_updated_at ?? null, data: r.data }));
+      const capped = capSourceIngestPreviewPayload(previewRecords);
+      res.json({ ok: true, count: records.length, returned: capped.records.length, truncated: capped.truncated || capped.records.length < records.length, records: capped.records });
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
     }

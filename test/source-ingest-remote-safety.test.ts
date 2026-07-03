@@ -24,4 +24,11 @@ describe('source_dry_run remote safety', () => {
     expect(SERVE_HTTP).toContain("error: 'sensitivity_ack_required'");
     expect(SERVE_HTTP).toContain('profile_hash: dry_run_profile_hash');
   });
+
+  test('transform-preview validates profile and caps preview request/response size', () => {
+    expect(SERVE_HTTP).toContain('clampSourceIngestPreviewLimit(req.body?.sample_limit)');
+    expect(SERVE_HTTP).toContain('validateSourceIngestProfile(req.body.profile)');
+    expect(SERVE_HTTP).toContain('capSourceIngestPreviewPayload(previewRecords)');
+    expect(SERVE_HTTP).toContain('returned: capped.records.length');
+  });
 });

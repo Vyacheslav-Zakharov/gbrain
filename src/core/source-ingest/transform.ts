@@ -3,6 +3,8 @@ import type { SourceRecord } from './connectors/types.ts';
 
 export interface SourceTransformSource {
   alias: string;
+  /** Stable source table/config id, e.g. appsheet-autopark.vehicles. Preferred over connector/object for multi-source transforms. */
+  source_table_id?: string;
   connector?: string;
   object: string;
   fields?: string[];
@@ -55,6 +57,7 @@ export function normalizeTransformSource(raw: unknown): SourceTransformSource | 
   if (!alias || !object) return null;
   return {
     alias,
+    source_table_id: typeof r.source_table_id === 'string' && r.source_table_id.trim() ? r.source_table_id.trim() : undefined,
     connector: typeof r.connector === 'string' && r.connector.trim() ? r.connector.trim() : undefined,
     object,
     fields: Array.isArray(r.fields) ? r.fields.map(String).filter(Boolean) : undefined,
@@ -114,7 +117,8 @@ function inferSqlType(values) {
   return 'text';
 }
 function coerceValue(value, sqlType) {
-  if (value === undefined || value === null || value === '') return null;
+  if (value === undefined || value === null) return null;
+  if (value === '' && sqlType !== 'text') return null;
   if (sqlType === 'boolean') return value === true || value === 'true';
   if (sqlType === 'bigint' || sqlType === 'double precision') {
     const n = Number(value);
@@ -223,6 +227,13 @@ function rowTimestampToIso(value: unknown): string | null {
   return null;
 }
 
+function normalizeTransformRowValue(value: unknown): unknown {
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)) return value.toFixed(0);
+  if (value instanceof Date) return value.toISOString();
+  return value;
+}
+
 export async function executeSourceTransform(
   config: SourceTransformConfig,
   fetcher: SourceTransformFetcher,
@@ -251,7 +262,8 @@ export async function executeSourceTransform(
     }
     const key = String(keyValue);
     const updated = updatedField ? rowTimestampToIso(row[updatedField]) : null;
-    return { external_id: key, source_updated_at: updated, data: { ...row, id: row.id ?? key } };
+    const data = Object.fromEntries(Object.entries(row).map(([k, v]) => [k, normalizeTransformRowValue(v)]));
+    return { external_id: key, source_updated_at: updated, data: { ...data, id: data.id ?? key } };
   });
   return { records, row_count: records.length, source_counts: sourceCounts, warnings };
 }

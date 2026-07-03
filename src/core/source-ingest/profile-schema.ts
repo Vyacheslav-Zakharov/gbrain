@@ -23,6 +23,8 @@ export interface SourceLinkRule {
 
 export interface SourceTransformProfileSource {
   alias: string;
+  /** Stable saved source table/config id; preferred UI contract for multi-source transforms. */
+  source_table_id?: string;
   connector?: string;
   object: string;
   fields?: string[];
@@ -155,6 +157,7 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
         t.sources.forEach((src, i) => {
           if (!isObject(src)) { issues.push(issue(`transform.sources.${i}`, 'invalid_source', 'Source must be an object.')); return; }
           if (typeof src.alias !== 'string' || !SQL_IDENT_RE.test(src.alias)) issues.push(issue(`transform.sources.${i}.alias`, 'invalid_alias', 'Alias must be a SQL identifier.'));
+          if (src.source_table_id !== undefined && (typeof src.source_table_id !== 'string' || src.source_table_id.trim().length === 0)) issues.push(issue(`transform.sources.${i}.source_table_id`, 'invalid_source_table_id', 'source_table_id must be a non-empty string.'));
           if (src.connector !== undefined && typeof src.connector !== 'string') issues.push(issue(`transform.sources.${i}.connector`, 'invalid_connector', 'Connector must be a string.'));
           if (typeof src.object !== 'string' || !src.object) issues.push(issue(`transform.sources.${i}.object`, 'required', 'Source object is required.'));
           if (src.fields !== undefined && !Array.isArray(src.fields)) issues.push(issue(`transform.sources.${i}.fields`, 'invalid_fields', 'fields must be an array.'));

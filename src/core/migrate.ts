@@ -5557,6 +5557,18 @@ export const MIGRATIONS: Migration[] = [
           IF to_regclass('public.source_connector_secret_audit') IS NOT NULL THEN
             ALTER TABLE source_connector_secret_audit ENABLE ROW LEVEL SECURITY;
           END IF;
+          IF to_regclass('public.source_connectors') IS NOT NULL THEN
+            ALTER TABLE source_connectors ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_base_views') IS NOT NULL THEN
+            ALTER TABLE source_base_views ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_transform_views') IS NOT NULL THEN
+            ALTER TABLE source_transform_views ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_article_views') IS NOT NULL THEN
+            ALTER TABLE source_article_views ENABLE ROW LEVEL SECURITY;
+          END IF;
         END IF;
       END $$;
     `,
@@ -5609,6 +5621,99 @@ export const MIGRATIONS: Migration[] = [
         ON source_ingest_run_items (run_id, approved_source_id, slug);
       CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
         ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
+    `,
+  },
+  {
+    version: 126,
+    name: 'source_ingest_catalog_views',
+    // Phase 0 catalog split: first-class connector/base/transform/article
+    // view objects. Article views freeze a compiled SourceIngestProfile
+    // snapshot; executor-facing batch inputs must read that snapshot rather
+    // than live upstream view objects.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS source_connectors (
+        connector_id       TEXT PRIMARY KEY,
+        kind               TEXT NOT NULL CHECK (kind IN ('appsheet','fake','postgres')),
+        display_name       TEXT NOT NULL,
+        config_json        JSONB NOT NULL DEFAULT '{}'::jsonb,
+        enabled            BOOLEAN NOT NULL DEFAULT true,
+        config_hash        TEXT NOT NULL,
+        last_test_ok       BOOLEAN,
+        last_test_at       TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_connectors_kind_idx
+        ON source_connectors (kind, enabled);
+
+      CREATE TABLE IF NOT EXISTS source_base_views (
+        base_view_id       TEXT PRIMARY KEY,
+        connector_id       TEXT NOT NULL REFERENCES source_connectors(connector_id) ON DELETE RESTRICT,
+        object_name        TEXT NOT NULL,
+        display_name       TEXT NOT NULL,
+        selected_fields    JSONB NOT NULL DEFAULT '[]'::jsonb,
+        row_filter         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        sample_limit       INTEGER NOT NULL DEFAULT 50,
+        discovery_json     JSONB,
+        last_discovered_at TIMESTAMPTZ,
+        version_hash       TEXT NOT NULL,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_base_views_connector_idx
+        ON source_base_views (connector_id, object_name);
+
+      CREATE TABLE IF NOT EXISTS source_transform_views (
+        transform_view_id  TEXT PRIMARY KEY,
+        display_name       TEXT NOT NULL,
+        inputs             JSONB NOT NULL DEFAULT '[]'::jsonb,
+        sql                TEXT NOT NULL,
+        primary_key_field  TEXT NOT NULL,
+        updated_at_field   TEXT,
+        version_hash       TEXT NOT NULL,
+        last_preview_ok    BOOLEAN,
+        last_preview_at    TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS source_article_views (
+        article_view_id    TEXT PRIMARY KEY,
+        display_name       TEXT NOT NULL,
+        input_kind         TEXT NOT NULL CHECK (input_kind IN ('base_view','transform_view')),
+        input_id           TEXT NOT NULL,
+        status             TEXT NOT NULL DEFAULT 'draft'
+          CHECK (status IN ('draft','reviewed','active','paused')),
+        gbrain_type        TEXT NOT NULL,
+        target_source_id   TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+        article_json       JSONB NOT NULL DEFAULT '{}'::jsonb,
+        compiled_profile   JSONB,
+        version_hash       TEXT,
+        current_chain_hash TEXT,
+        stale              BOOLEAN NOT NULL DEFAULT false,
+        stale_reasons      JSONB NOT NULL DEFAULT '[]'::jsonb,
+        compiled_at        TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_article_views_input_idx
+        ON source_article_views (input_kind, input_id);
+      CREATE INDEX IF NOT EXISTS source_article_views_status_idx
+        ON source_article_views (status, stale, target_source_id);
+
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          ALTER TABLE source_connectors ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE source_base_views ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE source_transform_views ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE source_article_views ENABLE ROW LEVEL SECURITY;
+        END IF;
+      END $$;
     `,
   },
 ];

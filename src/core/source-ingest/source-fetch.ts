@@ -1,5 +1,5 @@
 import type { BrainEngine } from '../engine.ts';
-import { getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
+import { defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
 import { getSourceConnector } from './connectors/fake.ts';
 import type { SourceRecord } from './connectors/types.ts';
 import type { SourceIngestProfile } from './profile-schema.ts';
@@ -22,20 +22,44 @@ function fieldsForSource(profile: SourceIngestProfile, connector: string, object
   return undefined;
 }
 
-export async function connectorConfigForSource(ctx: SourceFetchContext, connectorId: string, objectName: string): Promise<Record<string, unknown>> {
-  const primary = connectorId === ctx.defaultConnector && objectName === ctx.defaultObject;
-  if (primary && ctx.connectorConfigOverride) return ctx.connectorConfigOverride;
-  if (!ctx.engine) return primary ? (ctx.connectorConfigOverride || {}) : {};
-  const configId = `${connectorId}:${objectName}`;
-  const [savedConfig] = await listSourceConnectorConfigs(ctx.engine, configId);
-  const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, connectorId, objectName);
-  return { ...(savedConfig?.config_json || {}), ...secretConfig };
+interface ResolvedSourceConnectorConfig {
+  connectorId: string;
+  objectName: string;
+  config: Record<string, unknown>;
+}
+
+async function resolveSourceConnectorConfig(ctx: SourceFetchContext, source: SourceTransformSource): Promise<ResolvedSourceConnectorConfig> {
+  const fallbackConnectorId = source.connector || ctx.defaultConnector;
+  const fallbackObjectName = source.object || ctx.defaultObject;
+  const primary = fallbackConnectorId === ctx.defaultConnector && fallbackObjectName === ctx.defaultObject;
+  if (primary && ctx.connectorConfigOverride && !source.source_table_id) {
+    return { connectorId: fallbackConnectorId, objectName: fallbackObjectName, config: ctx.connectorConfigOverride };
+  }
+  if (!ctx.engine) return { connectorId: fallbackConnectorId, objectName: fallbackObjectName, config: primary ? (ctx.connectorConfigOverride || {}) : {} };
+  const candidateIds = [source.source_table_id, defaultSourceConnectorConfigId(fallbackConnectorId, fallbackObjectName)].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+  for (const configId of candidateIds) {
+    const [savedConfig] = await listSourceConnectorConfigs(ctx.engine, configId);
+    if (savedConfig) {
+      const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, savedConfig.connector_id, savedConfig.source_object, savedConfig.config_id);
+      const rowConfig = {
+        table_name: savedConfig.table_name ?? undefined,
+        target_source_id: savedConfig.target_source_id ?? undefined,
+        slug_prefix: savedConfig.slug_prefix,
+        freshness_policy: savedConfig.freshness_policy ?? undefined,
+      };
+      return { connectorId: savedConfig.connector_id, objectName: savedConfig.source_object, config: { ...rowConfig, ...(savedConfig.config_json || {}), ...secretConfig } };
+    }
+  }
+  const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, fallbackConnectorId, fallbackObjectName);
+  return { connectorId: fallbackConnectorId, objectName: fallbackObjectName, config: { ...(primary ? (ctx.connectorConfigOverride || {}) : {}), ...secretConfig } };
+}
+
+export async function connectorConfigForSource(ctx: SourceFetchContext, connectorId: string, objectName: string, sourceTableId?: string): Promise<Record<string, unknown>> {
+  return (await resolveSourceConnectorConfig(ctx, { alias: 'source', connector: connectorId, object: objectName, source_table_id: sourceTableId })).config;
 }
 
 export async function fetchSourceSample(ctx: SourceFetchContext, source: SourceTransformSource, limit: number, profile?: SourceIngestProfile): Promise<SourceRecord[]> {
-  const connectorId = source.connector || ctx.defaultConnector;
-  const objectName = source.object || ctx.defaultObject;
-  const cfg = await connectorConfigForSource(ctx, connectorId, objectName);
+  const { connectorId, objectName, config: cfg } = await resolveSourceConnectorConfig(ctx, source);
   const connector = getSourceConnector(connectorId, cfg);
   if (!connector) throw new Error(`connector not found: ${connectorId}`);
   const fields = source.fields?.length ? source.fields : (profile ? fieldsForSource(profile, connectorId, objectName) : undefined);
@@ -52,9 +76,7 @@ export async function buildProfileSampleRecords(profile: SourceIngestProfile, li
 }
 
 export async function fetchAllSourceRecords(ctx: SourceFetchContext, source: SourceTransformSource, profile?: SourceIngestProfile): Promise<SourceRecord[]> {
-  const connectorId = source.connector || ctx.defaultConnector;
-  const objectName = source.object || ctx.defaultObject;
-  const cfg = await connectorConfigForSource(ctx, connectorId, objectName);
+  const { connectorId, objectName, config: cfg } = await resolveSourceConnectorConfig(ctx, source);
   const connector = getSourceConnector(connectorId, cfg);
   if (!connector) throw new Error(`connector not found: ${connectorId}`);
   const fields = source.fields?.length ? source.fields : (profile ? fieldsForSource(profile, connectorId, objectName) : undefined);

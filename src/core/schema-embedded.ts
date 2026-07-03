@@ -894,6 +894,76 @@ CREATE TABLE IF NOT EXISTS source_connector_secret_audit (
 CREATE INDEX IF NOT EXISTS source_connector_secret_audit_config_idx
   ON source_connector_secret_audit (config_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS source_connectors (
+  connector_id       TEXT PRIMARY KEY,
+  kind               TEXT NOT NULL CHECK (kind IN ('appsheet','fake','postgres')),
+  display_name       TEXT NOT NULL,
+  config_json        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  enabled            BOOLEAN NOT NULL DEFAULT true,
+  config_hash        TEXT NOT NULL,
+  last_test_ok       BOOLEAN,
+  last_test_at       TIMESTAMPTZ,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS source_connectors_kind_idx
+  ON source_connectors (kind, enabled);
+
+CREATE TABLE IF NOT EXISTS source_base_views (
+  base_view_id       TEXT PRIMARY KEY,
+  connector_id       TEXT NOT NULL REFERENCES source_connectors(connector_id) ON DELETE RESTRICT,
+  object_name        TEXT NOT NULL,
+  display_name       TEXT NOT NULL,
+  selected_fields    JSONB NOT NULL DEFAULT '[]'::jsonb,
+  row_filter         JSONB NOT NULL DEFAULT '[]'::jsonb,
+  sample_limit       INTEGER NOT NULL DEFAULT 50,
+  discovery_json     JSONB,
+  last_discovered_at TIMESTAMPTZ,
+  version_hash       TEXT NOT NULL,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS source_base_views_connector_idx
+  ON source_base_views (connector_id, object_name);
+
+CREATE TABLE IF NOT EXISTS source_transform_views (
+  transform_view_id  TEXT PRIMARY KEY,
+  display_name       TEXT NOT NULL,
+  inputs             JSONB NOT NULL DEFAULT '[]'::jsonb,
+  sql                TEXT NOT NULL,
+  primary_key_field  TEXT NOT NULL,
+  updated_at_field   TEXT,
+  version_hash       TEXT NOT NULL,
+  last_preview_ok    BOOLEAN,
+  last_preview_at    TIMESTAMPTZ,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS source_article_views (
+  article_view_id    TEXT PRIMARY KEY,
+  display_name       TEXT NOT NULL,
+  input_kind         TEXT NOT NULL CHECK (input_kind IN ('base_view','transform_view')),
+  input_id           TEXT NOT NULL,
+  status             TEXT NOT NULL DEFAULT 'draft'
+    CHECK (status IN ('draft','reviewed','active','paused')),
+  gbrain_type        TEXT NOT NULL,
+  target_source_id   TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  article_json       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  compiled_profile   JSONB,
+  version_hash       TEXT,
+  current_chain_hash TEXT,
+  stale              BOOLEAN NOT NULL DEFAULT false,
+  stale_reasons      JSONB NOT NULL DEFAULT '[]'::jsonb,
+  compiled_at        TIMESTAMPTZ,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS source_article_views_input_idx
+  ON source_article_views (input_kind, input_id);
+CREATE INDEX IF NOT EXISTS source_article_views_status_idx
+  ON source_article_views (status, stale, target_source_id);
+
 -- migration_impact_log moved BELOW minion_jobs (was here, lines 645-676)
 -- because its \`job_id BIGINT REFERENCES minion_jobs(id)\` FK requires
 -- minion_jobs to exist FIRST during SCHEMA_SQL replay. v0.41.25.0 fix.
@@ -1570,6 +1640,10 @@ BEGIN
     ALTER TABLE source_connector_configs ENABLE ROW LEVEL SECURITY;
     ALTER TABLE source_connector_secrets ENABLE ROW LEVEL SECURITY;
     ALTER TABLE source_connector_secret_audit ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_connectors ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_base_views ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_transform_views ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE source_article_views ENABLE ROW LEVEL SECURITY;
     RAISE NOTICE 'RLS enabled on all tables (role % has BYPASSRLS)', current_user;
   ELSE
     RAISE WARNING 'Skipping RLS: role % does not have BYPASSRLS privilege. Run as postgres role to enable.', current_user;

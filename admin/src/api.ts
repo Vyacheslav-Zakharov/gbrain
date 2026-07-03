@@ -53,6 +53,11 @@ export const api = {
   // v0.41 D2 — live minion-jobs dashboard snapshot.
   jobsWatch: () => apiFetch('/admin/api/jobs/watch'),
   sourceIngestOverview: () => apiFetch('/admin/api/source-ingest/overview'),
+  sourceIngestCatalogTree: () => apiFetch('/admin/api/source-ingest/catalog/tree'),
+  sourceIngestSaveCatalogConnector: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/catalog/connector', { method: 'POST', body: JSON.stringify(payload) }),
+  sourceIngestDeleteCatalogConnector: (connector_id: string) => apiFetch('/admin/api/source-ingest/catalog/connector/delete', { method: 'POST', body: JSON.stringify({ connector_id }) }),
+  sourceIngestConnectorListObjects: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/catalog/connector/list-objects', { method: 'POST', body: JSON.stringify(payload) }),
+  sourceIngestCatalogConnectorTest: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/catalog/connector/test', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestRefreshReport: (profile_id?: string) => apiFetch('/admin/api/source-ingest/refresh-report', { method: 'POST', body: JSON.stringify({ profile_id }) }),
   sourceIngestSaveConfig: (config: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/save-config', { method: 'POST', body: JSON.stringify({ config }) }),
   sourceIngestSaveSecret: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/save-secret', { method: 'POST', body: JSON.stringify(payload) }),

@@ -65,6 +65,20 @@ import {
 import { runSourceIngestExecutor } from './source-ingest/executor.ts';
 import { buildSourceRevertReport } from './source-ingest/revert.ts';
 import { enqueueDueSourceRefreshJobs, listDueSourceRefreshes } from './source-ingest/freshness.ts';
+import {
+  compileSourceArticleView,
+  deleteSourceConnectorView,
+  getCompiledArticleProfile,
+  listSourceArticleViews,
+  listSourceBaseViews,
+  listSourceConnectorViews,
+  listSourceTransformViews,
+  sourceIngestTree,
+  upsertSourceArticleView,
+  upsertSourceBaseView,
+  upsertSourceConnectorView,
+  upsertSourceTransformView,
+} from './source-ingest/catalog.ts';
 
 // --- Types ---
 
@@ -2888,7 +2902,7 @@ const source_connector_config_get: Operation = {
     return {
       rows: await Promise.all(rows.map(async row => ({
         ...row,
-        secrets: await sourceConnectorSecretStatus(ctx.engine, row.connector_id, row.config_id),
+        secrets: await sourceConnectorSecretStatus(ctx.engine, row.connector_id, row.config_id, row.source_object),
       }))),
       count: rows.length,
     };
@@ -2924,7 +2938,7 @@ const source_connector_config_put: Operation = {
       enabled: Boolean(raw.enabled),
       config_json: (raw.config_json && typeof raw.config_json === 'object' ? raw.config_json : {}) as Record<string, unknown>,
     }, { actor });
-    return { ok: true, saved: { ...saved, secrets: await sourceConnectorSecretStatus(ctx.engine, saved.connector_id, saved.config_id) } };
+    return { ok: true, saved: { ...saved, secrets: await sourceConnectorSecretStatus(ctx.engine, saved.connector_id, saved.config_id, saved.source_object) } };
   },
 };
 
@@ -2997,6 +3011,210 @@ const source_connector_secret_audit: Operation = {
   }),
 };
 
+const source_ingest_tree: Operation = {
+  name: 'source_ingest_tree',
+  description: 'Read source-ingest catalog tree: connectors, base views, transform views, article views, links, and stale flags.',
+  scope: 'read',
+  params: {},
+  handler: async (ctx) => sourceIngestTree(ctx.engine),
+};
+
+const source_connector_list: Operation = {
+  name: 'source_connector_list',
+  description: 'List first-class source-ingest connector instances (system + non-secret config, no table binding).',
+  scope: 'read',
+  params: { connector_id: { type: 'string', description: 'Optional connector id filter' } },
+  handler: async (ctx, p) => ({ rows: await listSourceConnectorViews(ctx.engine, p.connector_id as string | undefined) }),
+};
+
+const source_connector_upsert: Operation = {
+  name: 'source_connector_upsert',
+  description: 'ADMIN: create/update a first-class source-ingest connector instance. Secrets remain in source_connector_secret_* ops.',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    connector_id: { type: 'string', required: true },
+    kind: { type: 'string', required: true },
+    display_name: { type: 'string', required: true },
+    config_json: { type: 'object' },
+    enabled: { type: 'boolean' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_upsert is local/trusted only for Phase 0.');
+    const row = await upsertSourceConnectorView(ctx.engine, {
+      connector_id: String(p.connector_id || ''),
+      kind: String(p.kind || ''),
+      display_name: String(p.display_name || p.connector_id || ''),
+      config_json: (p.config_json && typeof p.config_json === 'object' ? p.config_json : {}) as Record<string, unknown>,
+      enabled: typeof p.enabled === 'boolean' ? p.enabled : true,
+    });
+    return { ok: true, row };
+  },
+};
+
+const source_connector_delete: Operation = {
+  name: 'source_connector_delete',
+  description: 'ADMIN: delete a first-class source-ingest connector instance when no base views depend on it.',
+  scope: 'admin',
+  mutating: true,
+  params: { connector_id: { type: 'string', required: true } },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_delete is local/trusted only for Phase 1.');
+    try {
+      return { ok: true, ...(await deleteSourceConnectorView(ctx.engine, String(p.connector_id || ''))) };
+    } catch (e) {
+      throw new OperationError('conflict', e instanceof Error ? e.message : String(e));
+    }
+  },
+};
+
+const source_base_view_list: Operation = {
+  name: 'source_base_view_list',
+  description: 'List first-class source-ingest base views.',
+  scope: 'read',
+  params: { base_view_id: { type: 'string', description: 'Optional base view id filter' } },
+  handler: async (ctx, p) => ({ rows: await listSourceBaseViews(ctx.engine, p.base_view_id as string | undefined) }),
+};
+
+const source_base_view_upsert: Operation = {
+  name: 'source_base_view_upsert',
+  description: 'ADMIN: create/update a base view (connector + object + selected fields + row filter).',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    base_view_id: { type: 'string', required: true },
+    connector_id: { type: 'string', required: true },
+    object_name: { type: 'string', required: true },
+    display_name: { type: 'string' },
+    selected_fields: { type: 'array', items: { type: 'string' } },
+    row_filter: { type: 'array' },
+    sample_limit: { type: 'number' },
+    discovery_json: { type: 'object' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_base_view_upsert is local/trusted only for Phase 0.');
+    const row = await upsertSourceBaseView(ctx.engine, {
+      base_view_id: String(p.base_view_id || ''),
+      connector_id: String(p.connector_id || ''),
+      object_name: String(p.object_name || ''),
+      display_name: typeof p.display_name === 'string' ? p.display_name : undefined,
+      selected_fields: Array.isArray(p.selected_fields) ? p.selected_fields.map(String).filter(Boolean) : [],
+      row_filter: Array.isArray(p.row_filter) ? p.row_filter as any : [],
+      sample_limit: typeof p.sample_limit === 'number' ? p.sample_limit : 50,
+      discovery_json: (p.discovery_json && typeof p.discovery_json === 'object' ? p.discovery_json : null) as Record<string, unknown> | null,
+    });
+    return { ok: true, row };
+  },
+};
+
+const source_transform_view_list: Operation = {
+  name: 'source_transform_view_list',
+  description: 'List first-class source-ingest transform views.',
+  scope: 'read',
+  params: { transform_view_id: { type: 'string', description: 'Optional transform view id filter' } },
+  handler: async (ctx, p) => ({ rows: await listSourceTransformViews(ctx.engine, p.transform_view_id as string | undefined) }),
+};
+
+const source_transform_view_upsert: Operation = {
+  name: 'source_transform_view_upsert',
+  description: 'ADMIN: create/update a transform view. SQL executes only in staging PGLite, never pushed down to sources.',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    transform_view_id: { type: 'string', required: true },
+    display_name: { type: 'string' },
+    inputs: { type: 'array', required: true },
+    sql: { type: 'string', required: true },
+    primary_key_field: { type: 'string', required: true },
+    updated_at_field: { type: 'string' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_transform_view_upsert is local/trusted only for Phase 0.');
+    const row = await upsertSourceTransformView(ctx.engine, {
+      transform_view_id: String(p.transform_view_id || ''),
+      display_name: typeof p.display_name === 'string' ? p.display_name : undefined,
+      inputs: Array.isArray(p.inputs) ? p.inputs as any : [],
+      sql: String(p.sql || ''),
+      primary_key_field: String(p.primary_key_field || ''),
+      updated_at_field: typeof p.updated_at_field === 'string' ? p.updated_at_field : undefined,
+    });
+    return { ok: true, row };
+  },
+};
+
+const source_article_view_list: Operation = {
+  name: 'source_article_view_list',
+  description: 'List first-class source-ingest article views and their compiled snapshot/stale state.',
+  scope: 'read',
+  params: { article_view_id: { type: 'string', description: 'Optional article view id filter' } },
+  handler: async (ctx, p) => ({ rows: await listSourceArticleViews(ctx.engine, p.article_view_id as string | undefined) }),
+};
+
+const source_article_view_upsert: Operation = {
+  name: 'source_article_view_upsert',
+  description: 'ADMIN: create/update an article view. Any edit invalidates the compiled snapshot until re-approve.',
+  scope: 'admin',
+  mutating: true,
+  params: { article_view: { type: 'object', required: true } },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_upsert is local/trusted only for Phase 0.');
+    const row = await upsertSourceArticleView(ctx.engine, p.article_view as any);
+    return { ok: true, row };
+  },
+};
+
+const source_article_view_approve: Operation = {
+  name: 'source_article_view_approve',
+  description: 'LOCAL/TRUSTED: compile an article view chain into a frozen SourceIngestProfile snapshot and persist a compatibility profile version.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    article_view_id: { type: 'string', required: true },
+    approved_by: { type: 'string' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_approve is local/trusted only.');
+    const compiled = await compileSourceArticleView(ctx.engine, String(p.article_view_id || ''), { approvedBy: p.approved_by as string | undefined });
+    const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, compiled.compiled_profile);
+    if (!validation.ok || !validation.profile) return { ok: false, validation, compiled };
+    const saved = await putSourceIngestProfile(ctx.engine, validation.profile, { createdBy: (p.approved_by as string | undefined) || 'local', changeNote: 'compiled article_view snapshot' });
+    return { ok: true, compiled, saved };
+  },
+};
+
+const source_article_view_run: Operation = {
+  name: 'source_article_view_run',
+  description: 'LOCAL/TRUSTED: run a source-ingest article view using its frozen compiled_profile snapshot.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    article_view_id: { type: 'string', required: true },
+    run_id: { type: 'string' },
+    limit: { type: 'number' },
+    require_clean_git: { type: 'boolean' },
+    no_embed: { type: 'boolean' },
+    changed_since: { type: 'boolean' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_run is local/trusted only.');
+    const articleViewId = String(p.article_view_id || '');
+    const compiled = await getCompiledArticleProfile(ctx.engine, articleViewId);
+    if (!compiled) throw new OperationError('invalid_params', 'article_view has no compiled_profile; run source_article_view_approve first.');
+    if (compiled.stale) throw new OperationError('conflict', 'article_view is stale; re-run dry-run/approve before batch execution.');
+    await putSourceIngestProfile(ctx.engine, compiled.profile, { createdBy: 'source_article_view_run', changeNote: 'compatibility snapshot for executor' });
+    return runSourceIngestExecutor(ctx.engine, {
+      profile_id: compiled.profile.profile_id,
+      ...(typeof p.run_id === 'string' ? { run_id: p.run_id } : {}),
+      ...(typeof p.limit === 'number' ? { limit: p.limit } : {}),
+      ...(typeof p.require_clean_git === 'boolean' ? { require_clean_git: p.require_clean_git } : {}),
+      ...(typeof p.no_embed === 'boolean' ? { no_embed: p.no_embed } : {}),
+      ...(typeof p.changed_since === 'boolean' ? { changed_since: p.changed_since } : {}),
+    }, ctx.logger);
+  },
+};
+
 const source_profile_draft: Operation = {
   name: 'source_profile_draft',
   description: 'Draft an editable source-ingest profile from connector discovery. Does not approve or freeze source_id; human review is required before ingest.',
@@ -3008,13 +3226,23 @@ const source_profile_draft: Operation = {
     sample_limit: { type: 'number', description: 'Sample size for discovery (default 50)' },
     connector_config: { type: 'object', description: 'Non-secret connector config override, e.g. table_name. Secrets are never passed here.' },
     selected_fields: { type: 'array', items: { type: 'string' }, description: 'Optional source field allowlist selected by the admin UI before drafting.' },
+    primary_key_field: { type: 'string', description: 'Source-table primary key field selected by the reviewer.' },
+    updated_at_field: { type: 'string', description: 'Source-table updated-at field selected by the reviewer.' },
   },
   handler: async (_ctx, p) => {
     const connectorId = p.connector_id as string;
     const sourceObject = p.source_object as string;
     const selectedFields = Array.isArray(p.selected_fields) ? p.selected_fields.map(String).filter(Boolean) : undefined;
     const discovery = await discoverSourceObject(resolveSourceConnectorOrThrow(connectorId, p.connector_config as Record<string, unknown> | undefined), sourceObject, (p.sample_limit as number | undefined) ?? 50, selectedFields?.length ? { fields: selectedFields } : {});
-    const { profile, warnings } = draftSourceIngestProfile({ connectorId, sourceObject, discovery, targetSourceId: p.target_source_id as string | undefined, selectedFields });
+    const { profile, warnings } = draftSourceIngestProfile({
+      connectorId,
+      sourceObject,
+      discovery,
+      targetSourceId: p.target_source_id as string | undefined,
+      selectedFields,
+      primaryKeyField: typeof p.primary_key_field === 'string' && p.primary_key_field.trim() ? p.primary_key_field.trim() : undefined,
+      updatedAtField: typeof p.updated_at_field === 'string' && p.updated_at_field.trim() ? p.updated_at_field.trim() : undefined,
+    });
     return { discovery, profile, warnings };
   },
 };
@@ -5576,6 +5804,11 @@ export const operations: Operation[] = [
   // Source Ingest (third-party connectors; Stage 1 read contracts + local write skeletons)
   source_discover, source_connector_config_get, source_connector_config_put,
   source_connector_secret_put, source_connector_secret_delete, source_connector_secret_audit,
+  source_ingest_tree,
+  source_connector_list, source_connector_upsert, source_connector_delete,
+  source_base_view_list, source_base_view_upsert,
+  source_transform_view_list, source_transform_view_upsert,
+  source_article_view_list, source_article_view_upsert, source_article_view_approve, source_article_view_run,
   source_profile_draft, source_validate_profile, source_profile_get, source_profile_put, source_dry_run, source_sync_status,
   source_ingest, source_refresh, source_revert,
   // Files

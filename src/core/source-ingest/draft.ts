@@ -12,6 +12,8 @@ export interface DraftSourceIngestProfileOptions {
   discovery: DiscoveryProfile;
   targetSourceId?: string | null;
   selectedFields?: string[];
+  primaryKeyField?: string;
+  updatedAtField?: string;
 }
 
 function filterDiscovery(discovery: DiscoveryProfile, selectedFields?: string[]): DiscoveryProfile {
@@ -28,8 +30,8 @@ function filterDiscovery(discovery: DiscoveryProfile, selectedFields?: string[])
 export function draftSourceIngestProfile(opts: DraftSourceIngestProfileOptions): { profile: SourceIngestProfile & { target: SourceIngestProfile['target'] & { suggested_source_id?: string | null } }; warnings: string[] } {
   const { connectorId, sourceObject, targetSourceId } = opts;
   const discovery = filterDiscovery(opts.discovery, opts.selectedFields);
-  const idField = discovery.idCandidates.includes('id') ? 'id' : (discovery.idCandidates[0] || 'id');
-  const updatedAt = discovery.updatedAtCandidates[0];
+  const idField = opts.primaryKeyField || (discovery.idCandidates.includes('id') ? 'id' : (discovery.idCandidates[0] || 'id'));
+  const updatedAt = opts.updatedAtField || discovery.updatedAtCandidates[0];
   const isVehicle = sourceObject === 'vehicle';
   const hasName = discovery.fields.some(f => f.name === 'name');
   const piiFields = discovery.fields.filter(f => /iin|phone|email|responsible|person/i.test(f.name)).map(f => f.name);

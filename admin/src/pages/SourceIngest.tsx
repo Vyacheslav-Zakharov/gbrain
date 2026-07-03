@@ -1,13 +1,37 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
 
+interface SourceIngestCatalogTree {
+  connectors?: Array<Record<string, unknown>>;
+  base_views?: Array<Record<string, unknown>>;
+  transform_views?: Array<Record<string, unknown>>;
+  article_views?: Array<Record<string, unknown>>;
+  schema?: Record<string, unknown>;
+}
+
+type ConnectorChoice = {
+  id: string;
+  kind?: string;
+  displayName: string;
+  object: string;
+  supportsChangedSince?: boolean;
+  credentialMode?: string;
+  status?: string;
+  requiredKeys?: string[];
+  requiredEnv?: string[];
+  fields?: Array<{ key: string; label: string; defaultValue: string }>;
+  safety?: string[];
+};
+
 interface SourceIngestOverview {
   connectors: Array<{
     id: string;
+    kind?: string;
     displayName: string;
     object: string;
     supportsChangedSince: boolean;
     credentialMode: string;
+    status?: string;
     requiredKeys?: string[];
     requiredEnv?: string[];
     fields?: Array<{ key: string; label: string; defaultValue: string }>;
@@ -17,6 +41,8 @@ interface SourceIngestOverview {
   status: { rows: Array<Record<string, unknown>>; summary?: Record<string, unknown> };
   refresh: { count: number; due?: Array<Record<string, unknown>> };
   connector_configs?: { rows: Array<Record<string, unknown>>; count: number };
+  source_tables?: Array<Record<string, unknown>>;
+  catalog_tree?: SourceIngestCatalogTree;
   sources: Array<{ id: string; name: string; path?: string; federated?: boolean }>;
 }
 
@@ -27,6 +53,8 @@ interface ReviewForm {
   target_source_id: string;
   slug_prefix: string;
   freshness_policy: string;
+  primary_key_field: string;
+  updated_at_field: string;
   sample_limit: number;
 }
 
@@ -111,6 +139,30 @@ function asArr<T = unknown>(x: unknown): T[] {
   return Array.isArray(x) ? x as T[] : [];
 }
 
+function safeSourceTableId(connectorId: string, sourceObject: string, tableName: string): string {
+  const suffix = tableName.trim() && tableName.trim() !== sourceObject
+    ? `:${tableName.toLowerCase().trim().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'default'}`
+    : '';
+  return `${connectorId}:${sourceObject}${suffix}`;
+}
+
+function connectorFieldDefault(connector: ConnectorChoice | undefined, key: string, fallback: string): string {
+  const field = connector?.fields?.find(f => f.key === key);
+  return field?.defaultValue ?? fallback;
+}
+
+function formPatchForConnector(connector: ConnectorChoice | undefined): Partial<ReviewForm> {
+  if (!connector) return {};
+  return {
+    source_object: connector.object,
+    table_name: connectorFieldDefault(connector, 'tableName', connector.object),
+    primary_key_field: connectorFieldDefault(connector, 'primaryKeyField', 'id'),
+    updated_at_field: connectorFieldDefault(connector, 'updatedAtField', ''),
+    slug_prefix: connectorFieldDefault(connector, 'slugPrefix', 'source-ingest/records'),
+    freshness_policy: connectorFieldDefault(connector, 'freshnessPolicy', 'P30D'),
+  };
+}
+
 function PreviewJson({ value, empty }: { value: unknown; empty: string }) {
   return <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', maxHeight: 260, overflow: 'auto' }}>{value ? JSON.stringify(value, null, 2) : empty}</pre>;
 }
@@ -126,7 +178,15 @@ function parseJsonArray(text: string): unknown[] {
 
 function defaultTransformSources(form: ReviewForm, fields: string[]): string {
   return JSON.stringify([
-    { alias: 'main', connector: form.connector_id, object: form.source_object, fields },
+    {
+      alias: 'main',
+      source_table_id: safeSourceTableId(form.connector_id, form.source_object, form.table_name),
+      connector: form.connector_id,
+      object: form.source_object,
+      primary_key_field: form.primary_key_field,
+      updated_at_field: form.updated_at_field || undefined,
+      fields,
+    },
   ], null, 2);
 }
 
@@ -159,6 +219,62 @@ function DiscoveryPreview({ value }: { value: unknown }) {
       {fields.slice(0, 12).map((f, i) => <tr key={i}><td className="mono">{val(f.name)}</td><td>{asArr(f.observedTypes).join(', ')}</td><td>{typeof f.nullRatio === 'number' ? `${Math.round(f.nullRatio * 100)}%` : '—'}</td><td className="mono">{asArr(f.samples).slice(0, 3).map(val).join(' · ')}</td></tr>)}
     </tbody></table>
   </div>;
+}
+
+function CatalogCount({ label, rows }: { label: string; rows: Array<Record<string, unknown>> }) {
+  return <div className="metric"><div className="metric-value">{rows.length}</div><div className="metric-label">{label}</div></div>;
+}
+
+function CatalogSection({ title, rows, idKey, subtitle }: { title: string; rows: Array<Record<string, unknown>>; idKey: string; subtitle: (row: Record<string, unknown>) => string }) {
+  return <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+    <h3 style={{ fontSize: 13, marginBottom: 8 }}>{title}</h3>
+    {rows.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>No catalog objects yet.</div>}
+    {rows.map(row => {
+      const stale = row.stale === true;
+      const enabled = row.enabled !== false;
+      return <div key={String(row[idKey])} style={{ padding: 8, borderRadius: 6, background: stale ? 'rgba(245, 158, 11, 0.12)' : 'rgba(148, 163, 184, 0.08)', marginBottom: 6 }}>
+        <div><code>{val(row[idKey])}</code> {stale && <span style={{ color: 'var(--warning)' }}>stale</span>} {!enabled && <span style={{ color: 'var(--warning)' }}>disabled</span>}</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{subtitle(row)}</div>
+        {stale && <div style={{ color: 'var(--warning)', fontSize: 12 }}>reasons: {asArr(row.stale_reasons).map(String).join(', ') || '—'}</div>}
+      </div>;
+    })}
+  </div>;
+}
+
+function SourceIngestCatalogPanel({ tree, onSelectConnector }: { tree: SourceIngestCatalogTree; onSelectConnector?: (row: Record<string, unknown>) => void }) {
+  const connectors = tree.connectors ?? [];
+  const baseViews = tree.base_views ?? [];
+  const transformViews = tree.transform_views ?? [];
+  const articleViews = tree.article_views ?? [];
+  return <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
+    <h2 className="section-title">Catalog tree preview</h2>
+    <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
+      Phase 1 shell: first-class catalog objects from <code>source_ingest_tree</code>. Existing review wizard below remains the compatibility path until the new object editors are complete.
+    </p>
+    <div className="metrics" style={{ marginBottom: 12 }}>
+      <CatalogCount label="connectors" rows={connectors} />
+      <CatalogCount label="base views" rows={baseViews} />
+      <CatalogCount label="transforms" rows={transformViews} />
+      <CatalogCount label="article views" rows={articleViews} />
+    </div>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+      <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+        <h3 style={{ fontSize: 13, marginBottom: 8 }}>Подключения</h3>
+        {connectors.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>No catalog connectors yet.</div>}
+        {connectors.map(row => {
+          const enabled = row.enabled !== false;
+          return <button key={String(row.connector_id)} className="btn btn-secondary" style={{ display: 'block', width: '100%', textAlign: 'left', marginBottom: 6 }} onClick={() => onSelectConnector?.(row)}>
+            <code>{val(row.connector_id)}</code> {!enabled && <span style={{ color: 'var(--warning)' }}>disabled</span>}
+            <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>{val(row.display_name)} · kind {val(row.kind)} · last test {val(row.last_test_ok)}</span>
+          </button>;
+        })}
+      </div>
+      <CatalogSection title="Источники" rows={baseViews} idKey="base_view_id" subtitle={row => `${val(row.display_name)} · ${val(row.connector_id)} / ${val(row.object_name)} · fields ${asArr(row.selected_fields).length}`} />
+      <CatalogSection title="Преобразования" rows={transformViews} idKey="transform_view_id" subtitle={row => `${val(row.display_name)} · inputs ${asArr(row.inputs).length} · pk ${val(row.primary_key_field)}`} />
+      <CatalogSection title="Публикации" rows={articleViews} idKey="article_view_id" subtitle={row => `${val(row.status)} · ${val(row.gbrain_type)} → ${val(row.target_source_id)} · compiled ${val(row.version_hash)}`} />
+    </div>
+    <div style={{ marginTop: 12, color: 'var(--text-muted)', fontSize: 12 }}>Схема мозга: read-only = {String(asObj(tree.schema).read_only ?? true)}.</div>
+  </section>;
 }
 
 function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; currentTargetSourceId: string }) {
@@ -213,10 +329,12 @@ export function SourceIngestPage() {
   const [form, setForm] = useState<ReviewForm>({
     connector_id: 'appsheet-vehicles',
     source_object: 'vehicle',
-    table_name: 'Автотранспорт',
+    table_name: 'vehicles',
     target_source_id: 'shared',
     slug_prefix: 'source-ingest/vehicles',
     freshness_policy: 'P30D',
+    primary_key_field: 'vehicleID',
+    updated_at_field: '',
     sample_limit: 25,
   });
   const [articleSections, setArticleSections] = useState<Record<string, string>>(DEFAULT_ARTICLE_SECTIONS);
@@ -226,8 +344,11 @@ export function SourceIngestPage() {
   const [transformEnabled, setTransformEnabled] = useState(false);
   const [transformSourcesText, setTransformSourcesText] = useState('');
   const [transformSql, setTransformSql] = useState('');
-  const [transformPrimaryKey, setTransformPrimaryKey] = useState('id');
-  const [transformUpdatedAt, setTransformUpdatedAt] = useState('updated_at');
+  const [transformPrimaryKey, setTransformPrimaryKey] = useState('vehicleID');
+  const [transformUpdatedAt, setTransformUpdatedAt] = useState('');
+  const [catalogConnectorForm, setCatalogConnectorForm] = useState({ connector_id: 'appsheet-protokolist', kind: 'appsheet', display_name: 'AppSheet Протоколист', enabled: true });
+  const [catalogConnectorObjects, setCatalogConnectorObjects] = useState<unknown>(null);
+  const [catalogConnectorTest, setCatalogConnectorTest] = useState<unknown>(null);
 
   const load = async () => {
     try {
@@ -243,11 +364,19 @@ export function SourceIngestPage() {
 
   useEffect(() => { void load(); }, []);
 
-  const appSheet = data?.connectors.find(c => c.id === 'appsheet-vehicles');
-  const savedConfig = data?.connector_configs?.rows?.find(c => c.connector_id === form.connector_id && c.source_object === form.source_object);
-  const configId = `${form.connector_id}:${form.source_object}`;
+  const catalogConnectors = data?.catalog_tree?.connectors ?? [];
+  const connectorChoices = [
+    ...(data?.connectors ?? []).map(c => ({ id: c.id, kind: c.kind ?? c.id, displayName: c.displayName, status: c.status, object: c.object, fields: c.fields, requiredKeys: c.requiredKeys, requiredEnv: c.requiredEnv, safety: c.safety })),
+    ...catalogConnectors.map(c => ({ id: String(c.connector_id), kind: String(c.kind ?? ''), displayName: String(c.display_name ?? c.connector_id), status: 'catalog', object: 'vehicle', fields: undefined, requiredKeys: c.kind === 'appsheet' ? ['app_id', 'access_key'] : [], requiredEnv: [], safety: ['First-class catalog connector: table binding is configured in base/source table settings.'] })),
+  ].filter((c, i, arr) => c.id && arr.findIndex(x => x.id === c.id) === i);
+  const selectedConnector = connectorChoices.find(c => c.id === form.connector_id);
+  const sourceTables = data?.source_tables ?? [];
+  const configId = safeSourceTableId(form.connector_id, form.source_object, form.table_name);
+  const matchingConfigs = data?.connector_configs?.rows?.filter(c => c.connector_id === form.connector_id && c.source_object === form.source_object) ?? [];
+  const savedConfig = data?.connector_configs?.rows?.find(c => c.config_id === configId)
+    || (matchingConfigs.length === 1 ? matchingConfigs[0] : undefined);
   const secretStatus = (savedConfig?.secrets as Record<string, unknown> | undefined)
-    || { configured: false, missing_keys: appSheet?.requiredKeys ?? [], required_keys: appSheet?.requiredKeys ?? [], missing_env: appSheet?.requiredEnv ?? [], required_env: appSheet?.requiredEnv ?? [], masked: {}, storage: 'none' };
+    || { configured: false, missing_keys: selectedConnector?.requiredKeys ?? [], required_keys: selectedConnector?.requiredKeys ?? [], missing_env: selectedConnector?.requiredEnv ?? [], required_env: selectedConnector?.requiredEnv ?? [], masked: {}, storage: 'none' };
   const summary = data?.status.summary ?? {};
   const discoveredFields = asArr<Record<string, unknown>>(asObj(discovery).fields);
   const selectedSourceFieldSet = new Set(selectedSourceFields);
@@ -301,11 +430,14 @@ export function SourceIngestPage() {
   };
 
   const payload = () => ({
+    config_id: configId,
     connector_id: form.connector_id,
     source_object: form.source_object,
     target_source_id: form.target_source_id,
     slug_prefix: form.slug_prefix,
     freshness_policy: form.freshness_policy,
+    primary_key_field: form.primary_key_field,
+    updated_at_field: form.updated_at_field,
     sample_limit: form.sample_limit,
     // Table name is non-secret UI config. It can be saved through
     // source_connector_configs; AppSheet credentials remain server-side only.
@@ -314,7 +446,7 @@ export function SourceIngestPage() {
   });
 
   const configPayload = () => ({
-    config_id: `${form.connector_id}:${form.source_object}`,
+    config_id: configId,
     connector_id: form.connector_id,
     source_object: form.source_object,
     display_name: form.connector_id === 'appsheet-vehicles' ? 'AppSheet автотранспорт' : form.connector_id,
@@ -322,8 +454,10 @@ export function SourceIngestPage() {
     target_source_id: form.target_source_id,
     slug_prefix: form.slug_prefix,
     freshness_policy: form.freshness_policy,
+    primary_key_field: form.primary_key_field,
+    updated_at_field: form.updated_at_field,
     enabled: true,
-    config_json: { table_name: form.table_name, selected_fields: selectedSourceFields, transform_enabled: transformEnabled, transform_sources: parseJsonArray(transformSourcesText), transform_sql: transformSql, transform_primary_key: transformPrimaryKey, transform_updated_at: transformUpdatedAt },
+    config_json: { table_name: form.table_name, primary_key_field: form.primary_key_field, updated_at_field: form.updated_at_field, selected_fields: selectedSourceFields, article_sections: articleSections, transform_enabled: transformEnabled, transform_sources: parseJsonArray(transformSourcesText), transform_sql: transformSql, transform_primary_key: transformPrimaryKey, transform_updated_at: transformUpdatedAt },
   });
 
   const applySavedConfig = () => {
@@ -336,9 +470,16 @@ export function SourceIngestPage() {
       target_source_id: String(savedConfig.target_source_id ?? form.target_source_id),
       slug_prefix: String(savedConfig.slug_prefix ?? form.slug_prefix),
       freshness_policy: String(savedConfig.freshness_policy ?? form.freshness_policy),
+      primary_key_field: String(savedJson.primary_key_field ?? form.primary_key_field),
+      updated_at_field: String(savedJson.updated_at_field ?? form.updated_at_field),
     });
     if (savedFields.length > 0) setSelectedSourceFields(savedFields);
-    if (savedJson.transform_enabled === true) setTransformEnabled(true);
+    const savedSections = asObj(savedJson.article_sections);
+    if (Object.keys(savedSections).length > 0) {
+      setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(savedSections).map(([k, v]) => [k, String(v ?? '')])) });
+      setArticleDirty(true);
+    }
+    setTransformEnabled(savedJson.transform_enabled === true);
     if (Array.isArray(savedJson.transform_sources)) setTransformSourcesText(JSON.stringify(savedJson.transform_sources, null, 2));
     if (typeof savedJson.transform_sql === 'string') setTransformSql(savedJson.transform_sql);
     if (typeof savedJson.transform_primary_key === 'string') setTransformPrimaryKey(savedJson.transform_primary_key);
@@ -379,6 +520,52 @@ export function SourceIngestPage() {
     setSecretAudit(await api.sourceIngestSecretAudit(configId));
   });
 
+  const saveCatalogConnector = async () => runStep('catalog-connector', async () => {
+    await api.sourceIngestSaveCatalogConnector({
+      ...catalogConnectorForm,
+      config_json: { source: 'admin-ui', phase: 'catalog-tree-shell' },
+    });
+    await load();
+  });
+
+  const selectCatalogConnector = (row: Record<string, unknown>) => {
+    const connectorId = String(row.connector_id ?? '');
+    setCatalogConnectorForm({
+      connector_id: connectorId,
+      kind: String(row.kind ?? 'appsheet'),
+      display_name: String(row.display_name ?? connectorId),
+      enabled: row.enabled !== false,
+    });
+    setForm(prev => ({ ...prev, connector_id: connectorId }));
+    setCatalogConnectorObjects(null);
+    setCatalogConnectorTest(null);
+  };
+
+  const catalogConnectorPayload = () => ({
+    connector_id: catalogConnectorForm.connector_id,
+    kind: catalogConnectorForm.kind,
+    source_object: form.source_object,
+    table_name: form.table_name,
+    primary_key_field: form.primary_key_field,
+    updated_at_field: form.updated_at_field,
+  });
+
+  const listCatalogConnectorObjects = async () => runStep('catalog-list-objects', async () => {
+    setCatalogConnectorObjects(await api.sourceIngestConnectorListObjects(catalogConnectorPayload()));
+  });
+
+  const testCatalogConnector = async () => runStep('catalog-test-connector', async () => {
+    setCatalogConnectorTest(await api.sourceIngestCatalogConnectorTest(catalogConnectorPayload()));
+    await load();
+  });
+
+  const deleteCatalogConnector = async () => runStep('catalog-delete-connector', async () => {
+    await api.sourceIngestDeleteCatalogConnector(catalogConnectorForm.connector_id);
+    setCatalogConnectorObjects(null);
+    setCatalogConnectorTest(null);
+    await load();
+  });
+
   const testConnection = async () => runStep('test-connection', async () => {
     setConnectionTest(await api.sourceIngestTestConnection(payload()));
   });
@@ -394,6 +581,13 @@ export function SourceIngestPage() {
     const fields = asArr<Record<string, unknown>>(asObj(out).fields);
     const selected = fields.filter(f => !isNoisySourceField(f)).map(f => String(f.name)).filter(Boolean);
     setDiscovery(out);
+    const ids = asArr((out as Record<string, unknown>).idCandidates).map(String);
+    const updated = asArr((out as Record<string, unknown>).updatedAtCandidates).map(String);
+    if (!form.primary_key_field || form.primary_key_field === 'id' || form.primary_key_field === 'vehicleID') {
+      const preferredId = ids.includes('vehicleID') ? 'vehicleID' : (ids[0] || form.primary_key_field);
+      if (preferredId) setForm(prev => ({ ...prev, primary_key_field: preferredId }));
+    }
+    if (!form.updated_at_field && updated[0]) setForm(prev => ({ ...prev, updated_at_field: updated[0] }));
     setSelectedSourceFields(selected);
     if (!transformSourcesText) setTransformSourcesText(defaultTransformSources(form, selected));
     if (!articleDirty) setArticleSections(makeDefaultArticleSections(selected));
@@ -520,19 +714,70 @@ export function SourceIngestPage() {
         <div className="metric"><div className="metric-value">{data.refresh.count}</div><div className="metric-label">due profiles</div></div>
       </div>
 
+      <SourceIngestCatalogPanel tree={data.catalog_tree ?? { connectors: [], base_views: [], transform_views: [], article_views: [], schema: { read_only: true } }} onSelectConnector={selectCatalogConnector} />
+
       <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
-        <h2 className="section-title">1. Configure connector: AppSheet автотранспорт</h2>
+        <h2 className="section-title">0. Catalog connector instance</h2>
+        <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
+          Creates the new first-class connector object (system + non-secret config). Table binding remains in Source table / connector config until the base-view editor lands.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 14, alignItems: 'end' }}>
+          <label>Connector id
+            <input value={catalogConnectorForm.connector_id} onChange={e => setCatalogConnectorForm(prev => ({ ...prev, connector_id: e.target.value }))} placeholder="appsheet-protokolist" />
+          </label>
+          <label>Kind
+            <select value={catalogConnectorForm.kind} onChange={e => setCatalogConnectorForm(prev => ({ ...prev, kind: e.target.value }))}>
+              <option value="appsheet">appsheet</option>
+              <option value="fake">fake</option>
+            </select>
+          </label>
+          <label>Display name
+            <input value={catalogConnectorForm.display_name} onChange={e => setCatalogConnectorForm(prev => ({ ...prev, display_name: e.target.value }))} placeholder="AppSheet Протоколист" />
+          </label>
+          <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id || !catalogConnectorForm.kind} onClick={() => void saveCatalogConnector()}>{busy === 'catalog-connector' ? 'Saving…' : 'Save connector'}</button>
+        </div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
+          <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void listCatalogConnectorObjects()}>{busy === 'catalog-list-objects' ? 'Loading objects…' : 'List objects'}</button>
+          <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void testCatalogConnector()}>{busy === 'catalog-test-connector' ? 'Testing…' : 'Test connector'}</button>
+          <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void deleteCatalogConnector()}>{busy === 'catalog-delete-connector' ? 'Deleting…' : 'Delete connector'}</button>
+          <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>List/test use current Source object + table fields below; read-only sample/listObjects only.</span>
+        </div>
+        {(catalogConnectorObjects !== null || catalogConnectorTest !== null) && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
+          <div><h3 style={{ fontSize: 13 }}>Objects</h3><PreviewJson value={catalogConnectorObjects} empty="No listObjects result yet." /></div>
+          <div><h3 style={{ fontSize: 13 }}>Connection test</h3><PreviewJson value={catalogConnectorTest} empty="No test result yet." /></div>
+        </div>}
+      </section>
+
+      <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
+        <h2 className="section-title">1. Source table / connector config</h2>
+        <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
+          Сохраняем не просто connector, а конкретную таблицу источника: <code>{configId}</code>. Один connector может иметь несколько source tables для join/union в transform.
+        </p>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
           <label>Connector
-            <select value={form.connector_id} onChange={e => updateFormAndInvalidate({ connector_id: e.target.value })}>
-              {data.connectors.map(c => <option key={c.id} value={c.id}>{c.displayName} ({c.id})</option>)}
+            <select value={form.connector_id} onChange={e => {
+              const connector = connectorChoices.find(c => c.id === e.target.value);
+              const patch = formPatchForConnector(connector);
+              updateFormAndInvalidate({ connector_id: e.target.value, ...patch });
+              setTransformPrimaryKey(patch.primary_key_field || 'id');
+              setTransformUpdatedAt(patch.updated_at_field || '');
+              setTransformSourcesText('');
+            }}>
+              {connectorChoices.map(c => <option key={c.id} value={c.id}>{c.displayName} ({c.id}){c.status === 'scaffold' ? ' — scaffold' : c.status === 'catalog' ? ' — catalog' : ''}</option>)}
             </select>
+            {selectedConnector?.status === 'scaffold' && <span style={{ display: 'block', color: 'var(--warning)', fontSize: 12 }}>Scaffold only: можно сохранить source table config и использовать в transform JSON, но live discovery/sample будет работать после реализации connector IO.</span>}
           </label>
           <label>Source object
             <input value={form.source_object} onChange={e => updateFormAndInvalidate({ source_object: e.target.value })} />
           </label>
-          <label>AppSheet table name
+          <label>Source table name / API object
             <input value={form.table_name} onChange={e => updateFormAndInvalidate({ table_name: e.target.value })} />
+          </label>
+          <label>Primary key field
+            <input value={form.primary_key_field} onChange={e => { updateFormAndInvalidate({ primary_key_field: e.target.value }); setTransformPrimaryKey(e.target.value || transformPrimaryKey); }} placeholder="vehicleID" />
+          </label>
+          <label>Updated-at field (optional)
+            <input value={form.updated_at_field} onChange={e => { updateFormAndInvalidate({ updated_at_field: e.target.value }); setTransformUpdatedAt(e.target.value || transformUpdatedAt); }} placeholder="updatedAt / modified" />
           </label>
           <label>Target GBrain source
             <select value={form.target_source_id} onChange={e => updateFormAndInvalidate({ target_source_id: e.target.value })}>
@@ -542,8 +787,14 @@ export function SourceIngestPage() {
           <label>Slug prefix
             <input value={form.slug_prefix} onChange={e => updateFormAndInvalidate({ slug_prefix: e.target.value })} />
           </label>
-          <label>Freshness policy
-            <input value={form.freshness_policy} onChange={e => updateFormAndInvalidate({ freshness_policy: e.target.value })} />
+          <label>Article freshness policy
+            <select value={form.freshness_policy} onChange={e => updateFormAndInvalidate({ freshness_policy: e.target.value })}>
+              <option value="PT6H">6 hours</option>
+              <option value="P1D">1 day</option>
+              <option value="P7D">7 days</option>
+              <option value="P30D">30 days</option>
+              <option value="P90D">90 days</option>
+            </select>
           </label>
           <label>Sample limit
             <input type="number" min={1} max={200} value={form.sample_limit} onChange={e => updateFormAndInvalidate({ sample_limit: Number(e.target.value) || 25 })} />
@@ -562,19 +813,23 @@ export function SourceIngestPage() {
             Updated: {val(secretStatus.updated_by)} · {val(secretStatus.updated_at)}
           </div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 12 }}>
-          <label>App ID
-            <input type="password" autoComplete="off" value={secretForm.app_id} onChange={e => setSecretForm({ ...secretForm, app_id: e.target.value })} placeholder="saved separately; never shown back" />
-          </label>
-          <label>Access Key
-            <input type="password" autoComplete="off" value={secretForm.access_key} onChange={e => setSecretForm({ ...secretForm, access_key: e.target.value })} placeholder="saved separately; never shown back" />
-          </label>
-        </div>
-        <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-          <button className="btn btn-secondary" disabled={busy !== null || !secretForm.app_id || !secretForm.access_key} onClick={() => void rotateSecret()}>{busy === 'save-secret' ? 'Saving secret…' : 'Rotate/save secret + test'}</button>
-          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void deleteSecret()}>{busy === 'delete-secret' ? 'Deleting…' : 'Delete secret'}</button>
-          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void loadSecretAudit()}>{busy === 'secret-audit' ? 'Loading audit…' : 'Audit'}</button>
-        </div>
+        {form.connector_id === 'appsheet-vehicles' ? <>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 12 }}>
+            <label>App ID
+              <input type="password" autoComplete="off" value={secretForm.app_id} onChange={e => setSecretForm({ ...secretForm, app_id: e.target.value })} placeholder="saved separately; never shown back" />
+            </label>
+            <label>Access Key
+              <input type="password" autoComplete="off" value={secretForm.access_key} onChange={e => setSecretForm({ ...secretForm, access_key: e.target.value })} placeholder="saved separately; never shown back" />
+            </label>
+          </div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+            <button className="btn btn-secondary" disabled={busy !== null || !secretForm.app_id || !secretForm.access_key} onClick={() => void rotateSecret()}>{busy === 'save-secret' ? 'Saving secret…' : 'Rotate/save secret + test'}</button>
+            <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void deleteSecret()}>{busy === 'delete-secret' ? 'Deleting…' : 'Delete secret'}</button>
+            <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void loadSecretAudit()}>{busy === 'secret-audit' ? 'Loading audit…' : 'Audit'}</button>
+          </div>
+        </> : <div style={{ marginTop: 12, color: 'var(--text-muted)', fontSize: 12 }}>
+          Credential editor for <code>{form.connector_id}</code> is scaffolded but not active yet. Save non-secret source table config now; connector-specific secret fields arrive with live connector IO.
+        </div>}
         {secretAudit !== null && <details open style={{ marginTop: 10 }}><summary>Secret audit</summary><PreviewJson value={secretAudit} empty="No audit." /></details>}
         <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void saveConfig()}>{busy === 'save-config' ? 'Saving…' : 'Save config'}</button>
@@ -621,8 +876,19 @@ export function SourceIngestPage() {
           <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 8 }}>Selected {selectedSourceFields.length} of {discoveredFields.length}. If you change selection after dry-run, run Draft profile/Dry-run again before approval.</div>
         </div>}
         <ul style={{ marginTop: 10, paddingLeft: 18, color: 'var(--text-secondary)' }}>
-          {(appSheet?.safety ?? []).map(s => <li key={s}>{s}</li>)}
+          {(selectedConnector?.safety ?? []).map(s => <li key={s}>{s}</li>)}
         </ul>
+        <div style={{ marginTop: 14, border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+          <h3 style={{ fontSize: 13, marginBottom: 8 }}>Saved source tables</h3>
+          {sourceTables.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>No saved source tables yet. Save config after setting connector/table/key fields.</div>}
+          {sourceTables.length > 0 && <div style={{ display: 'grid', gap: 8 }}>
+            {sourceTables.map(t => <div key={String(t.source_table_id)} style={{ padding: 8, borderRadius: 6, background: String(t.source_table_id) === configId ? 'rgba(16, 185, 129, 0.10)' : 'rgba(148, 163, 184, 0.08)' }}>
+              <div><code>{val(t.source_table_id)}</code> {t.enabled === false && <span style={{ color: 'var(--warning)' }}>disabled</span>}</div>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>table: <code>{val(t.table_name)}</code> · key: <code>{val(t.primary_key_field)}</code> · updated: <code>{val(t.updated_at_field)}</code> · fields: {asArr(t.fields).length}</div>
+              <button className="btn btn-secondary" type="button" style={{ marginTop: 6 }} onClick={() => setTransformSourcesText(prev => prev || JSON.stringify([{ alias: String(t.table_name || t.source_object || 'src').replace(/[^A-Za-z0-9_]+/g, '_'), source_table_id: t.source_table_id, connector: t.connector_id, object: t.source_object, fields: asArr(t.fields) }], null, 2))}>Use in transform sources</button>
+            </div>)}
+          </div>}
+        </div>
       </section>
 
       <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
@@ -632,20 +898,20 @@ export function SourceIngestPage() {
           Enable SQL transform before mapping
         </label>
         <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 10 }}>
-          Use this for multi-source joins, counts and complex WHERE logic. Sources are loaded as temporary PGlite tables under their alias; the SQL result becomes the record stream for dry-run/import.
+          Use this for multi-source joins, counts and complex WHERE logic. Each source entry should reference a saved <code>source_table_id</code> (for example <code>appsheet-autopark.vehicles</code> or <code>bigquery-galery.vehicle_costs</code>); it is staged as a temporary PGlite table named by <code>alias</code>.
         </div>
         {transformEnabled && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
           <label>Primary key field in SQL result
-            <input value={transformPrimaryKey} onChange={e => { setTransformPrimaryKey(e.target.value); invalidateTransformPreview(); }} placeholder="id" />
+            <input value={transformPrimaryKey} onChange={e => { setTransformPrimaryKey(e.target.value); invalidateTransformPreview(); }} placeholder="vehicleID" />
           </label>
           <label>Updated-at field in SQL result
-            <input value={transformUpdatedAt} onChange={e => { setTransformUpdatedAt(e.target.value); invalidateTransformPreview(); }} placeholder="updated_at" />
+            <input value={transformUpdatedAt} onChange={e => { setTransformUpdatedAt(e.target.value); invalidateTransformPreview(); }} placeholder="max_updated_at" />
           </label>
           <label style={{ gridColumn: '1 / -1' }}>Transform sources JSON
             <textarea rows={7} value={transformSourcesText} onChange={e => { setTransformSourcesText(e.target.value); invalidateTransformPreview(); }} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} />
           </label>
           <label style={{ gridColumn: '1 / -1' }}>Read-only SQL
-            <textarea rows={9} value={transformSql} onChange={e => { setTransformSql(e.target.value); invalidateTransformPreview(); }} placeholder={"SELECT main.id, main.code, main.name, main.updated_at\nFROM main\nWHERE main.status = 'active'"} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} />
+            <textarea rows={9} value={transformSql} onChange={e => { setTransformSql(e.target.value); invalidateTransformPreview(); }} placeholder={"SELECT main.vehicleID, main.govNumber, main.updatedAt AS max_updated_at\nFROM main\nWHERE main.vehicleID IS NOT NULL"} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} />
           </label>
           <div style={{ gridColumn: '1 / -1', color: transformSources.length > 0 && transformSql.trim() ? 'var(--text-muted)' : 'var(--warning)', fontSize: 12 }}>
             Parsed sources: {transformSources.length}. SQL is sent only inside profile dry-run/approval; mutating SQL is rejected server-side.

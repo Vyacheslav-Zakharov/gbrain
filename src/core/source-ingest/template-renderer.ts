@@ -45,6 +45,10 @@ export function renderTemplateString(template: string, record: SourceRecord, emp
       return '';
     }
     const s = stringifyValue(raw);
+    if (filter && filter !== 'slugify') {
+      emptySlots.push(`${field} (unknown filter: ${filter})`);
+      return '';
+    }
     if (filter === 'slugify') return s.toLowerCase().replace(/[^a-z0-9а-яё]+/gi, '-').replace(/^-+|-+$/g, '');
     return s;
   });
@@ -106,9 +110,18 @@ function mappingFromProfile(profile: SourceIngestProfile): ArticleTemplateMappin
   };
 }
 
+const MAX_RENDERED_BODY_BYTES = 262_144;
+
 function cleanLineValue(v: string): string {
-  const s = v.trim();
+  const s = v.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
   return s || '—';
+}
+
+function capRenderedBody(body: string): string {
+  if (Buffer.byteLength(body, 'utf8') <= MAX_RENDERED_BODY_BYTES) return body;
+  let out = body;
+  while (Buffer.byteLength(out, 'utf8') > MAX_RENDERED_BODY_BYTES - 64) out = out.slice(0, Math.max(0, out.length - 1024));
+  return `${out.trimEnd()}\n\n[Preview truncated]\n`;
 }
 
 export function renderArticleTemplate(profile: SourceIngestProfile, record: SourceRecord): RenderedArticleTemplate {
@@ -159,10 +172,12 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
     renderedFields.timeline || '',
   ];
 
+  const body = lines.join('\n').replace(/\n{4,}/g, '\n\n\n').trimEnd() + '\n';
+
   return {
     title,
     frontmatter,
-    body: lines.join('\n').replace(/\n{4,}/g, '\n\n\n').trimEnd() + '\n',
+    body: capRenderedBody(body),
     emptySlots: Array.from(new Set(emptySlots)),
     renderedFields,
   };
