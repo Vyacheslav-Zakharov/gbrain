@@ -56,15 +56,27 @@ export function sourceIngestLockId(sourceId: string): string {
   return syncLockId(sourceId);
 }
 
-function assertStage3AFakeSourceOnly(profile: SourceIngestProfile): void {
-  if (profile.source_connector !== 'fake-source') throw new Error('Stage 3A executor only allows fake-source');
+function parseLiveConnectorAllowlist(raw: string | null): Set<string> {
+  if (!raw || !raw.trim()) return new Set(['fake-source']);
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return new Set(parsed.map(String).map(s => s.trim()).filter(Boolean));
+  } catch {}
+  return new Set(raw.split(/[\n,]/).map(s => s.trim()).filter(Boolean));
+}
+
+async function assertAllowedSourceConnectors(engine: BrainEngine, profile: SourceIngestProfile): Promise<void> {
+  const allowed = parseLiveConnectorAllowlist(await engine.getConfig('source_ingest.live_connectors'));
+  const deny = (connector: string, label: string) => {
+    if (!allowed.has(connector)) {
+      throw new Error(`source_ingest live connector not enabled: ${label} uses ${connector}. Set source_ingest.live_connectors to include it before running a batch.`);
+    }
+  };
+  deny(profile.source_connector, 'profile');
   const transform = normalizeTransformConfig(profile.transform);
   if (!transform) return;
   for (const source of transform.sources) {
-    const connector = source.connector || profile.source_connector;
-    if (connector !== 'fake-source') {
-      throw new Error(`Stage 3A executor only allows fake-source transform sources: ${source.alias} uses ${connector}`);
-    }
+    deny(source.connector || profile.source_connector, `transform source ${source.alias}`);
   }
 }
 
@@ -325,7 +337,7 @@ export async function runSourceIngestExecutor(
   logger: { warn(msg: string): void } = console,
 ): Promise<SourceIngestExecutorResult> {
   const { profile, version, hash } = await loadProfile(engine, opts.profile_id);
-  assertStage3AFakeSourceOnly(profile);
+  await assertAllowedSourceConnectors(engine, profile);
   const sourceId = profile.target.approved_source_id;
   if (!sourceId) throw new Error('profile target approved_source_id is required');
   let storage = await resolveSourceIngestStorageMode(engine, sourceId, {

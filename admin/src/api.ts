@@ -72,6 +72,8 @@ export const api = {
   sourceIngestDeleteArticleView: (article_view_id: string) => apiFetch('/admin/api/source-ingest/catalog/article-view/delete', { method: 'POST', body: JSON.stringify({ article_view_id }) }),
   sourceIngestArticleViewDryRun: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/catalog/article-view/dry-run', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestApproveArticleView: (article_view_id: string, current_chain_hash?: string) => apiFetch('/admin/api/source-ingest/catalog/article-view/approve', { method: 'POST', body: JSON.stringify({ article_view_id, current_chain_hash }) }),
+  sourceIngestRunArticleView: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/catalog/article-view/run', { method: 'POST', body: JSON.stringify(payload) }),
+  sourceIngestArticleViewRuns: (article_view_id: string, limit = 20) => apiFetch(`/admin/api/source-ingest/catalog/article-view/${encodeURIComponent(article_view_id)}/runs?limit=${limit}`),
   sourceIngestRefreshReport: (profile_id?: string) => apiFetch('/admin/api/source-ingest/refresh-report', { method: 'POST', body: JSON.stringify({ profile_id }) }),
   sourceIngestSaveConfig: (config: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/save-config', { method: 'POST', body: JSON.stringify({ config }) }),
   sourceIngestSaveSecret: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/save-secret', { method: 'POST', body: JSON.stringify(payload) }),

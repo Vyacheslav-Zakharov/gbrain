@@ -602,12 +602,65 @@ export async function getCompiledArticleProfile(engine: BrainEngine, articleView
   return { profile: row.compiled_profile, version_hash: row.version_hash, stale: row.stale };
 }
 
+export async function listSourceArticleViewRuns(engine: BrainEngine, articleViewId: string, limit = 20) {
+  const rows = await engine.executeRaw<Record<string, unknown>>(
+    `SELECT run_id,
+            profile_id,
+            MIN(created_at)::text AS started_at,
+            MAX(created_at)::text AS finished_at,
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE last_result = 'success')::int AS success,
+            COUNT(*) FILTER (WHERE last_result = 'unchanged')::int AS unchanged,
+            COUNT(*) FILTER (WHERE last_result = 'skipped')::int AS skipped,
+            COUNT(*) FILTER (WHERE last_result = 'failed')::int AS failed,
+            MIN(last_error) FILTER (WHERE last_error IS NOT NULL) AS sample_error,
+            MAX(slug) AS sample_slug
+       FROM source_ingest_run_items
+      WHERE profile_id = $1
+      GROUP BY run_id, profile_id
+      ORDER BY MAX(created_at) DESC
+      LIMIT $2`,
+    [articleViewId, Math.max(1, Math.min(100, Number(limit) || 20))],
+  );
+  return rows;
+}
+
+async function latestArticleRuns(engine: BrainEngine) {
+  const rows = await engine.executeRaw<Record<string, unknown>>(
+    `WITH grouped AS (
+       SELECT run_id,
+              profile_id,
+              MAX(created_at) AS finished_at,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE last_result = 'success')::int AS success,
+              COUNT(*) FILTER (WHERE last_result = 'unchanged')::int AS unchanged,
+              COUNT(*) FILTER (WHERE last_result = 'skipped')::int AS skipped,
+              COUNT(*) FILTER (WHERE last_result = 'failed')::int AS failed
+         FROM source_ingest_run_items
+        GROUP BY run_id, profile_id
+     ), ranked AS (
+       SELECT *, ROW_NUMBER() OVER (PARTITION BY profile_id ORDER BY finished_at DESC) AS rn
+         FROM grouped
+     )
+     SELECT run_id, profile_id, finished_at::text, total, success, unchanged, skipped, failed
+       FROM ranked
+      WHERE rn = 1`,
+    [],
+  );
+  return new Map(rows.map(row => [String(row.profile_id), row]));
+}
+
 export async function sourceIngestTree(engine: BrainEngine) {
-  const [connectors, base_views, transform_views, article_views] = await Promise.all([
+  const [connectors, base_views, transform_views, article_views, latestRuns] = await Promise.all([
     listSourceConnectorViews(engine),
     listSourceBaseViews(engine),
     listSourceTransformViews(engine),
     listSourceArticleViews(engine),
+    latestArticleRuns(engine),
   ]);
-  return { connectors, base_views, transform_views, article_views, schema: { read_only: true } };
+  const enrichedArticles = article_views.map(row => ({
+    ...row,
+    last_run: latestRuns.get(String(row.article_view_id)) ?? null,
+  }));
+  return { connectors, base_views, transform_views, article_views: enrichedArticles, schema: { read_only: true } };
 }

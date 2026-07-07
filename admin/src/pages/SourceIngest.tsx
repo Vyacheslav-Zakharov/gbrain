@@ -5,6 +5,7 @@ import { BaseViewEditor } from './source-ingest/BaseViewEditor';
 import { ConnectorEditor } from './source-ingest/ConnectorEditor';
 import { SchemaWorkbench } from './source-ingest/SchemaWorkbench';
 import { SourceIngestCatalogPanel } from './source-ingest/SourceIngestCatalogPanel';
+import { SourceIngestWizard } from './source-ingest/SourceIngestWizard';
 import { TransformViewEditor } from './source-ingest/TransformViewEditor';
 import { asArr, asObj, type CatalogArea, type SourceIngestCatalogTree, val } from './source-ingest/shared';
 
@@ -596,6 +597,8 @@ export function SourceIngestPage() {
   const [articleViewApproveResult, setArticleViewApproveResult] = useState<unknown>(null);
   const [articleViewPreview, setArticleViewPreview] = useState<unknown>(null);
   const [articleViewCurrentChainHash, setArticleViewCurrentChainHash] = useState('');
+  const [articleViewRuns, setArticleViewRuns] = useState<unknown>(null);
+  const [articleViewRunResult, setArticleViewRunResult] = useState<unknown>(null);
   const [schemaWorkbench, setSchemaWorkbench] = useState<unknown>(null);
   const [schemaType, setSchemaType] = useState('');
   const [schemaTypeExplain, setSchemaTypeExplain] = useState<unknown>(null);
@@ -659,6 +662,32 @@ export function SourceIngestPage() {
     const baseLookup = new Map(catalogBaseViews.map(row => [String(row.base_view_id), row]));
     return Array.from(new Set(currentTransform.inputs.flatMap(input => asArr(baseLookup.get(input.base_view_id)?.selected_fields).map(String).filter(Boolean))));
   }, [articleViewForm.input_kind, articleViewForm.input_id, catalogBaseViews, catalogTransformViews, transformPreview, transformViewForm.inputs_text, transformViewForm.sql, transformViewForm.transform_view_id]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !data?.catalog_tree) return;
+    const applyHashRoute = () => {
+      const m = window.location.hash.match(/^#source-ingest\/(connector|base|transform|article)\/([^/?#]+)/);
+      if (!m) return;
+      const id = decodeURIComponent(m[2]);
+      if (m[1] === 'connector') {
+        const row = (data.catalog_tree?.connectors ?? []).find(r => String(r.connector_id) === id);
+        if (row) selectCatalogConnector(row);
+      } else if (m[1] === 'base') {
+        const row = (data.catalog_tree?.base_views ?? []).find(r => String(r.base_view_id) === id);
+        if (row) selectBaseView(row);
+      } else if (m[1] === 'transform') {
+        const row = (data.catalog_tree?.transform_views ?? []).find(r => String(r.transform_view_id) === id);
+        if (row) selectTransformView(row);
+      } else if (m[1] === 'article') {
+        const row = (data.catalog_tree?.article_views ?? []).find(r => String(r.article_view_id) === id);
+        if (row) selectArticleView(row);
+      }
+    };
+    applyHashRoute();
+    window.addEventListener('hashchange', applyHashRoute);
+    return () => window.removeEventListener('hashchange', applyHashRoute);
+  }, [data?.catalog_tree]);
+
   const catalogConnectorChoices = catalogConnectors.map(c => ({ id: String(c.connector_id), kind: String(c.kind ?? ''), displayName: String(c.display_name ?? c.connector_id), status: 'catalog', object: '', fields: undefined, requiredKeys: c.kind === 'appsheet' ? ['app_id', 'access_key'] : [], requiredEnv: [], safety: ['First-class catalog connector: table binding is configured in base/source table settings.'] }));
   const connectorChoices = [
     ...catalogConnectorChoices,
@@ -838,8 +867,18 @@ export function SourceIngestPage() {
     await load();
   });
 
+  const setRouteHash = (node: string) => {
+    if (typeof window === 'undefined') return;
+    if (!node.includes(':')) return;
+    const [kind, id] = node.split(':', 2);
+    if (!id || id === 'new') return;
+    const routeKind = kind === 'base_view' ? 'base' : kind === 'transform_view' ? 'transform' : kind === 'article_view' ? 'article' : kind;
+    window.location.hash = `#source-ingest/${routeKind}/${encodeURIComponent(id)}`;
+  };
+
   const handleSelectCatalogNode = (node: string) => {
     setActiveNode(node);
+    setRouteHash(node);
     if (node === 'base_view:new') {
       const connectorId = catalogConnectorForm.connector_id || String(catalogConnectors[0]?.connector_id ?? '');
       setBaseViewForm({
@@ -862,6 +901,7 @@ export function SourceIngestPage() {
     setActiveArea('connectors');
     const connectorId = String(row.connector_id ?? '');
     setActiveNode(`connector:${connectorId}`);
+    setRouteHash(`connector:${connectorId}`);
     setCatalogConnectorForm({
       connector_id: connectorId,
       kind: String(row.kind ?? 'appsheet'),
@@ -962,6 +1002,7 @@ export function SourceIngestPage() {
   const selectBaseView = (row: Record<string, unknown>) => {
     setActiveArea('base_views');
     setActiveNode(`base_view:${String(row.base_view_id ?? '')}`);
+    setRouteHash(`base_view:${String(row.base_view_id ?? '')}`);
     const discoveryJson = asObj(row.discovery_json);
     const selected = asArr(row.selected_fields).map(String);
     setBaseViewForm({
@@ -1058,6 +1099,7 @@ export function SourceIngestPage() {
     setBaseViewForm(prev => ({ ...prev, base_view_id: baseViewId }));
     setActiveArea('base_views');
     setActiveNode(`base_view:${baseViewId}`);
+    setRouteHash(`base_view:${baseViewId}`);
     setTransformViewForm(prev => ({ ...prev, inputs_text: defaultTransformViewInputs(baseViewId), primary_key_field: baseViewForm.primary_key_field || prev.primary_key_field || form.primary_key_field || 'id', updated_at_field: baseViewForm.updated_at_field || prev.updated_at_field || form.updated_at_field || '' }));
     setTransformSourcesText(JSON.stringify([{ alias: 'main', source_table_id: baseViewId, connector: baseViewForm.connector_id, object: baseViewForm.object_name, fields: selectedFields, sample_limit: Number(baseViewForm.sample_limit) || 25 }], null, 2));
     try {
@@ -1081,6 +1123,7 @@ export function SourceIngestPage() {
   const selectTransformView = (row: Record<string, unknown>) => {
     setActiveArea('transform_views');
     setActiveNode(`transform_view:${String(row.transform_view_id ?? '')}`);
+    setRouteHash(`transform_view:${String(row.transform_view_id ?? '')}`);
     const inputs = asArr(row.inputs).map(input => {
       const raw = asObj(input);
       return { alias: String(raw.alias ?? ''), base_view_id: String(raw.base_view_id ?? '') };
@@ -1171,6 +1214,7 @@ export function SourceIngestPage() {
   const selectArticleView = (row: Record<string, unknown>) => {
     setActiveArea('article_views');
     setActiveNode(`article_view:${String(row.article_view_id ?? '')}`);
+    setRouteHash(`article_view:${String(row.article_view_id ?? '')}`);
     const article = asObj(row.article_json);
     const input = asObj(article.input);
     const identity = asObj(article.identity);
@@ -1505,6 +1549,22 @@ export function SourceIngestPage() {
     await refreshCatalogTree();
   });
 
+  const loadArticleViewRuns = async () => runStep('catalog-article-runs', async () => {
+    const articleViewId = articleViewForm.article_view_id.trim();
+    if (!articleViewId) throw new Error('article_view_id_required');
+    setArticleViewRuns(await api.sourceIngestArticleViewRuns(articleViewId, 20));
+    await refreshCatalogTree();
+  });
+
+  const runArticleViewBatch = async (limit?: number, changed_since = false) => runStep('catalog-article-run', async () => {
+    const articleViewId = articleViewForm.article_view_id.trim();
+    if (!articleViewId) throw new Error('article_view_id_required');
+    const out = await api.sourceIngestRunArticleView({ article_view_id: articleViewId, ...(limit ? { limit } : {}), changed_since, require_clean_git: true });
+    setArticleViewRunResult(out);
+    setArticleViewRuns(await api.sourceIngestArticleViewRuns(articleViewId, 20));
+    await refreshCatalogTree();
+  });
+
   const runDryRun = async () => runStep('dry-run', async () => {
     if (!profileForReview) return;
     setDryRun(await api.sourceIngestDryRun({ ...payload(), profile: profileForReview, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
@@ -1565,6 +1625,7 @@ export function SourceIngestPage() {
         <SourceIngestCatalogPanel tree={data.catalog_tree ?? { connectors: [], base_views: [], transform_views: [], article_views: [], schema: { read_only: true } }} activeArea={activeArea} activeNode={activeNode} onSelectArea={setActiveArea} onSelectNode={handleSelectCatalogNode} onSelectConnector={selectCatalogConnector} onSelectBaseView={selectBaseView} onSelectTransformView={selectTransformView} onSelectArticleView={selectArticleView} />
 
       <main style={{ minWidth: 0 }}>
+        <SourceIngestWizard busy={busy} onSelectArea={setActiveArea as (area: 'connectors' | 'base_views' | 'transform_views' | 'article_views') => void} onSeedArticle={seedArticleViewFromCurrent} />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
             <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>EDIT</div>
@@ -1800,6 +1861,8 @@ export function SourceIngestPage() {
         articleSections={articleSections}
         sectionLabels={SECTION_LABELS}
         articleViewPreview={articleViewPreview}
+        articleViewRuns={articleViewRuns}
+        articleViewRunResult={articleViewRunResult}
         articleViewSaveResult={articleViewSaveResult}
         articleViewApproveResult={articleViewApproveResult}
         setActiveSection={setActiveSection}
@@ -1808,6 +1871,8 @@ export function SourceIngestPage() {
         saveArticleView={saveArticleView}
         deleteArticleView={deleteArticleView}
         approveArticleView={approveArticleView}
+        loadArticleViewRuns={loadArticleViewRuns}
+        runArticleViewBatch={runArticleViewBatch}
         invalidateArticleViewPreview={invalidateArticleViewPreview}
         insertFieldToken={insertFieldToken}
         updateArticleSection={updateArticleSection}

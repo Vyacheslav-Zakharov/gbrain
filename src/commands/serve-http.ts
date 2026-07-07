@@ -1471,6 +1471,39 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  app.post('/admin/api/source-ingest/catalog/article-view/run', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const article_view_id = typeof req.body?.article_view_id === 'string' ? req.body.article_view_id.trim() : '';
+      if (!article_view_id) {
+        res.status(400).json({ error: 'article_view_id_required' });
+        return;
+      }
+      const out = await operationsByName.source_article_view_run.handler(ctx, {
+        article_view_id,
+        limit: Number.isFinite(Number(req.body?.limit)) ? Number(req.body.limit) : undefined,
+        changed_since: req.body?.changed_since === true,
+        require_clean_git: req.body?.require_clean_git !== false,
+        no_embed: req.body?.no_embed === true,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/catalog/article-view/:article_view_id/runs', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const article_view_id = String(req.params.article_view_id || '').trim();
+      const limit = Number.isFinite(Number(req.query?.limit)) ? Number(req.query.limit) : 20;
+      const out = await operationsByName.source_article_view_runs.handler(ctx, { article_view_id, limit });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
   app.post('/admin/api/source-ingest/refresh-report', requireAdmin, express.json(), async (req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
     try {

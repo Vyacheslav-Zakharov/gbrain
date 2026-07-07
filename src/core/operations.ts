@@ -74,6 +74,7 @@ import {
   deleteSourceConnectorView,
   deleteSourceTransformView,
   getCompiledArticleProfile,
+  listSourceArticleViewRuns,
   listSourceArticleViews,
   listSourceBaseViews,
   listSourceConnectorViews,
@@ -3513,6 +3514,21 @@ const source_article_view_run: Operation = {
   },
 };
 
+const source_article_view_runs: Operation = {
+  name: 'source_article_view_runs',
+  description: 'Read run history rollups for a first-class article view.',
+  scope: 'read',
+  params: {
+    article_view_id: { type: 'string', required: true },
+    limit: { type: 'number', description: 'Max run groups to return (default 20).' },
+  },
+  handler: async (ctx, p) => {
+    const articleViewId = String(p.article_view_id || '').trim();
+    if (!articleViewId) throw new OperationError('invalid_params', 'article_view_id_required');
+    return { rows: await listSourceArticleViewRuns(ctx.engine, articleViewId, typeof p.limit === 'number' ? p.limit : 20) };
+  },
+};
+
 const source_profile_draft: Operation = {
   name: 'source_profile_draft',
   description: 'Draft an editable source-ingest profile from connector discovery. Does not approve or freeze source_id; human review is required before ingest.',
@@ -6107,7 +6123,7 @@ export const operations: Operation[] = [
   source_connector_list, source_connector_upsert, source_connector_delete,
   source_base_view_list, source_base_view_execute, source_base_view_upsert, source_base_view_delete,
   source_transform_view_list, source_transform_view_execute, source_transform_view_upsert, source_transform_view_delete,
-  source_article_view_list, source_article_view_upsert, source_article_view_delete, source_article_view_dry_run, source_article_view_approve, source_article_view_run,
+  source_article_view_list, source_article_view_upsert, source_article_view_delete, source_article_view_dry_run, source_article_view_approve, source_article_view_run, source_article_view_runs,
   source_profile_draft, source_validate_profile, source_profile_get, source_profile_put, source_dry_run, source_sync_status,
   source_ingest, source_refresh, source_revert,
   // Files

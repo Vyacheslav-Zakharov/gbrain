@@ -77,7 +77,9 @@ export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, onSelec
         const id = String(row.article_view_id);
         const state = articleState(row);
         const reasons = asArr(row.stale_reasons).map(String).filter(Boolean);
-        return <TreeButton key={id} active={activeNode === `article_view:${id}`} depth={2} icon={row.stale === true ? '⚠' : '▧'} label={<code>{id}</code>} meta={<><MiniBadge tone={state.tone}>{state.icon} {state.label}</MiniBadge><MiniBadge tone={row.current_chain_hash ? 'ok' : 'muted'}>hash {shortHash(row.current_chain_hash)}</MiniBadge><span>{val(row.gbrain_type)} → {val(row.target_source_id)}</span>{reasons.length > 0 && <span style={{ display: 'block', marginTop: 2, color: 'var(--warning)' }}>why: {reasons.join(', ')}</span>}</>} onClick={() => { onSelectArea('article_views'); onSelectNode(`article_view:${id}`); onSelectArticleView?.(row); }} />;
+        const lastRun = asObj(row.last_run);
+        const runMeta = lastRun.run_id ? <span style={{ display: 'block', marginTop: 2 }}>посл. запуск: {val(lastRun.success)} ok / {val(lastRun.failed)} fail · {val(lastRun.finished_at)}</span> : null;
+        return <TreeButton key={id} active={activeNode === `article_view:${id}`} depth={2} icon={row.stale === true ? '⚠' : '▧'} label={<code>{id}</code>} meta={<><MiniBadge tone={state.tone}>{state.icon} {state.label}</MiniBadge><MiniBadge tone={row.current_chain_hash ? 'ok' : 'muted'}>hash {shortHash(row.current_chain_hash)}</MiniBadge><span>{val(row.gbrain_type)} → {val(row.target_source_id)}</span>{runMeta}{reasons.length > 0 && <span style={{ display: 'block', marginTop: 2, color: 'var(--warning)' }}>why: {reasons.join(', ')}</span>}</>} onClick={() => { onSelectArea('article_views'); onSelectNode(`article_view:${id}`); onSelectArticleView?.(row); }} />;
       })}
       {isOpen('article_views') && <TreeButton active={activeNode === 'article_view:new'} depth={2} icon="＋" label="New article view…" meta="schema + template + batch run" onClick={() => { onSelectArea('article_views'); onSelectNode('article_view:new'); }} />}
 

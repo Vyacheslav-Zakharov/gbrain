@@ -11,6 +11,7 @@ const sourceIngestUi = () => [
   'admin/src/pages/source-ingest/ConnectorEditor.tsx',
   'admin/src/pages/source-ingest/SchemaWorkbench.tsx',
   'admin/src/pages/source-ingest/SourceIngestCatalogPanel.tsx',
+  'admin/src/pages/source-ingest/SourceIngestWizard.tsx',
   'admin/src/pages/source-ingest/TransformViewEditor.tsx',
   'admin/src/pages/source-ingest/ArticleViewStatePanel.tsx',
   'admin/src/pages/source-ingest/shared.tsx',

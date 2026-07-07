@@ -9,7 +9,7 @@
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
 import A_0_assets_index_Cb4jCY21_css from '../admin/dist/assets/index-Cb4jCY21.css' with { type: 'file' };
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
-import A_1_assets_index_DXd9d6Lu_js from '../admin/dist/assets/index-DXd9d6Lu.js' with { type: 'file' };
+import A_1_assets_index_WQNDoAS9_js from '../admin/dist/assets/index-WQNDoAS9.js' with { type: 'file' };
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
 import A_2_index_html from '../admin/dist/index.html' with { type: 'file' };
 
@@ -20,7 +20,7 @@ export interface AdminAsset {
 
 export const ADMIN_ASSETS: Record<string, AdminAsset> = {
   "/admin/assets/index-Cb4jCY21.css": { path: A_0_assets_index_Cb4jCY21_css as unknown as string, mime: "text/css; charset=utf-8" },
-  "/admin/assets/index-DXd9d6Lu.js": { path: A_1_assets_index_DXd9d6Lu_js as unknown as string, mime: "application/javascript; charset=utf-8" },
+  "/admin/assets/index-WQNDoAS9.js": { path: A_1_assets_index_WQNDoAS9_js as unknown as string, mime: "application/javascript; charset=utf-8" },
   "/admin/index.html": { path: A_2_index_html as unknown as string, mime: "text/html; charset=utf-8" },
 };
 

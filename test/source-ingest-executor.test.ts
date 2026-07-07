@@ -543,7 +543,7 @@ describe('source-ingest Stage 3A executor', () => {
     await putSourceIngestProfile(engine, badProfile, { createdBy: 'test', changeNote: 'bad transform connector' });
 
     await expect(runSourceIngestExecutor(engine, { profile_id: badProfile.profile_id, run_id: 'run-transform-bad', no_embed: true }))
-      .rejects.toThrow('Stage 3A executor only allows fake-source transform sources: vehicles uses appsheet-vehicles');
+      .rejects.toThrow('source_ingest live connector not enabled: transform source vehicles uses appsheet-vehicles');
   });
 
   test('resumes from op-checkpoint and skips completed external refs', async () => {
