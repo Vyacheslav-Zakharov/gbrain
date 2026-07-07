@@ -40,13 +40,21 @@ export function RequestLogPage() {
 
   const formatParams = (params: Record<string, unknown> | null) => {
     if (!params) return null;
-    const { query, slug, partial, limit, ...rest } = params as any;
+    const { query, slug, partial, limit, declared_keys, unknown_key_count, approx_bytes, redacted, ...rest } = params as any;
     const parts: string[] = [];
     if (query) parts.push(`"${query}"`);
     if (slug) parts.push(slug);
     if (partial) parts.push(`~${partial}`);
     if (limit) parts.push(`limit=${limit}`);
-    if (Object.keys(rest).length > 0) parts.push(`+${Object.keys(rest).length} params`);
+    if (Array.isArray(declared_keys) && declared_keys.length > 0) {
+      parts.push(`keys=${declared_keys.join(',')}`);
+    } else if (redacted) {
+      parts.push('keys=none');
+    }
+    if (unknown_key_count) parts.push(`+${unknown_key_count} unknown`);
+    if (approx_bytes) parts.push(`~${approx_bytes}B`);
+    const restCount = Object.keys(rest).length;
+    if (!redacted && restCount > 0) parts.push(`+${restCount} params`);
     return parts.join(' ');
   };
 

@@ -10,6 +10,15 @@ import { api } from './api';
 
 type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs' | 'source-ingest';
 
+const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: string }> = [
+  { page: 'dashboard', label: 'Dashboard', icon: '▣' },
+  { page: 'agents', label: 'Agents', icon: '◉' },
+  { page: 'log', label: 'Request Log', icon: '≋' },
+  { page: 'calibration', label: 'Calibration', icon: '◌' },
+  { page: 'jobs', label: 'Jobs Watch', icon: '⚙' },
+  { page: 'source-ingest', label: 'Source Ingest', icon: '⇄' },
+];
+
 function getPage(): Page {
   const hash = window.location.hash.replace('#', '') || 'dashboard';
   if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'source-ingest'].includes(hash)) return hash as Page;
@@ -18,12 +27,17 @@ function getPage(): Page {
 
 export function App() {
   const [page, setPage] = useState<Page>(getPage);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('gbrain-admin-sidebar-collapsed') === '1');
 
   useEffect(() => {
     const onHash = () => setPage(getPage());
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem('gbrain-admin-sidebar-collapsed', sidebarCollapsed ? '1' : '0');
+  }, [sidebarCollapsed]);
 
   const navigate = (p: Page) => {
     window.location.hash = p;
@@ -47,39 +61,39 @@ export function App() {
   };
 
   return (
-    <div className="app">
-      <nav className="sidebar">
-        <div className="sidebar-logo">GBrain</div>
-        <div className="sidebar-nav">
-          <a className={`nav-item ${page === 'dashboard' ? 'active' : ''}`}
-             onClick={() => navigate('dashboard')}>Dashboard</a>
-          <a className={`nav-item ${page === 'agents' ? 'active' : ''}`}
-             onClick={() => navigate('agents')}>Agents</a>
-          <a className={`nav-item ${page === 'log' ? 'active' : ''}`}
-             onClick={() => navigate('log')}>Request Log</a>
-          <a className={`nav-item ${page === 'calibration' ? 'active' : ''}`}
-             onClick={() => navigate('calibration')}>Calibration</a>
-          <a className={`nav-item ${page === 'jobs' ? 'active' : ''}`}
-             onClick={() => navigate('jobs')}>Jobs Watch</a>
-          <a className={`nav-item ${page === 'source-ingest' ? 'active' : ''}`}
-             onClick={() => navigate('source-ingest')}>Source Ingest</a>
+    <div className={`app ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
+      <nav className="sidebar" aria-label="Admin navigation">
+        <div className="sidebar-topbar">
+          <div className="sidebar-logo" title="GBrain">{sidebarCollapsed ? 'GB' : 'GBrain'}</div>
+          <button
+            className="sidebar-toggle"
+            type="button"
+            onClick={() => setSidebarCollapsed(v => !v)}
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {sidebarCollapsed ? '›' : '‹'}
+          </button>
         </div>
-        <div style={{ marginTop: 'auto', padding: '16px 12px', borderTop: '1px solid var(--border)' }}>
+        <div className="sidebar-nav">
+          {NAV_ITEMS.map(item => <a
+            key={item.page}
+            className={`nav-item ${page === item.page ? 'active' : ''}`}
+            onClick={() => navigate(item.page)}
+            title={item.label}
+          >
+            <span className="nav-icon" aria-hidden="true">{item.icon}</span>
+            <span className="nav-label">{item.label}</span>
+          </a>)}
+        </div>
+        <div className="sidebar-footer">
           <button
             onClick={handleSignOutEverywhere}
-            style={{
-              background: 'transparent',
-              border: '1px solid var(--border)',
-              color: 'var(--text-secondary)',
-              padding: '6px 10px',
-              borderRadius: 6,
-              fontSize: 12,
-              cursor: 'pointer',
-              width: '100%',
-            }}
+            className="sidebar-signout"
             title="Revoke every active admin session — every browser, every tab"
           >
-            Sign out everywhere
+            <span className="nav-icon" aria-hidden="true">⎋</span>
+            <span className="nav-label">Sign out everywhere</span>
           </button>
         </div>
       </nav>

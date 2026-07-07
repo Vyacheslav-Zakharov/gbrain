@@ -1,13 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api';
-
-interface SourceIngestCatalogTree {
-  connectors?: Array<Record<string, unknown>>;
-  base_views?: Array<Record<string, unknown>>;
-  transform_views?: Array<Record<string, unknown>>;
-  article_views?: Array<Record<string, unknown>>;
-  schema?: Record<string, unknown>;
-}
+import { ArticleViewEditor } from './source-ingest/ArticleViewEditor';
+import { BaseViewEditor } from './source-ingest/BaseViewEditor';
+import { ConnectorEditor } from './source-ingest/ConnectorEditor';
+import { SchemaWorkbench } from './source-ingest/SchemaWorkbench';
+import { SourceIngestCatalogPanel } from './source-ingest/SourceIngestCatalogPanel';
+import { TransformViewEditor } from './source-ingest/TransformViewEditor';
+import { asArr, asObj, type CatalogArea, type SourceIngestCatalogTree, val } from './source-ingest/shared';
 
 type ConnectorChoice = {
   id: string;
@@ -56,6 +55,44 @@ interface ReviewForm {
   primary_key_field: string;
   updated_at_field: string;
   sample_limit: number;
+}
+
+interface BaseViewForm {
+  base_view_id: string;
+  connector_id: string;
+  object_name: string;
+  display_name: string;
+  primary_key_field: string;
+  updated_at_field: string;
+  selected_fields_text: string;
+  row_filter_text: string;
+  sample_limit: number;
+}
+
+interface TransformViewForm {
+  transform_view_id: string;
+  display_name: string;
+  inputs_text: string;
+  sql: string;
+  primary_key_field: string;
+  updated_at_field: string;
+}
+
+interface ArticleViewForm {
+  article_view_id: string;
+  display_name: string;
+  input_kind: 'base_view' | 'transform_view';
+  input_id: string;
+  gbrain_type: string;
+  target_source_id: string;
+  slug_template: string;
+  external_id_field: string;
+  display_name_field: string;
+  natural_key_fields_text: string;
+  status: string;
+  freshness_policy: string;
+  classification: string;
+  pii: boolean;
 }
 
 const DEFAULT_ARTICLE_SECTIONS: Record<string, string> = {
@@ -117,26 +154,8 @@ const SECTION_LABELS: Record<string, string> = {
   timeline: 'Timeline',
 };
 
-function val(x: unknown): string {
-  return x === null || x === undefined || x === '' ? '—' : String(x);
-}
-
 function profileId(profile: unknown): string {
   return String((profile as Record<string, unknown> | null)?.profile_id ?? 'draft');
-}
-
-function statusBadge(status: unknown) {
-  const s = String(status ?? 'unknown');
-  const color = s === 'active' || s === 'reviewed' ? 'var(--success)' : s === 'draft' ? 'var(--warning)' : 'var(--text-muted)';
-  return <span style={{ color }}>{s}</span>;
-}
-
-function asObj(x: unknown): Record<string, unknown> {
-  return x && typeof x === 'object' ? x as Record<string, unknown> : {};
-}
-
-function asArr<T = unknown>(x: unknown): T[] {
-  return Array.isArray(x) ? x as T[] : [];
 }
 
 function safeSourceTableId(connectorId: string, sourceObject: string, tableName: string): string {
@@ -176,6 +195,66 @@ function parseJsonArray(text: string): unknown[] {
   }
 }
 
+function parseCsvLines(text: string): string[] {
+  return text.split(/\\n|[\n,]/).map(s => s.trim()).filter(Boolean);
+}
+
+function catalogSlugPart(value: string): string {
+  return value.toLowerCase().trim().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'default';
+}
+
+function defaultBaseViewId(connectorId: string, objectName: string, tableName: string): string {
+  return `bv-${catalogSlugPart(safeSourceTableId(connectorId, objectName, tableName))}`;
+}
+
+function discoveryFieldNames(value: unknown): string[] {
+  return asArr<Record<string, unknown>>(asObj(value).fields).map(f => String(f.name ?? '')).filter(Boolean);
+}
+
+function discoveryObjectNames(value: unknown): string[] {
+  return asArr<Record<string, unknown>>(asObj(value).objects).map(o => String(o.name ?? '')).filter(Boolean);
+}
+
+function compactDiscoveryForSave(value: unknown): Record<string, unknown> {
+  const d = asObj(value);
+  if (Object.keys(d).length === 0) return {};
+  const compactFields = asArr<Record<string, unknown>>(d.fields).map(f => ({
+    name: f.name,
+    observedTypes: f.observedTypes,
+    nullRatio: f.nullRatio,
+    samples: asArr(f.samples).slice(0, 3).map(x => {
+      const s = val(x);
+      return s.length > 160 ? `${s.slice(0, 160)}…` : s;
+    }),
+  }));
+  return {
+    connectorId: d.connectorId,
+    objectName: d.objectName,
+    totalEstimate: d.totalEstimate,
+    sampled: d.sampled,
+    fields: compactFields,
+    idCandidates: d.idCandidates,
+    updatedAtCandidates: d.updatedAtCandidates,
+    parentCandidates: d.parentCandidates,
+    warnings: d.warnings,
+  };
+}
+
+function defaultRowFilterText(): string {
+  return '[]';
+}
+
+function parseTransformInputs(text: string): Array<{ alias: string; base_view_id: string }> {
+  return parseJsonArray(text).map(input => {
+    const raw = asObj(input);
+    return { alias: String(raw.alias ?? '').trim(), base_view_id: String(raw.base_view_id ?? raw.source_table_id ?? '').trim() };
+  }).filter(input => input.alias && input.base_view_id);
+}
+
+function defaultTransformViewInputs(baseViewId: string, alias = 'main'): string {
+  return JSON.stringify([{ alias, base_view_id: baseViewId }], null, 2);
+}
+
 function defaultTransformSources(form: ReviewForm, fields: string[]): string {
   return JSON.stringify([
     {
@@ -188,6 +267,55 @@ function defaultTransformSources(form: ReviewForm, fields: string[]): string {
       fields,
     },
   ], null, 2);
+}
+
+function transformSourcesForInputs(inputs: Array<{ alias: string; base_view_id: string }>, baseViews: Array<Record<string, unknown>>) {
+  const lookup = new Map(baseViews.map(row => [String(row.base_view_id), row]));
+  return inputs.map(input => {
+    const base = lookup.get(input.base_view_id);
+    const fields = asArr(base?.selected_fields).map(String).filter(Boolean);
+    return {
+      alias: input.alias,
+      source_table_id: input.base_view_id,
+      connector: String(base?.connector_id ?? ''),
+      object: String(base?.object_name ?? input.base_view_id),
+      fields,
+      sample_limit: Number(base?.sample_limit) || 25,
+    };
+  });
+}
+
+function splitSqlProjection(selectList: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let depth = 0;
+  let quote: string | null = null;
+  for (const ch of selectList) {
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; current += ch; continue; }
+    if (ch === '(') depth += 1;
+    if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) { if (current.trim()) parts.push(current.trim()); current = ''; continue; }
+    current += ch;
+  }
+  if (current.trim()) parts.push(current.trim());
+  return parts;
+}
+
+function sqlProjectionFieldNames(sql: string): string[] {
+  const match = sql.match(/\bselect\b([\s\S]+?)\bfrom\b/i);
+  if (!match) return [];
+  return splitSqlProjection(match[1]).flatMap(part => {
+    if (/\.\*/.test(part) || part.trim() === '*') return [];
+    const asMatch = part.match(/\bas\s+"?([A-Za-z_][A-Za-z0-9_]*)"?\s*$/i);
+    if (asMatch) return [asMatch[1]];
+    const tail = part.match(/(?:^|\.)"?([A-Za-z_][A-Za-z0-9_]*)"?\s*$/);
+    return tail ? [tail[1]] : [];
+  }).filter((v, i, arr) => v && arr.indexOf(v) === i);
 }
 
 function TransformResultPreview({ value }: { value: unknown }) {
@@ -221,6 +349,104 @@ function DiscoveryPreview({ value }: { value: unknown }) {
   </div>;
 }
 
+function sourceTableCell(row: Record<string, unknown>, field: string): unknown {
+  const source = asObj(row.source_fields);
+  const data = asObj(row.data);
+  return Object.prototype.hasOwnProperty.call(source, field) ? source[field] : data[field];
+}
+
+function SourceSampleRowsTable({ discovery, selected }: { discovery: unknown; selected: string[] }) {
+  const d = asObj(discovery);
+  const rows = asArr<Record<string, unknown>>(d.samples).slice(0, Number(d.sampled) || 25);
+  const fields = selected.length ? selected : discoveryFieldNames(discovery);
+  if (rows.length === 0 || fields.length === 0) return null;
+  return <div style={{ gridColumn: '1 / -1', marginTop: 12 }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
+      <b>Sample rows</b>
+      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{rows.length} rows × {fields.length} selected columns</span>
+    </div>
+    <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'auto', maxHeight: 520, background: 'rgba(255,255,255,0.03)' }}>
+      <table style={{ margin: 0, width: 'max-content', minWidth: '100%', borderCollapse: 'collapse' }}>
+        <thead style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--bg-secondary)' }}>
+          <tr>
+            <th style={{ width: 52 }}>#</th>
+            {fields.map(field => <th key={field} className="mono"><code>{field}</code></th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => <tr key={`${String(row.external_id ?? i)}-${i}`} style={{ background: i % 2 ? 'rgba(255,255,255,0.025)' : 'transparent' }}>
+            <td style={{ color: 'var(--text-muted)' }}>{i + 1}</td>
+            {fields.map(field => <td key={`${i}-${field}`} className="mono" style={{ maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{val(sourceTableCell(row, field)) || '—'}</td>)}
+          </tr>)}
+        </tbody>
+      </table>
+    </div>
+  </div>;
+}
+
+function FieldSelectionPanel({ discovery, selected, onChange }: { discovery: unknown; selected: string[]; onChange: (fields: string[]) => void }) {
+  const d = asObj(discovery);
+  const fields = asArr<Record<string, unknown>>(d.fields);
+  if (fields.length === 0) {
+    return <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>Run Execute / Discover fields to show selectable source fields.</div>;
+  }
+  const selectedSet = new Set(selected);
+  const allNames = fields.map(f => String(f.name ?? '')).filter(Boolean);
+  const recommended = fields.filter(f => !isNoisySourceField(f)).map(f => String(f.name ?? '')).filter(Boolean);
+  const idCandidates = new Set(asArr(d.idCandidates).map(String));
+  const updatedCandidates = new Set(asArr(d.updatedAtCandidates).map(String));
+  const setField = (name: string, checked: boolean) => {
+    const next = new Set(selectedSet);
+    if (checked) next.add(name); else next.delete(name);
+    onChange(allNames.filter(n => next.has(n)));
+  };
+  return <div style={{ gridColumn: '1 / -1' }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 8 }}>
+      <div>
+        <b>Schema / selected fields</b>
+        <span style={{ color: 'var(--text-muted)', marginLeft: 8, fontSize: 12 }}>{selected.length} / {allNames.length}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button type="button" className="btn btn-secondary" style={{ padding: '4px 8px' }} onClick={() => onChange(allNames)}>Select all</button>
+        <button type="button" className="btn btn-secondary" style={{ padding: '4px 8px' }} onClick={() => onChange(recommended)}>Recommended</button>
+        <button type="button" className="btn btn-secondary" style={{ padding: '4px 8px' }} onClick={() => onChange([])}>Clear</button>
+      </div>
+    </div>
+    <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'auto', maxHeight: 430, background: 'rgba(255,255,255,0.03)' }}>
+      <table style={{ margin: 0, width: '100%', borderCollapse: 'collapse' }}>
+        <thead style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--bg-secondary)' }}>
+          <tr>
+            <th style={{ width: 48, textAlign: 'center' }}>Use</th>
+            <th style={{ width: 42, textAlign: 'center' }}>PK</th>
+            <th>Field name</th>
+            <th style={{ width: 150 }}>Field type</th>
+            <th>Samples</th>
+            <th style={{ width: 130 }}>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          {fields.map((f, i) => {
+            const name = String(f.name ?? '');
+            const noisy = isNoisySourceField(f);
+            const types = asArr(f.observedTypes).map(String).join(', ') || 'unknown';
+            const samples = asArr(f.samples).slice(0, 3).map(val).join(' · ');
+            const isPk = idCandidates.has(name);
+            const isUpdated = updatedCandidates.has(name);
+            return <tr key={`${name}-${i}`} style={{ background: selectedSet.has(name) ? 'rgba(136,170,255,0.10)' : i % 2 ? 'rgba(255,255,255,0.025)' : 'transparent' }}>
+              <td style={{ textAlign: 'center' }}><input aria-label={`Use ${name}`} type="checkbox" checked={selectedSet.has(name)} onChange={e => setField(name, e.target.checked)} /></td>
+              <td style={{ textAlign: 'center', color: isPk ? 'var(--success)' : 'var(--text-muted)', fontWeight: isPk ? 700 : 400 }}>{isPk ? '✓' : ''}</td>
+              <td className="mono"><code>{name}</code>{isUpdated && <span style={{ color: 'var(--accent)', marginLeft: 6 }}>updated</span>}</td>
+              <td>{types}</td>
+              <td className="mono" style={{ maxWidth: 420, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{samples || '—'}</td>
+              <td>{noisy ? <span style={{ color: 'var(--warning)' }}>noisy / related</span> : <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
+            </tr>;
+          })}
+        </tbody>
+      </table>
+    </div>
+  </div>;
+}
+
 function CatalogCount({ label, rows }: { label: string; rows: Array<Record<string, unknown>> }) {
   return <div className="metric"><div className="metric-value">{rows.length}</div><div className="metric-label">{label}</div></div>;
 }
@@ -241,70 +467,47 @@ function CatalogSection({ title, rows, idKey, subtitle }: { title: string; rows:
   </div>;
 }
 
-function SourceIngestCatalogPanel({ tree, onSelectConnector }: { tree: SourceIngestCatalogTree; onSelectConnector?: (row: Record<string, unknown>) => void }) {
-  const connectors = tree.connectors ?? [];
-  const baseViews = tree.base_views ?? [];
-  const transformViews = tree.transform_views ?? [];
-  const articleViews = tree.article_views ?? [];
-  return <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
-    <h2 className="section-title">Catalog tree preview</h2>
-    <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
-      Phase 1 shell: first-class catalog objects from <code>source_ingest_tree</code>. Existing review wizard below remains the compatibility path until the new object editors are complete.
-    </p>
-    <div className="metrics" style={{ marginBottom: 12 }}>
-      <CatalogCount label="connectors" rows={connectors} />
-      <CatalogCount label="base views" rows={baseViews} />
-      <CatalogCount label="transforms" rows={transformViews} />
-      <CatalogCount label="article views" rows={articleViews} />
-    </div>
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
-      <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
-        <h3 style={{ fontSize: 13, marginBottom: 8 }}>Подключения</h3>
-        {connectors.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>No catalog connectors yet.</div>}
-        {connectors.map(row => {
-          const enabled = row.enabled !== false;
-          return <button key={String(row.connector_id)} className="btn btn-secondary" style={{ display: 'block', width: '100%', textAlign: 'left', marginBottom: 6 }} onClick={() => onSelectConnector?.(row)}>
-            <code>{val(row.connector_id)}</code> {!enabled && <span style={{ color: 'var(--warning)' }}>disabled</span>}
-            <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>{val(row.display_name)} · kind {val(row.kind)} · last test {val(row.last_test_ok)}</span>
-          </button>;
-        })}
-      </div>
-      <CatalogSection title="Источники" rows={baseViews} idKey="base_view_id" subtitle={row => `${val(row.display_name)} · ${val(row.connector_id)} / ${val(row.object_name)} · fields ${asArr(row.selected_fields).length}`} />
-      <CatalogSection title="Преобразования" rows={transformViews} idKey="transform_view_id" subtitle={row => `${val(row.display_name)} · inputs ${asArr(row.inputs).length} · pk ${val(row.primary_key_field)}`} />
-      <CatalogSection title="Публикации" rows={articleViews} idKey="article_view_id" subtitle={row => `${val(row.status)} · ${val(row.gbrain_type)} → ${val(row.target_source_id)} · compiled ${val(row.version_hash)}`} />
-    </div>
-    <div style={{ marginTop: 12, color: 'var(--text-muted)', fontSize: 12 }}>Схема мозга: read-only = {String(asObj(tree.schema).read_only ?? true)}.</div>
-  </section>;
-}
-
 function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; currentTargetSourceId: string }) {
-  const d = asObj(value);
+  const raw = asObj(value);
+  const d = Object.keys(asObj(raw.dry_run)).length > 0 ? asObj(raw.dry_run) : raw;
   if (!value) return <div style={{ color: 'var(--text-muted)' }}>No dry-run yet.</div>;
   const counts = asObj(d.counts);
-  const samplePages = asArr<Record<string, unknown>>(d.sample_pages);
+  const stratifiedSamples = asObj(d.stratified_samples);
+  const samplePages = asArr<Record<string, unknown>>(d.sample_pages).length > 0
+    ? asArr<Record<string, unknown>>(d.sample_pages)
+    : asArr<Record<string, unknown>>(stratifiedSamples.would_write);
   const warnings = asArr(d.warnings);
   const sensitivity = asObj(d.routing_sensitivity);
   const piiFields = asArr(sensitivity.pii_fields).map(String);
   const hasPii = sensitivity.pii === true || piiFields.length > 0;
   const routedSource = String(sensitivity.approved_source_id ?? currentTargetSourceId ?? '—');
   const crossSource = routedSource !== '—' && currentTargetSourceId && routedSource !== currentTargetSourceId;
+  const metricKeys = ['sampled', 'would_write', 'skipped', 'slug_collisions'];
   return <div style={{ color: 'var(--text-secondary)' }}>
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(90px, 1fr))', gap: 8, marginBottom: 10 }}>
-      {['sampled', 'would_write', 'skipped', 'slug_collisions'].map(k => <div className="metric" key={k}><div className="metric-value">{val(counts[k])}</div><div className="metric-label">{k}</div></div>)}
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 8, marginBottom: 10 }}>
+      {metricKeys.map(k => <div key={k} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', background: 'rgba(15, 23, 42, 0.38)' }}>
+        <div style={{ color: 'var(--text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.04em' }}>{k}</div>
+        <div style={{ fontSize: 20, lineHeight: 1.15, fontWeight: 700, color: 'var(--text-primary)', marginTop: 4 }}>{val(counts[k])}</div>
+      </div>)}
     </div>
-    <div style={{ marginBottom: 10, padding: 10, borderRadius: 6, background: hasPii || crossSource ? 'rgba(245, 158, 11, 0.12)' : 'rgba(16, 185, 129, 0.10)', color: hasPii || crossSource ? 'var(--warning)' : 'var(--success)' }}>
-      <b>Routing / sensitivity</b>
-      <div style={{ marginTop: 4, color: 'var(--text-secondary)' }}>
-        target source: <code>{currentTargetSourceId || '—'}</code> · dry-run source: <code>{routedSource}</code> · classification: <code>{val(sensitivity.classification)}</code> · pii: <code>{String(hasPii)}</code>
+    <div style={{ marginBottom: 10, padding: '8px 10px', borderRadius: 8, border: `1px solid ${hasPii || crossSource ? 'rgba(245, 158, 11, 0.35)' : 'rgba(16, 185, 129, 0.28)'}`, background: hasPii || crossSource ? 'rgba(245, 158, 11, 0.08)' : 'rgba(16, 185, 129, 0.06)' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <b style={{ color: hasPii || crossSource ? 'var(--warning)' : 'var(--success)' }}>Routing</b>
+        <span>target <code>{currentTargetSourceId || '—'}</code></span>
+        <span>dry-run <code>{routedSource}</code></span>
+        <span>class <code>{val(sensitivity.classification)}</code></span>
+        <span>pii <code>{String(hasPii)}</code></span>
+        <span>pii_fields {piiFields.length ? piiFields.map(f => <code key={f} style={{ marginLeft: 4 }}>{f}</code>) : '—'}</span>
       </div>
-      <div style={{ marginTop: 4, color: 'var(--text-secondary)' }}>pii_fields: {piiFields.length ? piiFields.map(f => <code key={f} style={{ marginRight: 6 }}>{f}</code>) : '—'}</div>
-      {crossSource && <div style={{ marginTop: 4 }}>Cross-source mismatch: dry-run routing source differs from selected target source.</div>}
+      {crossSource && <div style={{ marginTop: 4, color: 'var(--warning)' }}>Cross-source mismatch: dry-run routing source differs from selected target source.</div>}
     </div>
     {warnings.length > 0 && <div style={{ color: 'var(--warning)', marginBottom: 8 }}>Warnings: {warnings.map(String).join(', ')}</div>}
-    <table><thead><tr><th>slug</th><th>title</th><th>external</th><th>empty template slots</th></tr></thead><tbody>
-      {samplePages.map((p, i) => <tr key={i}><td className="mono">{val(p.slug)}</td><td>{hasPii ? '[PII masked]' : val(p.title)}</td><td className="mono">{val(p.external_id)}</td><td>{asArr(p.article_empty_slots).map(String).join(', ') || '—'}</td></tr>)}
-    </tbody></table>
-    {samplePages.length > 0 && <details style={{ marginTop: 8 }}><summary>{hasPii ? 'Rendered article previews (PII fields masked)' : 'Rendered article previews'}</summary>
+    <div style={{ overflowX: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
+      <table style={{ margin: 0 }}><thead><tr><th>slug</th><th>title</th><th>external</th><th>empty template slots</th></tr></thead><tbody>
+        {samplePages.map((p, i) => <tr key={i}><td className="mono">{val(p.slug)}</td><td>{hasPii ? '[PII masked]' : val(p.title)}</td><td className="mono">{val(p.external_id)}</td><td>{asArr(p.article_empty_slots).map(String).join(', ') || '—'}</td></tr>)}
+      </tbody></table>
+    </div>
+    {samplePages.length > 0 && <details style={{ marginTop: 10 }}><summary style={{ cursor: 'pointer', color: 'var(--text-primary)' }}>{hasPii ? 'Rendered article previews (PII fields masked)' : 'Rendered article previews'}</summary>
       {samplePages.map((p, i) => <details key={i} style={{ marginTop: 8 }} open={i === 0}><summary>{val(p.slug)} · {hasPii ? '[PII masked]' : val(p.title)}</summary><pre style={{ whiteSpace: 'pre-wrap', maxHeight: 360, overflow: 'auto' }}>{String(p.article_markdown_preview || p.managed_block_preview || '')}</pre></details>)}
     </details>}
   </div>;
@@ -346,9 +549,58 @@ export function SourceIngestPage() {
   const [transformSql, setTransformSql] = useState('');
   const [transformPrimaryKey, setTransformPrimaryKey] = useState('vehicleID');
   const [transformUpdatedAt, setTransformUpdatedAt] = useState('');
-  const [catalogConnectorForm, setCatalogConnectorForm] = useState({ connector_id: 'appsheet-protokolist', kind: 'appsheet', display_name: 'AppSheet Протоколист', enabled: true });
+  const [catalogConnectorForm, setCatalogConnectorForm] = useState({ connector_id: 'appsheet-protokolist', kind: 'appsheet', display_name: '', enabled: true });
   const [catalogConnectorObjects, setCatalogConnectorObjects] = useState<unknown>(null);
   const [catalogConnectorTest, setCatalogConnectorTest] = useState<unknown>(null);
+  const [catalogDeleteImpact, setCatalogDeleteImpact] = useState<unknown>(null);
+  const [catalogConnectorSecretStatus, setCatalogConnectorSecretStatus] = useState<unknown>(null);
+  const [baseViewForm, setBaseViewForm] = useState<BaseViewForm>({
+    base_view_id: '',
+    connector_id: '',
+    object_name: '',
+    display_name: '',
+    primary_key_field: 'vehicleID',
+    updated_at_field: '',
+    selected_fields_text: '',
+    row_filter_text: '[]',
+    sample_limit: 25,
+  });
+  const [baseViewSaveResult, setBaseViewSaveResult] = useState<unknown>(null);
+  const [baseViewDiscovery, setBaseViewDiscovery] = useState<unknown>(null);
+  const [transformViewForm, setTransformViewForm] = useState<TransformViewForm>({
+    transform_view_id: 'tv-vehicles-clean',
+    display_name: 'Автотранспорт transform',
+    inputs_text: defaultTransformViewInputs('bv-appsheet-vehicles-vehicle-vehicles'),
+    sql: 'SELECT main.* FROM main',
+    primary_key_field: 'vehicleID',
+    updated_at_field: '',
+  });
+  const [transformViewSaveResult, setTransformViewSaveResult] = useState<unknown>(null);
+  const [articleViewForm, setArticleViewForm] = useState<ArticleViewForm>({
+    article_view_id: 'av-equipment',
+    display_name: 'Equipment articles',
+    input_kind: 'transform_view',
+    input_id: 'tv-bv-appsheet-avto-vehicles',
+    gbrain_type: 'equipment',
+    target_source_id: 'shared',
+    slug_template: 'source-ingest/vehicles/{{ vehicleID | slugify }}',
+    external_id_field: 'vehicleID',
+    display_name_field: 'govNumber',
+    natural_key_fields_text: 'govNumber',
+    status: 'draft',
+    freshness_policy: 'P30D',
+    classification: 'shared',
+    pii: false,
+  });
+  const [articleViewSaveResult, setArticleViewSaveResult] = useState<unknown>(null);
+  const [articleViewApproveResult, setArticleViewApproveResult] = useState<unknown>(null);
+  const [articleViewPreview, setArticleViewPreview] = useState<unknown>(null);
+  const [articleViewCurrentChainHash, setArticleViewCurrentChainHash] = useState('');
+  const [schemaWorkbench, setSchemaWorkbench] = useState<unknown>(null);
+  const [schemaType, setSchemaType] = useState('');
+  const [schemaTypeExplain, setSchemaTypeExplain] = useState<unknown>(null);
+  const [activeArea, setActiveArea] = useState<CatalogArea>('connectors');
+  const [activeNode, setActiveNode] = useState('section:connectors');
 
   const load = async () => {
     try {
@@ -360,14 +612,57 @@ export function SourceIngestPage() {
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
+    try {
+      setSchemaWorkbench(await api.sourceIngestSchemaView());
+    } catch (e) {
+      setErr(prev => prev ?? `schema_view_unavailable: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const refreshCatalogTree = async () => {
+    const tree = await api.sourceIngestCatalogTree();
+    setData(prev => prev ? { ...prev, catalog_tree: tree } : prev);
+    return tree;
   };
 
   useEffect(() => { void load(); }, []);
 
   const catalogConnectors = data?.catalog_tree?.connectors ?? [];
+  const schemaObj = asObj(schemaWorkbench);
+  const schemaGraph = asObj(schemaObj.graph);
+  const schemaNodes = asArr<Record<string, unknown>>(schemaGraph.nodes);
+  const schemaEdges = asArr<Record<string, unknown>>(schemaGraph.edges);
+  const activeSchemaPack = asObj(schemaObj.active_pack);
+  const schemaStats = asObj(schemaObj.stats);
+  const catalogBaseViews = data?.catalog_tree?.base_views ?? [];
+  const catalogTransformViews = data?.catalog_tree?.transform_views ?? [];
+  const articleInputChoices = [
+    ...catalogBaseViews.map(row => ({ kind: 'base_view' as const, id: String(row.base_view_id), label: `base_view · ${String(row.base_view_id)}` })),
+    ...catalogTransformViews.map(row => ({ kind: 'transform_view' as const, id: String(row.transform_view_id), label: `transform_view · ${String(row.transform_view_id)}` })),
+  ];
+  const articleAvailableFields = useMemo(() => {
+    if (articleViewForm.input_kind === 'base_view') {
+      const base = catalogBaseViews.find(row => String(row.base_view_id) === articleViewForm.input_id);
+      return asArr(base?.selected_fields).map(String).filter(Boolean);
+    }
+    const previewKeys = Array.from(new Set(asArr<Record<string, unknown>>(asObj(transformPreview).records).flatMap(r => Object.keys(asObj(r.data)))));
+    if (previewKeys.length > 0) return previewKeys;
+    const currentTransform = articleViewForm.input_id === transformViewForm.transform_view_id
+      ? { inputs: parseTransformInputs(transformViewForm.inputs_text), sql: transformViewForm.sql }
+      : (() => {
+          const row = catalogTransformViews.find(t => String(t.transform_view_id) === articleViewForm.input_id);
+          return row ? { inputs: asArr<Record<string, unknown>>(row.inputs).map(input => ({ alias: String(input.alias ?? ''), base_view_id: String(input.base_view_id ?? '') })).filter(input => input.alias && input.base_view_id), sql: String(row.sql ?? '') } : null;
+        })();
+    if (!currentTransform) return [];
+    const projected = sqlProjectionFieldNames(currentTransform.sql);
+    if (projected.length > 0) return projected;
+    const baseLookup = new Map(catalogBaseViews.map(row => [String(row.base_view_id), row]));
+    return Array.from(new Set(currentTransform.inputs.flatMap(input => asArr(baseLookup.get(input.base_view_id)?.selected_fields).map(String).filter(Boolean))));
+  }, [articleViewForm.input_kind, articleViewForm.input_id, catalogBaseViews, catalogTransformViews, transformPreview, transformViewForm.inputs_text, transformViewForm.sql, transformViewForm.transform_view_id]);
+  const catalogConnectorChoices = catalogConnectors.map(c => ({ id: String(c.connector_id), kind: String(c.kind ?? ''), displayName: String(c.display_name ?? c.connector_id), status: 'catalog', object: '', fields: undefined, requiredKeys: c.kind === 'appsheet' ? ['app_id', 'access_key'] : [], requiredEnv: [], safety: ['First-class catalog connector: table binding is configured in base/source table settings.'] }));
   const connectorChoices = [
+    ...catalogConnectorChoices,
     ...(data?.connectors ?? []).map(c => ({ id: c.id, kind: c.kind ?? c.id, displayName: c.displayName, status: c.status, object: c.object, fields: c.fields, requiredKeys: c.requiredKeys, requiredEnv: c.requiredEnv, safety: c.safety })),
-    ...catalogConnectors.map(c => ({ id: String(c.connector_id), kind: String(c.kind ?? ''), displayName: String(c.display_name ?? c.connector_id), status: 'catalog', object: 'vehicle', fields: undefined, requiredKeys: c.kind === 'appsheet' ? ['app_id', 'access_key'] : [], requiredEnv: [], safety: ['First-class catalog connector: table binding is configured in base/source table settings.'] })),
   ].filter((c, i, arr) => c.id && arr.findIndex(x => x.id === c.id) === i);
   const selectedConnector = connectorChoices.find(c => c.id === form.connector_id);
   const sourceTables = data?.source_tables ?? [];
@@ -377,6 +672,8 @@ export function SourceIngestPage() {
     || (matchingConfigs.length === 1 ? matchingConfigs[0] : undefined);
   const secretStatus = (savedConfig?.secrets as Record<string, unknown> | undefined)
     || { configured: false, missing_keys: selectedConnector?.requiredKeys ?? [], required_keys: selectedConnector?.requiredKeys ?? [], missing_env: selectedConnector?.requiredEnv ?? [], required_env: selectedConnector?.requiredEnv ?? [], masked: {}, storage: 'none' };
+  const effectiveBaseViewId = baseViewForm.base_view_id.trim() || (baseViewForm.connector_id && baseViewForm.object_name ? defaultBaseViewId(baseViewForm.connector_id, baseViewForm.object_name, baseViewForm.object_name) : '');
+  const baseViewSelectedFields = parseCsvLines(baseViewForm.selected_fields_text);
   const summary = data?.status.summary ?? {};
   const discoveredFields = asArr<Record<string, unknown>>(asObj(discovery).fields);
   const selectedSourceFieldSet = new Set(selectedSourceFields);
@@ -409,7 +706,9 @@ export function SourceIngestPage() {
     return raw;
   }, [activeProfile, articleSections, selectedSourceFields, transformConfig]);
   const canDryRun = Boolean(profileForReview);
-  const canTransformPreview = Boolean(profileForReview && transformEnabled && transformSources.length > 0 && transformSql.trim());
+  const catalogTransformInputs = parseTransformInputs(transformViewForm.inputs_text);
+  const canCatalogTransformPreview = Boolean(catalogTransformInputs.length > 0 && transformViewForm.sql.trim() && transformViewForm.primary_key_field);
+  const canTransformPreview = Boolean((profileForReview && transformEnabled && transformSources.length > 0 && transformSql.trim()) || canCatalogTransformPreview);
   const dryRunSensitivity = asObj(asObj(dryRun).routing_sensitivity);
   const dryRunPiiFields = asArr(dryRunSensitivity.pii_fields).map(String);
   const dryRunHasPii = dryRunSensitivity.pii === true || dryRunPiiFields.length > 0;
@@ -420,6 +719,16 @@ export function SourceIngestPage() {
   const dryRunProfileHash = typeof (dryRun as Record<string, unknown> | null)?.profile_hash === 'string' ? String((dryRun as Record<string, unknown>).profile_hash) : '';
   const dryRunSourceMismatch = Boolean(dryRun && dryRunSourceId && dryRunSourceId !== form.target_source_id);
   const canApprove = Boolean(activeProfile && dryRun && dryRunProfileHash && dryRunMatchesCurrentSource && (!requiresSensitivityAck || sensitivityAck) && !(dryRun as Record<string, unknown>).error);
+  const studioSectionStyle = (areas: CatalogArea | CatalogArea[]): React.CSSProperties => {
+    const areaList = Array.isArray(areas) ? areas : [areas];
+    return {
+      display: areaList.includes(activeArea) ? 'block' : 'none',
+      background: 'var(--bg-secondary)',
+      borderRadius: 8,
+      padding: 18,
+      marginBottom: 20,
+    };
+  };
 
   const runStep = async (name: string, fn: () => Promise<void>) => {
     setBusy(name);
@@ -523,13 +832,36 @@ export function SourceIngestPage() {
   const saveCatalogConnector = async () => runStep('catalog-connector', async () => {
     await api.sourceIngestSaveCatalogConnector({
       ...catalogConnectorForm,
+      display_name: catalogConnectorForm.display_name.trim() || catalogConnectorForm.connector_id,
       config_json: { source: 'admin-ui', phase: 'catalog-tree-shell' },
     });
     await load();
   });
 
+  const handleSelectCatalogNode = (node: string) => {
+    setActiveNode(node);
+    if (node === 'base_view:new') {
+      const connectorId = catalogConnectorForm.connector_id || String(catalogConnectors[0]?.connector_id ?? '');
+      setBaseViewForm({
+        base_view_id: '',
+        connector_id: connectorId,
+        object_name: '',
+        display_name: '',
+        primary_key_field: 'vehicleID',
+        updated_at_field: '',
+        selected_fields_text: '',
+        row_filter_text: '[]',
+        sample_limit: 25,
+      });
+      setBaseViewDiscovery(null);
+      setBaseViewSaveResult(null);
+    }
+  };
+
   const selectCatalogConnector = (row: Record<string, unknown>) => {
+    setActiveArea('connectors');
     const connectorId = String(row.connector_id ?? '');
+    setActiveNode(`connector:${connectorId}`);
     setCatalogConnectorForm({
       connector_id: connectorId,
       kind: String(row.kind ?? 'appsheet'),
@@ -541,13 +873,55 @@ export function SourceIngestPage() {
     setCatalogConnectorTest(null);
   };
 
+  const catalogConnectorSecretConfigId = () => `connector:${catalogConnectorForm.connector_id}`;
   const catalogConnectorPayload = () => ({
     connector_id: catalogConnectorForm.connector_id,
     kind: catalogConnectorForm.kind,
-    source_object: form.source_object,
-    table_name: form.table_name,
-    primary_key_field: form.primary_key_field,
-    updated_at_field: form.updated_at_field,
+    config_id: catalogConnectorSecretConfigId(),
+  });
+
+  const explainSchemaType = async (type: string) => runStep('schema-explain-type', async () => {
+    const t = type.trim();
+    if (!t) return;
+    setSchemaType(t);
+    setSchemaTypeExplain(await api.sourceIngestSchemaExplainType(t));
+  });
+
+  const saveCatalogConnectorCredentials = async () => runStep('catalog-save-secret', async () => {
+    await api.sourceIngestSaveCatalogConnector({
+      ...catalogConnectorForm,
+      display_name: catalogConnectorForm.display_name.trim() || catalogConnectorForm.connector_id,
+      config_json: { source: 'admin-ui', phase: 'catalog-tree-shell' },
+    });
+    await api.sourceIngestSaveConfig({
+      config_id: catalogConnectorSecretConfigId(),
+      connector_id: catalogConnectorForm.connector_id,
+      source_object: '__connection__',
+      display_name: catalogConnectorForm.display_name.trim() || catalogConnectorForm.connector_id,
+      enabled: true,
+      config_json: { connector_level: true, kind: catalogConnectorForm.kind },
+    });
+    const status = await api.sourceIngestSaveSecret({
+      config_id: catalogConnectorSecretConfigId(),
+      connector_id: catalogConnectorForm.connector_id,
+      source_object: '__connection__',
+      secrets: secretForm,
+    });
+    setCatalogConnectorSecretStatus(status);
+    setSecretForm({ app_id: '', access_key: '' });
+    setSecretAudit(await api.sourceIngestSecretAudit(catalogConnectorSecretConfigId()));
+    await load();
+  });
+
+  const deleteCatalogConnectorCredentials = async () => runStep('catalog-delete-secret', async () => {
+    const status = await api.sourceIngestDeleteSecret({
+      config_id: catalogConnectorSecretConfigId(),
+      connector_id: catalogConnectorForm.connector_id,
+      source_object: '__connection__',
+    });
+    setCatalogConnectorSecretStatus(status);
+    setSecretAudit(await api.sourceIngestSecretAudit(catalogConnectorSecretConfigId()));
+    await load();
   });
 
   const listCatalogConnectorObjects = async () => runStep('catalog-list-objects', async () => {
@@ -559,10 +933,422 @@ export function SourceIngestPage() {
     await load();
   });
 
+  const runDeleteGuard = async (kind: string, id: string): Promise<{ confirmed: boolean; token?: string }> => {
+    const out = await api.sourceIngestCatalogDeleteImpact({ kind, id });
+    const impact = asObj(asObj(out).impact);
+    setCatalogDeleteImpact(impact);
+    if (impact.exists === false) return { confirmed: true, token: String(impact.confirm_token ?? '') };
+    if (impact.blocking !== true) {
+      const ok = window.confirm(`Delete ${kind} ${id}? No dependent catalog objects were found.`);
+      return { confirmed: ok, token: String(impact.confirm_token ?? '') };
+    }
+    const deps = asObj(impact.dependencies);
+    const baseCount = asArr(deps.base_views).length;
+    const transformCount = asArr(deps.transform_views).length;
+    const articleCount = asArr(deps.article_views).length;
+    const ok = window.confirm(`Delete ${kind} ${id}? This has dependencies: ${baseCount} base views, ${transformCount} transform views, ${articleCount} article views. This may break downstream previews/runs. Confirm force delete?`);
+    return { confirmed: ok, token: String(impact.confirm_token ?? '') };
+  };
+
   const deleteCatalogConnector = async () => runStep('catalog-delete-connector', async () => {
-    await api.sourceIngestDeleteCatalogConnector(catalogConnectorForm.connector_id);
+    const guard = await runDeleteGuard('connector', catalogConnectorForm.connector_id);
+    if (!guard.confirmed) return;
+    await api.sourceIngestDeleteCatalogConnector(catalogConnectorForm.connector_id, guard.token, true);
     setCatalogConnectorObjects(null);
     setCatalogConnectorTest(null);
+    await load();
+  });
+
+  const selectBaseView = (row: Record<string, unknown>) => {
+    setActiveArea('base_views');
+    setActiveNode(`base_view:${String(row.base_view_id ?? '')}`);
+    const discoveryJson = asObj(row.discovery_json);
+    const selected = asArr(row.selected_fields).map(String);
+    setBaseViewForm({
+      base_view_id: String(row.base_view_id ?? ''),
+      connector_id: String(row.connector_id ?? form.connector_id),
+      object_name: String(row.object_name ?? form.source_object),
+      display_name: String(row.display_name ?? row.base_view_id ?? ''),
+      primary_key_field: String(asObj(discoveryJson).primary_key_field ?? asArr(asObj(discoveryJson).idCandidates)[0] ?? 'vehicleID'),
+      updated_at_field: String(asObj(discoveryJson).updated_at_field ?? asArr(asObj(discoveryJson).updatedAtCandidates)[0] ?? ''),
+      selected_fields_text: selected.join('\n'),
+      row_filter_text: JSON.stringify(asArr(row.row_filter), null, 2),
+      sample_limit: Number(row.sample_limit ?? form.sample_limit ?? 25),
+    });
+    const hydratedDiscovery = Object.keys(discoveryJson).length ? discoveryJson : discovery;
+    setDiscovery(hydratedDiscovery);
+    setBaseViewDiscovery(hydratedDiscovery);
+    setBaseViewSaveResult(null);
+  };
+
+  const seedBaseViewFromReview = () => {
+    const fields = selectedSourceFields.length ? selectedSourceFields : discoveryFieldNames(discovery);
+    const baseId = defaultBaseViewId(form.connector_id, form.source_object, form.table_name);
+    setBaseViewForm({
+      base_view_id: baseId,
+      connector_id: form.connector_id,
+      object_name: form.source_object,
+      display_name: `${form.table_name || form.source_object} source view`,
+      primary_key_field: form.primary_key_field || 'vehicleID',
+      updated_at_field: form.updated_at_field || '',
+      selected_fields_text: fields.join('\n'),
+      row_filter_text: defaultRowFilterText(),
+      sample_limit: form.sample_limit,
+    });
+    setBaseViewDiscovery(null);
+    setBaseViewSaveResult(null);
+  };
+
+  const discoverBaseView = async () => runStep('catalog-base-view-discover', async () => {
+    const selectedFields = parseCsvLines(baseViewForm.selected_fields_text);
+    const baseViewId = effectiveBaseViewId;
+    const savedBase = catalogBaseViews.some(row => String(row.base_view_id) === baseViewId);
+    const out = await api.sourceIngestExecuteBaseView({
+      ...(savedBase ? { base_view_id: baseViewId } : { draft: {
+        connector_id: baseViewForm.connector_id,
+        object_name: baseViewForm.object_name,
+        selected_fields: selectedFields,
+        row_filter: parseJsonArray(baseViewForm.row_filter_text),
+        sample_limit: Number(baseViewForm.sample_limit) || 25,
+        discovery_json: {
+          primary_key_field: baseViewForm.primary_key_field || undefined,
+          updated_at_field: baseViewForm.updated_at_field || undefined,
+        },
+      } }),
+      sample_limit: Number(baseViewForm.sample_limit) || 25,
+    });
+    const discoveryOut = asObj(out).discovery || out;
+    setBaseViewDiscovery(discoveryOut);
+    const idCandidates = asArr(asObj(discoveryOut).idCandidates).map(String);
+    const updatedCandidates = asArr(asObj(discoveryOut).updatedAtCandidates).map(String);
+    const fields = discoveryFieldNames(discoveryOut);
+    if (idCandidates[0] && !baseViewForm.primary_key_field.trim()) setBaseViewForm(prev => ({ ...prev, primary_key_field: idCandidates[0] }));
+    if (updatedCandidates[0] && !baseViewForm.updated_at_field.trim()) setBaseViewForm(prev => ({ ...prev, updated_at_field: updatedCandidates[0] }));
+    if (!baseViewForm.base_view_id.trim() && baseViewForm.connector_id && baseViewForm.object_name) {
+      setBaseViewForm(prev => ({ ...prev, base_view_id: defaultBaseViewId(prev.connector_id, prev.object_name, prev.object_name) }));
+    }
+    if (fields.length > 0 && !baseViewForm.selected_fields_text.trim()) {
+      setBaseViewForm(prev => ({ ...prev, selected_fields_text: fields.join('\n') }));
+    }
+    if (savedBase) await refreshCatalogTree();
+  });
+
+  const saveBaseView = async () => runStep('catalog-base-view', async () => {
+    const rowFilter = parseJsonArray(baseViewForm.row_filter_text);
+    const baseViewId = effectiveBaseViewId;
+    if (!baseViewId) throw new Error('base_view_id_required: enter connector and source object, then use the generated Base view id or type one manually.');
+    const selectedFields = parseCsvLines(baseViewForm.selected_fields_text);
+    const out = await api.sourceIngestSaveBaseView({
+      base_view_id: baseViewId,
+      connector_id: baseViewForm.connector_id,
+      object_name: baseViewForm.object_name,
+      display_name: baseViewForm.display_name,
+      primary_key_field: baseViewForm.primary_key_field,
+      updated_at_field: baseViewForm.updated_at_field,
+      selected_fields: selectedFields,
+      row_filter: rowFilter,
+      sample_limit: Number(baseViewForm.sample_limit) || 25,
+      discovery_json: {
+        ...compactDiscoveryForSave(baseViewDiscovery ?? discovery),
+        primary_key_field: baseViewForm.primary_key_field || undefined,
+        updated_at_field: baseViewForm.updated_at_field || undefined,
+      },
+    });
+    setBaseViewSaveResult(out);
+    setBaseViewForm(prev => ({ ...prev, base_view_id: baseViewId }));
+    setActiveArea('base_views');
+    setActiveNode(`base_view:${baseViewId}`);
+    setTransformViewForm(prev => ({ ...prev, inputs_text: defaultTransformViewInputs(baseViewId), primary_key_field: baseViewForm.primary_key_field || prev.primary_key_field || form.primary_key_field || 'id', updated_at_field: baseViewForm.updated_at_field || prev.updated_at_field || form.updated_at_field || '' }));
+    setTransformSourcesText(JSON.stringify([{ alias: 'main', source_table_id: baseViewId, connector: baseViewForm.connector_id, object: baseViewForm.object_name, fields: selectedFields, sample_limit: Number(baseViewForm.sample_limit) || 25 }], null, 2));
+    try {
+      await refreshCatalogTree();
+    } catch {
+      await load();
+    }
+  });
+
+  const deleteBaseView = async () => runStep('catalog-base-view-delete', async () => {
+    const baseViewId = effectiveBaseViewId;
+    if (!baseViewId) throw new Error('base_view_id_required');
+    const guard = await runDeleteGuard('base_view', baseViewId);
+    if (!guard.confirmed) return;
+    await api.sourceIngestDeleteBaseView(baseViewId, guard.token, true);
+    setBaseViewSaveResult(null);
+    setBaseViewDiscovery(null);
+    await load();
+  });
+
+  const selectTransformView = (row: Record<string, unknown>) => {
+    setActiveArea('transform_views');
+    setActiveNode(`transform_view:${String(row.transform_view_id ?? '')}`);
+    const inputs = asArr(row.inputs).map(input => {
+      const raw = asObj(input);
+      return { alias: String(raw.alias ?? ''), base_view_id: String(raw.base_view_id ?? '') };
+    }).filter(input => input.alias && input.base_view_id);
+    setTransformViewForm({
+      transform_view_id: String(row.transform_view_id ?? ''),
+      display_name: String(row.display_name ?? row.transform_view_id ?? ''),
+      inputs_text: JSON.stringify(inputs, null, 2),
+      sql: String(row.sql ?? ''),
+      primary_key_field: String(row.primary_key_field ?? 'id'),
+      updated_at_field: String(row.updated_at_field ?? ''),
+    });
+    setTransformEnabled(true);
+    setTransformSourcesText(JSON.stringify(inputs.map(input => ({ alias: input.alias, source_table_id: input.base_view_id })), null, 2));
+    setTransformSql(String(row.sql ?? ''));
+    setTransformPrimaryKey(String(row.primary_key_field ?? 'id'));
+    setTransformUpdatedAt(String(row.updated_at_field ?? ''));
+    setTransformViewSaveResult(null);
+  };
+
+  const seedTransformViewFromBase = () => {
+    const baseId = baseViewForm.base_view_id || String(catalogBaseViews[0]?.base_view_id ?? '');
+    setTransformViewForm({
+      transform_view_id: `tv-${catalogSlugPart(baseId || 'source')}`,
+      display_name: `${baseViewForm.display_name || baseId || 'Source'} transform`,
+      inputs_text: defaultTransformViewInputs(baseId || 'bv-source'),
+      sql: 'SELECT main.* FROM main',
+      primary_key_field: form.primary_key_field || transformPrimaryKey || 'id',
+      updated_at_field: form.updated_at_field || transformUpdatedAt || '',
+    });
+    setTransformViewSaveResult(null);
+  };
+
+  const appendBaseViewInput = (baseViewId: string) => {
+    const existing = parseTransformInputs(transformViewForm.inputs_text);
+    if (existing.some(input => input.base_view_id === baseViewId)) return;
+    const aliasSeed = catalogSlugPart(baseViewId).replace(/-/g, '_').slice(0, 24) || `src${existing.length + 1}`;
+    const alias = existing.length === 0 ? 'main' : aliasSeed;
+    setTransformViewForm(prev => ({ ...prev, inputs_text: JSON.stringify([...existing, { alias, base_view_id: baseViewId }], null, 2) }));
+  };
+
+  const generateSelectForTransform = () => {
+    const inputs = parseTransformInputs(transformViewForm.inputs_text);
+    if (inputs.length === 0) return;
+    const lookup = new Map(catalogBaseViews.map(row => [String(row.base_view_id), row]));
+    const projection = inputs.flatMap(input => {
+      const fields = asArr(lookup.get(input.base_view_id)?.selected_fields).map(String).filter(Boolean);
+      const safeFields = fields.length ? fields : ['*'];
+      if (safeFields.includes('*')) return [`${input.alias}.*`];
+      return safeFields.map(field => `${input.alias}.${field}${inputs.length > 1 ? ` AS ${input.alias}_${field}` : ''}`);
+    });
+    const from = inputs.map((input, i) => `${i === 0 ? 'FROM' : '-- JOIN'} ${input.alias}`).join('\n');
+    const sql = `SELECT\n  ${projection.join(',\n  ')}\n${from}`;
+    setTransformViewForm(prev => ({ ...prev, sql }));
+  };
+
+  const saveTransformView = async () => runStep('catalog-transform-view', async () => {
+    const inputs = parseTransformInputs(transformViewForm.inputs_text);
+    const out = await api.sourceIngestSaveTransformView({
+      transform_view_id: transformViewForm.transform_view_id,
+      display_name: transformViewForm.display_name,
+      inputs,
+      sql: transformViewForm.sql,
+      primary_key_field: transformViewForm.primary_key_field,
+      updated_at_field: transformViewForm.updated_at_field || undefined,
+    });
+    setTransformViewSaveResult(out);
+    setTransformEnabled(true);
+    setTransformSourcesText(JSON.stringify(inputs.map(input => ({ alias: input.alias, source_table_id: input.base_view_id })), null, 2));
+    setTransformSql(transformViewForm.sql);
+    setTransformPrimaryKey(transformViewForm.primary_key_field);
+    setTransformUpdatedAt(transformViewForm.updated_at_field);
+    setArticleViewForm(prev => ({ ...prev, input_kind: 'transform_view', input_id: transformViewForm.transform_view_id }));
+    await load();
+  });
+
+  const deleteTransformView = async () => runStep('catalog-transform-view-delete', async () => {
+    const transformViewId = transformViewForm.transform_view_id.trim();
+    if (!transformViewId) throw new Error('transform_view_id_required');
+    const guard = await runDeleteGuard('transform_view', transformViewId);
+    if (!guard.confirmed) return;
+    await api.sourceIngestDeleteTransformView(transformViewId, guard.token, true);
+    setTransformViewSaveResult(null);
+    setTransformPreview(null);
+    await load();
+  });
+
+  const selectArticleView = (row: Record<string, unknown>) => {
+    setActiveArea('article_views');
+    setActiveNode(`article_view:${String(row.article_view_id ?? '')}`);
+    const article = asObj(row.article_json);
+    const input = asObj(article.input);
+    const identity = asObj(article.identity);
+    const security = asObj(article.security);
+    const freshness = asObj(article.freshness_policy);
+    const mapping = asObj(article.mapping);
+    const template = asObj(article.article_template || asObj(mapping.article_template));
+    const sections = asObj(template.sections);
+    const rawInputKind = input.kind === 'transform_view' ? 'transform_view' : 'base_view';
+    const rawInputId = String(input.id ?? row.input_id ?? '');
+    const effectiveInputId = rawInputKind === 'transform_view' && rawInputId && !catalogTransformViews.some(t => String(t.transform_view_id) === rawInputId)
+      ? String(catalogTransformViews[0]?.transform_view_id ?? rawInputId)
+      : rawInputKind === 'base_view' && rawInputId && !catalogBaseViews.some(b => String(b.base_view_id) === rawInputId)
+        ? String(catalogBaseViews[0]?.base_view_id ?? rawInputId)
+        : rawInputId;
+    setArticleViewForm({
+      article_view_id: String(row.article_view_id ?? article.article_view_id ?? ''),
+      display_name: String(article.display_name ?? row.article_view_id ?? ''),
+      input_kind: rawInputKind,
+      input_id: effectiveInputId,
+      gbrain_type: String(row.gbrain_type ?? article.gbrain_type ?? 'equipment'),
+      target_source_id: String(row.target_source_id ?? article.target_source_id ?? 'shared'),
+      slug_template: String(article.slug_template ?? 'source-ingest/items/{{ id | slugify }}'),
+      external_id_field: String(identity.external_id_field ?? 'id'),
+      display_name_field: String(identity.display_name_field ?? ''),
+      natural_key_fields_text: asArr(identity.natural_key_fields).map(String).join('\n'),
+      status: String(row.status ?? article.status ?? 'draft'),
+      freshness_policy: String(freshness.policy ?? 'P30D'),
+      classification: String(security.classification ?? 'shared'),
+      pii: security.pii === true,
+    });
+    if (Object.keys(sections).length > 0) {
+      setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])) });
+      setArticleDirty(true);
+    }
+    setArticleViewSaveResult(null);
+    invalidateArticleViewPreview();
+  };
+
+  const seedArticleViewFromCurrent = () => {
+    const transformId = transformViewForm.transform_view_id || String(catalogTransformViews[0]?.transform_view_id ?? '');
+    const baseId = baseViewForm.base_view_id || String(catalogBaseViews[0]?.base_view_id ?? '');
+    const inputKind = transformId ? 'transform_view' : 'base_view';
+    const inputId = transformId || baseId || 'bv-source';
+    const keyField = transformViewForm.primary_key_field || form.primary_key_field || 'id';
+    setArticleViewForm(prev => ({
+      ...prev,
+      article_view_id: prev.article_view_id || `av-${catalogSlugPart(inputId)}`,
+      display_name: prev.display_name || `${inputId} articles`,
+      input_kind: inputKind,
+      input_id: inputId,
+      target_source_id: form.target_source_id || prev.target_source_id,
+      slug_template: form.slug_prefix ? `${form.slug_prefix.replace(/\/+$/g, '')}/{{ ${keyField} | slugify }}` : prev.slug_template,
+      external_id_field: keyField,
+      display_name_field: form.primary_key_field === keyField ? prev.display_name_field : form.primary_key_field || prev.display_name_field,
+      freshness_policy: form.freshness_policy || prev.freshness_policy,
+    }));
+    setArticleViewSaveResult(null);
+    invalidateArticleViewPreview();
+  };
+
+  const articleViewPayload = () => ({
+    article_view_id: articleViewForm.article_view_id,
+    display_name: articleViewForm.display_name,
+    input_kind: articleViewForm.input_kind,
+    input_id: articleViewForm.input_id,
+    gbrain_type: articleViewForm.gbrain_type,
+    target_source_id: articleViewForm.target_source_id,
+    slug_template: articleViewForm.slug_template,
+    identity: {
+      external_id_field: articleViewForm.external_id_field,
+      display_name_field: articleViewForm.display_name_field || articleViewForm.external_id_field,
+      natural_key_fields: parseCsvLines(articleViewForm.natural_key_fields_text),
+    },
+    article_template: { sections: articleSections },
+    freshness_policy: { policy: articleViewForm.freshness_policy },
+    update_policy: { mode: 'managed_block', preserve_manual_sections: true, field_allowlist: selectedSourceFields },
+    security: { classification: articleViewForm.classification, pii: articleViewForm.pii },
+    status: articleViewForm.status,
+  });
+
+  const profileForCatalogTransformPreview = () => {
+    const inputs = parseTransformInputs(transformViewForm.inputs_text);
+    const sources = transformSourcesForInputs(inputs, catalogBaseViews);
+    const primary = sources[0];
+    return {
+      profile_id: `${transformViewForm.transform_view_id || 'transform'}-preview`,
+      status: 'reviewed',
+      source_connector: primary?.connector || form.connector_id,
+      source_object: primary?.object || form.source_object,
+      transform: {
+        engine: 'pglite',
+        sources,
+        sql: transformViewForm.sql,
+        primary_key_field: transformViewForm.primary_key_field || 'id',
+        ...(transformViewForm.updated_at_field ? { updated_at_field: transformViewForm.updated_at_field } : {}),
+      },
+      target: { gbrain_type: 'preview', approved_source_id: articleViewForm.target_source_id || form.target_source_id, slug_template: 'preview/{{ id | slugify }}' },
+      identity: { external_id_field: transformViewForm.primary_key_field || 'id', natural_key_fields: [], display_name_field: transformViewForm.primary_key_field || 'id' },
+      mapping: { source_fields: [], article_template: { sections: { title: '{{ id }}', summary: 'preview' } } },
+      update_policy: { mode: 'managed_block', preserve_manual_sections: true, field_allowlist: [] },
+      security: { classification: 'shared', pii: false },
+    };
+  };
+
+  const profileForArticleViewPreview = () => {
+    const article = articleViewPayload();
+    const baseLookup = new Map(catalogBaseViews.map(row => [String(row.base_view_id), row]));
+    const transformRow = articleViewForm.input_kind === 'transform_view'
+      ? (articleViewForm.input_id === transformViewForm.transform_view_id
+          ? { inputs: parseTransformInputs(transformViewForm.inputs_text), sql: transformViewForm.sql, primary_key_field: transformViewForm.primary_key_field, updated_at_field: transformViewForm.updated_at_field }
+          : (() => {
+              const row = catalogTransformViews.find(t => String(t.transform_view_id) === articleViewForm.input_id);
+              return row ? { inputs: asArr<Record<string, unknown>>(row.inputs).map(input => ({ alias: String(input.alias ?? ''), base_view_id: String(input.base_view_id ?? '') })).filter(input => input.alias && input.base_view_id), sql: String(row.sql ?? ''), primary_key_field: String(row.primary_key_field ?? articleViewForm.external_id_field), updated_at_field: String(row.updated_at_field ?? '') } : null;
+            })())
+      : null;
+    const primaryBaseId = articleViewForm.input_kind === 'base_view' ? articleViewForm.input_id : transformRow?.inputs[0]?.base_view_id;
+    const base = baseLookup.get(String(primaryBaseId || ''));
+    const fields = articleAvailableFields.length ? articleAvailableFields : asArr(base?.selected_fields).map(String).filter(Boolean);
+    const stripTemplateField = (value: unknown) => String(value ?? '')
+      .trim()
+      .replace(/^{{\s*/, '')
+      .replace(/\s*}}$/, '')
+      .replace(/\s*\|.*$/, '')
+      .trim();
+    const validFieldSet = new Set(fields);
+    const normalizeIdentityField = (value: unknown, fallback: string) => {
+      const field = stripTemplateField(value);
+      return field && validFieldSet.has(field) ? field : fallback;
+    };
+    const externalIdField = normalizeIdentityField(article.identity.external_id_field, fields[0] || 'id');
+    const displayNameField = normalizeIdentityField(article.identity.display_name_field, externalIdField);
+    const naturalKeyFields = asArr(article.identity.natural_key_fields)
+      .map(stripTemplateField)
+      .filter(field => field && validFieldSet.has(field));
+    const identity = {
+      ...asObj(article.identity),
+      external_id_field: externalIdField,
+      display_name_field: displayNameField,
+      natural_key_fields: naturalKeyFields,
+    };
+    return {
+      profile_id: `${articleViewForm.article_view_id || 'article'}-preview`,
+      status: 'reviewed',
+      source_connector: String(base?.connector_id ?? form.connector_id),
+      source_object: String(base?.object_name ?? form.source_object),
+      ...(transformRow ? { transform: { engine: 'pglite', sources: transformSourcesForInputs(transformRow.inputs, catalogBaseViews), sql: transformRow.sql, primary_key_field: transformRow.primary_key_field || articleViewForm.external_id_field || 'id', ...(transformRow.updated_at_field ? { updated_at_field: transformRow.updated_at_field } : {}) } } : {}),
+      target: { gbrain_type: article.gbrain_type, approved_source_id: article.target_source_id, slug_template: article.slug_template },
+      selection: { include: asArr(base?.row_filter) },
+      identity,
+      freshness: article.freshness_policy,
+      mapping: { source_fields: fields, article_template: article.article_template },
+      update_policy: { ...asObj(article.update_policy), field_allowlist: fields },
+      security: article.security,
+    };
+  };
+
+  const saveArticleView = async () => runStep('catalog-article-view', async () => {
+    setArticleViewSaveResult(await api.sourceIngestSaveArticleView(articleViewPayload()));
+    await load();
+  });
+
+  const deleteArticleView = async () => runStep('catalog-article-view-delete', async () => {
+    const articleViewId = articleViewForm.article_view_id.trim();
+    if (!articleViewId) throw new Error('article_view_id_required');
+    const guard = await runDeleteGuard('article_view', articleViewId);
+    if (!guard.confirmed) return;
+    await api.sourceIngestDeleteArticleView(articleViewId);
+    setArticleViewSaveResult(null);
+    invalidateArticleViewPreview();
+    await load();
+  });
+
+  const approveArticleView = async () => runStep('catalog-article-approve', async () => {
+    if (!articleViewCurrentChainHash) {
+      throw new Error('chain_hash_required: run Article preview again before approving.');
+    }
+    setArticleViewApproveResult(await api.sourceIngestApproveArticleView(articleViewForm.article_view_id, articleViewCurrentChainHash));
     await load();
   });
 
@@ -589,6 +1375,15 @@ export function SourceIngestPage() {
     }
     if (!form.updated_at_field && updated[0]) setForm(prev => ({ ...prev, updated_at_field: updated[0] }));
     setSelectedSourceFields(selected);
+    setBaseViewForm(prev => ({
+      ...prev,
+      base_view_id: prev.base_view_id || defaultBaseViewId(form.connector_id, form.source_object, form.table_name),
+      connector_id: form.connector_id,
+      object_name: form.source_object,
+      display_name: prev.display_name || `${form.table_name || form.source_object} source view`,
+      selected_fields_text: selected.join('\n'),
+      sample_limit: form.sample_limit,
+    }));
     if (!transformSourcesText) setTransformSourcesText(defaultTransformSources(form, selected));
     if (!articleDirty) setArticleSections(makeDefaultArticleSections(selected));
     setDryRun(null);
@@ -622,6 +1417,7 @@ export function SourceIngestPage() {
     setDryRunSourceId(null);
     setSensitivityAck(false);
     setApproveResult(null);
+    invalidateArticleViewPreview();
   };
 
   const insertFieldToken = (field: string) => {
@@ -651,6 +1447,12 @@ export function SourceIngestPage() {
     setApproveResult(null);
   };
 
+  const invalidateArticleViewPreview = () => {
+    setArticleViewPreview(null);
+    setArticleViewCurrentChainHash('');
+    setArticleViewApproveResult(null);
+  };
+
   const invalidateTransformPreview = () => {
     setDryRun(null);
     setTransformPreview(null);
@@ -665,8 +1467,42 @@ export function SourceIngestPage() {
   };
 
   const runTransformPreview = async () => runStep('transform-preview', async () => {
-    if (!profileForReview) return;
-    setTransformPreview(await api.sourceIngestTransformPreview({ ...payload(), profile: profileForReview, sample_limit: form.sample_limit, target_source_id: form.target_source_id }));
+    if (canCatalogTransformPreview) {
+      const inputs = parseTransformInputs(transformViewForm.inputs_text);
+      const savedTransform = catalogTransformViews.some(row => String(row.transform_view_id) === transformViewForm.transform_view_id);
+      const out = await api.sourceIngestExecuteTransformView({
+        ...(savedTransform ? { transform_view_id: transformViewForm.transform_view_id } : {}),
+        draft: {
+          inputs,
+          sql: transformViewForm.sql,
+          primary_key_field: transformViewForm.primary_key_field,
+          updated_at_field: transformViewForm.updated_at_field || undefined,
+        },
+        sample_limit: Number(form.sample_limit) || 25,
+      });
+      setTransformPreview(out);
+      if (savedTransform) await refreshCatalogTree();
+      return;
+    }
+    const profile = profileForReview;
+    if (!profile) throw new Error('transform_preview_requires_inputs_sql_and_primary_key');
+    const out = await api.sourceIngestTransformPreview({ ...payload(), profile, sample_limit: form.sample_limit, target_source_id: form.target_source_id });
+    setTransformPreview(out);
+  });
+
+  const runArticleViewPreview = async () => runStep('catalog-article-preview', async () => {
+    const articleViewId = articleViewForm.article_view_id.trim();
+    if (!articleViewId) throw new Error('article_view_id_required: enter Article view id before preview.');
+    const saved = await api.sourceIngestSaveArticleView(articleViewPayload());
+    setArticleViewSaveResult(saved);
+    const out = await api.sourceIngestArticleViewDryRun({
+      article_view_id: articleViewId,
+      sample_limit: Number(form.sample_limit) || 25,
+    });
+    const wrapped = asObj(out);
+    setArticleViewCurrentChainHash(String(wrapped.current_chain_hash ?? ''));
+    setArticleViewPreview(wrapped.dry_run ?? out);
+    await refreshCatalogTree();
   });
 
   const runDryRun = async () => runStep('dry-run', async () => {
@@ -699,57 +1535,97 @@ export function SourceIngestPage() {
   if (err && !data) return <div style={{ color: 'var(--error)' }}><h1>Source Ingest</h1><pre>{err}</pre></div>;
   if (!data) return <div style={{ color: 'var(--text-muted)' }}>Loading source ingest console…</div>;
 
+  const selectedArticleViewRow = (data.catalog_tree?.article_views ?? []).find(row => String(row.article_view_id ?? '') === articleViewForm.article_view_id.trim()) ?? null;
+  const staleArticleCount = (data.catalog_tree?.article_views ?? []).filter(row => row.stale === true).length;
+
   return (
     <div>
-      <h1 className="page-title">Source Ingest</h1>
-      <p style={{ color: 'var(--text-secondary)', marginBottom: 18 }}>
-        Review workflow: configure → discover → draft profile → dry-run preview → approve. Import/refresh remains separate and guarded.
-      </p>
-      {err && <div style={{ color: 'var(--error)', marginBottom: 12 }}><b>Error:</b> {err}</div>}
-
-      <div className="metrics">
-        <div className="metric"><div className="metric-value">{val(summary.rows ?? data.status.rows.length)}</div><div className="metric-label">sync rows</div></div>
-        <div className="metric"><div className="metric-value">{val(summary.fresh ?? 0)}</div><div className="metric-label">fresh</div></div>
-        <div className="metric"><div className="metric-value">{val(summary.stale ?? 0)}</div><div className="metric-label">stale</div></div>
-        <div className="metric"><div className="metric-value">{data.refresh.count}</div><div className="metric-label">due profiles</div></div>
+      <div style={{
+        position: 'sticky', top: -16, zIndex: 100, margin: '-16px -24px 14px', padding: '16px 24px 8px',
+        background: 'var(--bg-primary)', boxShadow: '0 8px 18px rgba(0,0,0,0.28)', borderBottom: '1px solid var(--border, #333)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, minHeight: 40, flexWrap: 'wrap' }}>
+          <h1 className="page-title" style={{ margin: 0, fontSize: 18, lineHeight: 1.1 }}>Source Ingest</h1>
+          <span
+            title="Workflow: configure connector → discover fields → draft profile → dry-run preview → approve. Import/refresh remains separate and guarded."
+            style={{ width: 20, height: 20, borderRadius: '50%', border: '1px solid var(--border, #333)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', cursor: 'help' }}
+          >?</span>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginLeft: 'auto' }}>
+            <span className="badge badge-read" title="Rows in source sync state">sync {val(summary.rows ?? data.status.rows.length)}</span>
+            <span className="badge badge-success" title="Fresh sync rows">fresh {val(summary.fresh ?? 0)}</span>
+            <span className="badge badge-write" title="Stale sync rows">stale {val(summary.stale ?? 0)}</span>
+            <span className="badge badge-admin" title="Stale Article views requiring preview/approve">article stale {staleArticleCount}</span>
+            <span className="badge badge-admin" title="Profiles due for refresh">due {data.refresh.count}</span>
+          </div>
+        </div>
+        {err && <div style={{ color: 'var(--error)', marginTop: 6, fontSize: 12 }}><b>Error:</b> {err}</div>}
       </div>
 
-      <SourceIngestCatalogPanel tree={data.catalog_tree ?? { connectors: [], base_views: [], transform_views: [], article_views: [], schema: { read_only: true } }} onSelectConnector={selectCatalogConnector} />
+      <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 18, alignItems: 'start' }}>
+        <SourceIngestCatalogPanel tree={data.catalog_tree ?? { connectors: [], base_views: [], transform_views: [], article_views: [], schema: { read_only: true } }} activeArea={activeArea} activeNode={activeNode} onSelectArea={setActiveArea} onSelectNode={handleSelectCatalogNode} onSelectConnector={selectCatalogConnector} onSelectBaseView={selectBaseView} onSelectTransformView={selectTransformView} onSelectArticleView={selectArticleView} />
 
-      <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
-        <h2 className="section-title">0. Catalog connector instance</h2>
-        <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
-          Creates the new first-class connector object (system + non-secret config). Table binding remains in Source table / connector config until the base-view editor lands.
-        </p>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 14, alignItems: 'end' }}>
-          <label>Connector id
-            <input value={catalogConnectorForm.connector_id} onChange={e => setCatalogConnectorForm(prev => ({ ...prev, connector_id: e.target.value }))} placeholder="appsheet-protokolist" />
-          </label>
-          <label>Kind
-            <select value={catalogConnectorForm.kind} onChange={e => setCatalogConnectorForm(prev => ({ ...prev, kind: e.target.value }))}>
-              <option value="appsheet">appsheet</option>
-              <option value="fake">fake</option>
-            </select>
-          </label>
-          <label>Display name
-            <input value={catalogConnectorForm.display_name} onChange={e => setCatalogConnectorForm(prev => ({ ...prev, display_name: e.target.value }))} placeholder="AppSheet Протоколист" />
-          </label>
-          <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id || !catalogConnectorForm.kind} onClick={() => void saveCatalogConnector()}>{busy === 'catalog-connector' ? 'Saving…' : 'Save connector'}</button>
+      <main style={{ minWidth: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div>
+            <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>EDIT</div>
+            <h2 className="section-title" style={{ marginBottom: 0 }}>{activeArea === 'connectors' ? 'Connectors' : activeArea === 'base_views' ? 'Base views' : activeArea === 'transform_views' ? 'Transform views' : activeArea === 'article_views' ? 'Article views' : activeArea === 'schema_view' ? 'Schema view' : 'Profiles / refresh'}</h2>
+          </div>
+          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void load()}>Reload</button>
         </div>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
-          <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void listCatalogConnectorObjects()}>{busy === 'catalog-list-objects' ? 'Loading objects…' : 'List objects'}</button>
-          <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void testCatalogConnector()}>{busy === 'catalog-test-connector' ? 'Testing…' : 'Test connector'}</button>
-          <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void deleteCatalogConnector()}>{busy === 'catalog-delete-connector' ? 'Deleting…' : 'Delete connector'}</button>
-          <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>List/test use current Source object + table fields below; read-only sample/listObjects only.</span>
-        </div>
-        {(catalogConnectorObjects !== null || catalogConnectorTest !== null) && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 12 }}>
-          <div><h3 style={{ fontSize: 13 }}>Objects</h3><PreviewJson value={catalogConnectorObjects} empty="No listObjects result yet." /></div>
-          <div><h3 style={{ fontSize: 13 }}>Connection test</h3><PreviewJson value={catalogConnectorTest} empty="No test result yet." /></div>
-        </div>}
-      </section>
 
-      <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
-        <h2 className="section-title">1. Source table / connector config</h2>
+        {catalogDeleteImpact !== null && <section style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 12, marginBottom: 12, background: 'rgba(127, 29, 29, 0.14)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 8 }}>
+            <b>Delete impact / dependency guard</b>
+            <button className="btn btn-secondary" onClick={() => setCatalogDeleteImpact(null)}>Clear</button>
+          </div>
+          <PreviewJson value={catalogDeleteImpact} empty="No delete impact yet." />
+        </section>}
+
+      <ConnectorEditor
+        busy={busy}
+        catalogConnectorForm={catalogConnectorForm}
+        setCatalogConnectorForm={setCatalogConnectorForm}
+        secretForm={secretForm}
+        setSecretForm={setSecretForm}
+        catalogConnectorSecretStatus={catalogConnectorSecretStatus}
+        catalogConnectorObjects={catalogConnectorObjects}
+        catalogConnectorTest={catalogConnectorTest}
+        catalogConnectorSecretConfigId={catalogConnectorSecretConfigId}
+        saveCatalogConnector={saveCatalogConnector}
+        saveCatalogConnectorCredentials={saveCatalogConnectorCredentials}
+        deleteCatalogConnectorCredentials={deleteCatalogConnectorCredentials}
+        listCatalogConnectorObjects={listCatalogConnectorObjects}
+        testCatalogConnector={testCatalogConnector}
+        deleteCatalogConnector={deleteCatalogConnector}
+        PreviewJson={PreviewJson}
+        studioSectionStyle={studioSectionStyle}
+      />
+
+      <BaseViewEditor
+        busy={busy}
+        formSourceObject={form.source_object}
+        formTableName={form.table_name}
+        baseViewForm={baseViewForm}
+        setBaseViewForm={setBaseViewForm}
+        effectiveBaseViewId={effectiveBaseViewId}
+        catalogConnectorChoices={catalogConnectorChoices}
+        catalogConnectorObjects={catalogConnectorObjects}
+        objectSuggestions={discoveryObjectNames(catalogConnectorObjects)}
+        baseViewDiscovery={baseViewDiscovery}
+        baseViewSaveResult={baseViewSaveResult}
+        fieldSelectionPanel={<FieldSelectionPanel discovery={baseViewDiscovery} selected={baseViewSelectedFields} onChange={fields => setBaseViewForm(prev => ({ ...prev, selected_fields_text: fields.join('\n') }))} />}
+        sampleRowsPanel={<SourceSampleRowsTable discovery={baseViewDiscovery} selected={baseViewSelectedFields} />}
+        makeBaseViewId={defaultBaseViewId}
+        seedBaseViewFromReview={seedBaseViewFromReview}
+        discoverBaseView={discoverBaseView}
+        saveBaseView={saveBaseView}
+        deleteBaseView={deleteBaseView}
+        PreviewJson={PreviewJson}
+        studioSectionStyle={studioSectionStyle}
+      />
+
+      <section style={studioSectionStyle('profiles')}>
+        <h2 className="section-title">Legacy source table / connector config</h2>
         <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
           Сохраняем не просто connector, а конкретную таблицу источника: <code>{configId}</code>. Один connector может иметь несколько source tables для join/union в transform.
         </p>
@@ -891,8 +1767,78 @@ export function SourceIngestPage() {
         </div>
       </section>
 
-      <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
-        <h2 className="section-title">2. Optional SQL transform</h2>
+      <TransformViewEditor
+        busy={busy}
+        transformViewForm={transformViewForm}
+        setTransformViewForm={setTransformViewForm}
+        parsedInputsCount={parseTransformInputs(transformViewForm.inputs_text).length}
+        canTransformPreview={canTransformPreview}
+        catalogBaseViews={catalogBaseViews}
+        transformPreview={transformPreview}
+        transformViewSaveResult={transformViewSaveResult}
+        seedTransformViewFromBase={seedTransformViewFromBase}
+        generateSelectForTransform={generateSelectForTransform}
+        runTransformPreview={runTransformPreview}
+        saveTransformView={saveTransformView}
+        deleteTransformView={deleteTransformView}
+        appendBaseViewInput={appendBaseViewInput}
+        TransformResultPreview={TransformResultPreview}
+        PreviewJson={PreviewJson}
+        studioSectionStyle={studioSectionStyle}
+      />
+
+      <ArticleViewEditor
+        busy={busy}
+        sources={data.sources}
+        formSampleLimit={form.sample_limit}
+        articleViewForm={articleViewForm}
+        setArticleViewForm={setArticleViewForm}
+        articleViewCurrentChainHash={articleViewCurrentChainHash}
+        selectedArticleViewRow={selectedArticleViewRow}
+        articleAvailableFields={articleAvailableFields}
+        articleInputChoices={articleInputChoices}
+        articleSections={articleSections}
+        sectionLabels={SECTION_LABELS}
+        articleViewPreview={articleViewPreview}
+        articleViewSaveResult={articleViewSaveResult}
+        articleViewApproveResult={articleViewApproveResult}
+        setActiveSection={setActiveSection}
+        seedArticleViewFromCurrent={seedArticleViewFromCurrent}
+        runArticleViewPreview={runArticleViewPreview}
+        saveArticleView={saveArticleView}
+        deleteArticleView={deleteArticleView}
+        approveArticleView={approveArticleView}
+        invalidateArticleViewPreview={invalidateArticleViewPreview}
+        insertFieldToken={insertFieldToken}
+        updateArticleSection={updateArticleSection}
+        DryRunPreview={DryRunPreview}
+        PreviewJson={PreviewJson}
+        studioSectionStyle={studioSectionStyle}
+      />
+
+      <SchemaWorkbench
+        busy={busy}
+        catalogCounts={{
+          connectors: data.catalog_tree?.connectors?.length ?? 0,
+          baseViews: data.catalog_tree?.base_views?.length ?? 0,
+          transformViews: data.catalog_tree?.transform_views?.length ?? 0,
+          articleViews: data.catalog_tree?.article_views?.length ?? 0,
+        }}
+        activeSchemaPack={activeSchemaPack}
+        schemaStats={schemaStats}
+        schemaNodes={schemaNodes}
+        schemaEdges={schemaEdges}
+        schemaType={schemaType}
+        setSchemaType={setSchemaType}
+        schemaTypeExplain={schemaTypeExplain}
+        schemaWorkbench={schemaWorkbench}
+        explainSchemaType={explainSchemaType}
+        PreviewJson={PreviewJson}
+        studioSectionStyle={studioSectionStyle}
+      />
+
+      <section style={studioSectionStyle('transform_views')}>
+        <h2 className="section-title">5. Optional SQL transform preview</h2>
         <label style={{ display: 'block', marginBottom: 10 }}>
           <input type="checkbox" checked={transformEnabled} onChange={e => { setTransformEnabled(e.target.checked); if (!transformSourcesText) setTransformSourcesText(defaultTransformSources(form, selectedSourceFields)); invalidateTransformPreview(); }} style={{ marginRight: 8 }} />
           Enable SQL transform before mapping
@@ -926,8 +1872,8 @@ export function SourceIngestPage() {
         </div>}
       </section>
 
-      <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
-        <h2 className="section-title">3. Review workflow</h2>
+      <section style={studioSectionStyle('profiles')}>
+        <h2 className="section-title">Legacy profile workflow</h2>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void discover()}>{busy === 'discover' ? 'Discovering…' : 'Discover'}</button>
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void draftProfile()}>{busy === 'draft' ? 'Drafting…' : 'Draft profile'}</button>
@@ -991,8 +1937,8 @@ export function SourceIngestPage() {
         </div>
       </section>
 
-      <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18, marginBottom: 20 }}>
-        <h2 className="section-title">4. Profiles / refresh</h2>
+      <section style={studioSectionStyle('profiles')}>
+        <h2 className="section-title">7. Profiles / refresh</h2>
         <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
           <select value={selectedProfile} onChange={e => setSelectedProfile(e.target.value)}>
             <option value="">All profiles</option>
@@ -1024,6 +1970,8 @@ export function SourceIngestPage() {
           <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)' }}>{JSON.stringify(report, null, 2)}</pre>
         </section>
       )}
+      </main>
+      </div>
     </div>
   );
 }
