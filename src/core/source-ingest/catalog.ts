@@ -272,8 +272,8 @@ export async function upsertSourceBaseView(engine: BrainEngine, input: SourceBas
   await executeRawJsonb(
     engine,
     `INSERT INTO source_base_views
-       (base_view_id, connector_id, object_name, display_name, selected_fields, row_filter, sample_limit, discovery_json, version_hash, updated_at)
-     VALUES ($1,$2,$3,$4,$7::jsonb->'value',$8::jsonb->'value',$5,$9::jsonb->'value',$6,now())
+       (base_view_id, connector_id, object_name, display_name, selected_fields, row_filter, sample_limit, discovery_json, last_discovered_at, version_hash, updated_at)
+     VALUES ($1,$2,$3,$4,$7::jsonb->'value',$8::jsonb->'value',$5,$9::jsonb->'value',CASE WHEN ($9::jsonb->'value') IS NULL THEN NULL ELSE now() END,$6,now())
      ON CONFLICT (base_view_id) DO UPDATE SET
        connector_id = EXCLUDED.connector_id,
        object_name = EXCLUDED.object_name,
@@ -282,6 +282,7 @@ export async function upsertSourceBaseView(engine: BrainEngine, input: SourceBas
        row_filter = EXCLUDED.row_filter,
        sample_limit = EXCLUDED.sample_limit,
        discovery_json = EXCLUDED.discovery_json,
+       last_discovered_at = CASE WHEN EXCLUDED.discovery_json IS NULL THEN source_base_views.last_discovered_at ELSE COALESCE(source_base_views.last_discovered_at, now()) END,
        version_hash = EXCLUDED.version_hash,
        updated_at = now()`,
     [input.base_view_id, input.connector_id, input.object_name, input.display_name || input.base_view_id, input.sample_limit ?? 50, baseViewHash({ ...input, selected_fields: selected, row_filter: filter })],

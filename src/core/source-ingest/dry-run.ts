@@ -162,6 +162,20 @@ function detectSlugCollisions(pages: ReturnType<typeof samplePage>[]) {
     .map(([slug, external_ids]) => ({ slug, external_ids, count: external_ids.length }));
 }
 
+function fieldLikeWrappedWarnings(profile: SourceIngestProfile): string[] {
+  const warnings: string[] = [];
+  const wrapped = /^\s*{{\s*[A-Za-z_][A-Za-z0-9_.]*\s*}}\s*$/;
+  if (wrapped.test(profile.identity.display_name_field)) warnings.push('field_like_value_wrapped_in_braces:identity.display_name_field');
+  for (const [i, field] of (profile.identity.natural_key_fields || []).entries()) {
+    if (wrapped.test(field)) warnings.push(`field_like_value_wrapped_in_braces:identity.natural_key_fields.${i}`);
+  }
+  return warnings;
+}
+
+function missingChangedSinceWarnings(profile: SourceIngestProfile): string[] {
+  return profile.freshness?.changed_since_field ? [] : ['no_updated_at_candidate_changed_since_disabled'];
+}
+
 function pickStratifiedSamples(
   pages: ReturnType<typeof samplePage>[],
   skipped: Array<{ external_id: string; reason: string }>,
@@ -224,6 +238,8 @@ export function buildSourceDryRun(profile: SourceIngestProfile, sample: SourceRe
       ...(profile.security.pii && profile.security.classification === 'shared' ? ['shared_profile_has_pii_candidates'] : []),
       ...(profile.target.approved_source_id ? [] : ['approved_source_id_missing']),
       ...(slugCollisions.length > 0 ? ['slug_collision_candidates'] : []),
+      ...fieldLikeWrappedWarnings(profile),
+      ...missingChangedSinceWarnings(profile),
     ],
   };
 }
