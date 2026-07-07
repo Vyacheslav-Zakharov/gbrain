@@ -8,6 +8,7 @@ export interface SourceObjectDescriptor {
 export interface SourceRecord {
   external_id: string;
   data: Record<string, unknown>;
+  source_fields?: Record<string, unknown>;
   source_updated_at?: string | null;
 }
 

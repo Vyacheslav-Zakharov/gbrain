@@ -1,4 +1,5 @@
 import { Worker } from 'node:worker_threads';
+import { createRequire } from 'node:module';
 import type { SourceRecord } from './connectors/types.ts';
 
 export interface SourceTransformSource {
@@ -101,9 +102,18 @@ interface WorkerFailure {
   error: string;
 }
 
+const moduleRequire = createRequire(import.meta.url);
+const PGLITE_MODULE_PATH = moduleRequire.resolve('@electric-sql/pglite');
+
 const TRANSFORM_WORKER_SRC = String.raw`
 const { parentPort, workerData } = require('node:worker_threads');
-const { PGlite } = require('@electric-sql/pglite');
+let PGlite;
+try {
+  ({ PGlite } = require('@electric-sql/pglite'));
+} catch (e) {
+  if (!workerData.pgliteModulePath) throw e;
+  ({ PGlite } = require(workerData.pgliteModulePath));
+}
 
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 function quoteIdent(id) { return '"' + String(id).replace(/"/g, '""') + '"'; }
@@ -184,6 +194,7 @@ function runTransformWorker(payload: {
   sql: string;
   rowLimit: number;
   timeoutMs: number;
+  pgliteModulePath?: string;
 }): Promise<Record<string, unknown>[]> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(TRANSFORM_WORKER_SRC, { eval: true, workerData: payload });
@@ -252,16 +263,18 @@ export async function executeSourceTransform(
   }
   const rowLimit = Math.max(1, Math.floor(opts.rowLimit ?? DEFAULT_TRANSFORM_ROW_CAP));
   const timeoutMs = Math.max(1, Math.floor(opts.timeoutMs ?? DEFAULT_TRANSFORM_TIMEOUT_MS));
-  const rows = await runTransformWorker({ sources, sql: config.sql, rowLimit, timeoutMs });
+  const rows = await runTransformWorker({ sources, sql: config.sql, rowLimit, timeoutMs, pgliteModulePath: PGLITE_MODULE_PATH });
   const keyField = config.primary_key_field || (rows.some(r => r.id !== undefined) ? 'id' : undefined);
   const updatedField = config.updated_at_field || (rows.some(r => r.updated_at !== undefined) ? 'updated_at' : undefined);
   const records = rows.map((row) => {
-    const keyValue = keyField ? row[keyField] : undefined;
+    const keyLookup = keyField ? Object.keys(row).find(k => k === keyField || k.toLowerCase() === keyField.toLowerCase()) : undefined;
+    const keyValue = keyLookup ? row[keyLookup] : undefined;
     if (keyValue === undefined || keyValue === null || keyValue === '') {
       throw new Error(`transform_primary_key_missing: ${keyField}`);
     }
     const key = String(keyValue);
-    const updated = updatedField ? rowTimestampToIso(row[updatedField]) : null;
+    const updatedLookup = updatedField ? Object.keys(row).find(k => k === updatedField || k.toLowerCase() === updatedField.toLowerCase()) : undefined;
+    const updated = updatedLookup ? rowTimestampToIso(row[updatedLookup]) : null;
     const data = Object.fromEntries(Object.entries(row).map(([k, v]) => [k, normalizeTransformRowValue(v)]));
     return { external_id: key, source_updated_at: updated, data: { ...data, id: data.id ?? key } };
   });

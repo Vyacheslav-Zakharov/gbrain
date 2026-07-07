@@ -46,11 +46,12 @@ import {
   GET_SKILL_DESCRIPTION,
 } from './operations-descriptions.ts';
 import { getSourceConnector } from './source-ingest/connectors/fake.ts';
-import { discoverSourceObject } from './source-ingest/discovery.ts';
+import { discoverSourceObject, profileRecords } from './source-ingest/discovery.ts';
 import { draftSourceIngestProfile } from './source-ingest/draft.ts';
 import { buildSourceDryRun } from './source-ingest/dry-run.ts';
-import { buildProfileSampleRecords } from './source-ingest/source-fetch.ts';
-import { sourceIngestProfileJsonSchema } from './source-ingest/profile-schema.ts';
+import { buildProfileSampleRecords, fetchSourceSample } from './source-ingest/source-fetch.ts';
+import { executeSourceTransform, type SourceTransformConfig, type SourceTransformSource } from './source-ingest/transform.ts';
+import { sourceIngestProfileJsonSchema, type SourceFilterRule } from './source-ingest/profile-schema.ts';
 import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
 import { listSourceIngestProfiles, putSourceIngestProfile, profileHash } from './source-ingest/store.ts';
 import {
@@ -66,13 +67,20 @@ import { runSourceIngestExecutor } from './source-ingest/executor.ts';
 import { buildSourceRevertReport } from './source-ingest/revert.ts';
 import { enqueueDueSourceRefreshJobs, listDueSourceRefreshes } from './source-ingest/freshness.ts';
 import {
+  buildSourceArticleViewSnapshot,
   compileSourceArticleView,
+  deleteSourceArticleView,
+  deleteSourceBaseView,
   deleteSourceConnectorView,
+  deleteSourceTransformView,
   getCompiledArticleProfile,
   listSourceArticleViews,
   listSourceBaseViews,
   listSourceConnectorViews,
   listSourceTransformViews,
+  recordSourceBaseDiscovery,
+  recordSourceTransformPreview,
+  sourceCatalogDeleteImpact,
   sourceIngestTree,
   upsertSourceArticleView,
   upsertSourceBaseView,
@@ -2883,10 +2891,20 @@ const source_discover: Operation = {
     source_object: { type: 'string', required: true, description: 'Object/collection name, e.g. vehicle' },
     sample_limit: { type: 'number', description: 'Sample size for field profiling (default 50)' },
     connector_config: { type: 'object', description: 'Non-secret connector config override, e.g. table_name. Secrets are never passed here.' },
+    selected_fields: { type: 'array', items: { type: 'string' }, description: 'Optional field allowlist for sampling/profiling.' },
+    primary_key_field: { type: 'string', description: 'Reviewer-selected stable identity field.' },
+    updated_at_field: { type: 'string', description: 'Reviewer-selected updated-at field.' },
   },
   handler: async (_ctx, p) => {
     const connector = resolveSourceConnectorOrThrow(p.connector_id as string, p.connector_config as Record<string, unknown> | undefined);
-    return discoverSourceObject(connector, p.source_object as string, (p.sample_limit as number | undefined) ?? 50);
+    const selectedFields = Array.isArray(p.selected_fields) ? p.selected_fields.flatMap(v => String(v).split(/\\n|[\n,]/)).map(s => s.trim()).filter(Boolean) : undefined;
+    const primaryKeyField = typeof p.primary_key_field === 'string' && p.primary_key_field.trim() ? p.primary_key_field.trim() : undefined;
+    const updatedAtField = typeof p.updated_at_field === 'string' && p.updated_at_field.trim() ? p.updated_at_field.trim() : undefined;
+    return discoverSourceObject(connector, p.source_object as string, (p.sample_limit as number | undefined) ?? 50, {
+      ...(selectedFields?.length ? { fields: selectedFields } : {}),
+      ...(primaryKeyField ? { primaryKeyField } : {}),
+      ...(updatedAtField ? { updatedAtField } : {}),
+    });
   },
 };
 
@@ -3052,21 +3070,101 @@ const source_connector_upsert: Operation = {
   },
 };
 
+const source_catalog_delete_impact: Operation = {
+  name: 'source_catalog_delete_impact',
+  description: 'ADMIN: preview dependent Source Ingest catalog objects before deleting connector/base/transform/article views.',
+  scope: 'admin',
+  params: {
+    kind: { type: 'string', required: true, description: 'connector | base_view | transform_view | article_view' },
+    id: { type: 'string', required: true },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_catalog_delete_impact is local/trusted only.');
+    const kind = String(p.kind || '') as any;
+    if (!['connector', 'base_view', 'transform_view', 'article_view'].includes(kind)) throw new OperationError('invalid_params', 'invalid catalog delete kind.');
+    return { ok: true, impact: await sourceCatalogDeleteImpact(ctx.engine, kind, String(p.id || '')) };
+  },
+};
+
 const source_connector_delete: Operation = {
   name: 'source_connector_delete',
   description: 'ADMIN: delete a first-class source-ingest connector instance when no base views depend on it.',
   scope: 'admin',
   mutating: true,
-  params: { connector_id: { type: 'string', required: true } },
+  params: {
+    connector_id: { type: 'string', required: true },
+    confirm_token: { type: 'string' },
+    force: { type: 'boolean' },
+  },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_delete is local/trusted only for Phase 1.');
     try {
-      return { ok: true, ...(await deleteSourceConnectorView(ctx.engine, String(p.connector_id || ''))) };
+      return { ok: true, ...(await deleteSourceConnectorView(ctx.engine, String(p.connector_id || ''), { confirmToken: typeof p.confirm_token === 'string' ? p.confirm_token : undefined, force: p.force === true })) };
     } catch (e) {
       throw new OperationError('conflict', e instanceof Error ? e.message : String(e));
     }
   },
 };
+
+function sourceValueAt(data: Record<string, unknown>, path: string): unknown {
+  return path.split('.').reduce<unknown>((cur, part) => cur && typeof cur === 'object' ? (cur as Record<string, unknown>)[part] : undefined, data);
+}
+
+function sourceFilterMatches(rule: SourceFilterRule, data: Record<string, unknown>): boolean {
+  const v = sourceValueAt(data, rule.field);
+  switch (rule.op) {
+    case 'exists': return v !== undefined && v !== null && v !== '';
+    case 'not_exists': return v === undefined || v === null || v === '';
+    case 'eq': return v === rule.value;
+    case 'neq': return v !== rule.value;
+    case 'in': return Array.isArray(rule.value) && rule.value.includes(v);
+    case 'not_in': return Array.isArray(rule.value) && !rule.value.includes(v);
+    case 'lte': return Number(v) <= Number(rule.value);
+    case 'gte': return Number(v) >= Number(rule.value);
+    case 'lt': return Number(v) < Number(rule.value);
+    case 'gt': return Number(v) > Number(rule.value);
+    default: return false;
+  }
+}
+
+function normalizeSourceFilterRules(value: unknown): SourceFilterRule[] {
+  return Array.isArray(value)
+    ? value.filter((rule): rule is SourceFilterRule => Boolean(rule && typeof rule === 'object' && typeof (rule as Record<string, unknown>).field === 'string' && typeof (rule as Record<string, unknown>).op === 'string'))
+    : [];
+}
+
+function compactDiscoveryProfile(discovery: Record<string, unknown>): Record<string, unknown> {
+  const { samples: _samples, ...rest } = discovery;
+  return rest;
+}
+
+async function buildTransformConfigFromCatalog(engine: BrainEngine, transformId: string): Promise<SourceTransformConfig> {
+  const [transform] = await listSourceTransformViews(engine, transformId) as Array<Record<string, unknown>>;
+  if (!transform) throw new OperationError('invalid_params', `transform_view not found: ${transformId}`);
+  const inputs = Array.isArray(transform.inputs) ? transform.inputs as Array<Record<string, unknown>> : [];
+  const sources: SourceTransformSource[] = [];
+  for (const input of inputs) {
+    const baseViewId = String(input.base_view_id || '').trim();
+    if (!baseViewId) continue;
+    const [base] = await listSourceBaseViews(engine, baseViewId) as Array<Record<string, unknown>>;
+    if (!base) throw new OperationError('invalid_params', `base_view not found: ${baseViewId}`);
+    sources.push({
+      alias: String(input.alias || '').trim(),
+      source_table_id: baseViewId,
+      connector: String(base.connector_id || ''),
+      object: String(base.object_name || ''),
+      fields: Array.isArray(base.selected_fields) ? base.selected_fields.map(String).filter(Boolean) : undefined,
+      sample_limit: Number(base.sample_limit || 50),
+    });
+  }
+  return {
+    engine: 'pglite',
+    sources,
+    sql: String(transform.sql || ''),
+    primary_key_field: String(transform.primary_key_field || ''),
+    updated_at_field: typeof transform.updated_at_field === 'string' ? transform.updated_at_field : undefined,
+  };
+}
 
 const source_base_view_list: Operation = {
   name: 'source_base_view_list',
@@ -3074,6 +3172,60 @@ const source_base_view_list: Operation = {
   scope: 'read',
   params: { base_view_id: { type: 'string', description: 'Optional base view id filter' } },
   handler: async (ctx, p) => ({ rows: await listSourceBaseViews(ctx.engine, p.base_view_id as string | undefined) }),
+};
+
+const source_base_view_execute: Operation = {
+  name: 'source_base_view_execute',
+  description: 'LOCAL/TRUSTED: execute a saved or draft base view over a read-only sample, returning filtered rows and discovery profile.',
+  scope: 'read',
+  localOnly: true,
+  params: {
+    base_view_id: { type: 'string', description: 'Saved base view id. Mutually optional with draft.' },
+    draft: { type: 'object', description: 'Inline draft with connector_id, object_name, selected_fields, row_filter.' },
+    sample_limit: { type: 'number', description: 'Sample size (default from base view or 50).' },
+    connector_config: { type: 'object', description: 'Optional non-secret runtime config override for draft execution.' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_base_view_execute is local/trusted only.');
+    const draft = p.draft && typeof p.draft === 'object' ? p.draft as Record<string, unknown> : undefined;
+    const baseViewId = typeof p.base_view_id === 'string' && p.base_view_id.trim() ? p.base_view_id.trim() : undefined;
+    const saved = baseViewId ? (await listSourceBaseViews(ctx.engine, baseViewId) as Array<Record<string, unknown>>)[0] : undefined;
+    if (baseViewId && !saved) throw new OperationError('invalid_params', `base_view not found: ${baseViewId}`);
+    const src = saved || draft;
+    if (!src) throw new OperationError('invalid_params', 'base_view_id or draft is required.');
+    const connectorId = String(src.connector_id || '').trim();
+    const objectName = String(src.object_name || '').trim();
+    if (!connectorId || !objectName) throw new OperationError('invalid_params', 'connector_id and object_name are required.');
+    const selectedFields = Array.isArray(src.selected_fields) ? src.selected_fields.map(String).filter(Boolean) : [];
+    const rowFilter = normalizeSourceFilterRules(src.row_filter);
+    const sampleLimit = Number.isFinite(Number(p.sample_limit)) ? Number(p.sample_limit) : Number(src.sample_limit || 50);
+    const sourceTableId = saved ? String(saved.base_view_id) : undefined;
+    const records = await fetchSourceSample({
+      engine: ctx.engine,
+      connectorConfigOverride: p.connector_config as Record<string, unknown> | undefined,
+      defaultConnector: connectorId,
+      defaultObject: objectName,
+    }, {
+      alias: 'source',
+      connector: connectorId,
+      object: objectName,
+      source_table_id: sourceTableId,
+      fields: selectedFields.length ? selectedFields : undefined,
+      sample_limit: sampleLimit,
+    }, sampleLimit);
+    const filteredRows = rowFilter.length ? records.filter(record => rowFilter.every(rule => sourceFilterMatches(rule, record.data))) : records;
+    const discovery = profileRecords(connectorId, objectName, filteredRows, undefined, {
+      fields: selectedFields,
+      primaryKeyField: typeof (src.discovery_json as Record<string, unknown> | undefined)?.primary_key_field === 'string' ? String((src.discovery_json as Record<string, unknown>).primary_key_field) : undefined,
+      updatedAtField: typeof (src.discovery_json as Record<string, unknown> | undefined)?.updated_at_field === 'string' ? String((src.discovery_json as Record<string, unknown>).updated_at_field) : undefined,
+    }) as unknown as Record<string, unknown>;
+    const fieldNames = new Set((Array.isArray(discovery.fields) ? discovery.fields as Array<{ name?: string }> : []).map(f => String(f.name || '')).filter(Boolean));
+    const drift = selectedFields.filter(name => !fieldNames.has(name));
+    const warnings = [...(Array.isArray(discovery.warnings) ? discovery.warnings.map(String) : []), ...drift.map(name => `field_drift:${name}`)];
+    const outDiscovery = { ...discovery, warnings, samples: filteredRows };
+    const updated = saved ? await recordSourceBaseDiscovery(ctx.engine, String(saved.base_view_id), compactDiscoveryProfile(outDiscovery), drift.map(name => `field_drift:${name}`)) : null;
+    return { ok: true, base_view_id: saved?.base_view_id ?? null, sampled: records.length, filtered: filteredRows.length, rows: filteredRows, discovery: outDiscovery, warnings, drift_fields: drift, updated };
+  },
 };
 
 const source_base_view_upsert: Operation = {
@@ -3107,12 +3259,92 @@ const source_base_view_upsert: Operation = {
   },
 };
 
+const source_base_view_delete: Operation = {
+  name: 'source_base_view_delete',
+  description: 'ADMIN: delete a base view, guarded by dependency impact confirmation when transforms/articles depend on it.',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    base_view_id: { type: 'string', required: true },
+    confirm_token: { type: 'string' },
+    force: { type: 'boolean' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_base_view_delete is local/trusted only.');
+    try {
+      return { ok: true, ...(await deleteSourceBaseView(ctx.engine, String(p.base_view_id || ''), { confirmToken: typeof p.confirm_token === 'string' ? p.confirm_token : undefined, force: p.force === true })) };
+    } catch (e) {
+      throw new OperationError('conflict', e instanceof Error ? e.message : String(e));
+    }
+  },
+};
+
 const source_transform_view_list: Operation = {
   name: 'source_transform_view_list',
   description: 'List first-class source-ingest transform views.',
   scope: 'read',
   params: { transform_view_id: { type: 'string', description: 'Optional transform view id filter' } },
   handler: async (ctx, p) => ({ rows: await listSourceTransformViews(ctx.engine, p.transform_view_id as string | undefined) }),
+};
+
+const source_transform_view_execute: Operation = {
+  name: 'source_transform_view_execute',
+  description: 'LOCAL/TRUSTED: execute a saved or draft transform view in the isolated PGLite sandbox over source samples.',
+  scope: 'read',
+  localOnly: true,
+  params: {
+    transform_view_id: { type: 'string', description: 'Saved transform view id. Mutually optional with draft.' },
+    draft: { type: 'object', description: 'Inline draft with inputs, sql, primary_key_field, updated_at_field.' },
+    sample_limit: { type: 'number', description: 'Sample size / row cap for preview (default 50).' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_transform_view_execute is local/trusted only.');
+    const transformId = typeof p.transform_view_id === 'string' && p.transform_view_id.trim() ? p.transform_view_id.trim() : undefined;
+    const draft = p.draft && typeof p.draft === 'object' ? p.draft as Record<string, unknown> : undefined;
+    let config: SourceTransformConfig;
+    if (draft) {
+      const inputs = Array.isArray(draft.inputs) ? draft.inputs as Array<Record<string, unknown>> : [];
+      const sources: SourceTransformSource[] = [];
+      for (const input of inputs) {
+        const baseViewId = String(input.base_view_id || input.source_table_id || '').trim();
+        if (!baseViewId) continue;
+        const [base] = await listSourceBaseViews(ctx.engine, baseViewId) as Array<Record<string, unknown>>;
+        if (!base) throw new OperationError('invalid_params', `base_view not found: ${baseViewId}`);
+        sources.push({
+          alias: String(input.alias || '').trim(),
+          source_table_id: baseViewId,
+          connector: String(base.connector_id || ''),
+          object: String(base.object_name || ''),
+          fields: Array.isArray(base.selected_fields) ? base.selected_fields.map(String).filter(Boolean) : undefined,
+          sample_limit: Number(base.sample_limit || 50),
+        });
+      }
+      config = {
+        engine: 'pglite',
+        sources,
+        sql: String(draft.sql || ''),
+        primary_key_field: String(draft.primary_key_field || ''),
+        updated_at_field: typeof draft.updated_at_field === 'string' ? draft.updated_at_field : undefined,
+      };
+    } else if (transformId) {
+      config = await buildTransformConfigFromCatalog(ctx.engine, transformId);
+    } else {
+      throw new OperationError('invalid_params', 'transform_view_id or draft is required.');
+    }
+    const sampleLimit = Number.isFinite(Number(p.sample_limit)) ? Number(p.sample_limit) : 50;
+    try {
+      const result = await executeSourceTransform(config, source => fetchSourceSample({
+        engine: ctx.engine,
+        defaultConnector: source.connector || '',
+        defaultObject: source.object,
+      }, source, source.sample_limit ?? sampleLimit), { rowLimit: sampleLimit });
+      const updated = transformId ? await recordSourceTransformPreview(ctx.engine, transformId, true) : null;
+      return { ok: true, transform_view_id: transformId ?? null, rows: result.records.map(record => record.data), records: result.records, row_count: result.row_count, source_counts: result.source_counts, warnings: result.warnings, updated };
+    } catch (e) {
+      if (transformId) await recordSourceTransformPreview(ctx.engine, transformId, false).catch(() => undefined);
+      return { ok: false, transform_view_id: transformId ?? null, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
 };
 
 const source_transform_view_upsert: Operation = {
@@ -3142,6 +3374,26 @@ const source_transform_view_upsert: Operation = {
   },
 };
 
+const source_transform_view_delete: Operation = {
+  name: 'source_transform_view_delete',
+  description: 'ADMIN: delete a transform view, guarded by dependent article-view confirmation.',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    transform_view_id: { type: 'string', required: true },
+    confirm_token: { type: 'string' },
+    force: { type: 'boolean' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_transform_view_delete is local/trusted only.');
+    try {
+      return { ok: true, ...(await deleteSourceTransformView(ctx.engine, String(p.transform_view_id || ''), { confirmToken: typeof p.confirm_token === 'string' ? p.confirm_token : undefined, force: p.force === true })) };
+    } catch (e) {
+      throw new OperationError('conflict', e instanceof Error ? e.message : String(e));
+    }
+  },
+};
+
 const source_article_view_list: Operation = {
   name: 'source_article_view_list',
   description: 'List first-class source-ingest article views and their compiled snapshot/stale state.',
@@ -3163,6 +3415,44 @@ const source_article_view_upsert: Operation = {
   },
 };
 
+const source_article_view_delete: Operation = {
+  name: 'source_article_view_delete',
+  description: 'ADMIN: delete an article view and its compiled snapshot metadata.',
+  scope: 'admin',
+  mutating: true,
+  params: { article_view_id: { type: 'string', required: true } },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_delete is local/trusted only.');
+    return { ok: true, ...(await deleteSourceArticleView(ctx.engine, String(p.article_view_id || ''))) };
+  },
+};
+
+const source_article_view_dry_run: Operation = {
+  name: 'source_article_view_dry_run',
+  description: 'LOCAL/TRUSTED: compile an article view chain in-memory and run source dry-run without freezing the snapshot.',
+  scope: 'read',
+  localOnly: true,
+  params: {
+    article_view_id: { type: 'string', required: true },
+    sample_limit: { type: 'number', description: 'Sample size for preview (default 25)' },
+    connector_config: { type: 'object', description: 'Optional non-secret runtime connector config override.' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_dry_run is local/trusted only.');
+    const snapshot = await buildSourceArticleViewSnapshot(ctx.engine, String(p.article_view_id || ''), { approvedBy: 'dry-run' });
+    const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, snapshot.compiled_profile);
+    if (!validation.ok || !validation.profile) return { ok: false, validation, current_chain_hash: snapshot.current_chain_hash, compiled: snapshot };
+    const sample = await buildProfileSampleRecords(validation.profile, (p.sample_limit as number | undefined) ?? 25, {
+      engine: ctx.engine,
+      connectorConfigOverride: p.connector_config as Record<string, unknown> | undefined,
+      defaultConnector: validation.profile.source_connector,
+      defaultObject: validation.profile.source_object,
+    });
+    const dry_run = buildSourceDryRun(validation.profile, sample);
+    return { ok: true, current_chain_hash: snapshot.current_chain_hash, compiled: snapshot, validation, dry_run };
+  },
+};
+
 const source_article_view_approve: Operation = {
   name: 'source_article_view_approve',
   description: 'LOCAL/TRUSTED: compile an article view chain into a frozen SourceIngestProfile snapshot and persist a compatibility profile version.',
@@ -3172,9 +3462,17 @@ const source_article_view_approve: Operation = {
   params: {
     article_view_id: { type: 'string', required: true },
     approved_by: { type: 'string' },
+    current_chain_hash: { type: 'string', description: 'Chain hash returned by source_article_view_dry_run; when supplied, approve fails if definition changed.' },
   },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_approve is local/trusted only.');
+    const expectedChainHash = typeof p.current_chain_hash === 'string' && p.current_chain_hash.trim() ? p.current_chain_hash.trim() : undefined;
+    if (expectedChainHash) {
+      const snapshot = await buildSourceArticleViewSnapshot(ctx.engine, String(p.article_view_id || ''), { approvedBy: p.approved_by as string | undefined });
+      if (snapshot.current_chain_hash !== expectedChainHash) {
+        throw new OperationError('conflict', 'chain_hash_mismatch: run article preview again before approving this publication.');
+      }
+    }
     const compiled = await compileSourceArticleView(ctx.engine, String(p.article_view_id || ''), { approvedBy: p.approved_by as string | undefined });
     const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, compiled.compiled_profile);
     if (!validation.ok || !validation.profile) return { ok: false, validation, compiled };
@@ -3232,7 +3530,7 @@ const source_profile_draft: Operation = {
   handler: async (_ctx, p) => {
     const connectorId = p.connector_id as string;
     const sourceObject = p.source_object as string;
-    const selectedFields = Array.isArray(p.selected_fields) ? p.selected_fields.map(String).filter(Boolean) : undefined;
+    const selectedFields = Array.isArray(p.selected_fields) ? p.selected_fields.flatMap(v => String(v).split(/\\n|[\n,]/)).map(s => s.trim()).filter(Boolean) : undefined;
     const discovery = await discoverSourceObject(resolveSourceConnectorOrThrow(connectorId, p.connector_config as Record<string, unknown> | undefined), sourceObject, (p.sample_limit as number | undefined) ?? 50, selectedFields?.length ? { fields: selectedFields } : {});
     const { profile, warnings } = draftSourceIngestProfile({
       connectorId,
@@ -5805,10 +6103,11 @@ export const operations: Operation[] = [
   source_discover, source_connector_config_get, source_connector_config_put,
   source_connector_secret_put, source_connector_secret_delete, source_connector_secret_audit,
   source_ingest_tree,
+  source_catalog_delete_impact,
   source_connector_list, source_connector_upsert, source_connector_delete,
-  source_base_view_list, source_base_view_upsert,
-  source_transform_view_list, source_transform_view_upsert,
-  source_article_view_list, source_article_view_upsert, source_article_view_approve, source_article_view_run,
+  source_base_view_list, source_base_view_execute, source_base_view_upsert, source_base_view_delete,
+  source_transform_view_list, source_transform_view_execute, source_transform_view_upsert, source_transform_view_delete,
+  source_article_view_list, source_article_view_upsert, source_article_view_delete, source_article_view_dry_run, source_article_view_approve, source_article_view_run,
   source_profile_draft, source_validate_profile, source_profile_get, source_profile_put, source_dry_run, source_sync_status,
   source_ingest, source_refresh, source_revert,
   // Files

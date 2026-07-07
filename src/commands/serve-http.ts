@@ -43,7 +43,7 @@ import {
   type IngestionContentType,
   type IngestionEvent,
 } from '../core/ingestion/types.ts';
-import { defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, sourceTableSummariesFromConfigs } from '../core/source-ingest/connector-config.ts';
+import { defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, sourceConnectorSecretStatus, sourceTableSummariesFromConfigs } from '../core/source-ingest/connector-config.ts';
 import { buildProfileSampleRecords } from '../core/source-ingest/source-fetch.ts';
 import { profileHash } from '../core/source-ingest/store.ts';
 import { validateSourceIngestProfile } from '../core/source-ingest/profile-schema.ts';
@@ -1075,6 +1075,29 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  app.get('/admin/api/source-ingest/schema-view', requireAdmin, async (_req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const [active_pack, stats, graph] = await Promise.all([
+        operationsByName.get_active_schema_pack.handler(ctx, {}),
+        operationsByName.schema_stats.handler(ctx, {}),
+        operationsByName.schema_graph.handler(ctx, {}),
+      ]);
+      res.json({ ok: true, active_pack, stats, graph });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/schema-view/type/:type', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      res.json(await operationsByName.schema_explain_type.handler(ctx, { type: req.params.type }));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
   app.post('/admin/api/source-ingest/catalog/connector', requireAdmin, express.json(), async (req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
     try {
@@ -1107,30 +1130,55 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         res.status(400).json({ error: 'connector_id_required' });
         return;
       }
-      res.json(await operationsByName.source_connector_delete.handler(ctx, { connector_id }));
+      res.json(await operationsByName.source_connector_delete.handler(ctx, {
+        connector_id,
+        confirm_token: typeof req.body?.confirm_token === 'string' ? req.body.confirm_token : undefined,
+        force: req.body?.force === true,
+      }));
     } catch (e) {
       res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
     }
   });
 
-  async function sourceConnectorRuntimeConfig(body: Record<string, unknown>): Promise<{ connectorId: string; objectName: string; config: Record<string, unknown> }> {
+  app.post('/admin/api/source-ingest/catalog/delete-impact', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const kind = typeof req.body?.kind === 'string' ? req.body.kind.trim() : '';
+      const id = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+      if (!kind || !id) {
+        res.status(400).json({ error: 'kind_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_catalog_delete_impact.handler(ctx, { kind, id }));
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  async function sourceConnectorRuntimeConfig(body: Record<string, unknown>): Promise<{ connectorId: string; objectName?: string; config: Record<string, unknown>; credentialStatus: Record<string, unknown> }> {
     const connectorId = typeof body.connector_id === 'string' ? body.connector_id.trim() : 'appsheet-vehicles';
-    const objectName = typeof body.source_object === 'string' ? body.source_object.trim() : 'vehicle';
+    const objectName = typeof body.source_object === 'string' && body.source_object.trim() ? body.source_object.trim() : undefined;
     const tableName = typeof body.table_name === 'string' ? body.table_name.trim() : undefined;
-    const configId = typeof body.config_id === 'string' ? body.config_id : defaultSourceConnectorConfigId(connectorId, objectName, tableName);
+    const configId = typeof body.config_id === 'string' ? body.config_id : (objectName ? defaultSourceConnectorConfigId(connectorId, objectName, tableName) : `connector:${connectorId}`);
     const saved = await operationsByName.source_connector_list.handler(
       { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true },
       { connector_id: connectorId },
     ) as { rows?: Array<Record<string, unknown>> };
     const row = saved.rows?.[0];
     const rowConfig = row?.config_json && typeof row.config_json === 'object' ? row.config_json as Record<string, unknown> : {};
-    const secretConfig = await getSourceConnectorSecretConfig(engine, connectorId, objectName, configId);
-    return { connectorId, objectName, config: { ...rowConfig, ...nonSecretConnectorConfigFromBody(body), ...secretConfig } };
+    const objectSecretConfig = objectName ? await getSourceConnectorSecretConfig(engine, connectorId, objectName, configId) : {};
+    const connectorSecretConfig = await getSourceConnectorSecretConfig(engine, connectorId, '__connection__', `connector:${connectorId}`);
+    const credentialStatus = await sourceConnectorSecretStatus(engine, connectorId, `connector:${connectorId}`, '__connection__') as unknown as Record<string, unknown>;
+    return { connectorId, objectName, credentialStatus, config: { ...rowConfig, ...nonSecretConnectorConfigFromBody(body), ...connectorSecretConfig, ...objectSecretConfig } };
   }
 
   app.post('/admin/api/source-ingest/catalog/connector/list-objects', requireAdmin, express.json(), async (req: Request, res: Response) => {
     try {
-      const { connectorId, config: runtimeConfig } = await sourceConnectorRuntimeConfig((req.body || {}) as Record<string, unknown>);
+      const { connectorId, objectName, config: runtimeConfig } = await sourceConnectorRuntimeConfig((req.body || {}) as Record<string, unknown>);
+      if (!objectName) {
+        res.json({ ok: true, connector_id: connectorId, objects: [], note: 'No table/object was requested. AppSheet does not expose reliable table discovery here; enter the table name in Base view and run Execute/Discover there.' });
+        return;
+      }
       const connector = getSourceConnector(connectorId, runtimeConfig);
       if (!connector) {
         res.status(400).json({ ok: false, error: `unsupported_connector: ${connectorId}` });
@@ -1146,19 +1194,280 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   app.post('/admin/api/source-ingest/catalog/connector/test', requireAdmin, express.json(), async (req: Request, res: Response) => {
     const started = Date.now();
     try {
-      const { connectorId, objectName, config: runtimeConfig } = await sourceConnectorRuntimeConfig((req.body || {}) as Record<string, unknown>);
+      const { connectorId, objectName, config: runtimeConfig, credentialStatus } = await sourceConnectorRuntimeConfig((req.body || {}) as Record<string, unknown>);
       const connector = getSourceConnector(connectorId, runtimeConfig);
       if (!connector) {
         res.status(400).json({ ok: false, status: 'unsupported_connector', connector_id: connectorId });
         return;
       }
-      const objects = await connector.listObjects();
+      const objects = objectName ? await connector.listObjects() : [];
+      const credentialsConfigured = (credentialStatus.configured !== false);
+      if (!credentialsConfigured) {
+        await recordSourceConnectorTest(engine, connectorId, false);
+        res.json({ ok: false, status: 'credentials_missing', connector_id: connectorId, elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: 'Connector-level test does not require a table. Add credentials here; table-specific extraction is tested from Base view.' });
+        return;
+      }
       await recordSourceConnectorTest(engine, connectorId, true);
-      res.json({ ok: true, status: 'connection_ok', connector_id: connectorId, source_object: objectName, elapsed_ms: Date.now() - started, objects });
+      res.json({ ok: true, status: objectName ? 'connection_ok' : 'credentials_configured', connector_id: connectorId, ...(objectName ? { source_object: objectName } : {}), elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: objectName ? 'Connector can be used for table/object-level tests.' : 'Credentials are configured. Create a Base view to test a concrete AppSheet table/object.' });
     } catch (e) {
       const connectorId = typeof req.body?.connector_id === 'string' ? req.body.connector_id : '';
       if (connectorId) await recordSourceConnectorTest(engine, connectorId, false).catch(() => undefined);
       res.status(200).json({ ok: false, status: 'connection_failed', elapsed_ms: Date.now() - started, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/base-view/discover', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const connector_id = typeof body.connector_id === 'string' ? body.connector_id.trim() : '';
+      const object_name = typeof body.object_name === 'string' ? body.object_name.trim() : '';
+      if (!connector_id || !object_name) {
+        res.status(400).json({ error: 'connector_id_object_name_required' });
+        return;
+      }
+      const selected_fields = Array.isArray(body.selected_fields) ? body.selected_fields.flatMap(v => String(v).split(/\\n|[\n,]/)).map(s => s.trim()).filter(Boolean) : [];
+      const primary_key_field = typeof body.primary_key_field === 'string' && body.primary_key_field.trim() ? body.primary_key_field.trim() : undefined;
+      const updated_at_field = typeof body.updated_at_field === 'string' && body.updated_at_field.trim() ? body.updated_at_field.trim() : undefined;
+      const sample_limit = Number.isFinite(Number(body.sample_limit)) ? Number(body.sample_limit) : 25;
+      const { config: runtimeConfig } = await sourceConnectorRuntimeConfig({ ...body, connector_id, source_object: object_name, table_name: object_name, config_id: `connector:${connector_id}` });
+      const out = await operationsByName.source_discover.handler(ctx, {
+        connector_id,
+        source_object: object_name,
+        sample_limit,
+        connector_config: runtimeConfig,
+        ...(selected_fields.length ? { selected_fields } : {}),
+        ...(primary_key_field ? { primary_key_field } : {}),
+        ...(updated_at_field ? { updated_at_field } : {}),
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(200).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/base-view/execute', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const out = await operationsByName.source_base_view_execute.handler(ctx, {
+        base_view_id: typeof req.body?.base_view_id === 'string' ? req.body.base_view_id : undefined,
+        draft: req.body?.draft && typeof req.body.draft === 'object' ? req.body.draft : undefined,
+        sample_limit: Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : undefined,
+        connector_config: req.body?.connector_config && typeof req.body.connector_config === 'object' ? req.body.connector_config : undefined,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/base-view', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const base_view_id = typeof body.base_view_id === 'string' ? body.base_view_id.trim() : '';
+      const connector_id = typeof body.connector_id === 'string' ? body.connector_id.trim() : '';
+      const object_name = typeof body.object_name === 'string' ? body.object_name.trim() : '';
+      if (!base_view_id || !connector_id || !object_name) {
+        res.status(400).json({ error: 'base_view_id_connector_id_object_name_required' });
+        return;
+      }
+      const selected_fields = Array.isArray(body.selected_fields) ? body.selected_fields.flatMap(v => String(v).split(/\\n|[\n,]/)).map(s => s.trim()).filter(Boolean) : [];
+      const row_filter = Array.isArray(body.row_filter) ? body.row_filter : [];
+      const sample_limit = Number.isFinite(Number(body.sample_limit)) ? Number(body.sample_limit) : 50;
+      const primary_key_field = typeof body.primary_key_field === 'string' && body.primary_key_field.trim() ? body.primary_key_field.trim() : undefined;
+      const updated_at_field = typeof body.updated_at_field === 'string' && body.updated_at_field.trim() ? body.updated_at_field.trim() : undefined;
+      const discovery_json = body.discovery_json && typeof body.discovery_json === 'object'
+        ? { ...(body.discovery_json as Record<string, unknown>), ...(primary_key_field ? { primary_key_field } : {}), ...(updated_at_field ? { updated_at_field } : {}) }
+        : (primary_key_field || updated_at_field ? { ...(primary_key_field ? { primary_key_field } : {}), ...(updated_at_field ? { updated_at_field } : {}) } : undefined);
+      const out = await operationsByName.source_base_view_upsert.handler(ctx, {
+        base_view_id,
+        connector_id,
+        object_name,
+        display_name: typeof body.display_name === 'string' ? body.display_name.trim() : base_view_id,
+        selected_fields,
+        row_filter,
+        sample_limit,
+        discovery_json,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/base-view/delete', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const base_view_id = typeof req.body?.base_view_id === 'string' ? req.body.base_view_id.trim() : '';
+      if (!base_view_id) {
+        res.status(400).json({ error: 'base_view_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_base_view_delete.handler(ctx, {
+        base_view_id,
+        confirm_token: typeof req.body?.confirm_token === 'string' ? req.body.confirm_token : undefined,
+        force: req.body?.force === true,
+      }));
+    } catch (e) {
+      res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/transform-view', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const transform_view_id = typeof body.transform_view_id === 'string' ? body.transform_view_id.trim() : '';
+      const sql = typeof body.sql === 'string' ? body.sql : '';
+      const primary_key_field = typeof body.primary_key_field === 'string' ? body.primary_key_field.trim() : '';
+      if (!transform_view_id || !sql.trim() || !primary_key_field) {
+        res.status(400).json({ error: 'transform_view_id_sql_primary_key_required' });
+        return;
+      }
+      const inputs = Array.isArray(body.inputs) ? body.inputs.map((input: unknown) => {
+        const raw = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+        return { alias: String(raw.alias ?? '').trim(), base_view_id: String(raw.base_view_id ?? '').trim() };
+      }).filter(input => input.alias && input.base_view_id) : [];
+      if (inputs.length === 0) {
+        res.status(400).json({ error: 'transform_inputs_required' });
+        return;
+      }
+      const out = await operationsByName.source_transform_view_upsert.handler(ctx, {
+        transform_view_id,
+        display_name: typeof body.display_name === 'string' ? body.display_name.trim() : transform_view_id,
+        inputs,
+        sql,
+        primary_key_field,
+        updated_at_field: typeof body.updated_at_field === 'string' && body.updated_at_field.trim() ? body.updated_at_field.trim() : undefined,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/transform-view/execute', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const out = await operationsByName.source_transform_view_execute.handler(ctx, {
+        transform_view_id: typeof req.body?.transform_view_id === 'string' ? req.body.transform_view_id : undefined,
+        draft: req.body?.draft && typeof req.body.draft === 'object' ? req.body.draft : undefined,
+        sample_limit: Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : undefined,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/transform-view/delete', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const transform_view_id = typeof req.body?.transform_view_id === 'string' ? req.body.transform_view_id.trim() : '';
+      if (!transform_view_id) {
+        res.status(400).json({ error: 'transform_view_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_transform_view_delete.handler(ctx, {
+        transform_view_id,
+        confirm_token: typeof req.body?.confirm_token === 'string' ? req.body.confirm_token : undefined,
+        force: req.body?.force === true,
+      }));
+    } catch (e) {
+      res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/article-view', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const article_view_id = typeof body.article_view_id === 'string' ? body.article_view_id.trim() : '';
+      const input_kind = body.input_kind === 'transform_view' ? 'transform_view' : 'base_view';
+      const input_id = typeof body.input_id === 'string' ? body.input_id.trim() : '';
+      const gbrain_type = typeof body.gbrain_type === 'string' ? body.gbrain_type.trim() : '';
+      const target_source_id = typeof body.target_source_id === 'string' ? body.target_source_id.trim() : '';
+      const slug_template = typeof body.slug_template === 'string' ? body.slug_template.trim() : '';
+      if (!article_view_id || !input_id || !gbrain_type || !target_source_id || !slug_template) {
+        res.status(400).json({ error: 'article_view_id_input_type_target_slug_required' });
+        return;
+      }
+      const identity = body.identity && typeof body.identity === 'object' ? body.identity as Record<string, unknown> : {};
+      const security = body.security && typeof body.security === 'object' ? body.security as Record<string, unknown> : { classification: 'shared', pii: false };
+      const update_policy = body.update_policy && typeof body.update_policy === 'object' ? body.update_policy as Record<string, unknown> : { mode: 'managed_block', preserve_manual_sections: true };
+      const article_template = body.article_template && typeof body.article_template === 'object' ? body.article_template as Record<string, unknown> : undefined;
+      const freshness_policy = body.freshness_policy && typeof body.freshness_policy === 'object' ? body.freshness_policy as Record<string, unknown> : undefined;
+      const link_rules = Array.isArray(body.link_rules) ? body.link_rules : [];
+      const out = await operationsByName.source_article_view_upsert.handler(ctx, {
+        article_view: {
+          article_view_id,
+          display_name: typeof body.display_name === 'string' ? body.display_name.trim() : article_view_id,
+          input: { kind: input_kind, id: input_id },
+          gbrain_type,
+          target_source_id,
+          slug_template,
+          identity,
+          article_template,
+          link_rules,
+          freshness_policy,
+          update_policy,
+          security,
+          status: typeof body.status === 'string' ? body.status : 'draft',
+        },
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/article-view/delete', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const article_view_id = typeof req.body?.article_view_id === 'string' ? req.body.article_view_id.trim() : '';
+      if (!article_view_id) {
+        res.status(400).json({ error: 'article_view_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_article_view_delete.handler(ctx, { article_view_id }));
+    } catch (e) {
+      res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/article-view/dry-run', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const article_view_id = typeof req.body?.article_view_id === 'string' ? req.body.article_view_id.trim() : '';
+      if (!article_view_id) {
+        res.status(400).json({ error: 'article_view_id_required' });
+        return;
+      }
+      const out = await operationsByName.source_article_view_dry_run.handler(ctx, {
+        article_view_id,
+        sample_limit: Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25,
+        connector_config: req.body?.connector_config && typeof req.body.connector_config === 'object' ? req.body.connector_config : undefined,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/article-view/approve', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const article_view_id = typeof req.body?.article_view_id === 'string' ? req.body.article_view_id.trim() : '';
+      if (!article_view_id) {
+        res.status(400).json({ error: 'article_view_id_required' });
+        return;
+      }
+      const current_chain_hash = typeof req.body?.current_chain_hash === 'string' ? req.body.current_chain_hash.trim() : undefined;
+      const out = await operationsByName.source_article_view_approve.handler(ctx, { article_view_id, approved_by: 'admin-ui', ...(current_chain_hash ? { current_chain_hash } : {}) });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
     }
   });
 

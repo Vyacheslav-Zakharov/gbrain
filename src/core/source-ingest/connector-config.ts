@@ -155,7 +155,7 @@ export function defaultSourceConnectorConfigId(connectorId: string, sourceObject
 }
 
 function requiredSecretKeys(connectorId: string): string[] {
-  if (connectorId === 'appsheet-vehicles') return APPSHEET_SECRET_KEYS;
+  if (connectorId === 'appsheet-vehicles' || connectorId === 'appsheet' || connectorId.startsWith('appsheet-')) return APPSHEET_SECRET_KEYS;
   if (connectorId === 'bigquery') return ['service_account_json'];
   if (connectorId === 'postgres') return ['connection_string'];
   if (connectorId === 'supabase') return ['project_url', 'service_role_key'];

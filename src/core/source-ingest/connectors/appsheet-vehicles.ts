@@ -2,6 +2,7 @@ import { fetchWithSSRFGuard, validateAndResolveUrl } from '../../ssrf-validate.t
 import type { SourceConnector, SourceObjectDescriptor, SourceRecord, SourceRecordBatch, SourceFetchOptions } from './types.ts';
 
 export interface AppSheetVehicleConnectorConfig {
+  connectorId?: string;
   appId?: string;
   accessKey?: string;
   tableName?: string;
@@ -15,13 +16,16 @@ export class AppSheetVehicleConnector implements SourceConnector {
   id = 'appsheet-vehicles';
   displayName = 'AppSheet автотранспорт';
   private readonly tableName: string;
+  private readonly explicitTableName: boolean;
   private readonly primaryKeyField?: string;
   private readonly updatedAtField?: string;
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(private readonly config: AppSheetVehicleConnectorConfig = {}) {
-    this.tableName = config.tableName || 'vehicles';
+    this.id = config.connectorId?.trim() || 'appsheet-vehicles';
+    this.explicitTableName = typeof config.tableName === 'string' && config.tableName.trim().length > 0;
+    this.tableName = config.tableName?.trim() || 'vehicles';
     this.primaryKeyField = config.primaryKeyField?.trim() || undefined;
     this.updatedAtField = config.updatedAtField?.trim() || undefined;
     this.baseUrl = config.baseUrl || 'https://api.appsheet.com/api/v2/apps';
@@ -29,7 +33,10 @@ export class AppSheetVehicleConnector implements SourceConnector {
   }
 
   async listObjects(): Promise<SourceObjectDescriptor[]> {
-    return [{ name: 'vehicle', displayName: 'Автотранспорт AppSheet', supportsChangedSince: true }];
+    const primary = { name: this.objectName(), displayName: this.usesGenericRecordShape() ? this.tableName : 'Автотранспорт AppSheet', supportsChangedSince: true };
+    return this.explicitTableName && !this.usesGenericRecordShape() && primary.name !== 'vehicle'
+      ? [primary, { name: 'vehicle', displayName: 'Автотранспорт AppSheet (legacy alias)', supportsChangedSince: true }]
+      : [primary];
   }
 
   async sample(objectName: string, limit: number, opts: SourceFetchOptions = {}): Promise<SourceRecord[]> {
@@ -49,7 +56,7 @@ export class AppSheetVehicleConnector implements SourceConnector {
   }
 
   private async fetchRows(objectName: string, opts: { limit?: number; since?: string; fields?: string[] }): Promise<Record<string, unknown>[]> {
-    if (objectName !== 'vehicle') throw new Error(`AppSheet connector only supports vehicle object, got ${objectName}`);
+    if (objectName !== this.objectName() && !(objectName === 'vehicle' && !this.usesGenericRecordShape())) throw new Error(`AppSheet connector is configured for object/table ${this.objectName()}, got ${objectName}`);
     const appId = this.config.appId || process.env.APPSHEET_VEHICLES_APP_ID;
     const accessKey = this.config.accessKey || process.env.APPSHEET_VEHICLES_ACCESS_KEY;
     if (!appId || !accessKey) {
@@ -60,16 +67,14 @@ export class AppSheetVehicleConnector implements SourceConnector {
     const selectorParts = opts.since && changedSinceField
       ? [`[${changedSinceField}] > ${JSON.stringify(normalizeAppSheetSince(opts.since))}`]
       : [];
-    const requestedColumns = sourceFieldsToAppSheetColumns(opts.fields, {
-      primaryKeyField: this.primaryKeyField,
-      updatedAtField: this.updatedAtField,
-      generic: this.usesGenericRecordShape(),
-    });
+    // Do not pass Properties.ColumnNames to AppSheet Find.
+    // Some AppSheet apps return an empty array when ColumnNames is present even
+    // for valid columns (observed with the Avers vehicles table). Fetch the row
+    // shape as-is, then let GBrain profile/filter/mapping operate locally.
     const body: Record<string, unknown> = {
       Action: 'Find',
       Properties: {
         Locale: 'ru-RU',
-        ...(requestedColumns.length ? { ColumnNames: requestedColumns } : {}),
         ...(selectorParts.length ? { Selector: `Filter(${JSON.stringify(this.tableName)}, ${selectorParts.join(' AND ')})` } : {}),
       },
       Rows: [],
@@ -89,6 +94,10 @@ export class AppSheetVehicleConnector implements SourceConnector {
         ? ((json as Record<string, unknown>).Rows as unknown[])
         : [];
     return (rawRows as Record<string, unknown>[]).slice(0, opts.limit ?? rawRows.length);
+  }
+
+  private objectName(): string {
+    return this.explicitTableName ? this.tableName : 'vehicle';
   }
 
   private usesGenericRecordShape(): boolean {
@@ -199,6 +208,7 @@ export function rowToGenericAppSheetRecord(row: Record<string, unknown>, opts: {
   return {
     external_id: id,
     source_updated_at: typeof updated === 'string' ? updated : null,
+    source_fields: { ...row },
     data: {
       ...row,
       id,
@@ -223,6 +233,7 @@ export function rowToVehicleRecord(row: Record<string, unknown>): SourceRecord {
   return {
     external_id: id,
     source_updated_at: typeof updated === 'string' ? updated : null,
+    source_fields: { ...row },
     data: {
       ...row,
       id,

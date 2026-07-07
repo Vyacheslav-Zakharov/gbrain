@@ -6,7 +6,7 @@ export interface SourceIngestConnectorFieldDescriptor {
 
 export interface SourceIngestConnectorDescriptor {
   id: string;
-  kind: 'appsheet' | 'fake' | 'bigquery' | 'postgres' | 'supabase' | 'bitrix' | 'unf';
+  kind: 'appsheet' | 'fake';
   displayName: string;
   object: string;
   supportsChangedSince: boolean;
@@ -55,67 +55,6 @@ export function sourceIngestConnectorDescriptors(): SourceIngestConnectorDescrip
       credentialMode: 'none',
       status: 'implemented',
       fields: fields({ tableName: 'vehicle', primaryKeyField: 'id', updatedAtField: 'updated_at', slugPrefix: 'source-ingest/vehicles' }),
-    },
-    {
-      id: 'bigquery',
-      kind: 'bigquery',
-      displayName: 'BigQuery',
-      object: 'table',
-      supportsChangedSince: false,
-      credentialMode: 'db-or-server-env',
-      status: 'scaffold',
-      requiredKeys: ['service_account_json'],
-      requiredEnv: ['GOOGLE_APPLICATION_CREDENTIALS'],
-      fields: fields({ tableName: 'dataset.table', primaryKeyField: 'id', updatedAtField: 'updated_at', slugPrefix: 'source-ingest/bigquery' }),
-      safety: ['Scaffold only: discovery/sample connector implementation pending', 'Use source table configs now; live IO remains disabled until connector is implemented'],
-    },
-    {
-      id: 'postgres',
-      kind: 'postgres',
-      displayName: 'Postgres',
-      object: 'table',
-      supportsChangedSince: false,
-      credentialMode: 'db-or-server-env',
-      status: 'scaffold',
-      requiredKeys: ['connection_string'],
-      fields: fields({ tableName: 'schema.table', primaryKeyField: 'id', updatedAtField: 'updated_at', slugPrefix: 'source-ingest/postgres' }),
-      safety: ['Scaffold only: live SQL connector implementation pending', 'Use read-only database credentials only'],
-    },
-    {
-      id: 'supabase',
-      kind: 'supabase',
-      displayName: 'Supabase',
-      object: 'table',
-      supportsChangedSince: false,
-      credentialMode: 'db-or-server-env',
-      status: 'scaffold',
-      requiredKeys: ['project_url', 'service_role_key'],
-      fields: fields({ tableName: 'public.table', primaryKeyField: 'id', updatedAtField: 'updated_at', slugPrefix: 'source-ingest/supabase' }),
-      safety: ['Scaffold only: live connector implementation pending', 'Never expose service role key to browser/UI preview'],
-    },
-    {
-      id: 'bitrix',
-      kind: 'bitrix',
-      displayName: 'Bitrix API',
-      object: 'collection',
-      supportsChangedSince: false,
-      credentialMode: 'db-or-server-env',
-      status: 'scaffold',
-      requiredKeys: ['base_url', 'access_token'],
-      fields: fields({ tableName: 'crm.item', primaryKeyField: 'ID', updatedAtField: 'DATE_MODIFY', slugPrefix: 'source-ingest/bitrix' }),
-      safety: ['Scaffold only: live API connector implementation pending', 'Keep access token server-side/DB-encrypted'],
-    },
-    {
-      id: 'unf',
-      kind: 'unf',
-      displayName: '1C:УНФ API',
-      object: 'endpoint',
-      supportsChangedSince: false,
-      credentialMode: 'db-or-server-env',
-      status: 'scaffold',
-      requiredKeys: ['base_url', 'auth_code'],
-      fields: fields({ tableName: '/sales', primaryKeyField: 'id', updatedAtField: 'updated_at', slugPrefix: 'source-ingest/unf' }),
-      safety: ['Scaffold only: live connector implementation pending', 'Do not expose auth_code in profiles, pages, logs, or browser state'],
     },
   ];
 }

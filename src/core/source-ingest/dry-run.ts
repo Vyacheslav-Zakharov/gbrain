@@ -215,7 +215,7 @@ export function buildSourceDryRun(profile: SourceIngestProfile, sample: SourceRe
     link_rules: linkRules,
     routing_sensitivity: { approved_source_id: profile.target.approved_source_id ?? null, classification: profile.security.classification, pii: profile.security.pii, pii_fields: profile.security.pii_fields || [] },
     stratified_samples: pickStratifiedSamples(pages, skipped, linkRules, slugCollisions),
-    sample_pages: pages.slice(0, 3),
+    sample_pages: pages.slice(0, 25),
     deferred_checks: [
       'cross_source_edge_resolution_deferred_until_target_resolver_stage',
       'managed_block_before_after_diff_deferred_until_update_path',

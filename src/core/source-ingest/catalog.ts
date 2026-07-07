@@ -143,19 +143,119 @@ export async function listSourceConnectorViews(engine: BrainEngine, connectorId?
   );
 }
 
-export async function deleteSourceConnectorView(engine: BrainEngine, connectorId: string) {
-  const dependents = await engine.executeRaw<{ count: number }>(
-    `SELECT count(*)::int AS count FROM source_base_views WHERE connector_id = $1`,
+export type SourceCatalogObjectKind = 'connector' | 'base_view' | 'transform_view' | 'article_view';
+
+export interface SourceCatalogDeleteImpact {
+  kind: SourceCatalogObjectKind;
+  id: string;
+  exists: boolean;
+  blocking: boolean;
+  confirm_token: string;
+  dependencies: {
+    base_views: unknown[];
+    transform_views: unknown[];
+    article_views: SourceArticleViewRow[];
+  };
+  warnings: string[];
+}
+
+function deleteImpactToken(impact: Omit<SourceCatalogDeleteImpact, 'confirm_token'>): string {
+  return sha({ kind: impact.kind, id: impact.id, exists: impact.exists, dependencies: impact.dependencies });
+}
+
+export async function sourceCatalogDeleteImpact(engine: BrainEngine, kind: SourceCatalogObjectKind, id: string): Promise<SourceCatalogDeleteImpact> {
+  const warnings: string[] = [];
+  let exists = false;
+  let base_views: unknown[] = [];
+  let transform_views: unknown[] = [];
+  let article_views: SourceArticleViewRow[] = [];
+  if (kind === 'connector') {
+    exists = (await listSourceConnectorViews(engine, id)).length > 0;
+    base_views = await listSourceBaseViewsByConnector(engine, id);
+    const baseIds = new Set((base_views as Array<Record<string, unknown>>).map(r => String(r.base_view_id)));
+    transform_views = await listSourceTransformViewsUsingBaseViews(engine, [...baseIds]);
+    const transformIds = new Set((transform_views as Array<Record<string, unknown>>).map(r => String(r.transform_view_id)));
+    article_views = await listSourceArticleViewsDependingOn(engine, [...baseIds], [...transformIds]);
+  } else if (kind === 'base_view') {
+    exists = (await listSourceBaseViews(engine, id)).length > 0;
+    base_views = exists ? await listSourceBaseViews(engine, id) : [];
+    transform_views = await listSourceTransformViewsUsingBaseViews(engine, [id]);
+    const transformIds = new Set((transform_views as Array<Record<string, unknown>>).map(r => String(r.transform_view_id)));
+    article_views = await listSourceArticleViewsDependingOn(engine, [id], [...transformIds]);
+  } else if (kind === 'transform_view') {
+    exists = (await listSourceTransformViews(engine, id)).length > 0;
+    transform_views = exists ? await listSourceTransformViews(engine, id) : [];
+    article_views = await listSourceArticleViewsDependingOn(engine, [], [id]);
+  } else {
+    exists = (await listSourceArticleViews(engine, id)).length > 0;
+    article_views = exists ? await listSourceArticleViews(engine, id) : [];
+  }
+  const blocking = base_views.length > (kind === 'base_view' ? 1 : 0) || transform_views.length > (kind === 'transform_view' ? 1 : 0) || article_views.length > (kind === 'article_view' ? 1 : 0);
+  if (blocking) warnings.push('dependent_catalog_objects_will_break_without_reconfiguration');
+  const impactWithoutToken = { kind, id, exists, blocking, dependencies: { base_views, transform_views, article_views }, warnings };
+  return { ...impactWithoutToken, confirm_token: deleteImpactToken(impactWithoutToken) };
+}
+
+async function listSourceBaseViewsByConnector(engine: BrainEngine, connectorId: string) {
+  return engine.executeRaw(
+    `SELECT base_view_id, connector_id, object_name, display_name, selected_fields, row_filter, sample_limit,
+            discovery_json, last_discovered_at::text, version_hash, created_at::text, updated_at::text
+       FROM source_base_views
+      WHERE connector_id = $1
+      ORDER BY updated_at DESC`,
     [connectorId],
   );
-  if ((dependents[0]?.count ?? 0) > 0) {
-    throw new Error(`connector_has_base_views: ${connectorId}`);
+}
+
+async function listSourceTransformViewsUsingBaseViews(engine: BrainEngine, baseViewIds: string[]) {
+  if (baseViewIds.length === 0) return [];
+  return executeRawJsonb(
+    engine,
+    `SELECT transform_view_id, display_name, inputs, sql, primary_key_field, updated_at_field,
+            version_hash, last_preview_ok, last_preview_at::text, created_at::text, updated_at::text
+       FROM source_transform_views tv
+      WHERE EXISTS (
+        SELECT 1 FROM jsonb_to_recordset(tv.inputs) AS i(alias text, base_view_id text)
+         WHERE i.base_view_id IN (SELECT jsonb_array_elements_text($1::jsonb->'value'))
+      )
+      ORDER BY updated_at DESC`,
+    [],
+    [{ value: baseViewIds }],
+  );
+}
+
+async function listSourceArticleViewsDependingOn(engine: BrainEngine, baseViewIds: string[], transformViewIds: string[]) {
+  const rows = await executeRawJsonb<SourceArticleViewRow>(
+    engine,
+    `SELECT article_view_id, input_kind, input_id, status, gbrain_type, target_source_id,
+            stale, stale_reasons, current_chain_hash, version_hash, compiled_profile,
+            article_json, created_at::text, updated_at::text, compiled_at::text
+       FROM source_article_views
+      WHERE (input_kind = 'base_view' AND input_id IN (SELECT jsonb_array_elements_text($1::jsonb->'value')))
+         OR (input_kind = 'transform_view' AND input_id IN (SELECT jsonb_array_elements_text($2::jsonb->'value')))
+      ORDER BY updated_at DESC`,
+    [],
+    [{ value: baseViewIds }, { value: transformViewIds }],
+  );
+  return rows.map(row => ({ ...row, stale_reasons: asStringArray(row.stale_reasons), article_json: asObject(row.article_json), compiled_profile: row.compiled_profile ? (typeof row.compiled_profile === 'string' ? JSON.parse(row.compiled_profile) : row.compiled_profile) : null }));
+}
+
+function assertDeleteConfirmed(impact: SourceCatalogDeleteImpact, opts: { confirmToken?: string; force?: boolean }) {
+  if (!impact.exists) return;
+  if (impact.blocking && (!opts.force || opts.confirmToken !== impact.confirm_token)) {
+    throw new Error(`delete_blocked:${impact.kind}:${impact.id}: dependent catalog objects exist; rerun impact and confirm token to force delete.`);
   }
+}
+
+export async function deleteSourceConnectorView(engine: BrainEngine, connectorId: string, opts: { confirmToken?: string; force?: boolean } = {}) {
+  const impact = await sourceCatalogDeleteImpact(engine, 'connector', connectorId);
+  assertDeleteConfirmed(impact, opts);
   const rows = await engine.executeRaw(
     `DELETE FROM source_connectors WHERE connector_id = $1 RETURNING connector_id, kind, display_name`,
     [connectorId],
   );
-  return { deleted: rows.length > 0, row: rows[0] ?? null };
+  if (impact.blocking) await markArticleViewsStaleForConnector(engine, connectorId, ['connector_deleted']);
+  return { deleted: rows.length > 0, row: rows[0] ?? null, impact };
 }
 
 export async function recordSourceConnectorTest(engine: BrainEngine, connectorId: string, ok: boolean) {
@@ -205,6 +305,32 @@ export async function listSourceBaseViews(engine: BrainEngine, baseViewId?: stri
   );
 }
 
+export async function deleteSourceBaseView(engine: BrainEngine, baseViewId: string, opts: { confirmToken?: string; force?: boolean } = {}) {
+  const impact = await sourceCatalogDeleteImpact(engine, 'base_view', baseViewId);
+  assertDeleteConfirmed(impact, opts);
+  const rows = await engine.executeRaw(
+    `DELETE FROM source_base_views WHERE base_view_id = $1 RETURNING base_view_id, connector_id, object_name, display_name`,
+    [baseViewId],
+  );
+  if (impact.blocking) await markArticleViewsStaleForBaseView(engine, baseViewId, ['base_view_deleted']);
+  return { deleted: rows.length > 0, row: rows[0] ?? null, impact };
+}
+
+export async function recordSourceBaseDiscovery(engine: BrainEngine, baseViewId: string, discoveryJson: Record<string, unknown>, staleReasons: string[] = []) {
+  await executeRawJsonb(
+    engine,
+    `UPDATE source_base_views
+        SET discovery_json = $2::jsonb,
+            last_discovered_at = now(),
+            updated_at = now()
+      WHERE base_view_id = $1`,
+    [baseViewId],
+    [discoveryJson],
+  );
+  if (staleReasons.length) await markArticleViewsStaleForBaseView(engine, baseViewId, staleReasons);
+  return (await listSourceBaseViews(engine, baseViewId))[0] ?? null;
+}
+
 export async function upsertSourceTransformView(engine: BrainEngine, input: SourceTransformView) {
   const inputs = input.inputs || [];
   await executeRawJsonb(
@@ -239,6 +365,29 @@ export async function listSourceTransformViews(engine: BrainEngine, transformVie
        ORDER BY updated_at DESC`,
     params,
   );
+}
+
+export async function deleteSourceTransformView(engine: BrainEngine, transformViewId: string, opts: { confirmToken?: string; force?: boolean } = {}) {
+  const impact = await sourceCatalogDeleteImpact(engine, 'transform_view', transformViewId);
+  assertDeleteConfirmed(impact, opts);
+  const rows = await engine.executeRaw(
+    `DELETE FROM source_transform_views WHERE transform_view_id = $1 RETURNING transform_view_id, display_name`,
+    [transformViewId],
+  );
+  if (impact.blocking) await markArticleViewsStaleForTransformView(engine, transformViewId, ['transform_view_deleted']);
+  return { deleted: rows.length > 0, row: rows[0] ?? null, impact };
+}
+
+export async function recordSourceTransformPreview(engine: BrainEngine, transformViewId: string, ok: boolean) {
+  await engine.executeRaw(
+    `UPDATE source_transform_views
+        SET last_preview_ok = $2,
+            last_preview_at = now(),
+            updated_at = now()
+      WHERE transform_view_id = $1`,
+    [transformViewId, ok],
+  );
+  return (await listSourceTransformViews(engine, transformViewId))[0] ?? null;
 }
 
 export async function upsertSourceArticleView(engine: BrainEngine, input: SourceArticleView) {
@@ -284,6 +433,15 @@ export async function listSourceArticleViews(engine: BrainEngine, articleViewId?
     article_json: asObject(row.article_json),
     compiled_profile: row.compiled_profile ? (typeof row.compiled_profile === 'string' ? JSON.parse(row.compiled_profile) : row.compiled_profile) : null,
   }));
+}
+
+export async function deleteSourceArticleView(engine: BrainEngine, articleViewId: string) {
+  const impact = await sourceCatalogDeleteImpact(engine, 'article_view', articleViewId);
+  const rows = await engine.executeRaw(
+    `DELETE FROM source_article_views WHERE article_view_id = $1 RETURNING article_view_id, input_kind, input_id, status, gbrain_type, target_source_id`,
+    [articleViewId],
+  );
+  return { deleted: rows.length > 0, row: rows[0] ?? null, impact };
 }
 
 async function markArticleViewsStale(engine: BrainEngine, whereSql: string, params: unknown[], reasons: string[]) {
@@ -374,7 +532,7 @@ async function loadArticleInput(engine: BrainEngine, article: SourceArticleViewR
   return { base: bases[0], connector, transform, bases };
 }
 
-export async function compileSourceArticleView(engine: BrainEngine, articleViewId: string, opts: { approvedBy?: string } = {}) {
+export async function buildSourceArticleViewSnapshot(engine: BrainEngine, articleViewId: string, opts: { approvedBy?: string } = {}) {
   const [article] = await listSourceArticleViews(engine, articleViewId);
   if (!article) throw new Error(`article_view not found: ${articleViewId}`);
   const articleDef = article.article_json as unknown as SourceArticleView;
@@ -415,6 +573,11 @@ export async function compileSourceArticleView(engine: BrainEngine, articleViewI
     review: { approved_by: opts.approvedBy || 'local', approved_at: new Date().toISOString() },
   };
   const versionHash = profileHash(profile);
+  return { article_view_id: articleViewId, compiled_profile: profile, version_hash: versionHash, current_chain_hash: currentChainHash };
+}
+
+export async function compileSourceArticleView(engine: BrainEngine, articleViewId: string, opts: { approvedBy?: string } = {}) {
+  const snapshot = await buildSourceArticleViewSnapshot(engine, articleViewId, opts);
   await executeRawJsonb(
     engine,
     `UPDATE source_article_views
@@ -427,10 +590,10 @@ export async function compileSourceArticleView(engine: BrainEngine, articleViewI
             status = CASE WHEN status = 'draft' THEN 'reviewed' ELSE status END,
             updated_at = now()
       WHERE article_view_id = $1`,
-    [articleViewId, versionHash, currentChainHash],
-    [profile],
+    [articleViewId, snapshot.version_hash, snapshot.current_chain_hash],
+    [snapshot.compiled_profile],
   );
-  return { article_view_id: articleViewId, compiled_profile: profile, version_hash: versionHash, current_chain_hash: currentChainHash };
+  return snapshot;
 }
 
 export async function getCompiledArticleProfile(engine: BrainEngine, articleViewId: string): Promise<{ profile: SourceIngestProfile; version_hash: string; stale: boolean } | null> {

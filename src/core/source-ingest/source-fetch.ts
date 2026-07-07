@@ -1,5 +1,6 @@
 import type { BrainEngine } from '../engine.ts';
 import { defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
+import { listSourceBaseViews } from './catalog.ts';
 import { getSourceConnector } from './connectors/fake.ts';
 import type { SourceRecord } from './connectors/types.ts';
 import type { SourceIngestProfile } from './profile-schema.ts';
@@ -48,6 +49,26 @@ async function resolveSourceConnectorConfig(ctx: SourceFetchContext, source: Sou
         freshness_policy: savedConfig.freshness_policy ?? undefined,
       };
       return { connectorId: savedConfig.connector_id, objectName: savedConfig.source_object, config: { ...rowConfig, ...(savedConfig.config_json || {}), ...secretConfig } };
+    }
+  }
+  if (source.source_table_id) {
+    const [baseView] = await listSourceBaseViews(ctx.engine, source.source_table_id) as Array<Record<string, unknown>>;
+    if (baseView) {
+      const connectorId = String(baseView.connector_id || fallbackConnectorId);
+      const objectName = String(baseView.object_name || fallbackObjectName);
+      const discovery = (baseView.discovery_json && typeof baseView.discovery_json === 'object') ? baseView.discovery_json as Record<string, unknown> : {};
+      const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, connectorId, objectName, `connector:${connectorId}`);
+      return {
+        connectorId,
+        objectName,
+        config: {
+          table_name: objectName,
+          primary_key_field: typeof discovery.primary_key_field === 'string' ? discovery.primary_key_field : undefined,
+          updated_at_field: typeof discovery.updated_at_field === 'string' ? discovery.updated_at_field : undefined,
+          selected_fields: Array.isArray(baseView.selected_fields) ? baseView.selected_fields : undefined,
+          ...secretConfig,
+        },
+      };
     }
   }
   const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, fallbackConnectorId, fallbackObjectName);

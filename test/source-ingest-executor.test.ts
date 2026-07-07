@@ -19,12 +19,13 @@ import {
   sourceConnectorSecretStatus,
   sourceTableSummariesFromConfigs,
 } from '../src/core/source-ingest/connector-config.ts';
-import { rowToVehicleRecord, AppSheetVehicleConnector, sourceFieldsToAppSheetColumns } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
+import { rowToVehicleRecord, AppSheetVehicleConnector } from '../src/core/source-ingest/connectors/appsheet-vehicles.ts';
 import { runCycle } from '../src/core/cycle.ts';
 import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
 import { draftSourceIngestProfile } from '../src/core/source-ingest/draft.ts';
 import { buildProfileSampleRecords } from '../src/core/source-ingest/source-fetch.ts';
 import { executeSourceTransform } from '../src/core/source-ingest/transform.ts';
+import { discoverSourceObject, profileRecords } from '../src/core/source-ingest/discovery.ts';
 import { renderArticleTemplate, renderTemplateString } from '../src/core/source-ingest/template-renderer.ts';
 import type { SourceIngestProfile } from '../src/core/source-ingest/profile-schema.ts';
 import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
@@ -860,6 +861,24 @@ describe('source-ingest Stage 3A executor', () => {
 
       const secretConfig = await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle');
       expect(secretConfig).toEqual({ app_id: 'app-123456', access_key: 'key-secret-7890' });
+      await putSourceConnectorConfig(engine, {
+        config_id: 'connector:appsheet-avto',
+        connector_id: 'appsheet-avto',
+        source_object: '__connection__',
+        display_name: 'Авто AppSheet',
+        enabled: true,
+        config_json: { connector_level: true, kind: 'appsheet' },
+      }, { actor: 'test' });
+      const customRotated = await putSourceConnectorSecrets(engine, {
+        config_id: 'connector:appsheet-avto',
+        connector_id: 'appsheet-avto',
+        source_object: '__connection__',
+        secret_json: { app_id: 'custom-app', access_key: 'custom-key-1234' },
+      }, { actor: 'admin:test' });
+      expect(customRotated).toMatchObject({ configured: true, storage: 'db' });
+      expect(await getSourceConnectorSecretConfig(engine, 'appsheet-avto', '__connection__', 'connector:appsheet-avto'))
+        .toEqual({ app_id: 'custom-app', access_key: 'custom-key-1234' });
+      expect(JSON.stringify(customRotated)).not.toContain('custom-key-1234');
       expect(await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle', 'appsheet-vehicles:vehicle:vehicles'))
         .toEqual({ app_id: 'app-123456', access_key: 'key-secret-7890' });
       expect(await sourceConnectorSecretStatus(engine, 'appsheet-vehicles', 'appsheet-vehicles:vehicle:vehicles', 'vehicle'))
@@ -876,20 +895,30 @@ describe('source-ingest Stage 3A executor', () => {
     });
   });
 
-  test('AppSheet connector projects selected fields into ColumnNames request property', async () => {
+  test('AppSheet connector does not send ColumnNames because some apps return zero rows when projected', async () => {
     const calls: Array<{ url: string; body: any }> = [];
     const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ url: String(url), body: JSON.parse(String(init?.body || '{}')) });
       return new Response(JSON.stringify([{ ID: 'truck-1', ГосНомер: '111AAA02', Модель: 'Kamaz', ДатаИзменения: '2026-07-01T10:00:00+05:00', related_measurementacts: ['x'] }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
     const connector = new AppSheetVehicleConnector({ appId: 'app', accessKey: 'secret', tableName: 'Автотранспорт', baseUrl: 'https://203.0.113.10/api/v2/apps', fetchImpl });
-    await connector.sample('vehicle', 5, { fields: ['id', 'code', 'name', 'status'] });
-    const columnNames = calls[0].body.Properties.ColumnNames;
-    expect(columnNames).toEqual(sourceFieldsToAppSheetColumns(['id', 'code', 'name', 'status']));
-    expect(columnNames).toContain('ID');
-    expect(columnNames).toContain('ГосНомер');
-    expect(columnNames).not.toContain('related_measurementacts');
+    const sample = await connector.sample('vehicle', 5, { fields: ['id', 'code', 'name', 'status'] });
+    expect(calls[0].body.Properties.ColumnNames).toBeUndefined();
+    expect(sample[0].data).toMatchObject({ id: 'truck-1', code: '111AAA02', name: 'Kamaz' });
     expect(JSON.stringify(calls[0].body)).not.toContain('secret');
+  });
+
+  test('AppSheet discovery profiles real source columns, not synthetic canonical names', async () => {
+    const fetchImpl = (async (_url: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify([
+      { VehicleID: 'truck-1', registration_number: '111AAA02', brand: 'Kamaz', created_at: '2026-07-01T10:00:00+05:00' },
+    ]), { status: 200, headers: { 'Content-Type': 'application/json' } })) as typeof fetch;
+    const connector = new AppSheetVehicleConnector({ connectorId: 'appsheet-avto', appId: 'app', accessKey: 'secret', tableName: 'vehicles', primaryKeyField: 'VehicleID', updatedAtField: 'created_at', baseUrl: 'https://203.0.113.10/api/v2/apps', fetchImpl });
+    const profile = await discoverSourceObject(connector, 'vehicles', 5, { primaryKeyField: 'VehicleID', updatedAtField: 'created_at' });
+    expect(profile.fields.map(f => f.name)).toEqual(['brand', 'created_at', 'registration_number', 'VehicleID'].sort((a, b) => a.localeCompare(b)));
+    expect(profile.fields.map(f => f.name)).not.toContain('code');
+    expect(profile.fields.map(f => f.name)).not.toContain('name');
+    expect(profile.fields.map(f => f.name)).not.toContain('type');
+    expect(profile.idCandidates).toContain('VehicleID');
   });
 
   test('AppSheet connector supports arbitrary table configs with explicit primary/update fields', async () => {
@@ -910,11 +939,45 @@ describe('source-ingest Stage 3A executor', () => {
       fetchImpl,
     });
 
-    const sample = await connector.sample('vehicle', 5, { fields: ['repairID', 'vehicleID', 'title', 'amount'] });
+    const sample = await connector.sample('repairs', 5, { fields: ['repairID', 'vehicleID', 'title', 'amount'] });
+    expect(await connector.listObjects()).toEqual([{ name: 'repairs', displayName: 'repairs', supportsChangedSince: true }]);
+    expect(connector.id).toBe('appsheet-vehicles');
     expect(sample[0]).toMatchObject({ external_id: 'rep-1', source_updated_at: '2026-07-02T12:00:00+05:00' });
     expect(sample[0].data).toMatchObject({ id: 'rep-1', code: 'rep-1', name: 'Замена масла', type: 'repairs', vehicleID: 'veh-001', amount: 12000 });
     expect(calls[0].url).toContain('/tables/repairs/Action');
-    expect(calls[0].body.Properties.ColumnNames).toEqual(['repairID', 'updatedAt', 'vehicleID', 'title', 'amount']);
+    expect(calls[0].body.Properties.ColumnNames).toBeUndefined();
+    expect(JSON.stringify(calls[0].body)).not.toContain('secret');
+  });
+
+  test('discovery preserves reviewer-selected fields and identity even when sample returns zero rows', () => {
+    const profile = profileRecords('appsheet-avto', 'Vehicles', [], undefined, {
+      fields: ['vehicleID', 'name', 'status'],
+      primaryKeyField: 'vehicleID',
+      updatedAtField: 'UpdatedAt',
+    });
+    expect(profile.sampled).toBe(0);
+    expect(profile.fields.map(f => f.name)).toEqual(['name', 'status', 'UpdatedAt', 'vehicleID'].sort((a, b) => a.localeCompare(b)));
+    expect(profile.idCandidates).toContain('vehicleID');
+    expect(profile.updatedAtCandidates).toContain('UpdatedAt');
+    expect(profile.warnings).toContain('sample_returned_no_rows_check_table_name_or_appsheet_filter');
+    expect(profile.warnings).not.toContain('no_stable_id_candidate');
+  });
+
+  test('AppSheet connector exposes explicit vehicles table under the selected connector id', async () => {
+    const calls: Array<{ url: string; body: any }> = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body || '{}')) });
+      return new Response(JSON.stringify([{ ID: 'truck-1', ГосНомер: '111AAA02', Модель: 'Kamaz', ДатаИзменения: '2026-07-01T10:00:00+05:00' }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const connector = new AppSheetVehicleConnector({ connectorId: 'appsheet-avto', appId: 'app', accessKey: 'secret', tableName: 'vehicles', baseUrl: 'https://203.0.113.10/api/v2/apps', fetchImpl });
+    expect(connector.id).toBe('appsheet-avto');
+    expect(await connector.listObjects()).toEqual([
+      { name: 'vehicles', displayName: 'Автотранспорт AppSheet', supportsChangedSince: true },
+      { name: 'vehicle', displayName: 'Автотранспорт AppSheet (legacy alias)', supportsChangedSince: true },
+    ]);
+    const sample = await connector.sample('vehicles', 5, { fields: ['vehicleID\\nname\\nstatus'] });
+    expect(sample[0].external_id).toBe('truck-1');
+    expect(calls[0].url).toContain('/tables/vehicles/Action');
     expect(JSON.stringify(calls[0].body)).not.toContain('secret');
   });
 
