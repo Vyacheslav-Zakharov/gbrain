@@ -35,6 +35,8 @@ type Props = {
   articleInputChoices: ArticleInputChoice[];
   articleSections: Record<string, string>;
   sectionLabels: Record<string, string>;
+  requiredFrontmatter: string[];
+  articleTemplate: unknown;
   articleViewPreview: unknown;
   articleViewRuns: unknown;
   articleViewRunResult: unknown;
@@ -60,7 +62,7 @@ function TabButton({ tab, active, children, onClick }: { tab: Tab; active: Tab; 
   return <button type="button" className={active === tab ? 'btn btn-primary' : 'btn btn-secondary'} onClick={() => onClick(tab)}>{children}</button>;
 }
 
-export function ArticleViewEditor({ busy, sources, formSampleLimit, articleViewForm, setArticleViewForm, articleViewCurrentChainHash, selectedArticleViewRow, articleAvailableFields, articleInputChoices, articleSections, sectionLabels, articleViewPreview, articleViewRuns, articleViewRunResult, articleViewSaveResult, articleViewApproveResult, setActiveSection, seedArticleViewFromCurrent, runArticleViewPreview, saveArticleView, deleteArticleView, approveArticleView, loadArticleViewRuns, runArticleViewBatch, invalidateArticleViewPreview, insertFieldToken, updateArticleSection, DryRunPreview, PreviewJson, studioSectionStyle }: Props) {
+export function ArticleViewEditor({ busy, sources, formSampleLimit, articleViewForm, setArticleViewForm, articleViewCurrentChainHash, selectedArticleViewRow, articleAvailableFields, articleInputChoices, articleSections, sectionLabels, requiredFrontmatter, articleTemplate, articleViewPreview, articleViewRuns, articleViewRunResult, articleViewSaveResult, articleViewApproveResult, setActiveSection, seedArticleViewFromCurrent, runArticleViewPreview, saveArticleView, deleteArticleView, approveArticleView, loadArticleViewRuns, runArticleViewBatch, invalidateArticleViewPreview, insertFieldToken, updateArticleSection, DryRunPreview, PreviewJson, studioSectionStyle }: Props) {
   const [tab, setTab] = useState<Tab>('definition');
   const rows = asArr<Record<string, unknown>>(asObj(articleViewRuns).rows);
   const missingRequired = useMemo(() => {
@@ -71,9 +73,11 @@ export function ArticleViewEditor({ busy, sources, formSampleLimit, articleViewF
     if (!articleViewForm.target_source_id.trim()) missing.push('target_source');
     if (!articleViewForm.slug_template.trim()) missing.push('slug_template');
     if (!articleViewForm.external_id_field.trim()) missing.push('external_id_field');
+    const generatedFrontmatter = new Set(['type', 'title', 'source_id', 'status']);
+    for (const key of requiredFrontmatter) if (!generatedFrontmatter.has(key)) missing.push(`frontmatter.${key}`);
     if (Object.values(articleSections).every(v => !String(v || '').trim())) missing.push('article_template_sections');
     return missing;
-  }, [articleViewForm, articleSections]);
+  }, [articleViewForm, articleSections, requiredFrontmatter]);
   const canApprove = Boolean(articleViewForm.article_view_id && articleViewCurrentChainHash && missingRequired.length === 0);
 
   return <section style={studioSectionStyle('article_views')}>
@@ -122,7 +126,9 @@ export function ArticleViewEditor({ busy, sources, formSampleLimit, articleViewF
           <label style={{ alignSelf: 'end' }}><input type="checkbox" checked={articleViewForm.pii} onChange={e => { setArticleViewForm(prev => ({ ...prev, pii: e.target.checked })); invalidateArticleViewPreview(); }} style={{ marginRight: 8 }} />Contains PII</label>
           <div style={{ gridColumn: '1 / -1', border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
             <h3 style={{ fontSize: 13, marginBottom: 8 }}>Schema-template article sections</h3>
-            <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>TODO source of truth is active schema `_templates/&lt;type&gt;`; current editor keeps sections editable and blocks approve if all are empty.</div>
+            <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>
+              Source: <code>{val(asObj(articleTemplate).template_page) || 'fallback'}</code>; required frontmatter: {requiredFrontmatter.length ? requiredFrontmatter.map(key => <code key={key} style={{ marginLeft: 4 }}>{key}</code>) : '—'}.
+            </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>{Object.entries(articleSections).map(([key, value]) => <label key={`article-view-${key}`} style={{ display: 'block' }}>{sectionLabels[key] || key}<textarea rows={key === 'links' || key === 'notes' ? 4 : 2} value={value} onFocus={() => setActiveSection(key)} onDrop={e => { e.preventDefault(); const token = e.dataTransfer.getData('text/plain'); if (token) updateArticleSection(key, `${value}${value ? ' ' : ''}${token}`); }} onDragOver={e => e.preventDefault()} onChange={e => updateArticleSection(key, e.target.value)} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} /></label>)}</div>
           </div>
         </div>

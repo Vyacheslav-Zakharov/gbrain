@@ -1098,6 +1098,15 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  app.get('/admin/api/source-ingest/article-template/:type', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      res.json(await operationsByName.source_article_template.handler(ctx, { gbrain_type: req.params.type }));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
   app.post('/admin/api/source-ingest/catalog/connector', requireAdmin, express.json(), async (req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
     try {
@@ -1464,7 +1473,11 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         return;
       }
       const current_chain_hash = typeof req.body?.current_chain_hash === 'string' ? req.body.current_chain_hash.trim() : undefined;
-      const out = await operationsByName.source_article_view_approve.handler(ctx, { article_view_id, approved_by: 'admin-ui', ...(current_chain_hash ? { current_chain_hash } : {}) });
+      if (!current_chain_hash) {
+        res.status(400).json({ error: 'current_chain_hash_required' });
+        return;
+      }
+      const out = await operationsByName.source_article_view_approve.handler(ctx, { article_view_id, approved_by: 'admin-ui', current_chain_hash });
       res.json(out);
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });

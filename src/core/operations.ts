@@ -51,7 +51,7 @@ import { draftSourceIngestProfile } from './source-ingest/draft.ts';
 import { buildSourceDryRun } from './source-ingest/dry-run.ts';
 import { buildProfileSampleRecords, fetchSourceSample } from './source-ingest/source-fetch.ts';
 import { executeSourceTransform, type SourceTransformConfig, type SourceTransformSource } from './source-ingest/transform.ts';
-import { sourceIngestProfileJsonSchema, type SourceFilterRule } from './source-ingest/profile-schema.ts';
+import { sourceIngestProfileJsonSchema, type SourceFilterRule, type SourceIngestProfile } from './source-ingest/profile-schema.ts';
 import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
 import { listSourceIngestProfiles, putSourceIngestProfile, profileHash } from './source-ingest/store.ts';
 import {
@@ -3428,6 +3428,87 @@ const source_article_view_delete: Operation = {
   },
 };
 
+function articleTemplateFallback(gbrainType: string) {
+  const sections = [
+    { key: 'title', label: 'Заголовок H1 / frontmatter title', hint: 'Обычно {{ display_name_field }}.' },
+    { key: 'summary', label: 'Описание под заголовком' },
+    { key: 'characteristics_type', label: 'Характеристики → Тип' },
+    { key: 'characteristics_model', label: 'Характеристики → Производитель/модель' },
+    { key: 'characteristics_status', label: 'Характеристики → Состояние' },
+    { key: 'characteristics_inventory', label: 'Характеристики → Инвентарный/серийный №' },
+    { key: 'links', label: 'Связи' },
+    { key: 'notes', label: 'Заметки' },
+    { key: 'timeline', label: 'Timeline' },
+  ];
+  return { sections, required_frontmatter: ['type', 'source_id', 'status'], template_page: null, warnings: [`template_page_missing:${gbrainType}`] };
+}
+
+function extractMarkdownFence(markdown: string): string {
+  const m = markdown.match(/````markdown\n([\s\S]*?)\n````|```markdown\n([\s\S]*?)\n```/i);
+  return (m?.[1] || m?.[2] || markdown).trim();
+}
+
+function slugKey(label: string): string {
+  const lower = label.toLowerCase().replace(/[`*_<>]/g, '').trim();
+  if (lower.includes('характер')) return 'characteristics';
+  if (lower.includes('связ')) return 'links';
+  if (lower.includes('замет')) return 'notes';
+  if (lower.includes('timeline') || lower.includes('тайм')) return 'timeline';
+  return lower.replace(/[^a-z0-9а-яё]+/gi, '_').replace(/^_+|_+$/g, '') || 'section';
+}
+
+function extractTemplateSections(markdown: string) {
+  const body = extractMarkdownFence(markdown);
+  const headings = Array.from(body.matchAll(/^##\s+(.+)$/gm)).map(m => String(m[1] || '').trim()).filter(Boolean);
+  const out: Array<{ key: string; label: string; hint?: string }> = [
+    { key: 'title', label: 'Заголовок H1 / frontmatter title', hint: 'Из строки # ... внутри шаблона.' },
+    { key: 'summary', label: 'Описание под заголовком', hint: 'Первый абзац после заголовка.' },
+  ];
+  for (const label of headings) {
+    const key = slugKey(label);
+    if (!out.some(s => s.key === key)) out.push({ key, label });
+  }
+  if (out.some(s => s.key === 'characteristics')) {
+    out.push(
+      { key: 'characteristics_type', label: 'Характеристики → Тип' },
+      { key: 'characteristics_model', label: 'Характеристики → Производитель/модель' },
+      { key: 'characteristics_status', label: 'Характеристики → Состояние' },
+      { key: 'characteristics_inventory', label: 'Характеристики → Инвентарный/серийный №' },
+    );
+  }
+  return out.filter((s, i, arr) => arr.findIndex(x => x.key === s.key) === i);
+}
+
+async function loadSourceArticleTemplate(engine: BrainEngine, gbrainType: string) {
+  const type = gbrainType.trim();
+  if (!type) throw new OperationError('invalid_params', 'gbrain_type_required');
+  const slug = `_templates/${type}`;
+  const rows = await engine.executeRaw<{ slug: string; compiled_truth: string | null }>(
+    `SELECT slug, compiled_truth FROM pages WHERE deleted_at IS NULL AND source_id = 'shared' AND slug = $1 LIMIT 1`,
+    [slug],
+  );
+  const fallback = articleTemplateFallback(type);
+  if (!rows[0]?.compiled_truth) return fallback;
+  const sections = extractTemplateSections(rows[0].compiled_truth);
+  return { sections: sections.length ? sections : fallback.sections, required_frontmatter: ['type', 'source_id', 'status'], template_page: rows[0].slug, warnings: [] as string[] };
+}
+
+async function validateArticleTemplateRequired(engine: BrainEngine, profile: SourceIngestProfile) {
+  const template = await loadSourceArticleTemplate(engine, profile.target.gbrain_type);
+  const frontmatter = { ...(profile.mapping?.frontmatter || {}), ...(profile.mapping?.article_template?.frontmatter || {}) } as Record<string, unknown>;
+  const generated = new Set(['type', 'title', 'source_id', 'status']);
+  const missing = template.required_frontmatter.filter((key: string) => !generated.has(key) && !(key in frontmatter));
+  return { ok: missing.length === 0, missing, template };
+}
+
+const source_article_template: Operation = {
+  name: 'source_article_template',
+  description: 'Read schema/template-derived article sections for a GBrain page type.',
+  scope: 'read',
+  params: { gbrain_type: { type: 'string', required: true } },
+  handler: async (ctx, p) => loadSourceArticleTemplate(ctx.engine, String(p.gbrain_type || '')),
+};
+
 const source_article_view_dry_run: Operation = {
   name: 'source_article_view_dry_run',
   description: 'LOCAL/TRUSTED: compile an article view chain in-memory and run source dry-run without freezing the snapshot.',
@@ -3443,6 +3524,8 @@ const source_article_view_dry_run: Operation = {
     const snapshot = await buildSourceArticleViewSnapshot(ctx.engine, String(p.article_view_id || ''), { approvedBy: 'dry-run' });
     const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, snapshot.compiled_profile);
     if (!validation.ok || !validation.profile) return { ok: false, validation, current_chain_hash: snapshot.current_chain_hash, compiled: snapshot };
+    const template_validation = await validateArticleTemplateRequired(ctx.engine, validation.profile);
+    if (!template_validation.ok) return { ok: false, validation, template_validation, current_chain_hash: snapshot.current_chain_hash, compiled: snapshot };
     const sample = await buildProfileSampleRecords(validation.profile, (p.sample_limit as number | undefined) ?? 25, {
       engine: ctx.engine,
       connectorConfigOverride: p.connector_config as Record<string, unknown> | undefined,
@@ -3463,20 +3546,21 @@ const source_article_view_approve: Operation = {
   params: {
     article_view_id: { type: 'string', required: true },
     approved_by: { type: 'string' },
-    current_chain_hash: { type: 'string', description: 'Chain hash returned by source_article_view_dry_run; when supplied, approve fails if definition changed.' },
+    current_chain_hash: { type: 'string', required: true, description: 'Chain hash returned by source_article_view_dry_run; approve fails if definition changed.' },
   },
   handler: async (ctx, p) => {
     if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_approve is local/trusted only.');
     const expectedChainHash = typeof p.current_chain_hash === 'string' && p.current_chain_hash.trim() ? p.current_chain_hash.trim() : undefined;
-    if (expectedChainHash) {
-      const snapshot = await buildSourceArticleViewSnapshot(ctx.engine, String(p.article_view_id || ''), { approvedBy: p.approved_by as string | undefined });
-      if (snapshot.current_chain_hash !== expectedChainHash) {
-        throw new OperationError('conflict', 'chain_hash_mismatch: run article preview again before approving this publication.');
-      }
+    if (!expectedChainHash) throw new OperationError('invalid_params', 'current_chain_hash_required: run article preview before approving this publication.');
+    const snapshot = await buildSourceArticleViewSnapshot(ctx.engine, String(p.article_view_id || ''), { approvedBy: p.approved_by as string | undefined });
+    if (snapshot.current_chain_hash !== expectedChainHash) {
+      throw new OperationError('conflict', 'chain_hash_mismatch: run article preview again before approving this publication.');
     }
     const compiled = await compileSourceArticleView(ctx.engine, String(p.article_view_id || ''), { approvedBy: p.approved_by as string | undefined });
     const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, compiled.compiled_profile);
     if (!validation.ok || !validation.profile) return { ok: false, validation, compiled };
+    const template_validation = await validateArticleTemplateRequired(ctx.engine, validation.profile);
+    if (!template_validation.ok) return { ok: false, validation, template_validation, compiled };
     const saved = await putSourceIngestProfile(ctx.engine, validation.profile, { createdBy: (p.approved_by as string | undefined) || 'local', changeNote: 'compiled article_view snapshot' });
     return { ok: true, compiled, saved };
   },
@@ -6123,7 +6207,7 @@ export const operations: Operation[] = [
   source_connector_list, source_connector_upsert, source_connector_delete,
   source_base_view_list, source_base_view_execute, source_base_view_upsert, source_base_view_delete,
   source_transform_view_list, source_transform_view_execute, source_transform_view_upsert, source_transform_view_delete,
-  source_article_view_list, source_article_view_upsert, source_article_view_delete, source_article_view_dry_run, source_article_view_approve, source_article_view_run, source_article_view_runs,
+  source_article_view_list, source_article_view_upsert, source_article_view_delete, source_article_template, source_article_view_dry_run, source_article_view_approve, source_article_view_run, source_article_view_runs,
   source_profile_draft, source_validate_profile, source_profile_get, source_profile_put, source_dry_run, source_sync_status,
   source_ingest, source_refresh, source_revert,
   // Files

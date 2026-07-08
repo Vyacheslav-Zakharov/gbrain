@@ -143,18 +143,6 @@ function isNoisySourceField(field: Record<string, unknown>): boolean {
   return name.startsWith('related') || name.includes('related_') || name.includes('measurementacts') || types.some(t => t.includes('array') || t.includes('object')) || samples.some(s => s.length > 500 || s.split(',').length > 20);
 }
 
-const SECTION_LABELS: Record<string, string> = {
-  title: 'Заголовок H1 / frontmatter title',
-  summary: 'Описание под заголовком',
-  characteristics_type: 'Характеристики → Тип',
-  characteristics_model: 'Характеристики → Производитель/модель',
-  characteristics_status: 'Характеристики → Состояние',
-  characteristics_inventory: 'Характеристики → Инвентарный/серийный №',
-  links: 'Связи',
-  notes: 'Заметки',
-  timeline: 'Timeline',
-};
-
 function profileId(profile: unknown): string {
   return String((profile as Record<string, unknown> | null)?.profile_id ?? 'draft');
 }
@@ -599,6 +587,7 @@ export function SourceIngestPage() {
   const [articleViewCurrentChainHash, setArticleViewCurrentChainHash] = useState('');
   const [articleViewRuns, setArticleViewRuns] = useState<unknown>(null);
   const [articleViewRunResult, setArticleViewRunResult] = useState<unknown>(null);
+  const [articleTemplate, setArticleTemplate] = useState<unknown>(null);
   const [schemaWorkbench, setSchemaWorkbench] = useState<unknown>(null);
   const [schemaType, setSchemaType] = useState('');
   const [schemaTypeExplain, setSchemaTypeExplain] = useState<unknown>(null);
@@ -630,7 +619,36 @@ export function SourceIngestPage() {
 
   useEffect(() => { void load(); }, []);
 
+  const loadArticleTemplate = async (type: string, opts: { resetEmpty?: boolean } = {}) => {
+    if (!type.trim()) return;
+    try {
+      const tmpl = await api.sourceIngestArticleTemplate(type.trim());
+      setArticleTemplate(tmpl);
+      const sections = asArr<Record<string, unknown>>(asObj(tmpl).sections);
+      if (sections.length > 0) {
+        setArticleSections(prev => {
+          const next: Record<string, string> = {};
+          for (const section of sections) {
+            const key = String(section.key ?? '').trim();
+            if (!key) continue;
+            next[key] = opts.resetEmpty && !String(prev[key] ?? '').trim() ? '' : String(prev[key] ?? '');
+          }
+          for (const [key, value] of Object.entries(prev)) if (!(key in next) && String(value || '').trim()) next[key] = value;
+          return next;
+        });
+      }
+    } catch (e) {
+      setErr(prev => prev ?? `article_template_unavailable: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  useEffect(() => { void loadArticleTemplate(articleViewForm.gbrain_type, { resetEmpty: true }); }, [articleViewForm.gbrain_type]);
+
   const catalogConnectors = data?.catalog_tree?.connectors ?? [];
+  const articleTemplateObj = asObj(articleTemplate);
+  const articleTemplateSections = asArr<Record<string, unknown>>(articleTemplateObj.sections);
+  const articleSectionLabels = Object.fromEntries(articleTemplateSections.map(section => [String(section.key ?? ''), String(section.label ?? section.key ?? '')]).filter(([key]) => key));
+  const articleRequiredFrontmatter = asArr(articleTemplateObj.required_frontmatter).map(String);
   const schemaObj = asObj(schemaWorkbench);
   const schemaGraph = asObj(schemaObj.graph);
   const schemaNodes = asArr<Record<string, unknown>>(schemaGraph.nodes);
@@ -1629,7 +1647,7 @@ export function SourceIngestPage() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
             <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>EDIT</div>
-            <h2 className="section-title" style={{ marginBottom: 0 }}>{activeArea === 'connectors' ? 'Connectors' : activeArea === 'base_views' ? 'Base views' : activeArea === 'transform_views' ? 'Transform views' : activeArea === 'article_views' ? 'Article views' : activeArea === 'schema_view' ? 'Schema view' : 'Profiles / refresh'}</h2>
+            <h2 className="section-title" style={{ marginBottom: 0 }}>{activeArea === 'connectors' ? 'Connectors' : activeArea === 'base_views' ? 'Base views' : activeArea === 'transform_views' ? 'Transform views' : activeArea === 'article_views' ? 'Article views' : 'Schema view'}</h2>
           </div>
           <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void load()}>Reload</button>
         </div>
@@ -1685,148 +1703,6 @@ export function SourceIngestPage() {
         studioSectionStyle={studioSectionStyle}
       />
 
-      <section style={studioSectionStyle('profiles')}>
-        <h2 className="section-title">Legacy source table / connector config</h2>
-        <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
-          Сохраняем не просто connector, а конкретную таблицу источника: <code>{configId}</code>. Один connector может иметь несколько source tables для join/union в transform.
-        </p>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-          <label>Connector
-            <select value={form.connector_id} onChange={e => {
-              const connector = connectorChoices.find(c => c.id === e.target.value);
-              const patch = formPatchForConnector(connector);
-              updateFormAndInvalidate({ connector_id: e.target.value, ...patch });
-              setTransformPrimaryKey(patch.primary_key_field || 'id');
-              setTransformUpdatedAt(patch.updated_at_field || '');
-              setTransformSourcesText('');
-            }}>
-              {connectorChoices.map(c => <option key={c.id} value={c.id}>{c.displayName} ({c.id}){c.status === 'scaffold' ? ' — scaffold' : c.status === 'catalog' ? ' — catalog' : ''}</option>)}
-            </select>
-            {selectedConnector?.status === 'scaffold' && <span style={{ display: 'block', color: 'var(--warning)', fontSize: 12 }}>Scaffold only: можно сохранить source table config и использовать в transform JSON, но live discovery/sample будет работать после реализации connector IO.</span>}
-          </label>
-          <label>Source object
-            <input value={form.source_object} onChange={e => updateFormAndInvalidate({ source_object: e.target.value })} />
-          </label>
-          <label>Source table name / API object
-            <input value={form.table_name} onChange={e => updateFormAndInvalidate({ table_name: e.target.value })} />
-          </label>
-          <label>Primary key field
-            <input value={form.primary_key_field} onChange={e => { updateFormAndInvalidate({ primary_key_field: e.target.value }); setTransformPrimaryKey(e.target.value || transformPrimaryKey); }} placeholder="vehicleID" />
-          </label>
-          <label>Updated-at field (optional)
-            <input value={form.updated_at_field} onChange={e => { updateFormAndInvalidate({ updated_at_field: e.target.value }); setTransformUpdatedAt(e.target.value || transformUpdatedAt); }} placeholder="updatedAt / modified" />
-          </label>
-          <label>Target GBrain source
-            <select value={form.target_source_id} onChange={e => updateFormAndInvalidate({ target_source_id: e.target.value })}>
-              {data.sources.map(s => <option key={s.id} value={s.id}>{s.id} · {s.name}</option>)}
-            </select>
-          </label>
-          <label>Slug prefix
-            <input value={form.slug_prefix} onChange={e => updateFormAndInvalidate({ slug_prefix: e.target.value })} />
-          </label>
-          <label>Article freshness policy
-            <select value={form.freshness_policy} onChange={e => updateFormAndInvalidate({ freshness_policy: e.target.value })}>
-              <option value="PT6H">6 hours</option>
-              <option value="P1D">1 day</option>
-              <option value="P7D">7 days</option>
-              <option value="P30D">30 days</option>
-              <option value="P90D">90 days</option>
-            </select>
-          </label>
-          <label>Sample limit
-            <input type="number" min={1} max={200} value={form.sample_limit} onChange={e => updateFormAndInvalidate({ sample_limit: Number(e.target.value) || 25 })} />
-          </label>
-        </div>
-        <div style={{ marginTop: 12, color: 'var(--text-secondary)' }}>
-          Credential storage: <b>{val(secretStatus.storage)}</b>
-          <span style={{ marginLeft: 8, color: secretStatus.configured ? 'var(--success)' : 'var(--warning)' }}>
-            {secretStatus.configured ? 'configured' : `missing: ${((secretStatus.missing_keys as string[]) ?? []).join(', ') || 'unknown'}`}
-          </span>
-          <div style={{ marginTop: 6 }}>
-            Masked: {Object.entries(asObj(secretStatus.masked)).map(([k, v]) => <span key={k} style={{ marginRight: 10 }}><code>{k}</code> {String(v)}</span>)}
-            {Object.keys(asObj(secretStatus.masked)).length === 0 && '—'}
-          </div>
-          <div style={{ marginTop: 6, fontSize: 12 }}>
-            Updated: {val(secretStatus.updated_by)} · {val(secretStatus.updated_at)}
-          </div>
-        </div>
-        {form.connector_id === 'appsheet-vehicles' ? <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 12 }}>
-            <label>App ID
-              <input type="password" autoComplete="off" value={secretForm.app_id} onChange={e => setSecretForm({ ...secretForm, app_id: e.target.value })} placeholder="saved separately; never shown back" />
-            </label>
-            <label>Access Key
-              <input type="password" autoComplete="off" value={secretForm.access_key} onChange={e => setSecretForm({ ...secretForm, access_key: e.target.value })} placeholder="saved separately; never shown back" />
-            </label>
-          </div>
-          <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-            <button className="btn btn-secondary" disabled={busy !== null || !secretForm.app_id || !secretForm.access_key} onClick={() => void rotateSecret()}>{busy === 'save-secret' ? 'Saving secret…' : 'Rotate/save secret + test'}</button>
-            <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void deleteSecret()}>{busy === 'delete-secret' ? 'Deleting…' : 'Delete secret'}</button>
-            <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void loadSecretAudit()}>{busy === 'secret-audit' ? 'Loading audit…' : 'Audit'}</button>
-          </div>
-        </> : <div style={{ marginTop: 12, color: 'var(--text-muted)', fontSize: 12 }}>
-          Credential editor for <code>{form.connector_id}</code> is scaffolded but not active yet. Save non-secret source table config now; connector-specific secret fields arrive with live connector IO.
-        </div>}
-        {secretAudit !== null && <details open style={{ marginTop: 10 }}><summary>Secret audit</summary><PreviewJson value={secretAudit} empty="No audit." /></details>}
-        <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void saveConfig()}>{busy === 'save-config' ? 'Saving…' : 'Save config'}</button>
-          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void testConnection()}>{busy === 'test-connection' ? 'Testing…' : 'Test connection'}</button>
-          <button className="btn btn-secondary" disabled={busy !== null || !savedConfig} onClick={applySavedConfig}>Load saved config</button>
-          <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>
-            saved: {savedConfig ? `${savedConfig.config_id} · ${savedConfig.enabled ? 'enabled' : 'disabled'}` : 'none'}
-          </span>
-        </div>
-        {connectionTest !== null && (() => {
-          const t = asObj(connectionTest);
-          const ok = t.ok === true;
-          return <div style={{ marginTop: 12, padding: 10, borderRadius: 6, background: ok ? 'rgba(16, 185, 129, 0.12)' : 'rgba(245, 158, 11, 0.12)', color: ok ? 'var(--success)' : 'var(--warning)' }}>
-            <b>{ok ? 'connection ok' : 'connection failed'}</b>
-            <span style={{ marginLeft: 8, color: 'var(--text-secondary)' }}>
-              {ok
-                ? `sampled ${val(t.sampled)} · fields ${val(t.fields_count)} · ${val(t.elapsed_ms)} ms`
-                : val(t.error)}
-            </span>
-          </div>;
-        })()}
-        {discoveredFields.length > 0 && <div style={{ marginTop: 14, border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 8 }}>
-            <div>
-              <b>Fields to carry forward</b>
-              <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>Uncheck noisy AppSheet relation/list fields before Draft profile. Only selected fields are shown in the mapper and passed into the drafted profile.</div>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn btn-secondary" type="button" onClick={() => selectAllFields(discoveredFields.map(f => String(f.name)).filter(Boolean))}>Select all</button>
-              <button className="btn btn-secondary" type="button" onClick={() => selectAllFields(discoveredFields.filter(f => !isNoisySourceField(f)).map(f => String(f.name)).filter(Boolean))}>Exclude noisy</button>
-            </div>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 6, maxHeight: 260, overflow: 'auto' }}>
-            {discoveredFields.map(f => {
-              const name = String(f.name);
-              const noisy = isNoisySourceField(f);
-              return <label key={name} style={{ display: 'block', padding: 6, borderRadius: 6, background: selectedSourceFieldSet.has(name) ? 'rgba(16, 185, 129, 0.08)' : 'rgba(148, 163, 184, 0.08)' }}>
-                <input type="checkbox" checked={selectedSourceFieldSet.has(name)} onChange={e => setFieldSelected(name, e.target.checked)} style={{ marginRight: 6 }} />
-                <code>{name}</code>{noisy && <span style={{ color: 'var(--warning)', marginLeft: 6 }}>noisy</span>}
-                <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 11 }}>{asArr(f.samples).slice(0, 2).map(val).join(' · ') || '—'}</span>
-              </label>;
-            })}
-          </div>
-          <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 8 }}>Selected {selectedSourceFields.length} of {discoveredFields.length}. If you change selection after dry-run, run Draft profile/Dry-run again before approval.</div>
-        </div>}
-        <ul style={{ marginTop: 10, paddingLeft: 18, color: 'var(--text-secondary)' }}>
-          {(selectedConnector?.safety ?? []).map(s => <li key={s}>{s}</li>)}
-        </ul>
-        <div style={{ marginTop: 14, border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
-          <h3 style={{ fontSize: 13, marginBottom: 8 }}>Saved source tables</h3>
-          {sourceTables.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>No saved source tables yet. Save config after setting connector/table/key fields.</div>}
-          {sourceTables.length > 0 && <div style={{ display: 'grid', gap: 8 }}>
-            {sourceTables.map(t => <div key={String(t.source_table_id)} style={{ padding: 8, borderRadius: 6, background: String(t.source_table_id) === configId ? 'rgba(16, 185, 129, 0.10)' : 'rgba(148, 163, 184, 0.08)' }}>
-              <div><code>{val(t.source_table_id)}</code> {t.enabled === false && <span style={{ color: 'var(--warning)' }}>disabled</span>}</div>
-              <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>table: <code>{val(t.table_name)}</code> · key: <code>{val(t.primary_key_field)}</code> · updated: <code>{val(t.updated_at_field)}</code> · fields: {asArr(t.fields).length}</div>
-              <button className="btn btn-secondary" type="button" style={{ marginTop: 6 }} onClick={() => setTransformSourcesText(prev => prev || JSON.stringify([{ alias: String(t.table_name || t.source_object || 'src').replace(/[^A-Za-z0-9_]+/g, '_'), source_table_id: t.source_table_id, connector: t.connector_id, object: t.source_object, fields: asArr(t.fields) }], null, 2))}>Use in transform sources</button>
-            </div>)}
-          </div>}
-        </div>
-      </section>
 
       <TransformViewEditor
         busy={busy}
@@ -1859,7 +1735,9 @@ export function SourceIngestPage() {
         articleAvailableFields={articleAvailableFields}
         articleInputChoices={articleInputChoices}
         articleSections={articleSections}
-        sectionLabels={SECTION_LABELS}
+        sectionLabels={articleSectionLabels}
+        requiredFrontmatter={articleRequiredFrontmatter}
+        articleTemplate={articleTemplate}
         articleViewPreview={articleViewPreview}
         articleViewRuns={articleViewRuns}
         articleViewRunResult={articleViewRunResult}
@@ -1902,139 +1780,9 @@ export function SourceIngestPage() {
         studioSectionStyle={studioSectionStyle}
       />
 
-      <section style={studioSectionStyle('transform_views')}>
-        <h2 className="section-title">5. Optional SQL transform preview</h2>
-        <label style={{ display: 'block', marginBottom: 10 }}>
-          <input type="checkbox" checked={transformEnabled} onChange={e => { setTransformEnabled(e.target.checked); if (!transformSourcesText) setTransformSourcesText(defaultTransformSources(form, selectedSourceFields)); invalidateTransformPreview(); }} style={{ marginRight: 8 }} />
-          Enable SQL transform before mapping
-        </label>
-        <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 10 }}>
-          Use this for multi-source joins, counts and complex WHERE logic. Each source entry should reference a saved <code>source_table_id</code> (for example <code>appsheet-autopark.vehicles</code> or <code>bigquery-galery.vehicle_costs</code>); it is staged as a temporary PGlite table named by <code>alias</code>.
-        </div>
-        {transformEnabled && <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-          <label>Primary key field in SQL result
-            <input value={transformPrimaryKey} onChange={e => { setTransformPrimaryKey(e.target.value); invalidateTransformPreview(); }} placeholder="vehicleID" />
-          </label>
-          <label>Updated-at field in SQL result
-            <input value={transformUpdatedAt} onChange={e => { setTransformUpdatedAt(e.target.value); invalidateTransformPreview(); }} placeholder="max_updated_at" />
-          </label>
-          <label style={{ gridColumn: '1 / -1' }}>Transform sources JSON
-            <textarea rows={7} value={transformSourcesText} onChange={e => { setTransformSourcesText(e.target.value); invalidateTransformPreview(); }} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} />
-          </label>
-          <label style={{ gridColumn: '1 / -1' }}>Read-only SQL
-            <textarea rows={9} value={transformSql} onChange={e => { setTransformSql(e.target.value); invalidateTransformPreview(); }} placeholder={"SELECT main.vehicleID, main.govNumber, main.updatedAt AS max_updated_at\nFROM main\nWHERE main.vehicleID IS NOT NULL"} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} />
-          </label>
-          <div style={{ gridColumn: '1 / -1', color: transformSources.length > 0 && transformSql.trim() ? 'var(--text-muted)' : 'var(--warning)', fontSize: 12 }}>
-            Parsed sources: {transformSources.length}. SQL is sent only inside profile dry-run/approval; mutating SQL is rejected server-side.
-          </div>
-          <div style={{ gridColumn: '1 / -1', display: 'flex', gap: 10, alignItems: 'center' }}>
-            <button className="btn btn-secondary" disabled={busy !== null || !canTransformPreview} onClick={() => void runTransformPreview()}>{busy === 'transform-preview' ? 'Previewing transform…' : 'Preview transform rows'}</button>
-            <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Inspect SQL result before article mapping and approval.</span>
-          </div>
-          {transformPreview !== null && <div style={{ gridColumn: '1 / -1', border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
-            <TransformResultPreview value={transformPreview} />
-          </div>}
-        </div>}
-      </section>
 
-      <section style={studioSectionStyle('profiles')}>
-        <h2 className="section-title">Legacy profile workflow</h2>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
-          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void discover()}>{busy === 'discover' ? 'Discovering…' : 'Discover'}</button>
-          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void draftProfile()}>{busy === 'draft' ? 'Drafting…' : 'Draft profile'}</button>
-          <button className="btn btn-secondary" disabled={busy !== null || !canDryRun} onClick={() => void runDryRun()}>{busy === 'dry-run' ? 'Running…' : 'Dry-run preview'}</button>
-          <button className="btn btn-primary" disabled={busy !== null || !canApprove} onClick={() => void approveProfile()}>{busy === 'approve' ? 'Approving…' : 'Approve profile'}</button>
-          {dryRunSourceMismatch && <span style={{ color: 'var(--warning)', alignSelf: 'center' }}>Target source changed from dry-run ({dryRunSourceId}) to {form.target_source_id}; run dry-run preview again.</span>}
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 320px) 1fr', gap: 14, marginBottom: 14 }}>
-          <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
-            <h3 style={{ fontSize: 13, marginBottom: 8 }}>Source fields</h3>
-            <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 8 }}>Click a field to insert <code>{'{{ field }}'}</code> into the active template box.</div>
-            <div style={{ maxHeight: 360, overflow: 'auto' }}>
-              {discoveredFields.length === 0 && <div style={{ color: 'var(--text-muted)' }}>Run Discover first.</div>}
-              {discoveredFields.length > 0 && includedDiscoveryFields.length === 0 && <div style={{ color: 'var(--warning)' }}>No fields selected in Configure connector.</div>}
-              {includedDiscoveryFields.map(f => <button key={String(f.name)} className="btn btn-secondary" style={{ display: 'block', width: '100%', marginBottom: 6, textAlign: 'left' }} onClick={() => insertFieldToken(String(f.name))}>
-                <span className="mono">{val(f.name)}</span>
-                <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 11 }}>{asArr(f.samples).slice(0, 2).map(val).join(' · ') || '—'}</span>
-              </button>)}
-            </div>
-          </div>
-          <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
-            <h3 style={{ fontSize: 13, marginBottom: 8 }}>Article mapping editor — equipment template</h3>
-            <div style={{ color: 'var(--text-secondary)', fontSize: 12, marginBottom: 10 }}>
-              Write static text and insert source-field tokens. Dry-run preview renders the final Markdown for several input rows. Editing mapping invalidates the previous dry-run/approval.
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              {Object.entries(articleSections).map(([key, value]) => <label key={key} style={{ display: 'block' }}>
-                {SECTION_LABELS[key] || key}
-                <textarea
-                  rows={key === 'links' || key === 'notes' ? 4 : 2}
-                  value={value}
-                  onFocus={() => setActiveSection(key)}
-                  onChange={e => updateArticleSection(key, e.target.value)}
-                  style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }}
-                />
-              </label>)}
-            </div>
-          </div>
-        </div>
-        {requiresSensitivityAck && <label style={{ display: 'block', marginBottom: 12, padding: 10, borderRadius: 6, background: 'rgba(245, 158, 11, 0.12)', color: 'var(--warning)' }}>
-          <input type="checkbox" checked={sensitivityAck} onChange={e => setSensitivityAck(e.target.checked)} style={{ marginRight: 8 }} />
-          I acknowledge this dry-run targets <code>{form.target_source_id}</code>, classification <code>{val(dryRunSensitivity.classification)}</code>, PII fields <code>{dryRunPiiFields.join(', ') || '—'}</code>, and any cross-source routing warnings.
-        </label>}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-          <div>
-            <h3 style={{ fontSize: 13, marginBottom: 8 }}>Discovery</h3>
-            <DiscoveryPreview value={discovery} />
-          </div>
-          <div>
-            <h3 style={{ fontSize: 13, marginBottom: 8 }}>Draft profile</h3>
-            <PreviewJson value={draft} empty="No draft yet." />
-          </div>
-          <div>
-            <h3 style={{ fontSize: 13, marginBottom: 8 }}>Dry-run</h3>
-            <DryRunPreview value={dryRun} currentTargetSourceId={form.target_source_id} />
-          </div>
-          <div>
-            <h3 style={{ fontSize: 13, marginBottom: 8 }}>Approval</h3>
-            <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', maxHeight: 260, overflow: 'auto' }}>{approveResult ? JSON.stringify(approveResult, null, 2) : activeProfile ? `Ready: ${profileId(activeProfile)}` : 'Draft a profile first.'}</pre>
-          </div>
-        </div>
-      </section>
 
-      <section style={studioSectionStyle('profiles')}>
-        <h2 className="section-title">7. Profiles / refresh</h2>
-        <div style={{ display: 'flex', gap: 12, marginBottom: 12 }}>
-          <select value={selectedProfile} onChange={e => setSelectedProfile(e.target.value)}>
-            <option value="">All profiles</option>
-            {data.profiles.rows.map(p => <option key={p.profile_id} value={p.profile_id}>{p.profile_id} · {p.status} · v{p.current_version}</option>)}
-          </select>
-          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void refreshReport()}>Report due refresh</button>
-          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void load()}>Reload</button>
-        </div>
-        <table>
-          <thead><tr><th>profile</th><th>external</th><th>freshness</th><th>result</th><th>slug</th><th>stale after</th></tr></thead>
-          <tbody>
-            {data.status.rows.map((r, i) => (
-              <tr key={i}>
-                <td className="mono">{val(r.profile_id)}</td>
-                <td className="mono">{val(r.external_id)}</td>
-                <td>{statusBadge(r.freshness)}</td>
-                <td>{val(r.last_result)}</td>
-                <td className="mono">{val(r.slug)}</td>
-                <td className="mono">{val(r.stale_after)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </section>
 
-      {report !== null && (
-        <section style={{ background: 'var(--bg-secondary)', borderRadius: 8, padding: 18 }}>
-          <h2 className="section-title">Last report-only refresh plan</h2>
-          <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)' }}>{JSON.stringify(report, null, 2)}</pre>
-        </section>
-      )}
       </main>
       </div>
     </div>

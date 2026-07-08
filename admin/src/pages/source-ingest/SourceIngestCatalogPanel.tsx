@@ -83,9 +83,8 @@ export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, onSelec
       })}
       {isOpen('article_views') && <TreeButton active={activeNode === 'article_view:new'} depth={2} icon="＋" label="New article view…" meta="schema + template + batch run" onClick={() => { onSelectArea('article_views'); onSelectNode('article_view:new'); }} />}
 
-      <TreeButton active={activeNode === 'section:schema'} depth={1} icon={folderIcon('schema')} label="5 - schema" meta="schema browser + legacy refresh" onClick={() => { toggle('schema'); onSelectArea('schema_view'); onSelectNode('section:schema'); }} />
+      <TreeButton active={activeNode === 'section:schema'} depth={1} icon={folderIcon('schema')} label="5 - schema" meta="schema browser" onClick={() => { toggle('schema'); onSelectArea('schema_view'); onSelectNode('section:schema'); }} />
       {isOpen('schema') && <TreeButton active={activeNode === 'schema_view'} depth={2} icon="▧" label="Schema view" meta={`read-only: ${String(asObj(tree.schema).read_only ?? true)}`} onClick={() => { onSelectArea('schema_view'); onSelectNode('schema_view'); }} />}
-      {isOpen('schema') && <TreeButton active={activeNode === 'profiles'} depth={2} icon="▹" label="Profiles / refresh" meta="legacy status and refresh plans" onClick={() => { onSelectArea('profiles'); onSelectNode('profiles'); }} />}
     </div>
   </aside>;
 }
