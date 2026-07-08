@@ -56,7 +56,7 @@ export class PostgresSourceConnector implements SourceConnector {
 
   async sample(objectName: string, limit: number, opts: SourceFetchOptions = {}): Promise<SourceRecord[]> {
     const object = this.assertAllowedObject(objectName);
-    const fields = this.selectedColumns(object, opts.fields);
+    const fields = await this.selectedColumns(object, opts.fields);
     const pk = this.primaryKeyFor(object);
     const updatedAt = this.updatedAtField;
     const rows = await this.withSql(sql => sql.unsafe(
@@ -78,7 +78,7 @@ export class PostgresSourceConnector implements SourceConnector {
     const object = this.assertAllowedObject(objectName);
     const sinceDate = new Date(since);
     if (!Number.isFinite(sinceDate.getTime())) throw new Error('invalid Postgres changed-since timestamp');
-    const fields = this.selectedColumns(object, opts.fields);
+    const fields = await this.selectedColumns(object, opts.fields);
     const pk = this.primaryKeyFor(object);
     const updatedAt = this.updatedAtField;
     const rows = await this.withSql(sql => sql.unsafe(
@@ -90,7 +90,7 @@ export class PostgresSourceConnector implements SourceConnector {
 
   async fetchById(objectName: string, id: string, opts: SourceFetchOptions = {}): Promise<SourceRecord | null> {
     const object = this.assertAllowedObject(objectName);
-    const fields = this.selectedColumns(object, opts.fields);
+    const fields = await this.selectedColumns(object, opts.fields);
     const pk = this.primaryKeyFor(object);
     const rows = await this.withSql(sql => sql.unsafe(
       `SELECT ${fields.map(quoteIdentifier).join(', ')} FROM ${this.qualifiedTable(object)} WHERE ${quoteIdentifier(pk)} = $1 LIMIT 1`,
@@ -100,7 +100,7 @@ export class PostgresSourceConnector implements SourceConnector {
   }
 
   private async fetchPage(object: string, opts: { offset: number; fields?: string[] }): Promise<Array<Record<string, unknown>>> {
-    const fields = this.selectedColumns(object, opts.fields);
+    const fields = await this.selectedColumns(object, opts.fields);
     const pk = this.primaryKeyFor(object);
     return this.withSql(sql => sql.unsafe(
       `SELECT ${fields.map(quoteIdentifier).join(', ')} FROM ${this.qualifiedTable(object)} ORDER BY ${quoteIdentifier(pk)} ASC LIMIT $1 OFFSET $2`,
@@ -108,11 +108,25 @@ export class PostgresSourceConnector implements SourceConnector {
     ) as Promise<Array<Record<string, unknown>>>);
   }
 
-  private selectedColumns(object: string, requested?: string[]): string[] {
+  private async selectedColumns(object: string, requested?: string[]): Promise<string[]> {
     const pk = this.primaryKeyFor(object);
-    const base = [pk, this.updatedAtField];
     const requestedClean = (requested || []).map(v => String(v).trim()).filter(Boolean).map(v => sanitizeIdentifier(v, 'field'));
+    if (requestedClean.length === 0) return await this.introspectColumns(object, pk);
+    const base = [pk, this.updatedAtField];
     return Array.from(new Set([...base, ...requestedClean]));
+  }
+
+  private async introspectColumns(object: string, pk: string): Promise<string[]> {
+    const rows = await this.withSql(sql => sql.unsafe(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2
+        ORDER BY ordinal_position`,
+      [this.schema, object],
+    ) as Promise<Array<{ column_name: string }>>);
+    const columns = rows.map(r => String(r.column_name)).filter(Boolean).map(v => sanitizeIdentifier(v, 'field'));
+    if (columns.length === 0) throw new Error(`Postgres connector could not introspect columns for ${this.schema}.${object}`);
+    return Array.from(new Set([pk, ...columns.filter(c => c !== pk)]));
   }
 
   private toSourceRecord(object: string, row: Record<string, unknown>): SourceRecord {

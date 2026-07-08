@@ -1185,6 +1185,7 @@ export function SourceIngestPage() {
         },
       } }),
       sample_limit: Number(baseViewForm.sample_limit) || 25,
+      discover_all_fields: true,
     });
     const discoveryOut = asObj(out).discovery || out;
     setBaseViewDiscovery(discoveryOut);
@@ -1196,7 +1197,7 @@ export function SourceIngestPage() {
     if (!baseViewForm.base_view_id.trim() && baseViewForm.connector_id && baseViewForm.object_name) {
       setBaseViewForm(prev => ({ ...prev, base_view_id: defaultBaseViewId(prev.connector_id, prev.object_name, prev.object_name) }));
     }
-    if (fields.length > 0 && !baseViewForm.selected_fields_text.trim()) {
+    if (fields.length > 0 && (!baseViewForm.selected_fields_text.trim() || fields.length > selectedFields.length)) {
       setBaseViewForm(prev => ({ ...prev, selected_fields_text: fields.join('\n') }));
     }
     if (savedBase) await refreshCatalogTree();

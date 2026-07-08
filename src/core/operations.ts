@@ -3184,6 +3184,7 @@ const source_base_view_execute: Operation = {
     base_view_id: { type: 'string', description: 'Saved base view id. Mutually optional with draft.' },
     draft: { type: 'object', description: 'Inline draft with connector_id, object_name, selected_fields, row_filter.' },
     sample_limit: { type: 'number', description: 'Sample size (default from base view or 50).' },
+    discover_all_fields: { type: 'boolean', description: 'Ignore saved selected_fields during preview/discovery and sample every exposed source column.' },
     connector_config: { type: 'object', description: 'Optional non-secret runtime config override for draft execution.' },
   },
   handler: async (ctx, p) => {
@@ -3198,6 +3199,7 @@ const source_base_view_execute: Operation = {
     const objectName = String(src.object_name || '').trim();
     if (!connectorId || !objectName) throw new OperationError('invalid_params', 'connector_id and object_name are required.');
     const selectedFields = Array.isArray(src.selected_fields) ? src.selected_fields.map(String).filter(Boolean) : [];
+    const discoverAllFields = p.discover_all_fields === true;
     const rowFilter = normalizeSourceFilterRules(src.row_filter);
     const sampleLimit = Number.isFinite(Number(p.sample_limit)) ? Number(p.sample_limit) : Number(src.sample_limit || 50);
     const sourceTableId = saved ? String(saved.base_view_id) : undefined;
@@ -3211,12 +3213,12 @@ const source_base_view_execute: Operation = {
       connector: connectorId,
       object: objectName,
       source_table_id: sourceTableId,
-      fields: selectedFields.length ? selectedFields : undefined,
+      fields: !discoverAllFields && selectedFields.length ? selectedFields : undefined,
       sample_limit: sampleLimit,
     }, sampleLimit);
     const filteredRows = rowFilter.length ? records.filter(record => rowFilter.every(rule => sourceFilterMatches(rule, record.data))) : records;
     const discovery = profileRecords(connectorId, objectName, filteredRows, undefined, {
-      fields: selectedFields,
+      fields: discoverAllFields ? [] : selectedFields,
       primaryKeyField: typeof (src.discovery_json as Record<string, unknown> | undefined)?.primary_key_field === 'string' ? String((src.discovery_json as Record<string, unknown>).primary_key_field) : undefined,
       updatedAtField: typeof (src.discovery_json as Record<string, unknown> | undefined)?.updated_at_field === 'string' ? String((src.discovery_json as Record<string, unknown>).updated_at_field) : undefined,
     }) as unknown as Record<string, unknown>;

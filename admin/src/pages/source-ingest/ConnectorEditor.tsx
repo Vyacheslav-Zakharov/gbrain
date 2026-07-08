@@ -25,6 +25,8 @@ type Props = {
 };
 
 export function ConnectorEditor({ busy, catalogConnectorForm, setCatalogConnectorForm, secretForm, setSecretForm, catalogConnectorSecretStatus, catalogConnectorObjects, catalogConnectorTest, catalogConnectorSecretConfigId, saveCatalogConnector, saveCatalogConnectorCredentials, deleteCatalogConnectorCredentials, listCatalogConnectorObjects, testCatalogConnector, deleteCatalogConnector, PreviewJson, studioSectionStyle }: Props) {
+  const testStatus = catalogConnectorTest && typeof catalogConnectorTest === 'object' ? String((catalogConnectorTest as Record<string, unknown>).status ?? '') : '';
+  const testOk = catalogConnectorTest && typeof catalogConnectorTest === 'object' ? (catalogConnectorTest as Record<string, unknown>).ok === true : false;
   return <section style={studioSectionStyle('connectors')}>
     <h2 className="section-title">0. Catalog connector instance</h2>
     <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
@@ -77,6 +79,9 @@ export function ConnectorEditor({ busy, catalogConnectorForm, setCatalogConnecto
       <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void deleteCatalogConnector()}>{busy === 'catalog-delete-connector' ? 'Deleting…' : 'Delete connector'}</button>
       <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>No table is sent from this connector test. Tables/objects are selected and sampled in Base views.</span>
     </div>
+    {catalogConnectorTest !== null && <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, border: `1px solid ${testOk ? 'rgba(34,197,94,.35)' : 'rgba(239,68,68,.35)'}`, color: testOk ? 'var(--success)' : 'var(--danger)', background: testOk ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.08)' }}>
+      Test result: <b>{testOk ? 'OK' : 'FAILED'}</b>{testStatus ? ` · ${testStatus}` : ''}
+    </div>}
     {(catalogConnectorObjects !== null || catalogConnectorTest !== null) && <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12, marginTop: 12 }}>
       {catalogConnectorObjects !== null && <div><h3 style={{ fontSize: 13, marginBottom: 6 }}>Available objects / metadata</h3><PreviewJson value={catalogConnectorObjects} empty="No listObjects result yet." /></div>}
       {catalogConnectorTest !== null && <div><h3 style={{ fontSize: 13, marginBottom: 6 }}>Credential test</h3><PreviewJson value={catalogConnectorTest} empty="No test result yet." /></div>}

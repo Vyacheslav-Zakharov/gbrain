@@ -1227,8 +1227,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         res.status(400).json({ ok: false, status: 'unsupported_connector', connector_id: connectorId });
         return;
       }
-      const objects = objectName ? await connector.listObjects() : [];
       const credentialsConfigured = (credentialStatus.configured !== false);
+      const shouldProbeObjects = credentialsConfigured && (!!objectName || connectorId === 'postgres' || connectorId.startsWith('postgres-'));
+      const objects = shouldProbeObjects ? await connector.listObjects() : [];
       if (!credentialsConfigured) {
         await recordSourceConnectorTest(engine, connectorId, false);
         res.json({ ok: false, status: 'credentials_missing', connector_id: connectorId, elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: 'Connector-level test does not require a table. Add credentials here; table-specific extraction is tested from Base view.' });
@@ -1281,6 +1282,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         draft: req.body?.draft && typeof req.body.draft === 'object' ? req.body.draft : undefined,
         sample_limit: Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : undefined,
         connector_config: req.body?.connector_config && typeof req.body.connector_config === 'object' ? req.body.connector_config : undefined,
+        discover_all_fields: req.body?.discover_all_fields === true,
       });
       res.json(out);
     } catch (e) {
