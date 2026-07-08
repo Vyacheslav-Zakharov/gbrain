@@ -2914,7 +2914,7 @@ const source_connector_config_get: Operation = {
   description: 'Read persisted non-secret source connector configuration plus masked secret readiness. Read-only; MCP-safe.',
   scope: 'read',
   params: {
-    config_id: { type: 'string', description: 'Optional connector config id, e.g. appsheet-vehicles:vehicle' },
+    config_id: { type: 'string', description: 'Optional connector config id. Secrets are canonical at connector:<connector_id>; legacy object-scope IDs are read as fallback.' },
   },
   handler: async (ctx, p) => {
     const rows = await listSourceConnectorConfigs(ctx.engine, p.config_id as string | undefined);
@@ -2968,7 +2968,7 @@ const source_connector_secret_put: Operation = {
   mutating: true,
   localOnly: true,
   params: {
-    config_id: { type: 'string', description: 'Optional connector config id, e.g. appsheet-vehicles:vehicle' },
+    config_id: { type: 'string', description: 'Optional connector config id. Secrets are canonical at connector:<connector_id>; legacy object-scope IDs are read as fallback.' },
     connector_id: { type: 'string', required: true },
     source_object: { type: 'string', required: true },
     secrets: { type: 'object', required: true, description: 'Secret values, e.g. app_id/access_key. Never returned.' },
@@ -2997,7 +2997,7 @@ const source_connector_secret_delete: Operation = {
   mutating: true,
   localOnly: true,
   params: {
-    config_id: { type: 'string', description: 'Optional connector config id, e.g. appsheet-vehicles:vehicle' },
+    config_id: { type: 'string', description: 'Optional connector config id. Secrets are canonical at connector:<connector_id>; legacy object-scope IDs are read as fallback.' },
     connector_id: { type: 'string', required: true },
     source_object: { type: 'string', required: true },
     actor: { type: 'string', description: 'Audit actor label supplied by trusted admin UI/CLI' },
@@ -3022,7 +3022,7 @@ const source_connector_secret_audit: Operation = {
   description: 'Read source connector credential audit trail. Values are never stored in audit rows.',
   scope: 'read',
   params: {
-    config_id: { type: 'string', description: 'Optional connector config id, e.g. appsheet-vehicles:vehicle' },
+    config_id: { type: 'string', description: 'Optional connector config id. Secrets are canonical at connector:<connector_id>; legacy object-scope IDs are read as fallback.' },
     limit: { type: 'number', description: 'Max audit rows (default 20)' },
   },
   handler: async (ctx, p) => ({

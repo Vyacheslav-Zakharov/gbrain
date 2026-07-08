@@ -14,6 +14,14 @@ import {
 } from '../src/core/source-ingest/catalog.ts';
 import { profileHash } from '../src/core/source-ingest/store.ts';
 import { getSourceConnector } from '../src/core/source-ingest/connectors/fake.ts';
+import {
+  connectorSecretConfigId,
+  getSourceConnectorSecretConfig,
+  listSourceConnectorSecretAudit,
+  putSourceConnectorConfig,
+  putSourceConnectorSecrets,
+  sourceConnectorSecretStatus,
+} from '../src/core/source-ingest/connector-config.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
@@ -58,6 +66,30 @@ describe('source-ingest Phase 0 catalog model', () => {
     expect(connector).toBeTruthy();
     const objects = await connector!.listObjects();
     expect(objects.map(o => o.name)).toContain('vehicle');
+  });
+
+  test('connector credentials use connector-scope first and legacy object-scope fallback', async () => {
+    const connectorId = 'appsheet-avto';
+    const canonical = connectorSecretConfigId(connectorId);
+    const legacy = `${connectorId}:vehicle`;
+    await putSourceConnectorConfig(engine, { config_id: canonical, connector_id: connectorId, source_object: '__connection__', display_name: 'AppSheet Avto', enabled: true });
+    await putSourceConnectorConfig(engine, { config_id: legacy, connector_id: connectorId, source_object: 'vehicle', display_name: 'Legacy vehicle scope', enabled: true });
+
+    await putSourceConnectorSecrets(engine, { config_id: legacy, connector_id: connectorId, source_object: 'vehicle', secret_json: { app_id: 'legacy-app', access_key: 'legacy-key' } }, { actor: 'test-legacy' });
+    expect(await getSourceConnectorSecretConfig(engine, connectorId, 'vehicle', canonical)).toMatchObject({ app_id: 'legacy-app', access_key: 'legacy-key' });
+
+    await putSourceConnectorSecrets(engine, { config_id: canonical, connector_id: connectorId, source_object: '__connection__', secret_json: { app_id: 'canonical-app', access_key: 'canonical-key' } }, { actor: 'test-canonical' });
+    expect(await getSourceConnectorSecretConfig(engine, connectorId, 'vehicle', canonical)).toMatchObject({ app_id: 'canonical-app', access_key: 'canonical-key' });
+
+    const status = await sourceConnectorSecretStatus(engine, connectorId, canonical, 'vehicle');
+    expect(status.config_id).toBe(canonical);
+    expect(status.resolved_config_id).toBe(canonical);
+    expect(status.legacy_config_id).toBe(legacy);
+    expect(status.checked_config_ids).toContain(legacy);
+    expect(status.configured).toBe(true);
+
+    const audit = await listSourceConnectorSecretAudit(engine, canonical, 10);
+    expect(audit.map(row => row.config_id)).toEqual(expect.arrayContaining([canonical, legacy]));
   });
 
   test('compiles an article view into a frozen SourceIngestProfile snapshot', async () => {

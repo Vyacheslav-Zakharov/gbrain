@@ -51,6 +51,10 @@ export interface SourceConnectorSecretStatus {
   missing_env: string[];
   masked: Record<string, string>;
   storage: 'none' | 'db' | 'server-env' | 'db+server-env';
+  config_id?: string;
+  resolved_config_id?: string | null;
+  legacy_config_id?: string | null;
+  checked_config_ids?: string[];
   updated_by?: string | null;
   updated_at?: string | null;
 }
@@ -154,6 +158,10 @@ export function defaultSourceConnectorConfigId(connectorId: string, sourceObject
   return `${connectorId}:${sourceObject}${table}`;
 }
 
+export function connectorSecretConfigId(connectorId: string): string {
+  return `connector:${connectorId}`;
+}
+
 function requiredSecretKeys(connectorId: string): string[] {
   if (connectorId === 'appsheet-vehicles' || connectorId === 'appsheet' || connectorId.startsWith('appsheet-')) return APPSHEET_SECRET_KEYS;
   if (connectorId === 'bigquery') return ['service_account_json'];
@@ -201,10 +209,11 @@ function maskSecret(value: unknown): string {
   return value.length <= 4 ? '••••' : `••••${tail}`;
 }
 
-function legacyConfigIdForSecretFallback(connectorId: string, sourceObject: string, configId?: string): string | null {
+function legacyConfigIdsForSecretFallback(connectorId: string, sourceObject: string, configId?: string): string[] {
   const legacy = defaultSourceConnectorConfigId(connectorId, sourceObject);
-  if (!configId || configId === legacy) return null;
-  return configId.startsWith(`${legacy}:`) ? legacy : null;
+  const ids = [legacy];
+  if (configId && configId.startsWith(`${legacy}:`)) ids.push(configId);
+  return Array.from(new Set(ids.filter(id => id !== connectorSecretConfigId(connectorId))));
 }
 
 async function sourceConnectorSecretRowWithLegacyFallback(
@@ -213,19 +222,21 @@ async function sourceConnectorSecretRowWithLegacyFallback(
   sourceObject: string,
   configId?: string,
 ): Promise<SourceConnectorSecretRow | undefined> {
-  const id = configId || defaultSourceConnectorConfigId(connectorId, sourceObject);
-  const [exact] = await listSourceConnectorSecrets(engine, id);
-  if (exact) return exact;
-  const legacyId = legacyConfigIdForSecretFallback(connectorId, sourceObject, id);
-  if (!legacyId) return undefined;
-  const [legacy] = await listSourceConnectorSecrets(engine, legacyId);
-  return legacy;
+  const ids = [connectorSecretConfigId(connectorId), ...legacyConfigIdsForSecretFallback(connectorId, sourceObject, configId)];
+  for (const id of Array.from(new Set(ids))) {
+    const [row] = await listSourceConnectorSecrets(engine, id);
+    if (row) return row;
+  }
+  return undefined;
 }
 
 export async function sourceConnectorSecretStatus(engine: BrainEngine, connectorId: string, configId?: string, sourceObject = 'vehicle'): Promise<SourceConnectorSecretStatus> {
   const required_keys = requiredSecretKeys(connectorId);
   const required_env = requiredEnvKeys(connectorId);
-  if (required_keys.length === 0) return { credential_mode: 'none', required_keys: [], required_env: [], configured: true, missing_keys: [], missing_env: [], masked: {}, storage: 'none' };
+  const canonicalConfigId = connectorSecretConfigId(connectorId);
+  const legacyConfigIds = legacyConfigIdsForSecretFallback(connectorId, sourceObject, configId);
+  const checkedConfigIds = Array.from(new Set([canonicalConfigId, ...legacyConfigIds]));
+  if (required_keys.length === 0) return { credential_mode: 'none', required_keys: [], required_env: [], configured: true, missing_keys: [], missing_env: [], masked: {}, storage: 'none', config_id: canonicalConfigId, resolved_config_id: null, legacy_config_id: legacyConfigIds[0] ?? null, checked_config_ids: checkedConfigIds };
 
   const row = await sourceConnectorSecretRowWithLegacyFallback(engine, connectorId, sourceObject, configId);
   const dbSecrets = row?.secret_json || {};
@@ -250,6 +261,10 @@ export async function sourceConnectorSecretStatus(engine: BrainEngine, connector
     missing_env,
     masked,
     storage: hasDb && hasEnv ? 'db+server-env' : hasDb ? 'db' : hasEnv ? 'server-env' : 'none',
+    config_id: canonicalConfigId,
+    resolved_config_id: row?.config_id ?? (hasEnv ? 'server-env' : null),
+    legacy_config_id: legacyConfigIds[0] ?? null,
+    checked_config_ids: checkedConfigIds,
     updated_by: row?.updated_by ?? null,
     updated_at: row?.updated_at ?? null,
   };
@@ -356,8 +371,7 @@ export async function listSourceConnectorSecrets(engine: BrainEngine, configId?:
 }
 
 export async function getSourceConnectorSecretConfig(engine: BrainEngine, connectorId: string, sourceObject: string, configIdOverride?: string): Promise<Record<string, string>> {
-  const configId = configIdOverride || defaultSourceConnectorConfigId(connectorId, sourceObject);
-  const row = await sourceConnectorSecretRowWithLegacyFallback(engine, connectorId, sourceObject, configId);
+  const row = await sourceConnectorSecretRowWithLegacyFallback(engine, connectorId, sourceObject, configIdOverride);
   const raw = row?.secret_json || {};
   const out: Record<string, string> = {};
   for (const key of requiredSecretKeys(connectorId)) {
@@ -371,7 +385,7 @@ export async function putSourceConnectorSecrets(
   input: { config_id?: string; connector_id: string; source_object: string; secret_json: Record<string, unknown> },
   opts: { actor?: string } = {},
 ): Promise<SourceConnectorSecretStatus> {
-  const configId = input.config_id || defaultSourceConnectorConfigId(input.connector_id, input.source_object);
+  const configId = input.config_id || connectorSecretConfigId(input.connector_id);
   const secretJson = normalizeSecrets(input.connector_id, input.secret_json);
   const keys = Object.keys(secretJson).sort();
   if (keys.length === 0) throw new Error('no_supported_secret_keys');
@@ -406,7 +420,7 @@ export async function deleteSourceConnectorSecrets(
   input: { config_id?: string; connector_id: string; source_object: string },
   opts: { actor?: string } = {},
 ): Promise<SourceConnectorSecretStatus> {
-  const configId = input.config_id || defaultSourceConnectorConfigId(input.connector_id, input.source_object);
+  const configId = input.config_id || connectorSecretConfigId(input.connector_id);
   const [row] = await listSourceConnectorSecrets(engine, configId);
   const keys = Object.keys(row?.secret_json || {}).sort();
   await engine.executeRaw(`DELETE FROM source_connector_secrets WHERE config_id = $1`, [configId]);
@@ -425,8 +439,13 @@ export async function listSourceConnectorSecretAudit(engine: BrainEngine, config
   const params: unknown[] = [];
   let where = '';
   if (configId) {
-    where = 'WHERE config_id = $1';
-    params.push(configId);
+    if (configId.startsWith('connector:')) {
+      where = 'WHERE config_id = $1 OR connector_id = $2';
+      params.push(configId, configId.slice('connector:'.length));
+    } else {
+      where = 'WHERE config_id = $1';
+      params.push(configId);
+    }
   }
   params.push(Math.max(1, Math.min(100, limit)));
   const rows = await engine.executeRaw<SourceConnectorSecretAuditRow>(

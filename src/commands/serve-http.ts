@@ -43,7 +43,7 @@ import {
   type IngestionContentType,
   type IngestionEvent,
 } from '../core/ingestion/types.ts';
-import { defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, sourceConnectorSecretStatus, sourceTableSummariesFromConfigs } from '../core/source-ingest/connector-config.ts';
+import { connectorSecretConfigId, defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, sourceConnectorSecretStatus, sourceTableSummariesFromConfigs } from '../core/source-ingest/connector-config.ts';
 import { buildProfileSampleRecords } from '../core/source-ingest/source-fetch.ts';
 import { profileHash } from '../core/source-ingest/store.ts';
 import { validateSourceIngestProfile } from '../core/source-ingest/profile-schema.ts';
@@ -1575,7 +1575,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         return;
       }
       const out = await operationsByName.source_connector_secret_put.handler(ctx, {
-        config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : `${connector_id}:${source_object}`,
+        config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : connectorSecretConfigId(connector_id),
         connector_id,
         source_object,
         secrets: req.body.secrets,
@@ -1593,7 +1593,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id : 'appsheet-vehicles';
       const source_object = typeof req.body?.source_object === 'string' ? req.body.source_object : 'vehicle';
       const out = await operationsByName.source_connector_secret_delete.handler(ctx, {
-        config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : `${connector_id}:${source_object}`,
+        config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : connectorSecretConfigId(connector_id),
         connector_id,
         source_object,
         actor: adminActor(req),
@@ -1636,13 +1636,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     const connector_id = typeof body.connector_id === 'string' ? body.connector_id : 'appsheet-vehicles';
     const source_object = typeof body.source_object === 'string' ? body.source_object : 'vehicle';
     const config_id = typeof body.config_id === 'string' ? body.config_id : defaultSourceConnectorConfigId(connector_id, source_object, typeof body.table_name === 'string' ? body.table_name : undefined);
+    const secret_config_id = connectorSecretConfigId(connector_id);
     const saved = await operationsByName.source_connector_config_get.handler(
       { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true },
       { config_id },
     ) as { rows?: Array<Record<string, unknown>> };
     const row = saved.rows?.[0];
     const nonSecretConfig = { ...(row?.config_json && typeof row.config_json === 'object' ? row.config_json as Record<string, unknown> : {}), ...nonSecretConnectorConfigFromBody(body) };
-    const secretConfig = await getSourceConnectorSecretConfig(engine, connector_id, source_object, config_id);
+    const secretConfig = await getSourceConnectorSecretConfig(engine, connector_id, source_object, secret_config_id);
     return {
       connector_id,
       source_object,
@@ -1653,6 +1654,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       primary_key_field: typeof body.primary_key_field === 'string' ? body.primary_key_field : (typeof nonSecretConfig.primary_key_field === 'string' ? nonSecretConfig.primary_key_field : 'vehicleID'),
       updated_at_field: typeof body.updated_at_field === 'string' ? body.updated_at_field : (typeof nonSecretConfig.updated_at_field === 'string' ? nonSecretConfig.updated_at_field : ''),
       source_table_id: config_id,
+      secret_config_id,
       connector_config: { ...nonSecretConfig, ...secretConfig },
     };
   }

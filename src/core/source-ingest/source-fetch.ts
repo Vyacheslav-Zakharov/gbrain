@@ -1,5 +1,5 @@
 import type { BrainEngine } from '../engine.ts';
-import { defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
+import { connectorSecretConfigId, defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
 import { listSourceBaseViews } from './catalog.ts';
 import { getSourceConnector } from './connectors/fake.ts';
 import type { SourceRecord } from './connectors/types.ts';
@@ -41,7 +41,7 @@ async function resolveSourceConnectorConfig(ctx: SourceFetchContext, source: Sou
   for (const configId of candidateIds) {
     const [savedConfig] = await listSourceConnectorConfigs(ctx.engine, configId);
     if (savedConfig) {
-      const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, savedConfig.connector_id, savedConfig.source_object, savedConfig.config_id);
+      const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, savedConfig.connector_id, savedConfig.source_object, connectorSecretConfigId(savedConfig.connector_id));
       const rowConfig = {
         table_name: savedConfig.table_name ?? undefined,
         target_source_id: savedConfig.target_source_id ?? undefined,
@@ -57,7 +57,7 @@ async function resolveSourceConnectorConfig(ctx: SourceFetchContext, source: Sou
       const connectorId = String(baseView.connector_id || fallbackConnectorId);
       const objectName = String(baseView.object_name || fallbackObjectName);
       const discovery = (baseView.discovery_json && typeof baseView.discovery_json === 'object') ? baseView.discovery_json as Record<string, unknown> : {};
-      const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, connectorId, objectName, `connector:${connectorId}`);
+      const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, connectorId, objectName, connectorSecretConfigId(connectorId));
       return {
         connectorId,
         objectName,
