@@ -1236,7 +1236,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         return;
       }
       await recordSourceConnectorTest(engine, connectorId, true);
-      res.json({ ok: true, status: objectName ? 'connection_ok' : 'credentials_configured', connector_id: connectorId, ...(objectName ? { source_object: objectName } : {}), elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: objectName ? 'Connector can be used for table/object-level tests.' : 'Credentials are configured. Create a Base view to test a concrete AppSheet table/object.' });
+      res.json({ ok: true, status: shouldProbeObjects ? 'connection_ok' : 'credentials_configured', connector_id: connectorId, ...(objectName ? { source_object: objectName } : {}), elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: shouldProbeObjects ? 'Connector credentials are valid; object discovery succeeded.' : 'Credentials are configured. Create a Base view to test a concrete AppSheet table/object.' });
     } catch (e) {
       const connectorId = typeof req.body?.connector_id === 'string' ? req.body.connector_id : '';
       if (connectorId) await recordSourceConnectorTest(engine, connectorId, false).catch(() => undefined);
