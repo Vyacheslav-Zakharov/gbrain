@@ -15,6 +15,7 @@ const sourceIngestUi = () => [
   'admin/src/pages/source-ingest/TransformViewEditor.tsx',
   'admin/src/pages/source-ingest/ArticleViewStatePanel.tsx',
   'admin/src/pages/source-ingest/shared.tsx',
+  'admin/src/pages/source-ingest/ru.ts',
 ].map(path => readFileSync(join(root, path), 'utf8')).join('\n');
 const serveHttp = () => readFileSync(join(root, 'src/commands/serve-http.ts'), 'utf8');
 const operations = () => readFileSync(join(root, 'src/core/operations.ts'), 'utf8');
@@ -63,8 +64,8 @@ describe('source-ingest admin review gates', () => {
     expect(ui).not.toContain('Legacy source table / connector config');
     expect(ui).not.toContain('Legacy profile workflow');
     expect(ui).not.toContain('Profiles / refresh');
-    expect(ui).toContain('Source Ingest Studio');
-    expect(ui).toContain('Denodo-style catalog tree');
+    expect(ui).toContain('Студия Source Ingest');
+    expect(ui).toContain('Каталог подключений, преобразований и публикаций');
     expect(ui).toContain('Мастер «Новая публикация»');
     expect(ui).toContain('Alt+1…Alt+5');
     expect(ui).toContain('Lineage / цепочка публикации');
@@ -72,9 +73,9 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain("window.addEventListener('keydown', onKeyDown)");
     expect(ui).toContain('handleSelectCatalogNode(hit.node)');
     expect(ui).toContain('Поиск по каталогу…');
-    expect(ui).toContain('New base view…');
-    expect(ui).toContain('New transform view…');
-    expect(ui).toContain('New article view…');
+    expect(ui).toContain('Новый источник…');
+    expect(ui).toContain('Новое преобразование…');
+    expect(ui).toContain('Новая публикация…');
     expect(ui).toContain('Схема мозга');
     expect(ui).toContain('Карточка типа');
     expect(api).toContain('sourceIngestSchemaTypeCard');
