@@ -20,8 +20,9 @@ const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: stri
 ];
 
 function getPage(): Page {
-  const hash = window.location.hash.replace('#', '') || 'dashboard';
-  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'source-ingest'].includes(hash)) return hash as Page;
+  const hash = window.location.hash.replace(/^#/, '') || 'dashboard';
+  const topLevel = hash.split('/')[0];
+  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'source-ingest'].includes(topLevel)) return topLevel as Page;
   return 'dashboard';
 }
 

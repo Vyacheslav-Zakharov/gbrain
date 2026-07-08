@@ -38,6 +38,12 @@ describe('source-ingest admin review gates', () => {
     expect(ops).toContain('buildSourceArticleViewSnapshot');
   });
 
+  test('admin app keeps source-ingest mounted for deep-link hashes', () => {
+    const app = readFileSync(join(root, 'admin/src/App.tsx'), 'utf8');
+    expect(app).toContain("hash.split('/')[0]");
+    expect(app).toContain("return topLevel as Page");
+  });
+
   test('schema-template article editor and catalog surfaces expose publish workflow', () => {
     const ui = sourceIngestUi();
     const server = serveHttp();
