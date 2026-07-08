@@ -165,7 +165,7 @@ export function connectorSecretConfigId(connectorId: string): string {
 function requiredSecretKeys(connectorId: string): string[] {
   if (connectorId === 'appsheet-vehicles' || connectorId === 'appsheet' || connectorId.startsWith('appsheet-')) return APPSHEET_SECRET_KEYS;
   if (connectorId === 'bigquery') return ['service_account_json'];
-  if (connectorId === 'postgres') return ['connection_string'];
+  if (connectorId === 'postgres' || connectorId.startsWith('postgres-')) return ['connection_string'];
   if (connectorId === 'supabase') return ['project_url', 'service_role_key'];
   if (connectorId === 'bitrix') return ['base_url', 'access_token'];
   if (connectorId === 'unf') return ['base_url', 'auth_code'];

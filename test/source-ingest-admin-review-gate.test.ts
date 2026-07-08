@@ -80,6 +80,8 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Новая публикация…');
     expect(ui).toContain('Схема мозга');
     expect(ui).toContain('Карточка типа');
+    expect(ui).toContain('Postgres read-only');
+    expect(ui).toContain('connection_string');
     expect(api).toContain('sourceIngestSchemaTypeCard');
     expect(api).toContain('sourceIngestSchemaProposalCreate');
     expect(server).toContain('/admin/api/source-ingest/schema-view/type-card/:type');
@@ -119,12 +121,12 @@ describe('source-ingest admin review gates', () => {
     expect(server).toContain('source_ingest_tree');
   });
 
-  test('connector registry only exposes implemented v1 connector kinds', () => {
+  test('connector registry exposes implemented v1 connector kinds', () => {
     const connectors = sourceIngestConnectorDescriptors();
-    expect(connectors.map(c => c.id)).toEqual(['appsheet-vehicles', 'fake-source']);
+    expect(connectors.map(c => c.id)).toEqual(['appsheet-vehicles', 'postgres', 'fake-source']);
     expect(connectors.find(c => c.id === 'appsheet-vehicles')).toMatchObject({ status: 'implemented', kind: 'appsheet', object: 'vehicle' });
+    expect(connectors.find(c => c.id === 'postgres')).toMatchObject({ status: 'implemented', kind: 'postgres', object: 'employees', requiredKeys: ['connection_string'] });
     expect(connectors.find(c => c.id === 'fake-source')).toMatchObject({ status: 'implemented', kind: 'fake', object: 'vehicle' });
     expect(connectors.find(c => c.id === 'bigquery')).toBeUndefined();
-    expect(connectors.find(c => c.id === 'postgres')).toBeUndefined();
   });
 });

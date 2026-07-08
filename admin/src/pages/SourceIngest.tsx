@@ -563,7 +563,7 @@ export function SourceIngestPage() {
   const [connectionTest, setConnectionTest] = useState<unknown>(null);
   const [secretAudit, setSecretAudit] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [secretForm, setSecretForm] = useState({ app_id: '', access_key: '' });
+  const [secretForm, setSecretForm] = useState({ app_id: '', access_key: '', connection_string: '' });
   const [form, setForm] = useState<ReviewForm>({
     connector_id: 'appsheet-vehicles',
     source_object: 'vehicle',
@@ -760,7 +760,10 @@ export function SourceIngestPage() {
     return () => window.removeEventListener('hashchange', applyHashRoute);
   }, [data?.catalog_tree]);
 
-  const catalogConnectorChoices = catalogConnectors.map(c => ({ id: String(c.connector_id), kind: String(c.kind ?? ''), displayName: String(c.display_name ?? c.connector_id), status: 'catalog', object: '', fields: undefined, requiredKeys: c.kind === 'appsheet' ? ['app_id', 'access_key'] : [], requiredEnv: [], safety: ['First-class catalog connector: table binding is configured in base/source table settings.'] }));
+  const catalogConnectorChoices = catalogConnectors.map(c => {
+    const kind = String(c.kind ?? '');
+    return { id: String(c.connector_id), kind, displayName: String(c.display_name ?? c.connector_id), status: 'catalog', object: '', fields: undefined, requiredKeys: kind === 'appsheet' ? ['app_id', 'access_key'] : kind === 'postgres' ? ['connection_string'] : [], requiredEnv: [], safety: ['First-class catalog connector: table binding is configured in base/source table settings.'] };
+  });
   const connectorChoices = [
     ...catalogConnectorChoices,
     ...(data?.connectors ?? []).map(c => ({ id: c.id, kind: c.kind ?? c.id, displayName: c.displayName, status: c.status, object: c.object, fields: c.fields, requiredKeys: c.requiredKeys, requiredEnv: c.requiredEnv, safety: c.safety })),
@@ -914,7 +917,7 @@ export function SourceIngestPage() {
       source_object: form.source_object,
       secrets: secretForm,
     });
-    setSecretForm({ app_id: '', access_key: '' });
+    setSecretForm({ app_id: '', access_key: '', connection_string: '' });
     await load();
     setConnectionTest(await api.sourceIngestTestConnection(payload()));
     setSecretAudit(await api.sourceIngestSecretAudit(configId));
@@ -934,7 +937,9 @@ export function SourceIngestPage() {
     await api.sourceIngestSaveCatalogConnector({
       ...catalogConnectorForm,
       display_name: catalogConnectorForm.display_name.trim() || catalogConnectorForm.connector_id,
-      config_json: { source: 'admin-ui', phase: 'catalog-tree-shell' },
+      config_json: catalogConnectorForm.kind === 'postgres'
+        ? { source: 'admin-ui', phase: 'catalog-tree-shell', schema: 'gbrain', allowed_objects: ['companies', 'departments', 'positions', 'employees'] }
+        : { source: 'admin-ui', phase: 'catalog-tree-shell' },
     });
     await load();
   });
@@ -1052,7 +1057,9 @@ export function SourceIngestPage() {
     await api.sourceIngestSaveCatalogConnector({
       ...catalogConnectorForm,
       display_name: catalogConnectorForm.display_name.trim() || catalogConnectorForm.connector_id,
-      config_json: { source: 'admin-ui', phase: 'catalog-tree-shell' },
+      config_json: catalogConnectorForm.kind === 'postgres'
+        ? { source: 'admin-ui', phase: 'catalog-tree-shell', schema: 'gbrain', allowed_objects: ['companies', 'departments', 'positions', 'employees'] }
+        : { source: 'admin-ui', phase: 'catalog-tree-shell' },
     });
     await api.sourceIngestSaveConfig({
       config_id: catalogConnectorSecretConfigId(),
@@ -1069,7 +1076,7 @@ export function SourceIngestPage() {
       secrets: secretForm,
     });
     setCatalogConnectorSecretStatus(status);
-    setSecretForm({ app_id: '', access_key: '' });
+    setSecretForm({ app_id: '', access_key: '', connection_string: '' });
     setSecretAudit(await api.sourceIngestSecretAudit(catalogConnectorSecretConfigId()));
     await load();
   });

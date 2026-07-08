@@ -1202,7 +1202,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   app.post('/admin/api/source-ingest/catalog/connector/list-objects', requireAdmin, express.json(), async (req: Request, res: Response) => {
     try {
       const { connectorId, objectName, config: runtimeConfig } = await sourceConnectorRuntimeConfig((req.body || {}) as Record<string, unknown>);
-      if (!objectName) {
+      if (!objectName && (connectorId === 'appsheet' || connectorId === 'appsheet-vehicles' || connectorId.startsWith('appsheet-'))) {
         res.json({ ok: true, connector_id: connectorId, objects: [], note: 'No table/object was requested. AppSheet does not expose reliable table discovery here; enter the table name in Base view and run Execute/Discover there.' });
         return;
       }
@@ -1622,12 +1622,16 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     if (typeof body.primary_key_field === 'string' && body.primary_key_field.trim()) out.primary_key_field = body.primary_key_field.trim();
     if (typeof body.updated_at_field === 'string' && body.updated_at_field.trim()) out.updated_at_field = body.updated_at_field.trim();
     if (typeof body.base_url === 'string' && body.base_url.trim()) out.base_url = body.base_url.trim();
+    if (typeof body.schema === 'string' && body.schema.trim()) out.schema = body.schema.trim();
+    if (Array.isArray(body.allowed_objects)) out.allowed_objects = body.allowed_objects.map(String).filter(Boolean);
     if (body.connector_config && typeof body.connector_config === 'object') {
       const raw = body.connector_config as Record<string, unknown>;
       if (typeof raw.table_name === 'string' && raw.table_name.trim()) out.table_name = raw.table_name.trim();
       if (typeof raw.primary_key_field === 'string' && raw.primary_key_field.trim()) out.primary_key_field = raw.primary_key_field.trim();
       if (typeof raw.updated_at_field === 'string' && raw.updated_at_field.trim()) out.updated_at_field = raw.updated_at_field.trim();
       if (typeof raw.base_url === 'string' && raw.base_url.trim()) out.base_url = raw.base_url.trim();
+      if (typeof raw.schema === 'string' && raw.schema.trim()) out.schema = raw.schema.trim();
+      if (Array.isArray(raw.allowed_objects)) out.allowed_objects = raw.allowed_objects.map(String).filter(Boolean);
     }
     return out;
   }

@@ -1,5 +1,6 @@
 import type { SourceConnector, SourceObjectDescriptor, SourceRecord, SourceRecordBatch } from './types.ts';
 import { AppSheetVehicleConnector } from './appsheet-vehicles.ts';
+import { PostgresSourceConnector } from './postgres.ts';
 
 const vehicleRecords: SourceRecord[] = [
   {
@@ -95,6 +96,15 @@ export function getSourceConnector(id: string, config?: Record<string, unknown>)
     primaryKeyField: typeof config?.primary_key_field === 'string' ? config.primary_key_field : undefined,
     updatedAtField: typeof config?.updated_at_field === 'string' ? config.updated_at_field : undefined,
     baseUrl: typeof config?.base_url === 'string' ? config.base_url : undefined,
+  });
+  if (id === 'postgres' || id.startsWith('postgres-')) return new PostgresSourceConnector({
+    connectorId: id,
+    connection_string: typeof config?.connection_string === 'string' ? config.connection_string : (typeof config?.connectionString === 'string' ? config.connectionString : undefined),
+    schema: typeof config?.schema === 'string' ? config.schema : undefined,
+    allowed_objects: Array.isArray(config?.allowed_objects) ? config.allowed_objects.map(String) : undefined,
+    primary_key_field: typeof config?.primary_key_field === 'string' ? config.primary_key_field : undefined,
+    updated_at_field: typeof config?.updated_at_field === 'string' ? config.updated_at_field : undefined,
+    batch_size: typeof config?.batch_size === 'number' ? config.batch_size : undefined,
   });
   return null;
 }

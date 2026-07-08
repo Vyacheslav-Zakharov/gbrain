@@ -6,7 +6,7 @@ export interface SourceIngestConnectorFieldDescriptor {
 
 export interface SourceIngestConnectorDescriptor {
   id: string;
-  kind: 'appsheet' | 'fake';
+  kind: 'appsheet' | 'fake' | 'postgres';
   displayName: string;
   object: string;
   supportsChangedSince: boolean;
@@ -45,6 +45,18 @@ export function sourceIngestConnectorDescriptors(): SourceIngestConnectorDescrip
       requiredEnv: ['APPSHEET_VEHICLES_APP_ID', 'APPSHEET_VEHICLES_ACCESS_KEY'],
       fields: fields({ tableName: 'vehicles', primaryKeyField: 'vehicleID', slugPrefix: 'source-ingest/vehicles' }),
       safety: ['Discovery/dry-run first', 'Review profile before approval', 'Refresh cycle enqueues Minion jobs only'],
+    },
+    {
+      id: 'postgres',
+      kind: 'postgres',
+      displayName: 'Postgres read-only',
+      object: 'employees',
+      supportsChangedSince: true,
+      credentialMode: 'db-or-server-env',
+      status: 'implemented',
+      requiredKeys: ['connection_string'],
+      fields: fields({ tableName: 'employees', primaryKeyField: 'employment_id', updatedAtField: 'updated_at', slugPrefix: 'source-ingest/org/employees', freshnessPolicy: 'P1D' }),
+      safety: ['SELECT-only connector', 'Identifier allowlist: companies/departments/positions/employees by default', 'No salary/document/PII tables are exposed by this connector'],
     },
     {
       id: 'fake-source',
