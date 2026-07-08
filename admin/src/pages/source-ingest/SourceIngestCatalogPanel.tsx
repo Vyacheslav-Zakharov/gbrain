@@ -12,7 +12,7 @@ function TreeButton({ active, depth = 0, icon, label, meta, onClick }: { active?
   </button>;
 }
 
-export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, onSelectArea, onSelectNode, onSelectConnector, onSelectBaseView, onSelectTransformView, onSelectArticleView }: { tree: SourceIngestCatalogTree; activeArea: CatalogArea; activeNode: string; onSelectArea: (area: CatalogArea) => void; onSelectNode: (node: string) => void; onSelectConnector?: (row: Record<string, unknown>) => void; onSelectBaseView?: (row: Record<string, unknown>) => void; onSelectTransformView?: (row: Record<string, unknown>) => void; onSelectArticleView?: (row: Record<string, unknown>) => void }) {
+export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, schemaNodes = [], onSelectArea, onSelectNode, onSelectConnector, onSelectBaseView, onSelectTransformView, onSelectArticleView, onSelectSchemaType }: { tree: SourceIngestCatalogTree; activeArea: CatalogArea; activeNode: string; schemaNodes?: Array<Record<string, unknown>>; onSelectArea: (area: CatalogArea) => void; onSelectNode: (node: string) => void; onSelectConnector?: (row: Record<string, unknown>) => void; onSelectBaseView?: (row: Record<string, unknown>) => void; onSelectTransformView?: (row: Record<string, unknown>) => void; onSelectArticleView?: (row: Record<string, unknown>) => void; onSelectSchemaType?: (type: string) => void }) {
   const [treeSearch, setTreeSearch] = useState('');
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({ connectors: true, base_views: true, transform_views: true, article_views: true, schema: true });
   const allConnectors = tree.connectors ?? [];
@@ -25,6 +25,7 @@ export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, onSelec
   const baseViews = allBaseViews.filter(row => rowMatches(row, ['base_view_id', 'display_name', 'connector_id', 'object_name']));
   const transformViews = allTransformViews.filter(row => rowMatches(row, ['transform_view_id', 'display_name', 'sql', 'primary_key_field']));
   const articleViews = allArticleViews.filter(row => rowMatches(row, ['article_view_id', 'gbrain_type', 'target_source_id', 'status']));
+  const schemaTypes = schemaNodes.filter(row => !q || String(row.name ?? '').toLowerCase().includes(q) || String(row.primitive ?? '').toLowerCase().includes(q));
   const isOpen = (key: string) => q ? true : openSections[key] !== false;
   const toggle = (key: string) => setOpenSections(prev => ({ ...prev, [key]: !isOpen(key) }));
   const setAll = (open: boolean) => setOpenSections({ connectors: open, base_views: open, transform_views: open, article_views: open, schema: open });
@@ -42,11 +43,11 @@ export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, onSelec
         <button className="btn btn-secondary" style={{ padding: '4px 8px' }} onClick={() => onSelectArea(activeArea)} title="Refresh selected area">⟳</button>
       </div>
       <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-        <button type="button" className="btn btn-secondary" style={{ padding: '4px 8px', flex: 1 }} onClick={() => setAll(false)}>Collapse all</button>
-        <button type="button" className="btn btn-secondary" style={{ padding: '4px 8px', flex: 1 }} onClick={() => setAll(true)}>Expand all</button>
+        <button type="button" className="btn btn-secondary" style={{ padding: '4px 8px', flex: 1 }} onClick={() => setAll(false)}>Свернуть</button>
+        <button type="button" className="btn btn-secondary" style={{ padding: '4px 8px', flex: 1 }} onClick={() => setAll(true)}>Развернуть</button>
       </div>
-      <input placeholder="Search catalog…" value={treeSearch} onChange={e => setTreeSearch(e.target.value)} style={{ width: '100%' }} />
-      {q && <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 6 }}>Filtered: {connectors.length + baseViews.length + transformViews.length + articleViews.length} of {allConnectors.length + allBaseViews.length + allTransformViews.length + allArticleViews.length}</div>}
+      <input placeholder="Поиск по каталогу…" value={treeSearch} onChange={e => setTreeSearch(e.target.value)} style={{ width: '100%' }} />
+      {q && <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 6 }}>Найдено: {connectors.length + baseViews.length + transformViews.length + articleViews.length + schemaTypes.length} из {allConnectors.length + allBaseViews.length + allTransformViews.length + allArticleViews.length + schemaNodes.length}</div>}
     </div>
     <div style={{ padding: 8 }}>
       <TreeButton active={false} depth={0} icon="▾" label={<b>gbrain_source_ingest</b>} meta={`${connectors.length + baseViews.length + transformViews.length + articleViews.length} catalog objects`} onClick={() => onSelectArea(activeArea)} />
@@ -83,8 +84,12 @@ export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, onSelec
       })}
       {isOpen('article_views') && <TreeButton active={activeNode === 'article_view:new'} depth={2} icon="＋" label="New article view…" meta="schema + template + batch run" onClick={() => { onSelectArea('article_views'); onSelectNode('article_view:new'); }} />}
 
-      <TreeButton active={activeNode === 'section:schema_view'} depth={1} icon={folderIcon('schema')} label="5 - schema" meta="schema browser" onClick={() => { toggle('schema'); onSelectArea('schema_view'); onSelectNode('section:schema_view'); }} />
-      {isOpen('schema') && <TreeButton active={activeNode === 'schema_view'} depth={2} icon="▧" label="Schema view" meta={`read-only: ${String(asObj(tree.schema).read_only ?? true)}`} onClick={() => { onSelectArea('schema_view'); onSelectNode('schema_view'); }} />}
+      <TreeButton active={activeNode === 'section:schema_view'} depth={1} icon={folderIcon('schema')} label="5 · Схема мозга" meta={`${schemaNodes.length} типов`} onClick={() => { toggle('schema'); onSelectArea('schema_view'); onSelectNode('section:schema_view'); }} />
+      {isOpen('schema') && <TreeButton active={activeNode === 'schema_view'} depth={2} icon="▧" label="Обзор схемы" meta={`read-only: ${String(asObj(tree.schema).read_only ?? true)}`} onClick={() => { onSelectArea('schema_view'); onSelectNode('schema_view'); }} />}
+      {isOpen('schema') && schemaTypes.map(row => {
+        const type = String(row.name ?? '');
+        return <TreeButton key={type} active={activeNode === `schema_type:${type}`} depth={2} icon="◇" label={<code>{type}</code>} meta={val(row.primitive)} onClick={() => { onSelectArea('schema_view'); onSelectNode(`schema_type:${type}`); onSelectSchemaType?.(type); }} />;
+      })}
     </div>
   </aside>;
 }

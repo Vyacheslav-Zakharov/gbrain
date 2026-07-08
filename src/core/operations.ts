@@ -3501,12 +3501,179 @@ async function validateArticleTemplateRequired(engine: BrainEngine, profile: Sou
   return { ok: missing.length === 0, missing, template };
 }
 
+function appendSourceScope(where: string, params: unknown[], scope: { sourceId?: string; sourceIds?: string[] }, tableAlias = 'p'): string {
+  if (scope.sourceIds && scope.sourceIds.length > 0) {
+    params.push(scope.sourceIds);
+    return `${where} AND ${tableAlias}.source_id = ANY($${params.length}::text[])`;
+  }
+  if (scope.sourceId) {
+    params.push(scope.sourceId);
+    return `${where} AND ${tableAlias}.source_id = $${params.length}`;
+  }
+  return where;
+}
+
+function extractResolverSection(markdown: string, type: string): string | null {
+  const lines = markdown.split(/\r?\n/);
+  const escaped = type.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const heading = new RegExp(`^(#{1,6})\\s+.*\\b${escaped}\\b.*$`, 'i');
+  let start = -1;
+  let level = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i]?.match(heading);
+    if (match) {
+      start = i;
+      level = match[1]!.length;
+      break;
+    }
+  }
+  if (start < 0) return null;
+  let end = lines.length;
+  const nextHeading = new RegExp(`^#{1,${level}}\\s+`);
+  for (let i = start + 1; i < lines.length; i++) {
+    if (nextHeading.test(lines[i] ?? '')) { end = i; break; }
+  }
+  return lines.slice(start, end).join('\n').trim() || null;
+}
+
+async function loadSchemaTypeCard(ctx: OperationContext, typeName: string) {
+  const type = typeName.trim();
+  if (!type) throw new OperationError('invalid_params', 'type_required');
+  const { loadActivePack } = await import('./schema-pack/load-active.ts');
+  const { loadConfig } = await import('./config.ts');
+  const cfg = loadConfig();
+  const pack = await loadActivePack({ cfg, remote: ctx.remote ?? true, sourceId: ctx.sourceId });
+  const found = pack.manifest.page_types.find((t) => t.name === type);
+  if (!found) return { error: 'type_not_found', type, pack: pack.manifest.name };
+  const scope = ctx.remote === false && ctx.sourceId === 'default' ? {} : sourceScopeOpts(ctx);
+
+  const countParams: unknown[] = [type];
+  const countWhere = appendSourceScope('WHERE p.deleted_at IS NULL AND p.type = $1', countParams, scope, 'p');
+  const pageCountRows = await ctx.engine.executeRaw<{ source_id: string; count: number | string | bigint }>(
+    `SELECT p.source_id, COUNT(*) AS count FROM pages p ${countWhere} GROUP BY p.source_id ORDER BY count DESC, p.source_id`,
+    countParams,
+  );
+  const pageCounts = pageCountRows.map(row => ({ source_id: row.source_id, count: Number(row.count || 0) }));
+  const totalPages = pageCounts.reduce((sum, row) => sum + Number(row.count || 0), 0);
+
+  const fieldParams: unknown[] = [type];
+  const fieldWhere = appendSourceScope('WHERE p.deleted_at IS NULL AND p.type = $1 AND p.frontmatter IS NOT NULL', fieldParams, scope, 'p');
+  const liveFieldRows = await ctx.engine.executeRaw<{ key: string; count: number | string | bigint; coverage_pct: number | string | null }>(
+    `SELECT k.key, COUNT(*) AS count,
+            ROUND((COUNT(*)::numeric / NULLIF($${fieldParams.length + 1}::numeric, 0)) * 100, 1) AS coverage_pct
+       FROM pages p
+       CROSS JOIN LATERAL jsonb_object_keys(p.frontmatter) AS k(key)
+       ${fieldWhere}
+       GROUP BY k.key
+       ORDER BY COUNT(*) DESC, k.key
+       LIMIT 50`,
+    [...fieldParams, totalPages],
+  );
+  const liveFields = liveFieldRows.map(row => ({ key: row.key, count: Number(row.count || 0), coverage_pct: Number(row.coverage_pct || 0) }));
+
+  const template = await loadSourceArticleTemplate(ctx.engine, type);
+  const canonicalFieldKeys = Array.from(new Set([
+    ...((template as Record<string, unknown>).required_frontmatter as string[] | undefined ?? []),
+    ...(((template as Record<string, unknown>).sections as Array<Record<string, unknown>> | undefined ?? []).map(s => String(s.key ?? '')).filter(Boolean)),
+  ]));
+  const liveFieldSet = new Set(liveFields.map(f => f.key));
+  const drift = {
+    canonical_missing_in_live: canonicalFieldKeys.filter(k => !liveFieldSet.has(k)),
+    live_not_in_canon: liveFields.map(f => f.key).filter(k => !canonicalFieldKeys.includes(k)).slice(0, 30),
+  };
+
+  const frontmatterLinks = pack.manifest.frontmatter_links
+    .filter(fl => fl.page_type === type)
+    .map(fl => ({ fields: fl.fields, link_type: fl.link_type, target: '*' }));
+  const outgoing = pack.manifest.link_types
+    .filter(lt => lt.inference?.page_type === type)
+    .map(lt => ({ verb: lt.name, target_type: lt.inference?.target_type ?? '*', inverse: lt.inverse ?? null }));
+  const incoming = pack.manifest.link_types
+    .filter(lt => lt.inference?.target_type === type)
+    .map(lt => ({ from_type: lt.inference?.page_type ?? '*', verb: lt.name, inverse: lt.inverse ?? null }));
+  const touchedLinkTypes = Array.from(new Set([...frontmatterLinks.map(fl => fl.link_type), ...outgoing.map(o => o.verb), ...incoming.map(i => i.verb)]));
+  const linkCountRows = touchedLinkTypes.length
+    ? await ctx.engine.executeRaw<{ link_type: string; count: number | string | bigint }>(
+        `SELECT link_type, COUNT(*) AS count FROM links WHERE link_type = ANY($1::text[]) GROUP BY link_type ORDER BY link_type`,
+        [touchedLinkTypes],
+      )
+    : [];
+  const linkCounts = linkCountRows.map(row => ({ link_type: row.link_type, count: Number(row.count || 0) }));
+
+  const articleViews = await listSourceArticleViews(ctx.engine);
+  const ingestUsage = articleViews
+    .filter(row => String(row.gbrain_type ?? '') === type)
+    .map(row => ({
+      article_view_id: row.article_view_id,
+      display_name: String(row.article_json?.display_name ?? row.article_view_id),
+      status: row.status,
+      target_source_id: row.target_source_id,
+      stale: row.stale,
+      stale_reasons: row.stale_reasons,
+    }));
+
+  const lint = await operationsByName.schema_lint.handler(ctx, {} as Record<string, unknown>) as { errors?: Array<Record<string, unknown>>; warnings?: Array<Record<string, unknown>> };
+  const lintItems = [...(lint.errors ?? []), ...(lint.warnings ?? [])].filter(item => String(item.type ?? '') === type || String(item.message ?? '').includes(`'${type}'`));
+
+  const resolverRows = await ctx.engine.executeRaw<{ compiled_truth: string | null }>(
+    `SELECT compiled_truth FROM pages WHERE deleted_at IS NULL AND source_id = 'shared' AND slug = 'RESOLVER.md' LIMIT 1`,
+  );
+  const resolverSection = resolverRows[0]?.compiled_truth ? extractResolverSection(resolverRows[0].compiled_truth, type) : null;
+  const reverseAliases = pack.manifest.page_types
+    .filter(t => t.name !== type && (t.aliases ?? []).includes(type))
+    .map(t => t.name);
+
+  return {
+    schema_version: 1,
+    pack: { name: pack.manifest.name, version: pack.manifest.version, sha8: pack.manifest_sha8, identity: pack.identity },
+    type,
+    header: {
+      name: found.name,
+      primitive: found.primitive,
+      total_pages: totalPages,
+      pages_by_source: pageCounts,
+      extractable: found.extractable,
+      expert_routing: found.expert_routing,
+      lint: lintItems,
+    },
+    resolution: {
+      path_prefixes: found.path_prefixes,
+      canonical_prefix: found.path_prefixes?.[0] ?? null,
+      first_match_wins: true,
+      aliases: found.aliases ?? [],
+      reverse_aliases: reverseAliases,
+      subtypes: found.subtypes ?? [],
+      resolver_section: resolverSection,
+    },
+    fields: {
+      canonical_template: template,
+      live_usage: liveFields,
+      drift,
+      frontmatter_links: frontmatterLinks,
+    },
+    relations: {
+      outgoing,
+      incoming,
+      link_counts: linkCounts,
+    },
+    ingest_usage: ingestUsage,
+  };
+}
+
 const source_article_template: Operation = {
   name: 'source_article_template',
   description: 'Read schema/template-derived article sections for a GBrain page type.',
   scope: 'read',
   params: { gbrain_type: { type: 'string', required: true } },
   handler: async (ctx, p) => loadSourceArticleTemplate(ctx.engine, String(p.gbrain_type || '')),
+};
+
+const schema_type_card: Operation = {
+  name: 'schema_type_card',
+  description: 'Source Ingest Schema View: aggregate one page-type card from schema pack, templates, live page/frontmatter usage, graph link counts, resolver text, and article-view usage.',
+  scope: 'read',
+  params: { type: { type: 'string', required: true, description: 'Page type name to inspect' } },
+  handler: async (ctx, p) => loadSchemaTypeCard(ctx, String(p.type || '')),
 };
 
 const source_article_view_dry_run: Operation = {
@@ -6251,7 +6418,7 @@ export const operations: Operation[] = [
   // mutations applied atomically inside one withPackLock scope.
   get_active_schema_pack, list_schema_packs,
   schema_stats, schema_lint, schema_graph, schema_explain_type,
-  schema_review_orphans,
+  schema_type_card, schema_review_orphans,
   schema_apply_mutations, reload_schema_pack,
   // v0.41.18.0 (T16, A7, codex #5)
   run_onboard,

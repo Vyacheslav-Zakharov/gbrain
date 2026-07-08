@@ -637,6 +637,7 @@ export function SourceIngestPage() {
   const [schemaWorkbench, setSchemaWorkbench] = useState<unknown>(null);
   const [schemaType, setSchemaType] = useState('');
   const [schemaTypeExplain, setSchemaTypeExplain] = useState<unknown>(null);
+  const [schemaTypeCard, setSchemaTypeCard] = useState<unknown>(null);
   const [activeArea, setActiveArea] = useState<CatalogArea>('connectors');
   const [activeNode, setActiveNode] = useState('section:connectors');
 
@@ -1031,7 +1032,12 @@ export function SourceIngestPage() {
     const t = type.trim();
     if (!t) return;
     setSchemaType(t);
-    setSchemaTypeExplain(await api.sourceIngestSchemaExplainType(t));
+    const [explain, card] = await Promise.all([
+      api.sourceIngestSchemaExplainType(t),
+      api.sourceIngestSchemaTypeCard(t),
+    ]);
+    setSchemaTypeExplain(explain);
+    setSchemaTypeCard(card);
   });
 
   const saveCatalogConnectorCredentials = async () => runStep('catalog-save-secret', async () => {
@@ -1729,7 +1735,19 @@ export function SourceIngestPage() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 18, alignItems: 'start' }}>
-        <SourceIngestCatalogPanel tree={data.catalog_tree ?? { connectors: [], base_views: [], transform_views: [], article_views: [], schema: { read_only: true } }} activeArea={activeArea} activeNode={activeNode} onSelectArea={setActiveArea} onSelectNode={handleSelectCatalogNode} onSelectConnector={selectCatalogConnector} onSelectBaseView={selectBaseView} onSelectTransformView={selectTransformView} onSelectArticleView={selectArticleView} />
+        <SourceIngestCatalogPanel
+          tree={data.catalog_tree ?? { connectors: [], base_views: [], transform_views: [], article_views: [], schema: { read_only: true } }}
+          activeArea={activeArea}
+          activeNode={activeNode}
+          schemaNodes={schemaNodes}
+          onSelectArea={setActiveArea}
+          onSelectNode={handleSelectCatalogNode}
+          onSelectConnector={selectCatalogConnector}
+          onSelectBaseView={selectBaseView}
+          onSelectTransformView={selectTransformView}
+          onSelectArticleView={selectArticleView}
+          onSelectSchemaType={(type) => void explainSchemaType(type)}
+        />
 
       <main style={{ minWidth: 0 }}>
         <SourceIngestWizard
@@ -1880,6 +1898,7 @@ export function SourceIngestPage() {
         schemaType={schemaType}
         setSchemaType={setSchemaType}
         schemaTypeExplain={schemaTypeExplain}
+        schemaTypeCard={schemaTypeCard}
         schemaWorkbench={schemaWorkbench}
         explainSchemaType={explainSchemaType}
         PreviewJson={PreviewJson}

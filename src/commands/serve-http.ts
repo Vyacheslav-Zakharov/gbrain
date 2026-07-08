@@ -1098,6 +1098,15 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  app.get('/admin/api/source-ingest/schema-view/type-card/:type', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      res.json(await operationsByName.schema_type_card.handler(ctx, { type: req.params.type }));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
   app.get('/admin/api/source-ingest/article-template/:type', requireAdmin, async (req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
     try {

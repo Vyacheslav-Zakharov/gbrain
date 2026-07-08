@@ -71,11 +71,16 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('window.location.hash = `#source-ingest/${routeArea}`');
     expect(ui).toContain("window.addEventListener('keydown', onKeyDown)");
     expect(ui).toContain('handleSelectCatalogNode(hit.node)');
-    expect(ui).toContain('Search catalog…');
+    expect(ui).toContain('Поиск по каталогу…');
     expect(ui).toContain('New base view…');
     expect(ui).toContain('New transform view…');
     expect(ui).toContain('New article view…');
-    expect(ui).toContain('Schema view');
+    expect(ui).toContain('Схема мозга');
+    expect(ui).toContain('Карточка типа');
+    expect(api).toContain('sourceIngestSchemaTypeCard');
+    expect(server).toContain('/admin/api/source-ingest/schema-view/type-card/:type');
+    expect(ops).toContain('schema_type_card');
+    expect(ops).toContain('loadSchemaTypeCard');
     expect(ui).toContain('Catalog connector instance');
     expect(ui).toContain('Base view / Источник');
     expect(ui).toContain('Transform view / Преобразование');
