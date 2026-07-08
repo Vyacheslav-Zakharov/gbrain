@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { asArr, asObj, MiniBadge, val } from './shared';
 
 type Props = {
@@ -14,6 +14,7 @@ type Props = {
   schemaTypeCard: unknown;
   schemaWorkbench: unknown;
   explainSchemaType: (type: string) => void;
+  createSchemaProposal: (payload: Record<string, unknown>) => Promise<unknown>;
   PreviewJson: React.ComponentType<{ value: unknown; empty: string }>;
   studioSectionStyle: (area: string) => React.CSSProperties;
 };
@@ -33,6 +34,31 @@ function CardBox({ title, children }: { title: string; children: React.ReactNode
     <h3 style={{ fontSize: 13, marginBottom: 8 }}>{title}</h3>
     {children}
   </div>;
+}
+
+function SchemaProposalBox({ type, busy, createSchemaProposal, PreviewJson }: { type: string; busy: string | null; createSchemaProposal: (payload: Record<string, unknown>) => Promise<unknown>; PreviewJson: React.ComponentType<{ value: unknown; empty: string }> }) {
+  const [title, setTitle] = useState('');
+  const [reason, setReason] = useState('');
+  const [payloadText, setPayloadText] = useState('');
+  const [result, setResult] = useState<unknown>(null);
+  const defaultPayload = type ? JSON.stringify([{ op: 'add_alias', type, alias: `${type}-alias` }], null, 2) : '[]';
+  const text = payloadText || defaultPayload;
+  const submit = async () => {
+    const mutations = JSON.parse(text);
+    const out = await createSchemaProposal({ type, title: title || `Schema proposal: ${type}`, reason, mutations });
+    setResult(out);
+  };
+  return <CardBox title="Предложить изменение">
+    <p style={{ color: 'var(--text-muted)', marginTop: -4 }}>Proposal создаёт страницу <code>shared:schema-proposals/...</code> с payload <code>schema_apply_mutations</code> и impact-preview. Схема не мутируется.</p>
+    <div style={{ display: 'grid', gap: 8 }}>
+      <input placeholder="Название proposal" value={title} onChange={e => setTitle(e.target.value)} />
+      <textarea placeholder="Обоснование" value={reason} onChange={e => setReason(e.target.value)} rows={3} />
+      <label style={{ fontSize: 12, color: 'var(--text-muted)' }}>mutations JSON</label>
+      <textarea value={text} onChange={e => setPayloadText(e.target.value)} rows={7} className="mono" />
+      <button className="btn btn-primary" disabled={!type || busy !== null} onClick={() => void submit()}>{busy === 'schema-proposal' ? 'Создание…' : 'Создать proposal-страницу'}</button>
+      {result ? <PreviewJson value={result} empty="" /> : null}
+    </div>
+  </CardBox>;
 }
 
 function SchemaTypeCard({ card, PreviewJson }: { card: unknown; PreviewJson: React.ComponentType<{ value: unknown; empty: string }> }) {
@@ -121,7 +147,7 @@ function SchemaTypeCard({ card, PreviewJson }: { card: unknown; PreviewJson: Rea
   </div>;
 }
 
-export function SchemaWorkbench({ busy, catalogCounts, activeSchemaPack, schemaStats, schemaNodes, schemaEdges, schemaType, setSchemaType, schemaTypeExplain, schemaTypeCard, schemaWorkbench, explainSchemaType, PreviewJson, studioSectionStyle }: Props) {
+export function SchemaWorkbench({ busy, catalogCounts, activeSchemaPack, schemaStats, schemaNodes, schemaEdges, schemaType, setSchemaType, schemaTypeExplain, schemaTypeCard, schemaWorkbench, explainSchemaType, createSchemaProposal, PreviewJson, studioSectionStyle }: Props) {
   return <section style={studioSectionStyle('schema_view')}>
     <h2 className="section-title">5 · Схема мозга</h2>
     <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
@@ -170,6 +196,9 @@ export function SchemaWorkbench({ busy, catalogCounts, activeSchemaPack, schemaS
           <button className="btn btn-secondary" disabled={busy !== null || !schemaType} onClick={() => void explainSchemaType(schemaType)}>{busy === 'schema-explain-type' ? 'Загрузка…' : 'Открыть карточку типа'}</button>
         </div>
         <SchemaTypeCard card={schemaTypeCard ?? schemaTypeExplain} PreviewJson={PreviewJson} />
+        <div style={{ marginTop: 12 }}>
+          <SchemaProposalBox type={schemaType} busy={busy} createSchemaProposal={createSchemaProposal} PreviewJson={PreviewJson} />
+        </div>
       </div>
     </div>
     <details style={{ marginTop: 12 }}>

@@ -3536,6 +3536,14 @@ function extractResolverSection(markdown: string, type: string): string | null {
   return lines.slice(start, end).join('\n').trim() || null;
 }
 
+function proposalSlugPart(value: string): string {
+  return value.toLowerCase().trim().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'change';
+}
+
+function yamlString(value: string): string {
+  return JSON.stringify(value);
+}
+
 async function loadSchemaTypeCard(ctx: OperationContext, typeName: string) {
   const type = typeName.trim();
   if (!type) throw new OperationError('invalid_params', 'type_required');
@@ -3660,6 +3668,73 @@ async function loadSchemaTypeCard(ctx: OperationContext, typeName: string) {
   };
 }
 
+async function buildSchemaProposalImpact(ctx: OperationContext, type: string, mutations: Array<{ op: string; [key: string]: unknown }>) {
+  const card = await loadSchemaTypeCard(ctx, type) as Record<string, unknown>;
+  const { loadActivePack } = await import('./schema-pack/load-active.ts');
+  const { loadConfig } = await import('./config.ts');
+  const cfg = loadConfig();
+  const pack = await loadActivePack({ cfg, remote: ctx.remote ?? true, sourceId: ctx.sourceId });
+  const allPrefixes = pack.manifest.page_types.flatMap(t => (t.path_prefixes ?? []).map(prefix => ({ type: t.name, prefix })));
+  const prefixConflicts = mutations
+    .filter(m => m.op === 'add_prefix' && typeof m.prefix === 'string')
+    .flatMap(m => {
+      const prefix = String(m.prefix);
+      const targetType = String(m.type || type);
+      return allPrefixes
+        .filter(existing => existing.type !== targetType && (prefix.startsWith(existing.prefix) || existing.prefix.startsWith(prefix)))
+        .map(existing => ({ mutation: m, conflicting_type: existing.type, conflicting_prefix: existing.prefix, proposed_prefix: prefix }));
+    });
+  const touchedLinkTypes = Array.from(new Set(mutations.flatMap(m => {
+    if (m.op === 'add_link_type' && typeof m.name === 'string') return [m.name];
+    if ((m.op === 'remove_link_type' || m.op === 'remove_link') && typeof m.name === 'string') return [m.name];
+    return [] as string[];
+  })));
+  const liveEdges = touchedLinkTypes.length
+    ? (await ctx.engine.executeRaw<{ link_type: string; count: number | string | bigint }>(
+        `SELECT link_type, COUNT(*) AS count FROM links WHERE link_type = ANY($1::text[]) GROUP BY link_type ORDER BY link_type`,
+        [touchedLinkTypes],
+      )).map(row => ({ link_type: row.link_type, count: Number(row.count || 0) }))
+    : [];
+  return {
+    schema_version: 1,
+    type,
+    pack: card.pack,
+    pages: (card.header as Record<string, unknown> | undefined)?.pages_by_source ?? [],
+    total_pages: (card.header as Record<string, unknown> | undefined)?.total_pages ?? 0,
+    ingest_usage: card.ingest_usage ?? [],
+    touched_link_types: touchedLinkTypes,
+    live_edges: liveEdges,
+    prefix_conflicts: prefixConflicts,
+    guards: {
+      live_apply_allowed: prefixConflicts.length === 0,
+      destructive_ops: mutations.filter(m => String(m.op).startsWith('remove_') || m.op === 'update_type').map(m => m.op),
+      note: 'proposal-only path: no schema mutation is applied by this operation',
+    },
+  };
+}
+
+async function createSchemaProposal(ctx: OperationContext, params: Record<string, unknown>) {
+  if (ctx.remote !== false) throw new OperationError('permission_denied', 'schema proposal creation is local/admin UI only.');
+  const type = String(params.type || '').trim();
+  const mutations = Array.isArray(params.mutations) ? params.mutations as Array<{ op: string; [key: string]: unknown }> : [];
+  if (!type) throw new OperationError('invalid_params', 'type_required');
+  if (!mutations.length) throw new OperationError('invalid_params', 'mutations_required');
+  const title = String(params.title || `Schema proposal: ${type}`).trim();
+  const reason = String(params.reason || '').trim();
+  const impact = await buildSchemaProposalImpact(ctx, type, mutations);
+  const date = new Date().toISOString().slice(0, 10);
+  const slug = `schema-proposals/${date}-${proposalSlugPart(type)}-${proposalSlugPart(title)}`;
+  const content = `---\nsource_id: shared\ntype: note\nstatus: proposed\ntitle: ${yamlString(title)}\nschema_proposal_type: ${yamlString(type)}\ncreated_by: source-ingest-admin-ui\n---\n\n# ${title}\n\n## Статус\n\nproposed\n\n## Обоснование\n\n${reason || 'Не указано.'}\n\n## Impact-preview\n\n\`\`\`json\n${JSON.stringify(impact, null, 2)}\n\`\`\`\n\n## Payload schema_apply_mutations\n\n\`\`\`json\n${JSON.stringify({ pack: (impact.pack as Record<string, unknown> | undefined)?.name ?? 'avers-ea', mutations }, null, 2)}\n\`\`\`\n\n## Проверка Hermes перед apply\n\n- [ ] pack-first gate: validate manifest shape\n- [ ] schema_lint errors = 0\n- [ ] prefix conflicts reviewed\n- [ ] affected Source Ingest publications reviewed\n- [ ] git commit/reload plan selected\n`;
+  const writeCtx: OperationContext = { ...ctx, sourceId: 'shared', dryRun: false, remote: false };
+  const write = await operationsByName.put_page.handler(writeCtx, {
+    slug,
+    content,
+    source_kind: 'admin-ui:schema-proposal',
+    ingested_via: 'source-ingest-admin-ui',
+  });
+  return { ok: true, slug, source_id: 'shared', title, impact, write };
+}
+
 const source_article_template: Operation = {
   name: 'source_article_template',
   description: 'Read schema/template-derived article sections for a GBrain page type.',
@@ -3674,6 +3749,21 @@ const schema_type_card: Operation = {
   scope: 'read',
   params: { type: { type: 'string', required: true, description: 'Page type name to inspect' } },
   handler: async (ctx, p) => loadSchemaTypeCard(ctx, String(p.type || '')),
+};
+
+const schema_proposal_create: Operation = {
+  name: 'schema_proposal_create',
+  description: 'LOCAL/TRUSTED: create a shared schema proposal page with schema_apply_mutations payload plus impact-preview. Does not mutate the schema pack.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    type: { type: 'string', required: true },
+    title: { type: 'string' },
+    reason: { type: 'string' },
+    mutations: { type: 'array', required: true, items: { type: 'object' } },
+  },
+  handler: async (ctx, p) => createSchemaProposal(ctx, p),
 };
 
 const source_article_view_dry_run: Operation = {
@@ -6418,7 +6508,7 @@ export const operations: Operation[] = [
   // mutations applied atomically inside one withPackLock scope.
   get_active_schema_pack, list_schema_packs,
   schema_stats, schema_lint, schema_graph, schema_explain_type,
-  schema_type_card, schema_review_orphans,
+  schema_type_card, schema_proposal_create, schema_review_orphans,
   schema_apply_mutations, reload_schema_pack,
   // v0.41.18.0 (T16, A7, codex #5)
   run_onboard,

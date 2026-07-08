@@ -57,6 +57,7 @@ export const api = {
   sourceIngestSchemaView: () => apiFetch('/admin/api/source-ingest/schema-view'),
   sourceIngestSchemaExplainType: (type: string) => apiFetch(`/admin/api/source-ingest/schema-view/type/${encodeURIComponent(type)}`),
   sourceIngestSchemaTypeCard: (type: string) => apiFetch(`/admin/api/source-ingest/schema-view/type-card/${encodeURIComponent(type)}`),
+  sourceIngestSchemaProposalCreate: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/schema-view/proposal', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestArticleTemplate: (type: string) => apiFetch(`/admin/api/source-ingest/article-template/${encodeURIComponent(type)}`),
   sourceIngestSaveCatalogConnector: (payload: Record<string, unknown>) => apiFetch('/admin/api/source-ingest/catalog/connector', { method: 'POST', body: JSON.stringify(payload) }),
   sourceIngestDeleteCatalogConnector: (connector_id: string, confirm_token?: string, force?: boolean) => apiFetch('/admin/api/source-ingest/catalog/connector/delete', { method: 'POST', body: JSON.stringify({ connector_id, confirm_token, force }) }),

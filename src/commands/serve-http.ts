@@ -1107,6 +1107,15 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   });
 
+  app.post('/admin/api/source-ingest/schema-view/proposal', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'shared', remote: false, dryRun: false };
+    try {
+      res.json(await operationsByName.schema_proposal_create.handler(ctx, req.body || {}));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
   app.get('/admin/api/source-ingest/article-template/:type', requireAdmin, async (req: Request, res: Response) => {
     const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
     try {

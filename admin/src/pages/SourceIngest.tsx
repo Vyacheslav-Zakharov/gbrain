@@ -1040,6 +1040,14 @@ export function SourceIngestPage() {
     setSchemaTypeCard(card);
   });
 
+  const createSchemaProposal = async (payload: Record<string, unknown>) => {
+    let result: unknown = null;
+    await runStep('schema-proposal', async () => {
+      result = await api.sourceIngestSchemaProposalCreate(payload);
+    });
+    return result;
+  };
+
   const saveCatalogConnectorCredentials = async () => runStep('catalog-save-secret', async () => {
     await api.sourceIngestSaveCatalogConnector({
       ...catalogConnectorForm,
@@ -1901,6 +1909,7 @@ export function SourceIngestPage() {
         schemaTypeCard={schemaTypeCard}
         schemaWorkbench={schemaWorkbench}
         explainSchemaType={explainSchemaType}
+        createSchemaProposal={createSchemaProposal}
         PreviewJson={PreviewJson}
         studioSectionStyle={studioSectionStyle}
       />

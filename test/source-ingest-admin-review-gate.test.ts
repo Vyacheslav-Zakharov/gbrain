@@ -78,8 +78,15 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Схема мозга');
     expect(ui).toContain('Карточка типа');
     expect(api).toContain('sourceIngestSchemaTypeCard');
+    expect(api).toContain('sourceIngestSchemaProposalCreate');
     expect(server).toContain('/admin/api/source-ingest/schema-view/type-card/:type');
+    expect(server).toContain('/admin/api/source-ingest/schema-view/proposal');
     expect(ops).toContain('schema_type_card');
+    expect(ops).toContain('schema_proposal_create');
+    expect(ops).toContain('schema-proposals/${date}');
+    expect(ops).toContain('Impact-preview');
+    expect(ui).toContain('Предложить изменение');
+    expect(ui).toContain('Создать proposal-страницу');
     expect(ops).toContain('loadSchemaTypeCard');
     expect(ui).toContain('Catalog connector instance');
     expect(ui).toContain('Base view / Источник');
