@@ -67,7 +67,9 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Студия Source Ingest');
     expect(ui).toContain('Каталог подключений, преобразований и публикаций');
     expect(ui).toContain('Мастер «Новая публикация»');
-    expect(ui).toContain('Alt+1…Alt+5');
+    expect(ui).toContain('Embedded flow');
+    expect(ui).toContain('Сохранить и дальше');
+    expect(ui).toContain('Upsert step');
     expect(ui).toContain('Lineage / цепочка публикации');
     expect(ui).toContain('window.location.hash = `#source-ingest/${routeArea}`');
     expect(ui).toContain("window.addEventListener('keydown', onKeyDown)");

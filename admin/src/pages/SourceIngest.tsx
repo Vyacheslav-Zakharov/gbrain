@@ -1764,6 +1764,12 @@ export function SourceIngestPage() {
           onSelectArea={setActiveArea as (area: 'connectors' | 'base_views' | 'transform_views' | 'article_views') => void}
           onSelectNode={handleSelectCatalogNode}
           onSeedArticle={seedArticleViewFromCurrent}
+          onSaveConnector={saveCatalogConnector}
+          onSaveBaseView={saveBaseView}
+          onSaveTransformView={saveTransformView}
+          onSaveArticleView={saveArticleView}
+          onPreviewArticleView={runArticleViewPreview}
+          onApproveArticleView={approveArticleView}
         />
         <SourceIngestLineagePanel
           activeArea={activeArea}
