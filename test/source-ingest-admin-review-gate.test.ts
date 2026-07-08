@@ -59,6 +59,12 @@ describe('source-ingest admin review gates', () => {
     expect(ui).not.toContain('Profiles / refresh');
     expect(ui).toContain('Source Ingest Studio');
     expect(ui).toContain('Denodo-style catalog tree');
+    expect(ui).toContain('Мастер «Новая публикация»');
+    expect(ui).toContain('Alt+1…Alt+5');
+    expect(ui).toContain('Lineage / цепочка публикации');
+    expect(ui).toContain('window.location.hash = `#source-ingest/${routeArea}`');
+    expect(ui).toContain("window.addEventListener('keydown', onKeyDown)");
+    expect(ui).toContain('handleSelectCatalogNode(hit.node)');
     expect(ui).toContain('Search catalog…');
     expect(ui).toContain('New base view…');
     expect(ui).toContain('New transform view…');

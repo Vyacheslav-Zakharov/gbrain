@@ -7,7 +7,7 @@ import { SchemaWorkbench } from './source-ingest/SchemaWorkbench';
 import { SourceIngestCatalogPanel } from './source-ingest/SourceIngestCatalogPanel';
 import { SourceIngestWizard } from './source-ingest/SourceIngestWizard';
 import { TransformViewEditor } from './source-ingest/TransformViewEditor';
-import { asArr, asObj, type CatalogArea, type SourceIngestCatalogTree, val } from './source-ingest/shared';
+import { asArr, asObj, MiniBadge, shortHash, type CatalogArea, type SourceIngestCatalogTree, val } from './source-ingest/shared';
 
 type ConnectorChoice = {
   id: string;
@@ -173,6 +173,52 @@ function formPatchForConnector(connector: ConnectorChoice | undefined): Partial<
 
 function PreviewJson({ value, empty }: { value: unknown; empty: string }) {
   return <pre style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', maxHeight: 260, overflow: 'auto' }}>{value ? JSON.stringify(value, null, 2) : empty}</pre>;
+}
+
+function SourceIngestLineagePanel({
+  activeArea,
+  activeNode,
+  connectorId,
+  baseId,
+  transformId,
+  articleId,
+  articleRow,
+  transformInputs,
+  onSelectNode,
+}: {
+  activeArea: CatalogArea;
+  activeNode: string;
+  connectorId: string;
+  baseId: string;
+  transformId: string;
+  articleId: string;
+  articleRow: Record<string, unknown> | null;
+  transformInputs: Array<{ alias: string; base_view_id: string }>;
+  onSelectNode: (node: string) => void;
+}) {
+  const articleInputKind = String(articleRow?.input_kind ?? '');
+  const articleInputId = String(articleRow?.input_id ?? '');
+  const nodes = [
+    { key: 'connector', label: 'Connector', id: connectorId, node: connectorId ? `connector:${connectorId}` : 'section:connectors', tone: connectorId ? 'ok' : 'muted' as const },
+    { key: 'base', label: 'Base view', id: baseId || transformInputs[0]?.base_view_id || '', node: baseId ? `base_view:${baseId}` : 'section:base_views', tone: (baseId || transformInputs.length) ? 'ok' : 'muted' as const },
+    { key: 'transform', label: 'Transform', id: transformId || (articleInputKind === 'transform_view' ? articleInputId : ''), node: (transformId || articleInputKind === 'transform_view') ? `transform_view:${transformId || articleInputId}` : 'section:transform_views', tone: (transformId || articleInputKind === 'transform_view') ? 'info' : 'muted' as const },
+    { key: 'article', label: 'Article view', id: articleId, node: articleId ? `article_view:${articleId}` : 'section:article_views', tone: articleId ? (articleRow?.stale === true ? 'warn' : 'ok') : 'muted' as const },
+  ];
+  return <section style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 10, marginBottom: 12, background: 'rgba(15,23,42,0.34)' }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 8 }}>
+      <b>Lineage / цепочка публикации</b>
+      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Активно: <code>{activeArea}</code> · <code>{activeNode}</code></span>
+    </div>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
+      {nodes.map((n, i) => <button key={n.key} type="button" className="btn btn-secondary" onClick={() => onSelectNode(n.node)} style={{ textAlign: 'left' }}>
+        <span style={{ display: 'block' }}><MiniBadge tone={n.tone}>{i + 1}</MiniBadge>{n.label}</span>
+        <code style={{ display: 'block', marginTop: 4 }}>{n.id || 'не выбрано'}</code>
+      </button>)}
+    </div>
+    {articleRow && <div style={{ marginTop: 8, color: 'var(--text-muted)', fontSize: 12 }}>
+      input: <code>{val(articleRow.input_kind)}:{val(articleRow.input_id)}</code> · target: <code>{val(articleRow.target_source_id)}</code> · chain: <code>{shortHash(articleRow.current_chain_hash)}</code>
+    </div>}
+  </section>;
 }
 
 function parseJsonArray(text: string): unknown[] {
@@ -684,6 +730,13 @@ export function SourceIngestPage() {
   useEffect(() => {
     if (typeof window === 'undefined' || !data?.catalog_tree) return;
     const applyHashRoute = () => {
+      const section = window.location.hash.match(/^#source-ingest\/(connectors|base|transform|article|schema)$/);
+      if (section) {
+        const area = section[1] === 'base' ? 'base_views' : section[1] === 'transform' ? 'transform_views' : section[1] === 'article' ? 'article_views' : section[1] === 'schema' ? 'schema_view' : 'connectors';
+        setActiveArea(area);
+        setActiveNode(`section:${area}`);
+        return;
+      }
       const m = window.location.hash.match(/^#source-ingest\/(connector|base|transform|article)\/([^/?#]+)/);
       if (!m) return;
       const id = decodeURIComponent(m[2]);
@@ -889,6 +942,11 @@ export function SourceIngestPage() {
     if (typeof window === 'undefined') return;
     if (!node.includes(':')) return;
     const [kind, id] = node.split(':', 2);
+    if (kind === 'section') {
+      const routeArea = id === 'base_views' ? 'base' : id === 'transform_views' ? 'transform' : id === 'article_views' ? 'article' : id === 'schema_view' ? 'schema' : id;
+      window.location.hash = `#source-ingest/${routeArea}`;
+      return;
+    }
     if (!id || id === 'new') return;
     const routeKind = kind === 'base_view' ? 'base' : kind === 'transform_view' ? 'transform' : kind === 'article_view' ? 'article' : kind;
     window.location.hash = `#source-ingest/${routeKind}/${encodeURIComponent(id)}`;
@@ -897,7 +955,13 @@ export function SourceIngestPage() {
   const handleSelectCatalogNode = (node: string) => {
     setActiveNode(node);
     setRouteHash(node);
+    if (node.startsWith('section:')) {
+      const area = node.slice('section:'.length);
+      if (area === 'connectors' || area === 'base_views' || area === 'transform_views' || area === 'article_views' || area === 'schema_view') setActiveArea(area);
+      return;
+    }
     if (node === 'base_view:new') {
+      setActiveArea('base_views');
       const connectorId = catalogConnectorForm.connector_id || String(catalogConnectors[0]?.connector_id ?? '');
       setBaseViewForm({
         base_view_id: '',
@@ -912,8 +976,33 @@ export function SourceIngestPage() {
       });
       setBaseViewDiscovery(null);
       setBaseViewSaveResult(null);
+    } else if (node === 'transform_view:new') {
+      setActiveArea('transform_views');
+    } else if (node === 'article_view:new') {
+      setActiveArea('article_views');
     }
   };
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const shortcuts: Array<{ key: string; area: CatalogArea; node: string }> = [
+      { key: '1', area: 'connectors', node: 'section:connectors' },
+      { key: '2', area: 'base_views', node: 'section:base_views' },
+      { key: '3', area: 'transform_views', node: 'section:transform_views' },
+      { key: '4', area: 'article_views', node: 'section:article_views' },
+      { key: '5', area: 'schema_view', node: 'section:schema_view' },
+    ];
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.altKey || event.ctrlKey || event.metaKey) return;
+      const hit = shortcuts.find(s => s.key === event.key);
+      if (!hit) return;
+      event.preventDefault();
+      setActiveArea(hit.area);
+      handleSelectCatalogNode(hit.node);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [catalogConnectors, catalogConnectorForm.connector_id]);
 
   const selectCatalogConnector = (row: Record<string, unknown>) => {
     setActiveArea('connectors');
@@ -1643,7 +1732,24 @@ export function SourceIngestPage() {
         <SourceIngestCatalogPanel tree={data.catalog_tree ?? { connectors: [], base_views: [], transform_views: [], article_views: [], schema: { read_only: true } }} activeArea={activeArea} activeNode={activeNode} onSelectArea={setActiveArea} onSelectNode={handleSelectCatalogNode} onSelectConnector={selectCatalogConnector} onSelectBaseView={selectBaseView} onSelectTransformView={selectTransformView} onSelectArticleView={selectArticleView} />
 
       <main style={{ minWidth: 0 }}>
-        <SourceIngestWizard busy={busy} onSelectArea={setActiveArea as (area: 'connectors' | 'base_views' | 'transform_views' | 'article_views') => void} onSeedArticle={seedArticleViewFromCurrent} />
+        <SourceIngestWizard
+          busy={busy}
+          counts={{ connectors: catalogConnectors.length, baseViews: catalogBaseViews.length, transformViews: catalogTransformViews.length, articleViews: data.catalog_tree?.article_views?.length ?? 0, staleArticleViews: staleArticleCount }}
+          onSelectArea={setActiveArea as (area: 'connectors' | 'base_views' | 'transform_views' | 'article_views') => void}
+          onSelectNode={handleSelectCatalogNode}
+          onSeedArticle={seedArticleViewFromCurrent}
+        />
+        <SourceIngestLineagePanel
+          activeArea={activeArea}
+          activeNode={activeNode}
+          connectorId={catalogConnectorForm.connector_id || baseViewForm.connector_id || form.connector_id}
+          baseId={baseViewForm.base_view_id || (articleViewForm.input_kind === 'base_view' ? articleViewForm.input_id : '')}
+          transformId={transformViewForm.transform_view_id || (articleViewForm.input_kind === 'transform_view' ? articleViewForm.input_id : '')}
+          articleId={articleViewForm.article_view_id}
+          articleRow={selectedArticleViewRow}
+          transformInputs={catalogTransformInputs}
+          onSelectNode={handleSelectCatalogNode}
+        />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
             <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>EDIT</div>
