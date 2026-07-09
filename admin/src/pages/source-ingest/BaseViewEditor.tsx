@@ -40,6 +40,15 @@ type Props = {
 };
 
 export function BaseViewEditor({ busy, formSourceObject, formTableName, baseViewForm, setBaseViewForm, effectiveBaseViewId, catalogConnectorChoices, objectSuggestions, baseViewDiscovery, baseViewSaveResult, fieldSelectionPanel, sampleRowsPanel, makeBaseViewId, seedBaseViewFromReview, discoverBaseView, saveBaseView, deleteBaseView, PreviewJson, studioSectionStyle }: Props) {
+  const fieldOptions = Array.from(new Set([
+    ...((asObj(baseViewDiscovery).fields as Array<Record<string, unknown>> | undefined) ?? []).map(f => String(f.name ?? '')).filter(Boolean),
+    ...baseViewForm.selected_fields_text.split(/\n|,/).map(s => s.trim()).filter(Boolean),
+    baseViewForm.primary_key_field,
+    baseViewForm.updated_at_field,
+  ].filter(Boolean)));
+  const sourceObjectOptions = Array.from(new Set([...objectSuggestions, formSourceObject, formTableName, baseViewForm.object_name].filter(Boolean)));
+  const idCandidates = Array.from(new Set([...(asObj(baseViewDiscovery).idCandidates as unknown[] | undefined ?? []).map(String), ...fieldOptions]));
+  const updatedAtCandidates = Array.from(new Set([...(asObj(baseViewDiscovery).updatedAtCandidates as unknown[] | undefined ?? []).map(String), '', ...fieldOptions]));
   return <section style={studioSectionStyle('base_views')}>
     <h2 className="section-title">1. Base view / Источник</h2>
     <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
@@ -66,14 +75,21 @@ export function BaseViewEditor({ busy, formSourceObject, formTableName, baseView
           {catalogConnectorChoices.map(c => <option key={c.id} value={c.id}>{c.displayName} ({c.id})</option>)}
         </select>
       </label>
-      <label>Source object / AppSheet table
-        <input list="source-ingest-base-objects" value={baseViewForm.object_name} onChange={e => setBaseViewForm(prev => {
+      <label>Source object / table
+        {sourceObjectOptions.length > 0 ? <select value={baseViewForm.object_name} onChange={e => setBaseViewForm(prev => {
           const next = { ...prev, object_name: e.target.value };
           return prev.base_view_id.trim() ? next : { ...next, base_view_id: next.connector_id && next.object_name ? makeBaseViewId(next.connector_id, next.object_name, next.object_name) : '' };
-        })} placeholder="например: vehicles" />
+        })}>
+          <option value="">Select source object…</option>
+          {sourceObjectOptions.map(name => <option key={name} value={name}>{name}</option>)}
+        </select> : <input list="source-ingest-base-objects" value={baseViewForm.object_name} onChange={e => setBaseViewForm(prev => {
+          const next = { ...prev, object_name: e.target.value };
+          return prev.base_view_id.trim() ? next : { ...next, base_view_id: next.connector_id && next.object_name ? makeBaseViewId(next.connector_id, next.object_name, next.object_name) : '' };
+        })} placeholder="например: vehicles" />}
         <datalist id="source-ingest-base-objects">
-          {[...new Set([...objectSuggestions, formSourceObject, formTableName].filter(Boolean))].map(name => <option key={name} value={name} />)}
+          {sourceObjectOptions.map(name => <option key={name} value={name} />)}
         </datalist>
+        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>Use “List available objects” on the connector to populate this dropdown.</span>
       </label>
       <label>Display name
         <input value={baseViewForm.display_name} onChange={e => setBaseViewForm(prev => ({ ...prev, display_name: e.target.value }))} placeholder="Автотранспорт source view" />
@@ -82,17 +98,34 @@ export function BaseViewEditor({ busy, formSourceObject, formTableName, baseView
         <input type="number" min={1} max={200} value={baseViewForm.sample_limit} onChange={e => setBaseViewForm(prev => ({ ...prev, sample_limit: Number(e.target.value) || 25 }))} />
       </label>
       <label>Stable ID field
-        <input value={baseViewForm.primary_key_field} onChange={e => setBaseViewForm(prev => ({ ...prev, primary_key_field: e.target.value }))} placeholder="vehicleID / id / Код" />
-        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>Required for stable external_id and later article slugs.</span>
+        {idCandidates.length > 0 ? <select value={baseViewForm.primary_key_field} onChange={e => setBaseViewForm(prev => ({ ...prev, primary_key_field: e.target.value }))}>
+          <option value="">Select after discovery…</option>
+          {idCandidates.filter(Boolean).map(name => <option key={name} value={name}>{name}</option>)}
+        </select> : <input value={baseViewForm.primary_key_field} onChange={e => setBaseViewForm(prev => ({ ...prev, primary_key_field: e.target.value }))} placeholder="vehicleID / id / Код" />}
+        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>Required for stable external_id and later article slugs. Click Execute / Discover fields first, then choose a field.</span>
       </label>
       <label>Updated-at field
-        <input value={baseViewForm.updated_at_field} onChange={e => setBaseViewForm(prev => ({ ...prev, updated_at_field: e.target.value }))} placeholder="UpdatedAt / ДатаИзменения (optional)" />
-        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>Optional; used for incremental refresh.</span>
+        {updatedAtCandidates.length > 1 ? <select value={baseViewForm.updated_at_field} onChange={e => setBaseViewForm(prev => ({ ...prev, updated_at_field: e.target.value }))}>
+          <option value="">No incremental field</option>
+          {updatedAtCandidates.filter(Boolean).map(name => <option key={name} value={name}>{name}</option>)}
+        </select> : <input value={baseViewForm.updated_at_field} onChange={e => setBaseViewForm(prev => ({ ...prev, updated_at_field: e.target.value }))} placeholder="UpdatedAt / ДатаИзменения (optional)" />}
+        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>Optional; used for incremental refresh. Click Execute / Discover fields first, then choose a field.</span>
       </label>
       {fieldSelectionPanel}
       {baseViewDiscovery !== null && asObj(baseViewDiscovery).ok !== false && sampleRowsPanel}
-      <label style={{ gridColumn: '1 / -1' }}>Row filter JSON
-        <textarea rows={4} value={baseViewForm.row_filter_text} onChange={e => setBaseViewForm(prev => ({ ...prev, row_filter_text: e.target.value }))} placeholder='[{"field":"is_group","op":"eq","value":false}]' style={{ width: '100%' }} />
+      <label style={{ gridColumn: '1 / -1' }}>Row filter JSON <span title="Filter rules are ANDed. Supported ops: exists, not_exists, eq, neq, in, not_in, lt, lte, gt, gte." style={{ cursor: 'help', color: 'var(--accent)' }}>?</span>
+        <details style={{ margin: '6px 0', color: 'var(--text-muted)', fontSize: 12 }}>
+          <summary>How to write row filters</summary>
+          <div style={{ marginTop: 6 }}>
+            Use a JSON array of rules. All rules must match. Field can be nested with dots. Supported ops: <code>exists</code>, <code>not_exists</code>, <code>eq</code>, <code>neq</code>, <code>in</code>, <code>not_in</code>, <code>lt</code>, <code>lte</code>, <code>gt</code>, <code>gte</code>.
+            <pre style={{ whiteSpace: 'pre-wrap' }}>{`[
+  {"field":"is_active","op":"eq","value":true},
+  {"field":"type","op":"in","value":["company","branch"]}
+]`}</pre>
+            Empty filter: <code>[]</code>.
+          </div>
+        </details>
+        <textarea rows={4} value={baseViewForm.row_filter_text} onChange={e => setBaseViewForm(prev => ({ ...prev, row_filter_text: e.target.value }))} placeholder='[{"field":"is_active","op":"eq","value":true}]' style={{ width: '100%' }} />
       </label>
     </div>
     {baseViewDiscovery !== null && asObj(baseViewDiscovery).ok === false && <div style={{ marginTop: 12, border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>

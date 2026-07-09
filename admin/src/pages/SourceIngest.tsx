@@ -1097,8 +1097,10 @@ export function SourceIngestPage() {
   });
 
   const testCatalogConnector = async () => runStep('catalog-test-connector', async () => {
-    setCatalogConnectorTest(await api.sourceIngestCatalogConnectorTest(catalogConnectorPayload()));
-    await load();
+    const out = await api.sourceIngestCatalogConnectorTest(catalogConnectorPayload());
+    setCatalogConnectorTest(out);
+    const objs = asArr<Record<string, unknown>>(asObj(out).objects);
+    if (objs.length > 0) setCatalogConnectorObjects(out);
   });
 
   const runDeleteGuard = async (kind: string, id: string): Promise<{ confirmed: boolean; token?: string }> => {
