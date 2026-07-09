@@ -597,7 +597,7 @@ export function SourceIngestPage() {
     connector_id: '',
     object_name: '',
     display_name: '',
-    primary_key_field: 'vehicleID',
+    primary_key_field: '',
     updated_at_field: '',
     selected_fields_text: '',
     row_filter_text: '[]',
@@ -977,7 +977,7 @@ export function SourceIngestPage() {
         connector_id: connectorId,
         object_name: '',
         display_name: '',
-        primary_key_field: 'vehicleID',
+        primary_key_field: '',
         updated_at_field: '',
         selected_fields_text: '',
         row_filter_text: '[]',
@@ -1035,6 +1035,25 @@ export function SourceIngestPage() {
     kind: catalogConnectorForm.kind,
     config_id: catalogConnectorSecretConfigId(),
   });
+
+  useEffect(() => {
+    const connectorId = baseViewForm.connector_id.trim();
+    if (!connectorId) return;
+    const current = asObj(catalogConnectorObjects);
+    const currentObjects = asArr<Record<string, unknown>>(current.objects);
+    if (String(current.connector_id ?? '') === connectorId && currentObjects.length > 0) return;
+    const row = catalogConnectors.find(c => String(c.connector_id ?? '') === connectorId);
+    if (!row) return;
+    let cancelled = false;
+    void api.sourceIngestConnectorListObjects({
+      connector_id: connectorId,
+      kind: String(row.kind ?? 'appsheet'),
+      config_id: `connector:${connectorId}`,
+    }).then(out => {
+      if (!cancelled) setCatalogConnectorObjects(out);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [baseViewForm.connector_id, catalogConnectorObjects, catalogConnectors]);
 
   const explainSchemaType = async (type: string) => runStep('schema-explain-type', async () => {
     const t = type.trim();
