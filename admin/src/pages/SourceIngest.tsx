@@ -246,8 +246,11 @@ function discoveryFieldNames(value: unknown): string[] {
   return asArr<Record<string, unknown>>(asObj(value).fields).map(f => String(f.name ?? '')).filter(Boolean);
 }
 
-function discoveryObjectNames(value: unknown): string[] {
-  return asArr<Record<string, unknown>>(asObj(value).objects).map(o => String(o.name ?? '')).filter(Boolean);
+function discoveryObjectNames(value: unknown, connectorId?: string): string[] {
+  const obj = asObj(value);
+  const resultConnectorId = String(obj.connector_id ?? '');
+  if (connectorId && resultConnectorId && resultConnectorId !== connectorId) return [];
+  return asArr<Record<string, unknown>>(obj.objects).map(o => String(o.name ?? '')).filter(Boolean);
 }
 
 function compactDiscoveryForSave(value: unknown): Record<string, unknown> {
@@ -1837,7 +1840,7 @@ export function SourceIngestPage() {
         effectiveBaseViewId={effectiveBaseViewId}
         catalogConnectorChoices={catalogConnectorChoices}
         catalogConnectorObjects={catalogConnectorObjects}
-        objectSuggestions={discoveryObjectNames(catalogConnectorObjects)}
+        objectSuggestions={discoveryObjectNames(catalogConnectorObjects, baseViewForm.connector_id)}
         baseViewDiscovery={baseViewDiscovery}
         baseViewSaveResult={baseViewSaveResult}
         fieldSelectionPanel={<FieldSelectionPanel discovery={baseViewDiscovery} selected={baseViewSelectedFields} onChange={fields => setBaseViewForm(prev => ({ ...prev, selected_fields_text: fields.join('\n') }))} />}

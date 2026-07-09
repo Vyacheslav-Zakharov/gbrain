@@ -46,7 +46,7 @@ export function BaseViewEditor({ busy, formSourceObject, formTableName, baseView
     baseViewForm.primary_key_field,
     baseViewForm.updated_at_field,
   ].filter(Boolean)));
-  const sourceObjectOptions = Array.from(new Set([...objectSuggestions, formSourceObject, formTableName, baseViewForm.object_name].filter(Boolean)));
+  const sourceObjectOptions = Array.from(new Set([...objectSuggestions, baseViewForm.object_name].filter(Boolean)));
   const idCandidates = Array.from(new Set([...(asObj(baseViewDiscovery).idCandidates as unknown[] | undefined ?? []).map(String), ...fieldOptions]));
   const updatedAtCandidates = Array.from(new Set([...(asObj(baseViewDiscovery).updatedAtCandidates as unknown[] | undefined ?? []).map(String), '', ...fieldOptions]));
   return <section style={studioSectionStyle('base_views')}>
@@ -68,8 +68,11 @@ export function BaseViewEditor({ busy, formSourceObject, formTableName, baseView
       </label>
       <label>Connector
         <select value={baseViewForm.connector_id} onChange={e => setBaseViewForm(prev => {
-          const next = { ...prev, connector_id: e.target.value };
-          return prev.base_view_id.trim() ? next : { ...next, base_view_id: next.connector_id && next.object_name ? makeBaseViewId(next.connector_id, next.object_name, next.object_name) : '' };
+          const changed = prev.connector_id !== e.target.value;
+          const next = changed
+            ? { ...prev, connector_id: e.target.value, object_name: '', display_name: '', primary_key_field: '', updated_at_field: '', selected_fields_text: '', base_view_id: '' }
+            : { ...prev, connector_id: e.target.value };
+          return next.base_view_id.trim() ? next : { ...next, base_view_id: next.connector_id && next.object_name ? makeBaseViewId(next.connector_id, next.object_name, next.object_name) : '' };
         })}>
           <option value="">Select connector…</option>
           {catalogConnectorChoices.map(c => <option key={c.id} value={c.id}>{c.displayName} ({c.id})</option>)}
@@ -89,7 +92,7 @@ export function BaseViewEditor({ busy, formSourceObject, formTableName, baseView
         <datalist id="source-ingest-base-objects">
           {sourceObjectOptions.map(name => <option key={name} value={name} />)}
         </datalist>
-        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>Use “List available objects” on the connector to populate this dropdown.</span>
+        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>Use “Test connector credentials” or “List available objects” on the connector to populate this dropdown. Legacy Review fields are not mixed into this list.</span>
       </label>
       <label>Display name
         <input value={baseViewForm.display_name} onChange={e => setBaseViewForm(prev => ({ ...prev, display_name: e.target.value }))} placeholder="Автотранспорт source view" />
