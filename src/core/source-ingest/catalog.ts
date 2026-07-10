@@ -45,6 +45,7 @@ export interface SourceArticleView {
   article_template?: NonNullable<SourceIngestProfile['mapping']>['article_template'];
   mapping?: SourceIngestProfile['mapping'];
   link_rules?: SourceLinkRule[];
+  change_intelligence?: SourceIngestProfile['change_intelligence'];
   freshness_policy?: SourceIngestProfile['freshness'];
   update_policy?: SourceIngestProfile['update_policy'];
   security: SourceIngestProfile['security'];
@@ -569,6 +570,7 @@ export async function buildSourceArticleViewSnapshot(engine: BrainEngine, articl
     ...(articleDef.freshness_policy ? { freshness: articleDef.freshness_policy } : {}),
     mapping: articleDef.mapping || (articleDef.article_template ? { article_template: articleDef.article_template } : undefined),
     links: articleDef.link_rules || [],
+    ...(articleDef.change_intelligence ? { change_intelligence: articleDef.change_intelligence } : {}),
     update_policy: articleDef.update_policy || { mode: 'managed_block', preserve_manual_sections: true },
     security: articleDef.security,
     review: { approved_by: opts.approvedBy || 'local', approved_at: new Date().toISOString() },

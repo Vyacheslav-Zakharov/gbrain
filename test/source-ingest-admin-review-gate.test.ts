@@ -7,6 +7,7 @@ const root = process.cwd();
 const sourceIngestUi = () => [
   'admin/src/pages/SourceIngest.tsx',
   'admin/src/pages/source-ingest/ArticleViewEditor.tsx',
+  'admin/src/pages/source-ingest/ChangeIntelligenceEditor.tsx',
   'admin/src/pages/source-ingest/BaseViewEditor.tsx',
   'admin/src/pages/source-ingest/ConnectorEditor.tsx',
   'admin/src/pages/source-ingest/SchemaWorkbench.tsx',
@@ -98,6 +99,11 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Transform view / Преобразование');
     expect(ui).toContain('Article view / Публикация');
     expect(ui).toContain('Определение');
+    expect(ui).toContain('Изменения');
+    expect(ui).toContain('Change Intelligence / История изменений');
+    expect(ui).toContain('Apply recommended preset');
+    expect(ui).toContain('Agent interprets semantic text fields');
+    expect(ui).toContain('Persisted contract preview');
     expect(ui).toContain('Превью');
     expect(ui).toContain('Запуски');
     expect(ui).toContain('Run trial batch (20)');

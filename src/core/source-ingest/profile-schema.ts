@@ -21,6 +21,36 @@ export interface SourceLinkRule {
   confidence?: number;
 }
 
+export interface SourceChangeRelationshipRule {
+  field: string;
+  link_type: string;
+  target_type: string;
+  target_lookup: 'external_id' | 'slug' | 'field_value';
+}
+
+export interface SourceChangeIntelligencePolicy {
+  version: 1;
+  enabled: boolean;
+  mode: 'current_state' | 'hybrid';
+  snapshot_strategy: 'full_record';
+  effective_at_field?: string;
+  current_state_fields: string[];
+  timeline_fields: string[];
+  relationship_rules: SourceChangeRelationshipRule[];
+  related_pages: { policy: 'graph_projection' | 'managed_derived_blocks' | 'agent_proposals' };
+  agent: {
+    enabled: boolean;
+    semantic_fields: string[];
+    confidence_threshold: number;
+    allowed_actions: Array<'summary_proposal' | 'timeline_proposal' | 'related_page_proposal'>;
+  };
+  approval: {
+    deterministic: 'auto' | 'review';
+    agent: 'review' | 'auto_high_confidence';
+    cascade: 'review' | 'auto';
+  };
+}
+
 export interface SourceTransformProfileSource {
   alias: string;
   /** Stable saved source table/config id; preferred UI contract for multi-source transforms. */
@@ -56,6 +86,7 @@ export interface SourceIngestProfile {
   freshness?: { policy?: string; on_access?: SourceIngestOnAccess; changed_since_field?: string };
   mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown>; source_fields?: string[]; article_template?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, string> } };
   links?: SourceLinkRule[];
+  change_intelligence?: SourceChangeIntelligencePolicy;
   update_policy: { mode: SourceIngestUpdateMode; preserve_manual_sections: true; field_allowlist?: string[] };
   security: { classification: 'public' | 'shared' | 'internal' | 'restricted'; pii: boolean; pii_fields?: string[] };
   review?: { drafted_by?: string; approved_by?: string | null; approved_at?: string | null };
@@ -175,6 +206,28 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
       if (!isObject(l.target)) issues.push(issue(`links.${i}.target`, 'required', 'Link target is required.'));
       if (Array.isArray(l.when)) l.when.forEach((r, j) => validateFilter(`links.${i}.when.${j}`, r, issues));
     });
+  }
+
+  if (p.change_intelligence !== undefined) {
+    if (!isObject(p.change_intelligence)) {
+      issues.push(issue('change_intelligence', 'invalid_type', 'change_intelligence must be an object.'));
+    } else {
+      const c = p.change_intelligence as Record<string, unknown>;
+      if (c.version !== 1) issues.push(issue('change_intelligence.version', 'unsupported_version', 'Only Change Intelligence contract version 1 is supported.'));
+      if (typeof c.enabled !== 'boolean') issues.push(issue('change_intelligence.enabled', 'required', 'enabled boolean is required.'));
+      if (!['current_state', 'hybrid'].includes(String(c.mode))) issues.push(issue('change_intelligence.mode', 'invalid_mode', 'mode must be current_state or hybrid.'));
+      if (c.effective_at_field !== undefined) validateFieldPath('change_intelligence.effective_at_field', c.effective_at_field, issues);
+      for (const key of ['current_state_fields', 'timeline_fields'] as const) {
+        const fields = c[key];
+        if (!Array.isArray(fields)) issues.push(issue(`change_intelligence.${key}`, 'invalid_type', `${key} must be an array.`));
+        else fields.forEach((field, i) => validateFieldPath(`change_intelligence.${key}.${i}`, field, issues));
+      }
+      if (!Array.isArray(c.relationship_rules)) issues.push(issue('change_intelligence.relationship_rules', 'invalid_type', 'relationship_rules must be an array.'));
+      if (isObject(c.agent)) {
+        const threshold = Number(c.agent.confidence_threshold);
+        if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) issues.push(issue('change_intelligence.agent.confidence_threshold', 'invalid_threshold', 'confidence_threshold must be between 0 and 1.'));
+      }
+    }
   }
 
   if (!isObject(p.update_policy)) {

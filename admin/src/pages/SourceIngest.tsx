@@ -3,6 +3,7 @@ import { api } from '../api';
 import { ArticleViewEditor } from './source-ingest/ArticleViewEditor';
 import { BaseViewEditor } from './source-ingest/BaseViewEditor';
 import { ConnectorEditor } from './source-ingest/ConnectorEditor';
+import { DEFAULT_CHANGE_INTELLIGENCE_POLICY, parseChangeIntelligence, serializeChangeIntelligence, type ChangeIntelligencePolicy } from './source-ingest/ChangeIntelligenceEditor';
 import { SchemaWorkbench } from './source-ingest/SchemaWorkbench';
 import { SourceIngestCatalogPanel } from './source-ingest/SourceIngestCatalogPanel';
 import { SourceIngestWizard } from './source-ingest/SourceIngestWizard';
@@ -630,6 +631,7 @@ export function SourceIngestPage() {
     classification: 'shared',
     pii: false,
   });
+  const [articleChangePolicy, setArticleChangePolicy] = useState<ChangeIntelligencePolicy>(DEFAULT_CHANGE_INTELLIGENCE_POLICY);
   const [articleViewSaveResult, setArticleViewSaveResult] = useState<unknown>(null);
   const [articleViewApproveResult, setArticleViewApproveResult] = useState<unknown>(null);
   const [articleViewPreview, setArticleViewPreview] = useState<unknown>(null);
@@ -1399,6 +1401,7 @@ export function SourceIngestPage() {
       classification: String(security.classification ?? 'shared'),
       pii: security.pii === true,
     });
+    setArticleChangePolicy(parseChangeIntelligence(article.change_intelligence));
     if (Object.keys(sections).length > 0) {
       setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])) });
       setArticleDirty(true);
@@ -1443,6 +1446,7 @@ export function SourceIngestPage() {
       natural_key_fields: parseCsvLines(articleViewForm.natural_key_fields_text),
     },
     article_template: { sections: articleSections },
+    change_intelligence: serializeChangeIntelligence(articleChangePolicy),
     freshness_policy: { policy: articleViewForm.freshness_policy },
     update_policy: { mode: 'managed_block', preserve_manual_sections: true, field_allowlist: selectedSourceFields },
     security: { classification: articleViewForm.classification, pii: articleViewForm.pii },
@@ -1900,6 +1904,8 @@ export function SourceIngestPage() {
         formSampleLimit={form.sample_limit}
         articleViewForm={articleViewForm}
         setArticleViewForm={setArticleViewForm}
+        articleChangePolicy={articleChangePolicy}
+        setArticleChangePolicy={setArticleChangePolicy}
         articleViewCurrentChainHash={articleViewCurrentChainHash}
         selectedArticleViewRow={selectedArticleViewRow}
         articleAvailableFields={articleAvailableFields}

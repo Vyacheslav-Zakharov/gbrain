@@ -110,6 +110,19 @@ describe('source-ingest Phase 0 catalog model', () => {
       slug_template: 'source-ingest/vehicles/{{ code | slugify }}',
       identity: { external_id_field: 'id', display_name_field: 'name', natural_key_fields: ['code'] },
       article_template: { sections: { title: '{{ name }}', summary: '{{ code }}' } },
+      change_intelligence: {
+        version: 1,
+        enabled: true,
+        mode: 'hybrid',
+        snapshot_strategy: 'full_record',
+        effective_at_field: 'updated_at',
+        current_state_fields: ['name'],
+        timeline_fields: ['name'],
+        relationship_rules: [],
+        related_pages: { policy: 'graph_projection' },
+        agent: { enabled: false, semantic_fields: [], confidence_threshold: 0.85, allowed_actions: ['summary_proposal', 'timeline_proposal', 'related_page_proposal'] },
+        approval: { deterministic: 'auto', agent: 'review', cascade: 'review' },
+      },
       update_policy: { mode: 'managed_block', preserve_manual_sections: true, field_allowlist: ['code', 'name'] },
       security: { classification: 'shared', pii: false },
       status: 'draft',
@@ -124,6 +137,14 @@ describe('source-ingest Phase 0 catalog model', () => {
       target: { approved_source_id: 'shared', gbrain_type: 'equipment' },
     });
     expect(compiled.compiled_profile.selection?.include?.[0]).toMatchObject({ field: 'is_group', op: 'eq', value: false });
+    expect(compiled.compiled_profile.change_intelligence).toMatchObject({
+      version: 1,
+      enabled: true,
+      mode: 'hybrid',
+      current_state_fields: ['name'],
+      timeline_fields: ['name'],
+      approval: { deterministic: 'auto', agent: 'review', cascade: 'review' },
+    });
     expect(compiled.version_hash).toBe(profileHash(compiled.compiled_profile));
 
     const [row] = await listSourceArticleViews(engine, 'av-equipment');

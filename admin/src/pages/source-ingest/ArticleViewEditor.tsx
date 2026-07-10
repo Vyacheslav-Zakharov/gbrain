@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { ArticleViewStatePanel } from './ArticleViewStatePanel';
+import { ChangeIntelligenceEditor, type ChangeIntelligencePolicy } from './ChangeIntelligenceEditor';
 import { asArr, asObj, val } from './shared';
 
 type Busy = string | null;
@@ -21,7 +22,7 @@ type ArticleViewForm = {
 };
 
 type ArticleInputChoice = { kind: 'base_view' | 'transform_view'; id: string; label: string };
-type Tab = 'definition' | 'preview' | 'runs';
+type Tab = 'definition' | 'changes' | 'preview' | 'runs';
 
 type Props = {
   busy: Busy;
@@ -29,6 +30,8 @@ type Props = {
   formSampleLimit: number;
   articleViewForm: ArticleViewForm;
   setArticleViewForm: React.Dispatch<React.SetStateAction<ArticleViewForm>>;
+  articleChangePolicy: ChangeIntelligencePolicy;
+  setArticleChangePolicy: React.Dispatch<React.SetStateAction<ChangeIntelligencePolicy>>;
   articleViewCurrentChainHash: string;
   selectedArticleViewRow: Record<string, unknown> | null;
   articleAvailableFields: string[];
@@ -62,7 +65,7 @@ function TabButton({ tab, active, children, onClick }: { tab: Tab; active: Tab; 
   return <button type="button" className={active === tab ? 'btn btn-primary' : 'btn btn-secondary'} onClick={() => onClick(tab)}>{children}</button>;
 }
 
-export function ArticleViewEditor({ busy, sources, formSampleLimit, articleViewForm, setArticleViewForm, articleViewCurrentChainHash, selectedArticleViewRow, articleAvailableFields, articleInputChoices, articleSections, sectionLabels, requiredFrontmatter, articleTemplate, articleViewPreview, articleViewRuns, articleViewRunResult, articleViewSaveResult, articleViewApproveResult, setActiveSection, seedArticleViewFromCurrent, runArticleViewPreview, saveArticleView, deleteArticleView, approveArticleView, loadArticleViewRuns, runArticleViewBatch, invalidateArticleViewPreview, insertFieldToken, updateArticleSection, DryRunPreview, PreviewJson, studioSectionStyle }: Props) {
+export function ArticleViewEditor({ busy, sources, formSampleLimit, articleViewForm, setArticleViewForm, articleChangePolicy, setArticleChangePolicy, articleViewCurrentChainHash, selectedArticleViewRow, articleAvailableFields, articleInputChoices, articleSections, sectionLabels, requiredFrontmatter, articleTemplate, articleViewPreview, articleViewRuns, articleViewRunResult, articleViewSaveResult, articleViewApproveResult, setActiveSection, seedArticleViewFromCurrent, runArticleViewPreview, saveArticleView, deleteArticleView, approveArticleView, loadArticleViewRuns, runArticleViewBatch, invalidateArticleViewPreview, insertFieldToken, updateArticleSection, DryRunPreview, PreviewJson, studioSectionStyle }: Props) {
   const [tab, setTab] = useState<Tab>('definition');
   const rows = asArr<Record<string, unknown>>(asObj(articleViewRuns).rows);
   const missingRequired = useMemo(() => {
@@ -95,6 +98,7 @@ export function ArticleViewEditor({ busy, sources, formSampleLimit, articleViewF
     </div>
     <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
       <TabButton tab="definition" active={tab} onClick={setTab}>Определение</TabButton>
+      <TabButton tab="changes" active={tab} onClick={setTab}>Изменения</TabButton>
       <TabButton tab="preview" active={tab} onClick={setTab}>Превью</TabButton>
       <TabButton tab="runs" active={tab} onClick={setTab}>Запуски</TabButton>
     </div>
@@ -134,6 +138,14 @@ export function ArticleViewEditor({ busy, sources, formSampleLimit, articleViewF
         </div>
       </div>
     </div>}
+
+    {tab === 'changes' && <ChangeIntelligenceEditor
+      policy={articleChangePolicy}
+      setPolicy={setArticleChangePolicy}
+      availableFields={articleAvailableFields}
+      gbrainType={articleViewForm.gbrain_type}
+      invalidate={invalidateArticleViewPreview}
+    />}
 
     {tab === 'preview' && <section style={{ marginTop: 14, border: '1px solid var(--border)', borderRadius: 10, padding: 12, background: 'rgba(15, 23, 42, 0.34)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
