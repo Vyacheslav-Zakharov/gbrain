@@ -123,6 +123,7 @@ describe('source-ingest admin review gates', () => {
     expect(server).toContain('source_base_view_upsert');
     expect(server).toContain('source_transform_view_upsert');
     expect(server).toContain('source_article_view_upsert');
+    expect(server).toContain('change_intelligence');
     expect(server).toContain('source_article_view_approve');
     expect(server).toContain('source_ingest_tree');
   });
