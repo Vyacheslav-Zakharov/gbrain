@@ -834,15 +834,12 @@ describe('source-ingest Stage 3A executor', () => {
       const repo = tempGitRepo();
       await seed(repo);
       await putSourceConnectorConfig(engine, {
+        config_id: 'connector:appsheet-vehicles',
         connector_id: 'appsheet-vehicles',
-        source_object: 'vehicle',
+        source_object: '__connection__',
         display_name: 'AppSheet автотранспорт',
-        table_name: 'Автотранспорт',
-        target_source_id: 'shared',
-        slug_prefix: 'source-ingest/vehicles',
-        freshness_policy: 'P30D',
         enabled: true,
-        config_json: { table_name: 'Автотранспорт' },
+        config_json: { connector_level: true, kind: 'appsheet' },
       }, { actor: 'test' });
 
       const rotated = await putSourceConnectorSecrets(engine, {
@@ -854,7 +851,7 @@ describe('source-ingest Stage 3A executor', () => {
       expect(rotated.masked).toEqual({ app_id: '••••3456', access_key: '••••7890' });
       expect(JSON.stringify(rotated)).not.toContain('key-secret-7890');
 
-      const raw = await engine.executeRaw<{ secret_json: Record<string, unknown> }>(`SELECT secret_json FROM source_connector_secrets WHERE config_id = $1`, ['appsheet-vehicles:vehicle']);
+      const raw = await engine.executeRaw<{ secret_json: Record<string, unknown> }>(`SELECT secret_json FROM source_connector_secrets WHERE config_id = $1`, ['connector:appsheet-vehicles']);
       expect(raw[0].secret_json.__encrypted).toBe(true);
       expect(JSON.stringify(raw[0].secret_json)).not.toContain('key-secret-7890');
       expect(JSON.stringify(raw[0].secret_json)).not.toContain('app-123456');
@@ -883,14 +880,15 @@ describe('source-ingest Stage 3A executor', () => {
         .toEqual({ app_id: 'app-123456', access_key: 'key-secret-7890' });
       expect(await sourceConnectorSecretStatus(engine, 'appsheet-vehicles', 'appsheet-vehicles:vehicle:vehicles', 'vehicle'))
         .toMatchObject({ configured: true, storage: 'db' });
-      const audit = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
+      const audit = await listSourceConnectorSecretAudit(engine, 'connector:appsheet-vehicles');
       expect(audit[0]).toMatchObject({ action: 'rotate', actor: 'admin:test', secret_keys: ['access_key', 'app_id'] });
+      expect(typeof audit[0].id).toBe('string');
       expect(JSON.stringify(audit)).not.toContain('key-secret-7890');
 
       const deleted = await deleteSourceConnectorSecrets(engine, { connector_id: 'appsheet-vehicles', source_object: 'vehicle' }, { actor: 'admin:test' });
       expect(deleted.configured).toBe(false);
       expect((await getSourceConnectorSecretConfig(engine, 'appsheet-vehicles', 'vehicle'))).toEqual({});
-      const auditAfterDelete = await listSourceConnectorSecretAudit(engine, 'appsheet-vehicles:vehicle');
+      const auditAfterDelete = await listSourceConnectorSecretAudit(engine, 'connector:appsheet-vehicles');
       expect(auditAfterDelete[0]).toMatchObject({ action: 'delete', actor: 'admin:test' });
     });
   });
@@ -947,6 +945,27 @@ describe('source-ingest Stage 3A executor', () => {
     expect(calls[0].url).toContain('/tables/repairs/Action');
     expect(calls[0].body.Properties.ColumnNames).toBeUndefined();
     expect(JSON.stringify(calls[0].body)).not.toContain('secret');
+  });
+
+  test('AppSheet connector rejects successful responses with an unexpected JSON shape', async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify({ error: 'table not found' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })) as unknown as typeof fetch;
+    const connector = new AppSheetVehicleConnector({
+      connectorId: 'appsheet-protokolist',
+      appId: 'app',
+      accessKey: 'secret',
+      tableName: 'PeriodicMeetingSeries',
+      primaryKeyField: 'seriesID',
+      baseUrl: 'https://203.0.113.10/api/v2/apps',
+      fetchImpl,
+    });
+
+    const error = await connector.sample('PeriodicMeetingSeries', 5).catch(e => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error.message)).toContain('AppSheet unexpected response shape');
+    expect(String(error.message)).not.toContain('secret');
   });
 
   test('discovery preserves reviewer-selected fields and identity even when sample returns zero rows', () => {

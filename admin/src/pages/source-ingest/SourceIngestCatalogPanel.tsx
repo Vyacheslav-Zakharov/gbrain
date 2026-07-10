@@ -13,7 +13,7 @@ function TreeButton({ active, lineage, depth = 0, icon, label, meta, onClick }: 
   </button>;
 }
 
-export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, schemaNodes = [], onSelectArea, onSelectNode, onSelectConnector, onSelectBaseView, onSelectTransformView, onSelectArticleView, onSelectSchemaType }: { tree: SourceIngestCatalogTree; activeArea: CatalogArea; activeNode: string; schemaNodes?: Array<Record<string, unknown>>; onSelectArea: (area: CatalogArea) => void; onSelectNode: (node: string) => void; onSelectConnector?: (row: Record<string, unknown>) => void; onSelectBaseView?: (row: Record<string, unknown>) => void; onSelectTransformView?: (row: Record<string, unknown>) => void; onSelectArticleView?: (row: Record<string, unknown>) => void; onSelectSchemaType?: (type: string) => void }) {
+export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, schemaNodes = [], onRefresh, onSelectArea, onSelectNode, onSelectConnector, onSelectBaseView, onSelectTransformView, onSelectArticleView, onSelectSchemaType }: { tree: SourceIngestCatalogTree; activeArea: CatalogArea; activeNode: string; schemaNodes?: Array<Record<string, unknown>>; onRefresh: () => void | Promise<void>; onSelectArea: (area: CatalogArea) => void; onSelectNode: (node: string) => void; onSelectConnector?: (row: Record<string, unknown>) => void; onSelectBaseView?: (row: Record<string, unknown>) => void; onSelectTransformView?: (row: Record<string, unknown>) => void; onSelectArticleView?: (row: Record<string, unknown>) => void; onSelectSchemaType?: (type: string) => void }) {
   const [treeSearch, setTreeSearch] = useState('');
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({ connectors: true, base_views: true, transform_views: true, article_views: true, schema: true });
   const allConnectors = tree.connectors ?? [];
@@ -101,7 +101,7 @@ export function SourceIngestCatalogPanel({ tree, activeArea, activeNode, schemaN
           <div style={{ fontWeight: 700, letterSpacing: 0.2 }}>{ru.studioTitle}</div>
           <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>{ru.studioSubtitle}</div>
         </div>
-        <button className="btn btn-secondary" style={{ padding: '4px 8px' }} onClick={() => onSelectArea(activeArea)} title={ru.refreshSelected}>⟳</button>
+        <button className="btn btn-secondary" style={{ padding: '4px 8px' }} onClick={() => { void onRefresh(); }} title={ru.refreshSelected}>⟳</button>
       </div>
       <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
         <button type="button" className="btn btn-secondary" style={{ padding: '4px 8px', flex: 1 }} onClick={() => setAll(false)}>{ru.collapse}</button>

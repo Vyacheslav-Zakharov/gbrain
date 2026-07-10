@@ -588,7 +588,7 @@ export function SourceIngestPage() {
   const [transformSql, setTransformSql] = useState('');
   const [transformPrimaryKey, setTransformPrimaryKey] = useState('vehicleID');
   const [transformUpdatedAt, setTransformUpdatedAt] = useState('');
-  const [catalogConnectorForm, setCatalogConnectorForm] = useState({ connector_id: 'appsheet-protokolist', kind: 'appsheet', display_name: '', enabled: true });
+  const [catalogConnectorForm, setCatalogConnectorForm] = useState({ connector_id: '', kind: 'appsheet', display_name: '', enabled: true });
   const [catalogConnectorObjects, setCatalogConnectorObjects] = useState<unknown>(null);
   const [catalogConnectorTest, setCatalogConnectorTest] = useState<unknown>(null);
   const [catalogDeleteImpact, setCatalogDeleteImpact] = useState<unknown>(null);
@@ -607,27 +607,27 @@ export function SourceIngestPage() {
   const [baseViewSaveResult, setBaseViewSaveResult] = useState<unknown>(null);
   const [baseViewDiscovery, setBaseViewDiscovery] = useState<unknown>(null);
   const [transformViewForm, setTransformViewForm] = useState<TransformViewForm>({
-    transform_view_id: 'tv-vehicles-clean',
-    display_name: 'Автотранспорт transform',
-    inputs_text: defaultTransformViewInputs('bv-appsheet-vehicles-vehicle-vehicles'),
+    transform_view_id: '',
+    display_name: '',
+    inputs_text: '[]',
     sql: 'SELECT main.* FROM main',
-    primary_key_field: 'vehicleID',
+    primary_key_field: '',
     updated_at_field: '',
   });
   const [transformViewSaveResult, setTransformViewSaveResult] = useState<unknown>(null);
   const [articleViewForm, setArticleViewForm] = useState<ArticleViewForm>({
-    article_view_id: 'av-equipment',
-    display_name: 'Equipment articles',
-    input_kind: 'transform_view',
-    input_id: 'tv-bv-appsheet-avto-vehicles',
-    gbrain_type: 'equipment',
+    article_view_id: '',
+    display_name: '',
+    input_kind: 'base_view',
+    input_id: '',
+    gbrain_type: '',
     target_source_id: 'shared',
-    slug_template: 'source-ingest/vehicles/{{ vehicleID | slugify }}',
-    external_id_field: 'vehicleID',
-    display_name_field: 'govNumber',
-    natural_key_fields_text: 'govNumber',
+    slug_template: '',
+    external_id_field: '',
+    display_name_field: '',
+    natural_key_fields_text: '',
     status: 'draft',
-    freshness_policy: 'P30D',
+    freshness_policy: 'P7D',
     classification: 'shared',
     pii: false,
   });
@@ -709,6 +709,7 @@ export function SourceIngestPage() {
   const schemaStats = asObj(schemaObj.stats);
   const catalogBaseViews = data?.catalog_tree?.base_views ?? [];
   const catalogTransformViews = data?.catalog_tree?.transform_views ?? [];
+  const catalogArticleViews = data?.catalog_tree?.article_views ?? [];
   const articleInputChoices = [
     ...catalogBaseViews.map(row => ({ kind: 'base_view' as const, id: String(row.base_view_id), label: `base_view · ${String(row.base_view_id)}` })),
     ...catalogTransformViews.map(row => ({ kind: 'transform_view' as const, id: String(row.transform_view_id), label: `transform_view · ${String(row.transform_view_id)}` })),
@@ -939,8 +940,14 @@ export function SourceIngestPage() {
   });
 
   const saveCatalogConnector = async () => runStep('catalog-connector', async () => {
+    const connectorId = catalogConnectorForm.connector_id.trim();
+    if (!connectorId) throw new Error('connector_id_required');
+    if (activeNode === 'connector:new' && catalogConnectors.some(row => String(row.connector_id) === connectorId)) {
+      throw new Error(`connector_already_exists:${connectorId}`);
+    }
     await api.sourceIngestSaveCatalogConnector({
       ...catalogConnectorForm,
+      connector_id: connectorId,
       display_name: catalogConnectorForm.display_name.trim() || catalogConnectorForm.connector_id,
       config_json: catalogConnectorForm.kind === 'postgres'
         ? { source: 'admin-ui', phase: 'catalog-tree-shell', schema: 'gbrain', allowed_objects: ['companies', 'departments', 'positions', 'employees'] }
@@ -971,12 +978,19 @@ export function SourceIngestPage() {
       if (area === 'connectors' || area === 'base_views' || area === 'transform_views' || area === 'article_views' || area === 'schema_view') setActiveArea(area);
       return;
     }
-    if (node === 'base_view:new') {
+    if (node === 'connector:new') {
+      setActiveArea('connectors');
+      setCatalogConnectorForm({ connector_id: '', kind: 'appsheet', display_name: '', enabled: true });
+      setSecretForm({ app_id: '', access_key: '', connection_string: '' });
+      setCatalogConnectorObjects(null);
+      setCatalogConnectorTest(null);
+      setCatalogConnectorSecretStatus(null);
+      setCatalogDeleteImpact(null);
+    } else if (node === 'base_view:new') {
       setActiveArea('base_views');
-      const connectorId = catalogConnectorForm.connector_id || String(catalogConnectors[0]?.connector_id ?? '');
       setBaseViewForm({
         base_view_id: '',
-        connector_id: connectorId,
+        connector_id: '',
         object_name: '',
         display_name: '',
         primary_key_field: '',
@@ -989,8 +1003,42 @@ export function SourceIngestPage() {
       setBaseViewSaveResult(null);
     } else if (node === 'transform_view:new') {
       setActiveArea('transform_views');
+      setTransformViewForm({
+        transform_view_id: '',
+        display_name: '',
+        inputs_text: '[]',
+        sql: 'SELECT main.* FROM main',
+        primary_key_field: '',
+        updated_at_field: '',
+      });
+      setTransformViewSaveResult(null);
+      setTransformPreview(null);
     } else if (node === 'article_view:new') {
       setActiveArea('article_views');
+      setArticleViewForm({
+        article_view_id: '',
+        display_name: '',
+        input_kind: 'base_view',
+        input_id: '',
+        gbrain_type: '',
+        target_source_id: 'shared',
+        slug_template: '',
+        external_id_field: '',
+        display_name_field: '',
+        natural_key_fields_text: '',
+        status: 'draft',
+        freshness_policy: 'P7D',
+        classification: 'shared',
+        pii: false,
+      });
+      setArticleSections({ title: '{{ name }}' });
+      setArticleChangePolicy(DEFAULT_CHANGE_INTELLIGENCE_POLICY);
+      setArticleViewSaveResult(null);
+      setArticleViewApproveResult(null);
+      setArticleViewPreview(null);
+      setArticleViewCurrentChainHash('');
+      setArticleViewRuns(null);
+      setArticleViewRunResult(null);
     }
   };
 
@@ -1233,6 +1281,9 @@ export function SourceIngestPage() {
     const rowFilter = parseJsonArray(baseViewForm.row_filter_text);
     const baseViewId = effectiveBaseViewId;
     if (!baseViewId) throw new Error('base_view_id_required: enter connector and source object, then use the generated Base view id or type one manually.');
+    if (activeNode === 'base_view:new' && catalogBaseViews.some(row => String(row.base_view_id) === baseViewId)) {
+      throw new Error(`base_view_already_exists:${baseViewId}`);
+    }
     const selectedFields = parseCsvLines(baseViewForm.selected_fields_text);
     const out = await api.sourceIngestSaveBaseView({
       base_view_id: baseViewId,
@@ -1336,9 +1387,14 @@ export function SourceIngestPage() {
   };
 
   const saveTransformView = async () => runStep('catalog-transform-view', async () => {
+    const transformViewId = transformViewForm.transform_view_id.trim();
+    if (!transformViewId) throw new Error('transform_view_id_required');
+    if (activeNode === 'transform_view:new' && catalogTransformViews.some(row => String(row.transform_view_id) === transformViewId)) {
+      throw new Error(`transform_view_already_exists:${transformViewId}`);
+    }
     const inputs = parseTransformInputs(transformViewForm.inputs_text);
     const out = await api.sourceIngestSaveTransformView({
-      transform_view_id: transformViewForm.transform_view_id,
+      transform_view_id: transformViewId,
       display_name: transformViewForm.display_name,
       inputs,
       sql: transformViewForm.sql,
@@ -1530,7 +1586,12 @@ export function SourceIngestPage() {
   };
 
   const saveArticleView = async () => runStep('catalog-article-view', async () => {
-    setArticleViewSaveResult(await api.sourceIngestSaveArticleView(articleViewPayload()));
+    const articleViewId = articleViewForm.article_view_id.trim();
+    if (!articleViewId) throw new Error('article_view_id_required');
+    if (activeNode === 'article_view:new' && catalogArticleViews.some(row => String(row.article_view_id) === articleViewId)) {
+      throw new Error(`article_view_already_exists:${articleViewId}`);
+    }
+    setArticleViewSaveResult(await api.sourceIngestSaveArticleView({ ...articleViewPayload(), article_view_id: articleViewId }));
     await load();
   });
 
@@ -1784,6 +1845,7 @@ export function SourceIngestPage() {
           activeArea={activeArea}
           activeNode={activeNode}
           schemaNodes={schemaNodes}
+          onRefresh={refreshCatalogTree}
           onSelectArea={setActiveArea}
           onSelectNode={handleSelectCatalogNode}
           onSelectConnector={selectCatalogConnector}

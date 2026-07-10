@@ -60,7 +60,7 @@ export interface SourceConnectorSecretStatus {
 }
 
 export interface SourceConnectorSecretAuditRow {
-  id: number;
+  id: string;
   config_id: string;
   connector_id: string;
   source_object: string;
@@ -449,7 +449,7 @@ export async function listSourceConnectorSecretAudit(engine: BrainEngine, config
   }
   params.push(Math.max(1, Math.min(100, limit)));
   const rows = await engine.executeRaw<SourceConnectorSecretAuditRow>(
-    `SELECT id, config_id, connector_id, source_object, action, actor, secret_keys, created_at::text
+    `SELECT id::text AS id, config_id, connector_id, source_object, action, actor, secret_keys, created_at::text
        FROM source_connector_secret_audit
        ${where}
        ORDER BY created_at DESC, id DESC

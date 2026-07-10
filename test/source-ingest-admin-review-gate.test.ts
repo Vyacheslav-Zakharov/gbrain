@@ -79,6 +79,11 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Новый источник…');
     expect(ui).toContain('Новое преобразование…');
     expect(ui).toContain('Новая публикация…');
+    expect(ui).toContain('connector_already_exists');
+    expect(ui).toContain('base_view_already_exists');
+    expect(ui).toContain('transform_view_already_exists');
+    expect(ui).toContain('article_view_already_exists');
+    expect(ui).toContain('onRefresh={refreshCatalogTree}');
     expect(ui).toContain('Схема мозга');
     expect(ui).toContain('Карточка типа');
     expect(ui).toContain('Postgres read-only');
@@ -115,6 +120,8 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('This Article view must be previewed and approved again before batch run');
     expect(server).toContain('/admin/api/source-ingest/catalog/connector/list-objects');
     expect(server).toContain('/admin/api/source-ingest/catalog/connector/test');
+    expect(server).toContain('credentials_stored_unverified');
+    expect(server).toContain('await connector.sample(objectName, 1)');
     expect(server).toContain('/admin/api/source-ingest/catalog/base-view');
     expect(server).toContain('/admin/api/source-ingest/catalog/transform-view');
     expect(server).toContain('/admin/api/source-ingest/catalog/article-view');

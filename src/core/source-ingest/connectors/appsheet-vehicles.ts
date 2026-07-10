@@ -88,11 +88,13 @@ export class AppSheetVehicleConnector implements SourceConnector {
     });
     if (!res.ok) throw new Error(`AppSheet vehicle fetch failed: HTTP ${res.status}`);
     const json = await res.json() as unknown;
+    const hasRowsEnvelope = json !== null && typeof json === 'object' && !Array.isArray(json) && Array.isArray((json as Record<string, unknown>).Rows);
+    if (!Array.isArray(json) && !hasRowsEnvelope) {
+      throw new Error(`AppSheet unexpected response shape for table ${this.tableName}; expected an array of rows.`);
+    }
     const rawRows: unknown[] = Array.isArray(json)
       ? json
-      : Array.isArray((json as Record<string, unknown>)?.Rows)
-        ? ((json as Record<string, unknown>).Rows as unknown[])
-        : [];
+      : ((json as Record<string, unknown>).Rows as unknown[]);
     return (rawRows as Record<string, unknown>[]).slice(0, opts.limit ?? rawRows.length);
   }
 

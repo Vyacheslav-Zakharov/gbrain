@@ -1196,7 +1196,19 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     const objectSecretConfig = objectName ? await getSourceConnectorSecretConfig(engine, connectorId, objectName, configId) : {};
     const connectorSecretConfig = await getSourceConnectorSecretConfig(engine, connectorId, '__connection__', `connector:${connectorId}`);
     const credentialStatus = await sourceConnectorSecretStatus(engine, connectorId, `connector:${connectorId}`, '__connection__') as unknown as Record<string, unknown>;
-    return { connectorId, objectName, credentialStatus, config: { ...rowConfig, ...nonSecretConnectorConfigFromBody(body), ...connectorSecretConfig, ...objectSecretConfig } };
+    const isAppSheet = connectorId === 'appsheet' || connectorId === 'appsheet-vehicles' || connectorId.startsWith('appsheet-');
+    return {
+      connectorId,
+      objectName,
+      credentialStatus,
+      config: {
+        ...rowConfig,
+        ...nonSecretConnectorConfigFromBody(body),
+        ...(isAppSheet && objectName ? { table_name: tableName || objectName } : {}),
+        ...connectorSecretConfig,
+        ...objectSecretConfig,
+      },
+    };
   }
 
   app.post('/admin/api/source-ingest/catalog/connector/list-objects', requireAdmin, express.json(), async (req: Request, res: Response) => {
@@ -1228,15 +1240,20 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         return;
       }
       const credentialsConfigured = (credentialStatus.configured !== false);
+      const isAppSheet = connectorId === 'appsheet' || connectorId === 'appsheet-vehicles' || connectorId.startsWith('appsheet-');
       const shouldProbeObjects = credentialsConfigured && (!!objectName || connectorId === 'postgres' || connectorId.startsWith('postgres-'));
-      const objects = shouldProbeObjects ? await connector.listObjects() : [];
+      let objects: unknown[] = [];
+      if (shouldProbeObjects) {
+        if (isAppSheet && objectName) await connector.sample(objectName, 1);
+        objects = await connector.listObjects();
+      }
       if (!credentialsConfigured) {
         await recordSourceConnectorTest(engine, connectorId, false);
         res.json({ ok: false, status: 'credentials_missing', connector_id: connectorId, elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: 'Connector-level test does not require a table. Add credentials here; table-specific extraction is tested from Base view.' });
         return;
       }
       await recordSourceConnectorTest(engine, connectorId, true);
-      res.json({ ok: true, status: shouldProbeObjects ? 'connection_ok' : 'credentials_configured', connector_id: connectorId, ...(objectName ? { source_object: objectName } : {}), elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: shouldProbeObjects ? 'Connector credentials are valid; object discovery succeeded.' : 'Credentials are configured. Create a Base view to test a concrete AppSheet table/object.' });
+      res.json({ ok: true, status: shouldProbeObjects ? 'connection_ok' : 'credentials_stored_unverified', connector_id: connectorId, ...(objectName ? { source_object: objectName } : {}), elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: shouldProbeObjects ? 'Connector credentials are valid; remote object probe succeeded.' : 'Credentials are stored but not remotely verified. Test a concrete table from Base view.' });
     } catch (e) {
       const connectorId = typeof req.body?.connector_id === 'string' ? req.body.connector_id : '';
       if (connectorId) await recordSourceConnectorTest(engine, connectorId, false).catch(() => undefined);
