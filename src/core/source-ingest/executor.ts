@@ -481,7 +481,7 @@ export async function runSourceIngestExecutor(
       const deleted = explicitCreate && !existing
         ? await engine.getPage(targetSlug, { sourceId, includeDeleted: true })
         : null;
-      if (explicitCreate && existing) {
+      if (explicitCreate && existing && !identitySlug) {
         throw new Error(`explicit create target already exists and requires adoption: ${record.external_id} -> ${targetSlug}`);
       }
       if (deleted?.deleted_at) {
@@ -569,7 +569,7 @@ export async function runSourceIngestExecutor(
         existing?.timeline ?? null,
         existing?.frontmatter ? existing.frontmatter as Record<string, unknown> : null,
         targetSlug,
-        Boolean(adoptionSlug && !identitySlug),
+        Boolean(adoptionSlug),
       );
       renderedSlug = rendered.slug;
       renderedPath = `${rendered.slug}.md`;

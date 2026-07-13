@@ -505,6 +505,8 @@ describe('source-ingest Stage 3A executor', () => {
     }, { createdBy: 'test', changeNote: 'approve explicit adoption and create resolutions' });
     const adopted = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-approved', no_embed: true });
     expect(adopted.results.find(r => r.external_id === 'veh-001')?.status).toBe('written');
+    const refreshed = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-refresh', no_embed: true });
+    expect(refreshed.ok).toBe(true);
     const page = await engine.getPage(slug, { sourceId: 'shared' });
     expect(page?.compiled_truth).toContain('Human-owned context.');
     expect(page?.compiled_truth).toContain('source-sync:start');
