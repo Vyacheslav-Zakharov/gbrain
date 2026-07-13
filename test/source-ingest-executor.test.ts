@@ -978,6 +978,32 @@ describe('source-ingest Stage 3A executor', () => {
     });
   });
 
+  test('AppSheet discovery can profile an arbitrary table before a stable ID is selected but full fetch still fails closed', async () => {
+    const fetchImpl = (async () => new Response(JSON.stringify([
+      { SeriesKey: 'series-1', MeetingTitle: 'Weekly operations', ModifiedOn: '2026-07-12T10:00:00Z' },
+    ]), { status: 200, headers: { 'Content-Type': 'application/json' } })) as unknown as typeof fetch;
+    const connector = new AppSheetVehicleConnector({
+      connectorId: 'appsheet-protokolist',
+      appId: 'app',
+      accessKey: 'secret',
+      tableName: 'PeriodicMeetingSeries',
+      baseUrl: 'https://203.0.113.10/api/v2/apps',
+      fetchImpl,
+    });
+
+    const sample = await connector.sample('PeriodicMeetingSeries', 5);
+    expect(sample[0].external_id).toStartWith('discovery-');
+    expect(sample[0].source_fields).toMatchObject({ SeriesKey: 'series-1', MeetingTitle: 'Weekly operations' });
+
+    const error = await (async () => {
+      for await (const _batch of connector.fetchAll!('PeriodicMeetingSeries')) {
+        // no-op
+      }
+    })().catch(e => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error.message)).toContain('configure primary_key_field before ingest');
+  });
+
   test('AppSheet connector supports arbitrary table configs with explicit primary/update fields', async () => {
     const calls: Array<{ url: string; body: any }> = [];
     const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {

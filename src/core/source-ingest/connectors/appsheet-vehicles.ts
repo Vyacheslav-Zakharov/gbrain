@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { fetchWithSSRFGuard, validateAndResolveUrl } from '../../ssrf-validate.ts';
 import type { SourceConnector, SourceObjectDescriptor, SourceRecord, SourceRecordBatch, SourceFetchOptions } from './types.ts';
 
@@ -50,7 +51,7 @@ export class AppSheetConnector implements SourceConnector {
 
   async sample(objectName: string, limit: number, opts: SourceFetchOptions = {}): Promise<SourceRecord[]> {
     const rows = await this.fetchRows(objectName, { limit, fields: opts.fields });
-    return rows.map(row => this.toSourceRecord(row));
+    return rows.map(row => this.toSourceRecord(row, true));
   }
 
   async *fetchAll(objectName: string, cursorOrOpts?: string | SourceFetchOptions, opts: SourceFetchOptions = {}): AsyncIterable<SourceRecordBatch> {
@@ -117,9 +118,14 @@ export class AppSheetConnector implements SourceConnector {
     return normalized !== 'vehicles' && normalized !== 'автотранспорт';
   }
 
-  private toSourceRecord(row: Record<string, unknown>): SourceRecord {
+  private toSourceRecord(row: Record<string, unknown>, allowUnstableDiscoveryId = false): SourceRecord {
     return this.usesGenericRecordShape()
-      ? rowToGenericAppSheetRecord(row, { tableName: this.tableName, primaryKeyField: this.primaryKeyField, updatedAtField: this.updatedAtField })
+      ? rowToGenericAppSheetRecord(row, {
+          tableName: this.tableName,
+          primaryKeyField: this.primaryKeyField,
+          updatedAtField: this.updatedAtField,
+          allowUnstableDiscoveryId,
+        })
       : rowToVehicleRecord(row);
   }
 
@@ -210,13 +216,20 @@ function firstString(row: Record<string, unknown>, names: string[]): string | nu
   return value === undefined || value === null || value === '' ? null : String(value);
 }
 
-export function rowToGenericAppSheetRecord(row: Record<string, unknown>, opts: { tableName: string; primaryKeyField?: string; updatedAtField?: string }): SourceRecord {
+export function rowToGenericAppSheetRecord(row: Record<string, unknown>, opts: {
+  tableName: string;
+  primaryKeyField?: string;
+  updatedAtField?: string;
+  allowUnstableDiscoveryId?: boolean;
+}): SourceRecord {
   const keyCandidates = [opts.primaryKeyField, 'id', 'ID', 'key', 'Key', 'uuid', 'UUID'].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
   const rawId = pick(row, keyCandidates);
-  if (rawId === undefined || rawId === null || rawId === '') {
+  if ((rawId === undefined || rawId === null || rawId === '') && (opts.primaryKeyField || !opts.allowUnstableDiscoveryId)) {
     throw new Error(`AppSheet table ${opts.tableName} row is missing stable identity column; configure primary_key_field before ingest.`);
   }
-  const id = String(rawId);
+  const id = rawId === undefined || rawId === null || rawId === ''
+    ? `discovery-${createHash('sha256').update(JSON.stringify(row, Object.keys(row).sort())).digest('hex').slice(0, 16)}`
+    : String(rawId);
   const updated = opts.updatedAtField ? pick(row, [opts.updatedAtField]) : pick(row, ['updated_at', 'UpdatedAt', 'modified_at', 'ModifiedAt', 'DATE_MODIFY']);
   const code = firstString(row, ['code', 'Code', 'Код', 'number', 'Number', 'name', 'Name', 'Наименование']) ?? id;
   const name = firstString(row, ['name', 'Name', 'Наименование', 'title', 'Title', 'description', 'Description']) ?? code;
