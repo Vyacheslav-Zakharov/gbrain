@@ -515,6 +515,7 @@ describe('source-ingest Stage 3A executor', () => {
     expect(persistedMarkdown).toContain('<!-- timeline -->');
     expect(persistedMarkdown).toContain('Human timeline entry.');
     expect(page?.frontmatter.status).toBe('curated');
+    expect(page?.title).toBe('Manual A-001');
     expect(page?.frontmatter.aliases).toEqual(['manual-a001']);
     expect(page?.frontmatter.company_metadata).toEqual({ owner: 'human', tier: 'gold' });
     expect((page?.frontmatter.source_ingest as Record<string, unknown>)?.run_id).toBeUndefined();

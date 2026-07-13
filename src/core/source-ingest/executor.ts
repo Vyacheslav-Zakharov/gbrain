@@ -567,7 +567,7 @@ export async function runSourceIngestExecutor(
         record,
         existing?.compiled_truth ?? null,
         existing?.timeline ?? null,
-        existing?.frontmatter ? existing.frontmatter as Record<string, unknown> : null,
+        existing ? { type: existing.type, title: existing.title, ...(existing.frontmatter as Record<string, unknown>) } : null,
         targetSlug,
         Boolean(adoptionSlug),
       );
