@@ -596,13 +596,16 @@ export async function runSourceIngestExecutor(
       if (imported.status === 'error') throw new Error(imported.error || 'import failed');
       const writeThrough = await writePageThrough(engine, rendered.slug, {
         sourceId,
-        frontmatterOverrides: { ingested_via: 'source_ingest', source_kind: 'source_ingest' },
+        ...(adoptionSlug ? {} : { frontmatterOverrides: { ingested_via: 'source_ingest', source_kind: 'source_ingest' } }),
         logger,
       });
       if (!writeThrough.written) throw new Error(`write-through failed: ${writeThrough.skipped || writeThrough.error || 'unknown'}`);
       const after = await engine.getPage(rendered.slug, { sourceId });
       const status = beforeHash && after?.content_hash === beforeHash ? 'unchanged' : 'written';
-      if (writeThrough.path && status !== 'unchanged') writtenPaths.push(writeThrough.path);
+      const writePathDirty = writeThrough.path
+        ? Boolean(execFileSync('git', ['-C', storage.local_path, 'status', '--porcelain', '--', writeThrough.path], { encoding: 'utf8' }).trim())
+        : false;
+      if (writeThrough.path && writePathDirty) writtenPaths.push(writeThrough.path);
       await writeSyncState(engine, {
         profile,
         profileVersion: version,
@@ -623,7 +626,7 @@ export async function runSourceIngestExecutor(
         priorVersionId,
         result: status === 'unchanged' ? 'unchanged' : 'success',
       });
-      if (status !== 'unchanged' && writeThrough.path) {
+      if (writePathDirty && writeThrough.path) {
         lastRecordCommit = await commitGitBackedRun(storage.local_path, [writeThrough.path], runId, profile.profile_id);
       }
       await appendCompleted(engine, key, [checkpointKey]);
