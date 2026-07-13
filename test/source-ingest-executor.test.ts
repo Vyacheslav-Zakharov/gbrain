@@ -691,6 +691,9 @@ describe('source-ingest Stage 3A executor', () => {
     const due = await listDueSourceRefreshes(engine, { profile_id: profile.profile_id });
     expect(due).toHaveLength(1);
     expect(due[0]).toMatchObject({ profile_id: profile.profile_id, total_rows: 0, never_synced_rows: 1, reason: 'initial_sync' });
+    expect(await listDueSourceRefreshes(engine, { profile_id: profile.profile_id, active_only: true })).toEqual([]);
+    await engine.executeRaw(`UPDATE source_ingest_profiles SET status = 'active', profile_json = jsonb_set(profile_json, '{status}', '"active"'::jsonb) WHERE profile_id = $1`, [profile.profile_id]);
+    expect(await listDueSourceRefreshes(engine, { profile_id: profile.profile_id, active_only: true })).toHaveLength(1);
   }, 30000);
 
   test('source_refresh enqueue is idempotent for the same freshness window', async () => {
@@ -711,6 +714,7 @@ describe('source-ingest Stage 3A executor', () => {
     const repo = tempGitRepo();
     await seed(repo);
     await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-refresh-cycle', no_embed: true });
+    await engine.executeRaw(`UPDATE source_ingest_profiles SET status = 'active', profile_json = jsonb_set(profile_json, '{status}', '"active"'::jsonb) WHERE profile_id = $1`, [profile.profile_id]);
     await engine.executeRaw(`UPDATE source_sync_state SET stale_after = now() - interval '1 hour' WHERE profile_id = $1`, [profile.profile_id]);
     const report = await runCycle(engine, { brainDir: null, phases: ['source_refresh'] });
     expect(report.phases[0]).toMatchObject({ phase: 'source_refresh', status: 'ok' });

@@ -49,11 +49,12 @@ export function nextStaleAfter(policy: string | null | undefined, base = new Dat
 export async function listDueSourceRefreshes(engine: BrainEngine, opts: {
   profile_id?: string;
   source_id?: string;
+  active_only?: boolean;
   limit?: number;
   now?: Date;
 } = {}): Promise<SourceRefreshDueRow[]> {
   const params: unknown[] = [];
-  const where: string[] = [`p.status IN ('reviewed', 'active')`];
+  const where: string[] = [opts.active_only ? `p.status = 'active'` : `p.status IN ('reviewed', 'active')`];
   if (opts.profile_id) { params.push(opts.profile_id); where.push(`p.profile_id = $${params.length}`); }
   if (opts.source_id) { params.push(opts.source_id); where.push(`p.approved_source_id = $${params.length}`); }
   params.push((opts.now ?? new Date()).toISOString());

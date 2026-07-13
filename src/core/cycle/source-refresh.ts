@@ -8,7 +8,7 @@ export async function runPhaseSourceRefresh(engine: BrainEngine, opts: {
   queue?: string;
   limit?: number;
 } = {}): Promise<PhaseResult> {
-  const due = await listDueSourceRefreshes(engine, { limit: opts.limit ?? 50, source_id: opts.sourceId });
+  const due = await listDueSourceRefreshes(engine, { limit: opts.limit ?? 50, source_id: opts.sourceId, active_only: true });
   if (opts.dryRun) {
     return {
       phase: 'source_refresh',

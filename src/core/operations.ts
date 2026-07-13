@@ -4111,6 +4111,7 @@ const source_refresh: Operation = {
   params: {
     profile_id: { type: 'string', description: 'Optional profile id filter' },
     source_id: { type: 'string', description: 'Optional approved source id filter' },
+    active_only: { type: 'boolean', description: 'Only active profiles. Use for unattended schedulers; reviewed profiles remain manual.' },
     limit: { type: 'number', description: 'Max due profiles to plan/enqueue (default 50)' },
     enqueue: { type: 'boolean', description: 'Submit source-ingest jobs for due profiles. Default false returns report-only plan.' },
     queue: { type: 'string', description: 'Minion queue name for enqueue (default: default).' },
@@ -4125,6 +4126,7 @@ const source_refresh: Operation = {
     const due = await listDueSourceRefreshes(ctx.engine, {
       profile_id: typeof p.profile_id === 'string' && p.profile_id.length > 0 ? p.profile_id : undefined,
       source_id: typeof p.source_id === 'string' && p.source_id.length > 0 ? p.source_id : undefined,
+      active_only: p.active_only === true,
       limit: typeof p.limit === 'number' ? p.limit : undefined,
     });
     if (ctx.dryRun || !p.enqueue) return { mode: 'report-only', count: due.length, due };
