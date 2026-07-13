@@ -478,8 +478,18 @@ export async function runSourceIngestExecutor(
     }
     if (profile.identity.require_explicit_resolution) {
       const existing = await engine.getPage(targetSlug, { sourceId });
+      const deleted = explicitCreate && !existing
+        ? await engine.getPage(targetSlug, { sourceId, includeDeleted: true })
+        : null;
       if (explicitCreate && existing) {
         throw new Error(`explicit create target already exists and requires adoption: ${record.external_id} -> ${targetSlug}`);
+      }
+      if (deleted?.deleted_at) {
+        const deletedOwner = deleted.frontmatter?.source_ingest as Record<string, unknown> | undefined;
+        const expectedExternalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
+        if (deletedOwner?.external_ref !== expectedExternalRef) {
+          throw new Error(`explicit create target is occupied by an unrelated soft-deleted page: ${record.external_id} -> ${targetSlug}`);
+        }
       }
       if (!explicitCreate && !existing) throw new Error(`required existing binding target not found for ${record.external_id}: ${targetSlug}`);
       if (existing?.type && existing.type !== profile.target.gbrain_type) {
@@ -522,11 +532,19 @@ export async function runSourceIngestExecutor(
       const identitySlug = resolvedTarget?.identitySlug;
       const adoptionSlug = resolvedTarget?.adoptionSlug;
       const targetSlug = resolvedTarget?.targetSlug || templateSlug;
-      const existing = await engine.getPage(targetSlug, { sourceId });
+      let existing = await engine.getPage(targetSlug, { sourceId });
+      if (!existing && resolvedTarget?.explicitCreate) {
+        const deleted = await engine.getPage(targetSlug, { sourceId, includeDeleted: true });
+        if (deleted?.deleted_at) {
+          const restored = await engine.restorePage(targetSlug, { sourceId });
+          if (!restored) throw new Error(`failed to restore explicit create target after rollback: ${targetSlug}`);
+          existing = await engine.getPage(targetSlug, { sourceId });
+        }
+      }
       if (adoptionSlug && !identitySlug && !existing) {
         throw new Error(`explicit adoption target not found for ${record.external_id}: ${adoptionSlug}`);
       }
-      if (existing && !identitySlug && !adoptionSlug) {
+      if (existing && !identitySlug && !adoptionSlug && !resolvedTarget?.explicitCreate) {
         throw new Error(`existing page requires explicit adoption mapping for ${record.external_id}: ${targetSlug}`);
       }
       if (existing && adoptionSlug && !identitySlug) {
