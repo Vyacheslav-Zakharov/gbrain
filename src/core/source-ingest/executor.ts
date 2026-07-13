@@ -146,14 +146,23 @@ function existingManagedBlock(content: string): string | null {
 }
 
 function yamlScalar(v: unknown): string {
+  if (v === null || v === undefined) return 'null';
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
-  const s = String(v ?? '');
+  if (Array.isArray(v) || typeof v === 'object') return JSON.stringify(v);
+  const s = String(v);
   if (/^[A-Za-z0-9_./:-]+$/.test(s)) return s;
   return JSON.stringify(s);
 }
 
-function renderMarkdown(profile: SourceIngestProfile, record: SourceRecord, existingBody: string | null, runIdForFrontmatter: string) {
-  const slug = renderSlugTemplate(profile.target.slug_template, record.data);
+function renderMarkdown(
+  profile: SourceIngestProfile,
+  record: SourceRecord,
+  existingBody: string | null,
+  existingFrontmatter: Record<string, unknown> | null,
+  targetSlug?: string,
+  explicitAdoption = false,
+) {
+  const slug = targetSlug || renderSlugTemplate(profile.target.slug_template, record.data);
   const externalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
   const article = renderArticleTemplate(profile, record);
   const generatedBlock = renderManagedBlock(profile.profile_id, externalRef, managedBody(profile, record));
@@ -161,10 +170,20 @@ function renderMarkdown(profile: SourceIngestProfile, record: SourceRecord, exis
   const mergedBody = existingBody
     ? mergeManagedBlock(existingBody, profile.profile_id, externalRef, managedBody(profile, record)).content
     : articleBodyWithBlock;
+  const preservedFrontmatter = { ...(existingFrontmatter || {}) };
+  delete preservedFrontmatter.source_ingest;
+  const managedArticleFrontmatter = explicitAdoption
+    ? Object.fromEntries(
+        (profile.update_policy.frontmatter_allowlist || [])
+          .filter(key => Object.prototype.hasOwnProperty.call(article.frontmatter, key))
+          .map(key => [key, article.frontmatter[key]]),
+      )
+    : article.frontmatter;
   const frontmatter: Record<string, unknown> = {
-    ...article.frontmatter,
-    type: profile.target.gbrain_type,
-    title: article.title,
+    ...preservedFrontmatter,
+    ...managedArticleFrontmatter,
+    type: explicitAdoption && typeof preservedFrontmatter.type === 'string' ? preservedFrontmatter.type : profile.target.gbrain_type,
+    title: explicitAdoption && typeof preservedFrontmatter.title === 'string' ? preservedFrontmatter.title : article.title,
     source_id: profile.target.approved_source_id,
   };
   const fm = [
@@ -173,7 +192,6 @@ function renderMarkdown(profile: SourceIngestProfile, record: SourceRecord, exis
     'source_ingest:',
     `  profile_id: ${yamlScalar(profile.profile_id)}`,
     `  external_ref: ${yamlScalar(externalRef)}`,
-    `  run_id: ${yamlScalar(runIdForFrontmatter)}`,
     '---',
     '',
   ].join('\n');
@@ -451,18 +469,53 @@ export async function runSourceIngestExecutor(
       results.push({ external_id: record.external_id, status: 'skipped', reason: 'checkpoint_completed' });
       continue;
     }
-    let renderedSlug = renderSlugTemplate(profile.target.slug_template, record.data);
+    const templateSlug = renderSlugTemplate(profile.target.slug_template, record.data);
+    let renderedSlug = templateSlug;
     let renderedPath = `${renderedSlug}.md`;
     let createdThisRecord = false;
     try {
-      const existing = await engine.getPage(renderedSlug, { sourceId });
+      const priorIdentityRows = await engine.executeRaw<{ slug: string }>(
+        `SELECT s.slug
+           FROM source_sync_state s
+           JOIN pages p ON p.slug = s.slug AND p.source_id = $4 AND p.deleted_at IS NULL
+          WHERE s.profile_id = $1 AND s.connector_id = $2 AND s.source_object = $3 AND s.external_id = $5
+            AND s.last_result <> 'failed'
+          LIMIT 1`,
+        [profile.profile_id, profile.source_connector, profile.source_object, sourceId, record.external_id],
+      );
+      const identitySlug = priorIdentityRows[0]?.slug;
+      const adoptionSlug = profile.identity.existing_slug_map?.[record.external_id];
+      const targetSlug = identitySlug || adoptionSlug || templateSlug;
+      const existing = await engine.getPage(targetSlug, { sourceId });
+      if (adoptionSlug && !identitySlug && !existing) {
+        throw new Error(`explicit adoption target not found for ${record.external_id}: ${adoptionSlug}`);
+      }
+      if (existing && !identitySlug && !adoptionSlug) {
+        throw new Error(`existing page requires explicit adoption mapping for ${record.external_id}: ${targetSlug}`);
+      }
+      if (existing && adoptionSlug && !identitySlug) {
+        if (existing.type && existing.type !== profile.target.gbrain_type) {
+          throw new Error(`existing page type is incompatible with adoption: ${targetSlug} (${existing.type} != ${profile.target.gbrain_type})`);
+        }
+        const expectedExternalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
+        const currentOwner = existing.frontmatter && typeof existing.frontmatter.source_ingest === 'object'
+          ? existing.frontmatter.source_ingest as Record<string, unknown>
+          : null;
+        if (currentOwner?.external_ref && currentOwner.external_ref !== expectedExternalRef) {
+          throw new Error(`existing page is owned by another source identity: ${targetSlug}`);
+        }
+      }
       createdThisRecord = !existing;
-      const priorVersions = existing ? await engine.getVersions(renderedSlug, { sourceId }) : [];
+      const priorVersions = existing ? await engine.getVersions(targetSlug, { sourceId }) : [];
       const priorVersionId = priorVersions[0]?.id ?? null;
-      const existingRunId = existing?.frontmatter && typeof existing.frontmatter.source_ingest === 'object'
-        ? (existing.frontmatter.source_ingest as Record<string, unknown>).run_id
-        : undefined;
-      const rendered = renderMarkdown(profile, record, existing?.compiled_truth ?? null, typeof existingRunId === 'string' ? existingRunId : runId);
+      const rendered = renderMarkdown(
+        profile,
+        record,
+        existing?.compiled_truth ?? null,
+        existing?.frontmatter ? existing.frontmatter as Record<string, unknown> : null,
+        targetSlug,
+        Boolean(adoptionSlug && !identitySlug),
+      );
       renderedSlug = rendered.slug;
       renderedPath = `${rendered.slug}.md`;
       const existingBlock = existing ? existingManagedBlock(existing.compiled_truth) : null;

@@ -91,13 +91,17 @@ function maskRecordForPreview(profile: SourceIngestProfile, record: SourceRecord
 }
 
 function samplePage(profile: SourceIngestProfile, record: SourceRecord) {
-  const slug = renderSlugTemplate(profile.target.slug_template, record.data);
+  const renderedSlug = renderSlugTemplate(profile.target.slug_template, record.data);
+  const adoptedSlug = profile.identity.existing_slug_map?.[record.external_id];
+  const slug = adoptedSlug || renderedSlug;
   const externalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
   const article = renderArticleTemplate(profile, record);
   const block = renderManagedBlock(profile.profile_id, externalRef, managedBody(profile, record));
   return {
     external_id: record.external_id,
     slug,
+    rendered_slug: renderedSlug,
+    adoption: adoptedSlug ? { mode: 'explicit', existing_slug: adoptedSlug } : null,
     title: article.title,
     source_ingest: { profile_id: profile.profile_id, external_ref: externalRef },
     managed_block_preview: block,

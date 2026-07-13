@@ -82,12 +82,24 @@ export interface SourceIngestProfile {
     slug_template: string;
   };
   selection?: { include?: SourceFilterRule[]; exclude?: SourceFilterRule[] };
-  identity: { external_id_field: string; natural_key_fields?: string[]; display_name_field: string };
+  identity: {
+    external_id_field: string;
+    natural_key_fields?: string[];
+    display_name_field: string;
+    /** Explicit external-id → existing page slug adoption map. Never inferred automatically. */
+    existing_slug_map?: Record<string, string>;
+  };
   freshness?: { policy?: string; on_access?: SourceIngestOnAccess; changed_since_field?: string };
   mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown>; source_fields?: string[]; article_template?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, string> } };
   links?: SourceLinkRule[];
   change_intelligence?: SourceChangeIntelligencePolicy;
-  update_policy: { mode: SourceIngestUpdateMode; preserve_manual_sections: true; field_allowlist?: string[] };
+  update_policy: {
+    mode: SourceIngestUpdateMode;
+    preserve_manual_sections: true;
+    field_allowlist?: string[];
+    /** Article-frontmatter keys allowed to overwrite an explicitly adopted manual page. */
+    frontmatter_allowlist?: string[];
+  };
   security: { classification: 'public' | 'shared' | 'internal' | 'restricted'; pii: boolean; pii_fields?: string[] };
   review?: { drafted_by?: string; approved_by?: string | null; approved_at?: string | null };
 }
@@ -155,6 +167,25 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
     if (p.identity.natural_key_fields !== undefined) {
       if (!Array.isArray(p.identity.natural_key_fields)) issues.push(issue('identity.natural_key_fields', 'invalid_type', 'natural_key_fields must be an array.'));
       else p.identity.natural_key_fields.forEach((v, i) => validateFieldPath(`identity.natural_key_fields.${i}`, v, issues));
+    }
+    if (p.identity.existing_slug_map !== undefined) {
+      if (!isObject(p.identity.existing_slug_map)) {
+        issues.push(issue('identity.existing_slug_map', 'invalid_type', 'existing_slug_map must be an external-id to slug object.'));
+      } else {
+        const claimedSlugs = new Map<string, string>();
+        for (const [externalId, slug] of Object.entries(p.identity.existing_slug_map)) {
+          if (!externalId.trim()) issues.push(issue('identity.existing_slug_map', 'invalid_external_id', 'Adoption external id must not be empty.'));
+          if (typeof slug !== 'string' || !slug.trim() || slug.startsWith('/') || slug.includes('..') || slug.includes('\\') || slug.endsWith('.md')) {
+            issues.push(issue(`identity.existing_slug_map.${externalId}`, 'invalid_adoption_slug', 'Adoption slug must be a safe relative GBrain slug without .md.'));
+          } else {
+            const previousExternalId = claimedSlugs.get(slug);
+            if (previousExternalId && previousExternalId !== externalId) {
+              issues.push(issue(`identity.existing_slug_map.${externalId}`, 'duplicate_adoption_slug', `Adoption slug is already claimed by ${previousExternalId}.`));
+            }
+            claimedSlugs.set(slug, externalId);
+          }
+        }
+      }
     }
   }
 
@@ -237,6 +268,10 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
     if (p.update_policy.preserve_manual_sections !== true) issues.push(issue('update_policy.preserve_manual_sections', 'required', 'Must explicitly preserve manual sections.'));
     const allow = p.update_policy.field_allowlist;
     if (Array.isArray(allow) && allow.some(v => typeof v === 'string' && v.startsWith('source_sync'))) issues.push(issue('update_policy.field_allowlist', 'sync_metadata_in_frontmatter', 'Mutable source_sync fields must not be written to frontmatter.'));
+    const frontmatterAllow = p.update_policy.frontmatter_allowlist;
+    if (frontmatterAllow !== undefined && (!Array.isArray(frontmatterAllow) || frontmatterAllow.some(v => typeof v !== 'string' || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(v)))) {
+      issues.push(issue('update_policy.frontmatter_allowlist', 'invalid_frontmatter_allowlist', 'frontmatter_allowlist must contain valid frontmatter key names.'));
+    }
   }
 
   if (!isObject(p.security)) {

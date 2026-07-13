@@ -133,7 +133,8 @@ describe('source-ingest Stage 3A executor', () => {
     expect(page?.compiled_truth).toContain('## Характеристики');
     expect(page?.compiled_truth).toContain('Пилотная карточка source-ingest.');
     expect(page?.compiled_truth).toContain('<!-- gbrain-source-sync:start');
-    expect(page?.frontmatter.source_ingest).toMatchObject({ profile_id: profile.profile_id, external_ref: 'fake-source:vehicle:veh-001', run_id: 'run-test-1' });
+    expect(page?.frontmatter.source_ingest).toMatchObject({ profile_id: profile.profile_id, external_ref: 'fake-source:vehicle:veh-001' });
+    expect((page?.frontmatter.source_ingest as Record<string, unknown>).run_id).toBeUndefined();
     const rows = await engine.executeRaw<{ run_id: string; last_result: string; content_fingerprint: string; managed_block_hash: string }>(
       `SELECT run_id, last_result, content_fingerprint, managed_block_hash FROM source_sync_state WHERE external_id = $1`,
       ['veh-001'],
@@ -455,6 +456,51 @@ describe('source-ingest Stage 3A executor', () => {
     expect(await engine.getPage('source-ingest/vehicles/a-002', { sourceId: 'shared' })).toBeTruthy();
   }, 30000);
 
+  test('source identity keeps the existing slug when the profile slug template changes', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-stable-slug-1', no_embed: true });
+    await putSourceIngestProfile(engine, {
+      ...profile,
+      target: { ...profile.target, slug_template: 'source-ingest/vehicles-v2/{{ code | slugify }}' },
+    }, { createdBy: 'test', changeNote: 'change slug convention' });
+
+    const out = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-stable-slug-2', no_embed: true });
+    expect(out.ok).toBe(true);
+    expect(await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' })).toBeTruthy();
+    expect(await engine.getPage('source-ingest/vehicles-v2/a-001', { sourceId: 'shared' })).toBeNull();
+  }, 30000);
+
+  test('existing manual page requires explicit adoption map and preserves manual content when adopted', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    const slug = 'source-ingest/vehicles/a-001';
+    const manual = `---\ntype: equipment\ntitle: Manual A-001\nstatus: curated\naliases:\n  - manual-a001\ncompany_metadata:\n  owner: human\n  tier: gold\n---\n# Manual A-001\n\nHuman-owned context.\n`;
+    mkdirSync(join(repo, 'source-ingest/vehicles'), { recursive: true });
+    writeFileSync(join(repo, `${slug}.md`), manual);
+    execFileSync('git', ['add', `${slug}.md`], { cwd: repo });
+    execFileSync('git', ['commit', '-q', '-m', 'manual equipment page'], { cwd: repo });
+    await importFromContent(engine, slug, manual, { sourceId: 'shared', sourcePath: `${slug}.md`, noEmbed: true, remote: false });
+
+    const blocked = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-blocked', no_embed: true });
+    expect(blocked.results.find(r => r.external_id === 'veh-001')).toMatchObject({ status: 'failed' });
+    expect(blocked.results.find(r => r.external_id === 'veh-001')?.reason).toContain('requires explicit adoption mapping');
+
+    await putSourceIngestProfile(engine, {
+      ...profile,
+      identity: { ...profile.identity, existing_slug_map: { 'veh-001': slug } },
+    }, { createdBy: 'test', changeNote: 'approve explicit adoption' });
+    const adopted = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-approved', no_embed: true });
+    expect(adopted.results.find(r => r.external_id === 'veh-001')?.status).toBe('written');
+    const page = await engine.getPage(slug, { sourceId: 'shared' });
+    expect(page?.compiled_truth).toContain('Human-owned context.');
+    expect(page?.compiled_truth).toContain('source-sync:start');
+    expect(page?.frontmatter.status).toBe('curated');
+    expect(page?.frontmatter.aliases).toEqual(['manual-a001']);
+    expect(page?.frontmatter.company_metadata).toEqual({ owner: 'human', tier: 'gold' });
+    expect((page?.frontmatter.source_ingest as Record<string, unknown>)?.run_id).toBeUndefined();
+  }, 30000);
+
   test('second identical run is unchanged and preserves page content_hash', async () => {
     const repo = tempGitRepo();
     await seed(repo);
@@ -634,6 +680,10 @@ describe('source-ingest Stage 3A executor', () => {
       sourceId: 'shared',
       sourcePath: 'source-ingest/vehicles/a-001.md',
       remote: false,
+    });
+    await putSourceIngestProfile(engine, {
+      ...profile,
+      identity: { ...profile.identity, existing_slug_map: { 'veh-001': 'source-ingest/vehicles/a-001' } },
     });
     await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-revert-update', limit: 1, no_embed: true });
     expect((await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' }))?.compiled_truth).toContain('Source data');
