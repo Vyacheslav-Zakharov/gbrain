@@ -368,6 +368,19 @@ describe('source-ingest Stage 3A executor', () => {
     expect(result.records[0].source_updated_at).toBe('2026-07-01T10:00:00.000Z');
   });
 
+  test('SQL transform preserves quoted source fields with spaces and Cyrillic names', async () => {
+    const result = await executeSourceTransform(
+      {
+        engine: 'pglite',
+        primary_key_field: 'id',
+        sources: [{ alias: 'source', object: 'meeting' }],
+        sql: 'SELECT id, "Незакрытые задачи серии" AS open_tasks FROM source',
+      },
+      async () => [{ external_id: 'meeting-1', data: { id: 'meeting-1', 'Незакрытые задачи серии': 'task-1' } }],
+    );
+    expect(result.records[0].data.open_tasks).toBe('task-1');
+  });
+
   test('SQL transform preserves empty text and serializes large bigint-like values safely', async () => {
     const result = await executeSourceTransform(
       {

@@ -115,9 +115,11 @@ try {
   ({ PGlite } = require(workerData.pgliteModulePath));
 }
 
-const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 function quoteIdent(id) { return '"' + String(id).replace(/"/g, '""') + '"'; }
-function sanitizeIdentifier(raw) { return IDENT_RE.test(String(raw)) ? String(raw) : null; }
+function sanitizeIdentifier(raw) {
+  const value = String(raw);
+  return value && !value.includes('\\0') && Buffer.byteLength(value, 'utf8') <= 63 ? value : null;
+}
 function inferSqlType(values) {
   const nonNull = values.filter(v => v !== null && v !== undefined && v !== '');
   if (nonNull.length === 0) return 'text';
