@@ -158,6 +158,7 @@ function renderMarkdown(
   profile: SourceIngestProfile,
   record: SourceRecord,
   existingBody: string | null,
+  existingTimeline: string | null,
   existingFrontmatter: Record<string, unknown> | null,
   targetSlug?: string,
   explicitAdoption = false,
@@ -167,9 +168,15 @@ function renderMarkdown(
   const article = renderArticleTemplate(profile, record);
   const generatedBlock = renderManagedBlock(profile.profile_id, externalRef, managedBody(profile, record));
   const articleBodyWithBlock = `${article.body.trimEnd()}\n\n${generatedBlock}\n`;
-  const mergedBody = existingBody
+  const mergedCore = existingBody
     ? mergeManagedBlock(existingBody, profile.profile_id, externalRef, managedBody(profile, record)).content
     : articleBodyWithBlock;
+  // Engine parsing separates timeline content from compiled_truth. Reattach it after the
+  // managed block so adoption never drops curated timeline entries or places source data
+  // inside the timeline parser's section.
+  const mergedBody = existingTimeline?.trim()
+    ? `${mergedCore.trimEnd()}\n\n<!-- timeline -->\n\n${existingTimeline.trim()}\n`
+    : mergedCore;
   const preservedFrontmatter = { ...(existingFrontmatter || {}) };
   delete preservedFrontmatter.source_ingest;
   const managedArticleFrontmatter = explicitAdoption
@@ -541,6 +548,7 @@ export async function runSourceIngestExecutor(
         profile,
         record,
         existing?.compiled_truth ?? null,
+        existing?.timeline ?? null,
         existing?.frontmatter ? existing.frontmatter as Record<string, unknown> : null,
         targetSlug,
         Boolean(adoptionSlug && !identitySlug),

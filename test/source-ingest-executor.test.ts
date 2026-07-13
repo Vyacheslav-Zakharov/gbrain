@@ -475,7 +475,7 @@ describe('source-ingest Stage 3A executor', () => {
     const repo = tempGitRepo();
     await seed(repo);
     const slug = 'source-ingest/vehicles/a-001';
-    const manual = `---\ntype: equipment\ntitle: Manual A-001\nstatus: curated\naliases:\n  - manual-a001\ncompany_metadata:\n  owner: human\n  tier: gold\n---\n# Manual A-001\n\nHuman-owned context.\n`;
+    const manual = `---\ntype: equipment\ntitle: Manual A-001\nstatus: curated\naliases:\n  - manual-a001\ncompany_metadata:\n  owner: human\n  tier: gold\n---\n# Manual A-001\n\nHuman-owned context.\n\n<!-- timeline -->\n\n- **2026-07-01** | Human timeline entry.\n`;
     mkdirSync(join(repo, 'source-ingest/vehicles'), { recursive: true });
     writeFileSync(join(repo, `${slug}.md`), manual);
     execFileSync('git', ['add', `${slug}.md`], { cwd: repo });
@@ -508,6 +508,10 @@ describe('source-ingest Stage 3A executor', () => {
     const page = await engine.getPage(slug, { sourceId: 'shared' });
     expect(page?.compiled_truth).toContain('Human-owned context.');
     expect(page?.compiled_truth).toContain('source-sync:start');
+    expect(page?.timeline).toContain('Human timeline entry.');
+    const persistedMarkdown = readFileSync(join(repo, `${slug}.md`), 'utf8');
+    expect(persistedMarkdown).toContain('<!-- timeline -->');
+    expect(persistedMarkdown).toContain('Human timeline entry.');
     expect(page?.frontmatter.status).toBe('curated');
     expect(page?.frontmatter.aliases).toEqual(['manual-a001']);
     expect(page?.frontmatter.company_metadata).toEqual({ owner: 'human', tier: 'gold' });
