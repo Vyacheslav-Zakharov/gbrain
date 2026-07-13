@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { ArticleViewEditor } from './source-ingest/ArticleViewEditor';
 import { BaseViewEditor } from './source-ingest/BaseViewEditor';
@@ -110,13 +110,59 @@ const DEFAULT_ARTICLE_SECTIONS: Record<string, string> = {
 };
 
 function firstField(fields: Set<string>, candidates: string[]): string {
-  return candidates.find(f => fields.has(f)) || '';
+  const byLower = new Map(Array.from(fields).map(field => [field.toLocaleLowerCase('ru'), field]));
+  for (const candidate of candidates) {
+    const match = byLower.get(candidate.toLocaleLowerCase('ru'));
+    if (match) return match;
+  }
+  return '';
 }
 
-function makeDefaultArticleSections(fieldNames: string[]): Record<string, string> {
+function makeDefaultArticleSections(fieldNames: string[], gbrainType = 'equipment'): Record<string, string> {
   const fields = new Set(fieldNames);
-  const titleField = firstField(fields, ['name', 'title', 'code', 'id']);
+  const titleField = firstField(fields, ['name', 'title', 'series_name', 'seriesname', 'название', 'тема', 'code', 'id']);
   const codeField = firstField(fields, ['code', 'external_code', 'id']);
+  if (gbrainType === 'meeting') {
+    const participants = firstField(fields, ['participants', 'участники']);
+    const agenda = firstField(fields, ['agenda', 'повестка']);
+    const decisions = firstField(fields, ['decisions', 'решения']);
+    const tasks = firstField(fields, ['Незакрытые задачи серии', 'open_tasks', 'opentasks', 'tasks', 'поручения']);
+    const risks = firstField(fields, ['risks', 'open_questions', 'риски', 'открытые вопросы']);
+    return {
+      title: titleField ? `{{ ${titleField} }}` : '',
+      summary: titleField ? `{{ ${titleField} }}` : '',
+      participants: participants ? `{{ ${participants} }}` : '',
+      agenda: agenda ? `{{ ${agenda} }}` : '',
+      decisions: decisions ? `{{ ${decisions} }}` : '',
+      tasks: tasks ? `{{ ${tasks} }}` : '',
+      risks: risks ? `{{ ${risks} }}` : '',
+      links: '',
+      source: 'Данные импортированы из AppSheet «ИИ Протоколист».',
+      ai_loop_review: '',
+      timeline: '',
+    };
+  }
+  if (gbrainType === 'company') {
+    return {
+      title: titleField ? `{{ ${titleField} }}` : '',
+      summary: `${titleField ? `{{ ${titleField} }}` : 'Компания'}${codeField ? ` — код: {{ ${codeField} }}.` : '.'}`,
+      profile: '',
+      links: '',
+      open_questions: '',
+      source: 'Данные импортированы через Source Ingest.',
+      timeline: '',
+    };
+  }
+  if (gbrainType !== 'equipment') {
+    return {
+      title: titleField ? `{{ ${titleField} }}` : '',
+      summary: titleField ? `{{ ${titleField} }}` : '',
+      profile: '',
+      links: '',
+      notes: 'Данные импортированы через Source Ingest.',
+      timeline: '',
+    };
+  }
   const typeField = firstField(fields, ['vehicle_class', 'equipment_class', 'type']);
   const modelField = firstField(fields, ['model', 'manufacturer_model', 'name']);
   const statusField = firstField(fields, ['status', 'state']);
@@ -350,11 +396,15 @@ function sqlProjectionFieldNames(sql: string): string[] {
   if (!match) return [];
   return splitSqlProjection(match[1]).flatMap(part => {
     if (/\.\*/.test(part) || part.trim() === '*') return [];
-    const asMatch = part.match(/\bas\s+"?([A-Za-z_][A-Za-z0-9_]*)"?\s*$/i);
-    if (asMatch) return [asMatch[1]];
-    const tail = part.match(/(?:^|\.)"?([A-Za-z_][A-Za-z0-9_]*)"?\s*$/);
-    return tail ? [tail[1]] : [];
+    const asMatch = part.match(/\bas\s+(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))\s*$/i);
+    if (asMatch) return [(asMatch[1] || asMatch[2]).replace(/""/g, '"')];
+    const tail = part.match(/(?:^|\.)(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))\s*$/);
+    return tail ? [(tail[1] || tail[2]).replace(/""/g, '"')] : [];
   }).filter((v, i, arr) => v && arr.indexOf(v) === i);
+}
+
+function quoteSqlIdentifier(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
 }
 
 function TransformResultPreview({ value }: { value: unknown }) {
@@ -645,6 +695,7 @@ export function SourceIngestPage() {
   const [schemaTypeCard, setSchemaTypeCard] = useState<unknown>(null);
   const [activeArea, setActiveArea] = useState<CatalogArea>('connectors');
   const [activeNode, setActiveNode] = useState('section:connectors');
+  const lastAppliedHashRoute = useRef('');
 
   const load = async () => {
     try {
@@ -679,13 +730,16 @@ export function SourceIngestPage() {
       const sections = asArr<Record<string, unknown>>(asObj(tmpl).sections);
       if (sections.length > 0) {
         setArticleSections(prev => {
+          const shouldReset = opts.resetEmpty === true && !articleDirty;
           const next: Record<string, string> = {};
           for (const section of sections) {
             const key = String(section.key ?? '').trim();
             if (!key) continue;
-            next[key] = opts.resetEmpty && !String(prev[key] ?? '').trim() ? '' : String(prev[key] ?? '');
+            next[key] = shouldReset ? '' : String(prev[key] ?? '');
           }
-          for (const [key, value] of Object.entries(prev)) if (!(key in next) && String(value || '').trim()) next[key] = value;
+          if (!shouldReset) {
+            for (const [key, value] of Object.entries(prev)) if (!(key in next) && String(value || '').trim()) next[key] = value;
+          }
           return next;
         });
       }
@@ -737,8 +791,10 @@ export function SourceIngestPage() {
   useEffect(() => {
     if (typeof window === 'undefined' || !data?.catalog_tree) return;
     const applyHashRoute = () => {
+      if (window.location.hash === lastAppliedHashRoute.current) return;
       const section = window.location.hash.match(/^#source-ingest\/(connectors|base|transform|article|schema)$/);
       if (section) {
+        lastAppliedHashRoute.current = window.location.hash;
         const area = section[1] === 'base' ? 'base_views' : section[1] === 'transform' ? 'transform_views' : section[1] === 'article' ? 'article_views' : section[1] === 'schema' ? 'schema_view' : 'connectors';
         setActiveArea(area);
         setActiveNode(`section:${area}`);
@@ -747,6 +803,7 @@ export function SourceIngestPage() {
       const m = window.location.hash.match(/^#source-ingest\/(connector|base|transform|article)\/([^/?#]+)/);
       if (!m) return;
       const id = decodeURIComponent(m[2]);
+      lastAppliedHashRoute.current = window.location.hash;
       if (m[1] === 'connector') {
         const row = (data.catalog_tree?.connectors ?? []).find(r => String(r.connector_id) === id);
         if (row) selectCatalogConnector(row);
@@ -962,12 +1019,16 @@ export function SourceIngestPage() {
     const [kind, id] = node.split(':', 2);
     if (kind === 'section') {
       const routeArea = id === 'base_views' ? 'base' : id === 'transform_views' ? 'transform' : id === 'article_views' ? 'article' : id === 'schema_view' ? 'schema' : id;
-      window.location.hash = `#source-ingest/${routeArea}`;
+      const nextHash = `#source-ingest/${routeArea}`;
+      lastAppliedHashRoute.current = nextHash;
+      window.location.hash = nextHash;
       return;
     }
     if (!id || id === 'new') return;
     const routeKind = kind === 'base_view' ? 'base' : kind === 'transform_view' ? 'transform' : kind === 'article_view' ? 'article' : kind;
-    window.location.hash = `#source-ingest/${routeKind}/${encodeURIComponent(id)}`;
+    const nextHash = `#source-ingest/${routeKind}/${encodeURIComponent(id)}`;
+    lastAppliedHashRoute.current = nextHash;
+    window.location.hash = nextHash;
   };
 
   const handleSelectCatalogNode = (node: string) => {
@@ -1090,8 +1151,7 @@ export function SourceIngestPage() {
     const connectorId = baseViewForm.connector_id.trim();
     if (!connectorId) return;
     const current = asObj(catalogConnectorObjects);
-    const currentObjects = asArr<Record<string, unknown>>(current.objects);
-    if (String(current.connector_id ?? '') === connectorId && currentObjects.length > 0) return;
+    if (String(current.connector_id ?? '') === connectorId) return;
     const row = catalogConnectors.find(c => String(c.connector_id ?? '') === connectorId);
     if (!row) return;
     let cancelled = false;
@@ -1378,10 +1438,13 @@ export function SourceIngestPage() {
     const projection = inputs.flatMap(input => {
       const fields = asArr(lookup.get(input.base_view_id)?.selected_fields).map(String).filter(Boolean);
       const safeFields = fields.length ? fields : ['*'];
-      if (safeFields.includes('*')) return [`${input.alias}.*`];
-      return safeFields.map(field => `${input.alias}.${field}${inputs.length > 1 ? ` AS ${input.alias}_${field}` : ''}`);
+      if (safeFields.includes('*')) return [`${quoteSqlIdentifier(input.alias)}.*`];
+      return safeFields.map(field => {
+        const source = `${quoteSqlIdentifier(input.alias)}.${quoteSqlIdentifier(field)}`;
+        return inputs.length > 1 ? `${source} AS ${quoteSqlIdentifier(`${input.alias}_${field}`)}` : source;
+      });
     });
-    const from = inputs.map((input, i) => `${i === 0 ? 'FROM' : '-- JOIN'} ${input.alias}`).join('\n');
+    const from = inputs.map((input, i) => `${i === 0 ? 'FROM' : '-- JOIN'} ${quoteSqlIdentifier(input.alias)}`).join('\n');
     const sql = `SELECT\n  ${projection.join(',\n  ')}\n${from}`;
     setTransformViewForm(prev => ({ ...prev, sql }));
   };
@@ -1647,7 +1710,7 @@ export function SourceIngestPage() {
       sample_limit: form.sample_limit,
     }));
     if (!transformSourcesText) setTransformSourcesText(defaultTransformSources(form, selected));
-    if (!articleDirty) setArticleSections(makeDefaultArticleSections(selected));
+    if (!articleDirty) setArticleSections(makeDefaultArticleSections(selected, articleViewForm.gbrain_type));
     setDryRun(null);
     setTransformPreview(null);
     setDryRunSourceId(null);
@@ -1690,7 +1753,7 @@ export function SourceIngestPage() {
   const setFieldSelected = (field: string, checked: boolean) => {
     setSelectedSourceFields(prev => {
       const next = checked ? Array.from(new Set([...prev, field])) : prev.filter(f => f !== field);
-      if (!articleDirty) setArticleSections(makeDefaultArticleSections(next));
+      if (!articleDirty) setArticleSections(makeDefaultArticleSections(next, articleViewForm.gbrain_type));
       return next;
     });
     setDryRun(null);
@@ -1702,7 +1765,7 @@ export function SourceIngestPage() {
 
   const selectAllFields = (fields: string[]) => {
     setSelectedSourceFields(fields);
-    if (!articleDirty) setArticleSections(makeDefaultArticleSections(fields));
+    if (!articleDirty) setArticleSections(makeDefaultArticleSections(fields, articleViewForm.gbrain_type));
     setDryRun(null);
     setTransformPreview(null);
     setDryRunSourceId(null);

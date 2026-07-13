@@ -3431,17 +3431,46 @@ const source_article_view_delete: Operation = {
 };
 
 function articleTemplateFallback(gbrainType: string) {
-  const sections = [
+  const common = [
     { key: 'title', label: 'Заголовок H1 / frontmatter title', hint: 'Обычно {{ display_name_field }}.' },
     { key: 'summary', label: 'Описание под заголовком' },
-    { key: 'characteristics_type', label: 'Характеристики → Тип' },
-    { key: 'characteristics_model', label: 'Характеристики → Производитель/модель' },
-    { key: 'characteristics_status', label: 'Характеристики → Состояние' },
-    { key: 'characteristics_inventory', label: 'Характеристики → Инвентарный/серийный №' },
+  ];
+  const byType: Record<string, Array<{ key: string; label: string; hint?: string }>> = {
+    equipment: [
+      { key: 'characteristics_type', label: 'Характеристики → Тип' },
+      { key: 'characteristics_model', label: 'Характеристики → Производитель/модель' },
+      { key: 'characteristics_status', label: 'Характеристики → Состояние' },
+      { key: 'characteristics_inventory', label: 'Характеристики → Инвентарный/серийный №' },
+      { key: 'links', label: 'Связи' },
+      { key: 'notes', label: 'Заметки' },
+      { key: 'timeline', label: 'Timeline' },
+    ],
+    company: [
+      { key: 'profile', label: 'Профиль' },
+      { key: 'links', label: 'Связи' },
+      { key: 'open_questions', label: 'Открытые вопросы' },
+      { key: 'source', label: 'Источник' },
+      { key: 'timeline', label: 'Timeline' },
+    ],
+    meeting: [
+      { key: 'participants', label: 'Участники' },
+      { key: 'agenda', label: 'Повестка' },
+      { key: 'decisions', label: 'Решения' },
+      { key: 'tasks', label: 'Поручения' },
+      { key: 'risks', label: 'Риски / открытые вопросы' },
+      { key: 'links', label: 'Связи' },
+      { key: 'source', label: 'Источник' },
+      { key: 'ai_loop_review', label: 'AI-loop review' },
+      { key: 'timeline', label: 'Timeline' },
+    ],
+  };
+  const generic = [
+    { key: 'profile', label: 'Профиль' },
     { key: 'links', label: 'Связи' },
     { key: 'notes', label: 'Заметки' },
     { key: 'timeline', label: 'Timeline' },
   ];
+  const sections = [...common, ...(byType[gbrainType] || generic)];
   return { sections, required_frontmatter: ['type', 'source_id', 'status'], template_page: null, warnings: [`template_page_missing:${gbrainType}`] };
 }
 

@@ -408,7 +408,10 @@ export async function upsertSourceArticleView(engine: BrainEngine, input: Source
        target_source_id = EXCLUDED.target_source_id,
        article_json = EXCLUDED.article_json,
        stale = true,
-       stale_reasons = source_article_views.stale_reasons || '["article_view_changed"]'::jsonb,
+       stale_reasons = (
+         SELECT COALESCE(jsonb_agg(DISTINCT reason.value), '[]'::jsonb)
+           FROM jsonb_array_elements(COALESCE(source_article_views.stale_reasons, '[]'::jsonb) || '["article_view_changed"]'::jsonb) AS reason(value)
+       ),
        updated_at = now()`,
     [input.article_view_id, input.display_name || input.article_view_id, input.input.kind, input.input.id, input.status || 'draft', input.gbrain_type, input.target_source_id],
     [articleJson],
@@ -451,7 +454,10 @@ async function markArticleViewsStale(engine: BrainEngine, whereSql: string, para
     engine,
     `UPDATE source_article_views
         SET stale = true,
-            stale_reasons = COALESCE(stale_reasons, '[]'::jsonb) || ($${params.length + 1}::jsonb->'value'),
+            stale_reasons = (
+              SELECT COALESCE(jsonb_agg(DISTINCT reason.value), '[]'::jsonb)
+                FROM jsonb_array_elements(COALESCE(source_article_views.stale_reasons, '[]'::jsonb) || ($${params.length + 1}::jsonb->'value')) AS reason(value)
+            ),
             updated_at = now()
       WHERE ${whereSql}`,
     params as any,

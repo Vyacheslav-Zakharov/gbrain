@@ -398,6 +398,33 @@ describe('source-ingest Stage 3A executor', () => {
     expect(article.body).toContain('# Line 1 Line 2\n');
   });
 
+  test('meeting templates render type-specific sections, Cyrillic fields, and transliterated slugs', () => {
+    const meetingProfile: SourceIngestProfile = {
+      ...profile,
+      profile_id: 'protocolist-series-preview',
+      target: { gbrain_type: 'meeting', approved_source_id: 'shared', slug_template: 'meetings/series/{{ Название | slugify }}' },
+      identity: { external_id_field: 'Id', natural_key_fields: [], display_name_field: 'Название' },
+      mapping: {
+        source_fields: ['Id', 'Название', 'Незакрытые задачи серии'],
+        article_template: {
+          sections: {
+            title: '{{ Название }}',
+            summary: '{{ Название }}',
+            tasks: '{{ Незакрытые задачи серии }}',
+            source: 'AppSheet Protocolist',
+          },
+        },
+      },
+    };
+    const record = { external_id: 'series-1', data: { Id: 'series-1', Название: 'Еженедельное совещание по ТОиРО', 'Незакрытые задачи серии': 'Проверить график' } };
+    const slug = renderTemplateString(meetingProfile.target.slug_template, record, [], new Set(meetingProfile.mapping?.source_fields));
+    const article = renderArticleTemplate(meetingProfile, record);
+    expect(slug).toBe('meetings/series/ezhenedelnoe-soveshchanie-po-toiro');
+    expect(article.body).toContain('## Поручения');
+    expect(article.body).toContain('Проверить график');
+    expect(article.body).not.toContain('## Характеристики');
+  });
+
   test('SQL transform rejects missing and null primary keys instead of row-N fallback', async () => {
     await expect(executeSourceTransform(
       {

@@ -128,6 +128,12 @@ describe('source-ingest Phase 0 catalog model', () => {
       status: 'draft',
     });
 
+    const [savedDraft] = await listSourceArticleViews(engine, 'av-equipment');
+    await upsertSourceArticleView(engine, savedDraft.article_json as any);
+    await upsertSourceArticleView(engine, savedDraft.article_json as any);
+    const [resavedDraft] = await listSourceArticleViews(engine, 'av-equipment');
+    expect(resavedDraft.stale_reasons.filter(reason => reason === 'article_view_changed')).toHaveLength(1);
+
     const compiled = await compileSourceArticleView(engine, 'av-equipment', { approvedBy: 'tester' });
     expect(compiled.compiled_profile).toMatchObject({
       profile_id: 'av-equipment',

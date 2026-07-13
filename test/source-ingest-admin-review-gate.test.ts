@@ -72,7 +72,8 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Сохранить и дальше');
     expect(ui).toContain('Upsert step');
     expect(ui).toContain('Lineage / цепочка публикации');
-    expect(ui).toContain('window.location.hash = `#source-ingest/${routeArea}`');
+    expect(ui).toContain('lastAppliedHashRoute.current = nextHash');
+    expect(ui).toContain('if (window.location.hash === lastAppliedHashRoute.current) return;');
     expect(ui).toContain("window.addEventListener('keydown', onKeyDown)");
     expect(ui).toContain('handleSelectCatalogNode(hit.node)');
     expect(ui).toContain('Поиск по каталогу…');

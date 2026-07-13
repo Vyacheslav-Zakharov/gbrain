@@ -33,8 +33,21 @@ function stringifyValue(v: unknown): string {
   return String(v);
 }
 
+function transliterateSlugValue(value: string): string {
+  const map: Record<string, string> = {
+    а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'yo', ж: 'zh', з: 'z', и: 'i', й: 'y',
+    к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f',
+    х: 'h', ц: 'ts', ч: 'ch', ш: 'sh', щ: 'shch', ъ: '', ы: 'y', ь: '', э: 'e', ю: 'yu', я: 'ya',
+    ә: 'a', ғ: 'g', қ: 'q', ң: 'n', ө: 'o', ұ: 'u', ү: 'u', һ: 'h', і: 'i',
+  };
+  return Array.from(value.toLocaleLowerCase('ru')).map(ch => map[ch] ?? ch).join('')
+    .normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
 export function renderTemplateString(template: string, record: SourceRecord, emptySlots: string[], allowedFields?: Set<string>): string {
-  return template.replace(/{{\s*([A-Za-z_][A-Za-z0-9_.]*)(?:\s*\|\s*([A-Za-z_][A-Za-z0-9_]*))?\s*}}/g, (_m, field: string, filter?: string) => {
+  return template.replace(/{{\s*([^{}|]+?)(?:\s*\|\s*([A-Za-z_][A-Za-z0-9_]*))?\s*}}/g, (_m, rawField: string, filter?: string) => {
+    const field = rawField.trim();
     if (allowedFields && !allowedFields.has(field)) {
       emptySlots.push(`${field} (not selected)`);
       return '';
@@ -49,7 +62,7 @@ export function renderTemplateString(template: string, record: SourceRecord, emp
       emptySlots.push(`${field} (unknown filter: ${filter})`);
       return '';
     }
-    if (filter === 'slugify') return s.toLowerCase().replace(/[^a-z0-9а-яё]+/gi, '-').replace(/^-+|-+$/g, '');
+    if (filter === 'slugify') return transliterateSlugValue(s);
     return s;
   });
 }
@@ -147,7 +160,13 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
   frontmatter.title = title;
   frontmatter.source_id = profile.target.approved_source_id;
 
-  const lines = [
+  const equipmentLayout = profile.target.gbrain_type === 'equipment' || Object.keys(sections).some(key => key.startsWith('characteristics_'));
+  const sectionLabels: Record<string, string> = {
+    profile: 'Профиль', participants: 'Участники', agenda: 'Повестка', decisions: 'Решения', tasks: 'Поручения',
+    risks: 'Риски / открытые вопросы', open_questions: 'Открытые вопросы', links: 'Связи', notes: 'Заметки',
+    source: 'Источник', ai_loop_review: 'AI-loop review', timeline: 'Timeline',
+  };
+  const lines = equipmentLayout ? [
     `# ${title}`,
     '',
     renderedFields.summary || '',
@@ -170,6 +189,18 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
     '## Timeline',
     '',
     renderedFields.timeline || '',
+  ] : [
+    `# ${title}`,
+    '',
+    renderedFields.summary || '',
+    ...Object.keys(sections)
+      .filter(key => key !== 'title' && key !== 'summary')
+      .flatMap(key => [
+        '',
+        `## ${sectionLabels[key] || key.replace(/_/g, ' ').replace(/^./, ch => ch.toUpperCase())}`,
+        '',
+        renderedFields[key] || '',
+      ]),
   ];
 
   const body = lines.join('\n').replace(/\n{4,}/g, '\n\n\n').trimEnd() + '\n';
