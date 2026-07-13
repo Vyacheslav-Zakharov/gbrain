@@ -88,6 +88,8 @@ export interface SourceIngestProfile {
     display_name_field: string;
     /** Explicit external-id → existing page slug adoption map. Never inferred automatically. */
     existing_slug_map?: Record<string, string>;
+    /** Fail the complete run before the first write unless every record resolves to an existing identity or explicit adoption target. */
+    require_existing_binding?: boolean;
   };
   freshness?: { policy?: string; on_access?: SourceIngestOnAccess; changed_since_field?: string };
   mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown>; source_fields?: string[]; article_template?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, string> } };
@@ -167,6 +169,9 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
     if (p.identity.natural_key_fields !== undefined) {
       if (!Array.isArray(p.identity.natural_key_fields)) issues.push(issue('identity.natural_key_fields', 'invalid_type', 'natural_key_fields must be an array.'));
       else p.identity.natural_key_fields.forEach((v, i) => validateFieldPath(`identity.natural_key_fields.${i}`, v, issues));
+    }
+    if (p.identity.require_existing_binding !== undefined && typeof p.identity.require_existing_binding !== 'boolean') {
+      issues.push(issue('identity.require_existing_binding', 'invalid_type', 'require_existing_binding must be boolean.'));
     }
     if (p.identity.existing_slug_map !== undefined) {
       if (!isObject(p.identity.existing_slug_map)) {

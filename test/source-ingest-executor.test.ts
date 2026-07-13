@@ -482,9 +482,17 @@ describe('source-ingest Stage 3A executor', () => {
     execFileSync('git', ['commit', '-q', '-m', 'manual equipment page'], { cwd: repo });
     await importFromContent(engine, slug, manual, { sourceId: 'shared', sourcePath: `${slug}.md`, noEmbed: true, remote: false });
 
-    const blocked = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-blocked', no_embed: true });
+    const blocked = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-blocked', limit: 1, no_embed: true });
     expect(blocked.results.find(r => r.external_id === 'veh-001')).toMatchObject({ status: 'failed' });
     expect(blocked.results.find(r => r.external_id === 'veh-001')?.reason).toContain('requires explicit adoption mapping');
+
+    await putSourceIngestProfile(engine, {
+      ...profile,
+      identity: { ...profile.identity, existing_slug_map: { 'veh-001': slug }, require_existing_binding: true },
+    }, { createdBy: 'test', changeNote: 'require complete adoption plan' });
+    await expect(runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-incomplete', no_embed: true }))
+      .rejects.toThrow('existing binding required before source ingest for veh-002');
+    expect((await engine.getPage(slug, { sourceId: 'shared' }))?.compiled_truth).not.toContain('source-sync:start');
 
     await putSourceIngestProfile(engine, {
       ...profile,

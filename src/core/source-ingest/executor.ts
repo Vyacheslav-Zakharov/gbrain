@@ -449,6 +449,39 @@ export async function runSourceIngestExecutor(
     }
   }
   const limited = opts.limit ? records.slice(0, opts.limit) : records;
+  const resolvedTargets = new Map<string, { identitySlug?: string; adoptionSlug?: string; targetSlug: string }>();
+  const claimedTargets = new Map<string, string>();
+  for (const record of limited) {
+    if (!includeRecord(profile, record).include) continue;
+    const priorIdentityRows = await engine.executeRaw<{ slug: string }>(
+      `SELECT s.slug
+         FROM source_sync_state s
+         JOIN pages p ON p.slug = s.slug AND p.source_id = $4 AND p.deleted_at IS NULL
+        WHERE s.profile_id = $1 AND s.connector_id = $2 AND s.source_object = $3 AND s.external_id = $5
+          AND s.last_result <> 'failed'
+        LIMIT 1`,
+      [profile.profile_id, profile.source_connector, profile.source_object, sourceId, record.external_id],
+    );
+    const identitySlug = priorIdentityRows[0]?.slug;
+    const adoptionSlug = profile.identity.existing_slug_map?.[record.external_id];
+    const targetSlug = identitySlug || adoptionSlug || renderSlugTemplate(profile.target.slug_template, record.data);
+    if (profile.identity.require_existing_binding && !identitySlug && !adoptionSlug) {
+      throw new Error(`existing binding required before source ingest for ${record.external_id}`);
+    }
+    if (profile.identity.require_existing_binding) {
+      const existing = await engine.getPage(targetSlug, { sourceId });
+      if (!existing) throw new Error(`required existing binding target not found for ${record.external_id}: ${targetSlug}`);
+      if (existing.type && existing.type !== profile.target.gbrain_type) {
+        throw new Error(`existing page type is incompatible with binding: ${targetSlug} (${existing.type} != ${profile.target.gbrain_type})`);
+      }
+    }
+    const priorClaim = claimedTargets.get(targetSlug);
+    if (priorClaim && priorClaim !== record.external_id) {
+      throw new Error(`multiple source records resolve to the same target slug: ${priorClaim}, ${record.external_id} -> ${targetSlug}`);
+    }
+    claimedTargets.set(targetSlug, record.external_id);
+    resolvedTargets.set(record.external_id, { identitySlug, adoptionSlug, targetSlug });
+  }
   const key: OpCheckpointKey = {
     op: 'source_ingest',
     fingerprint: fingerprint({ profile_id: profile.profile_id, profile_hash: hash, source_id: sourceId, connector: profile.source_connector, object: profile.source_object, mode: 'stage3a' }),
@@ -474,18 +507,10 @@ export async function runSourceIngestExecutor(
     let renderedPath = `${renderedSlug}.md`;
     let createdThisRecord = false;
     try {
-      const priorIdentityRows = await engine.executeRaw<{ slug: string }>(
-        `SELECT s.slug
-           FROM source_sync_state s
-           JOIN pages p ON p.slug = s.slug AND p.source_id = $4 AND p.deleted_at IS NULL
-          WHERE s.profile_id = $1 AND s.connector_id = $2 AND s.source_object = $3 AND s.external_id = $5
-            AND s.last_result <> 'failed'
-          LIMIT 1`,
-        [profile.profile_id, profile.source_connector, profile.source_object, sourceId, record.external_id],
-      );
-      const identitySlug = priorIdentityRows[0]?.slug;
-      const adoptionSlug = profile.identity.existing_slug_map?.[record.external_id];
-      const targetSlug = identitySlug || adoptionSlug || templateSlug;
+      const resolvedTarget = resolvedTargets.get(record.external_id);
+      const identitySlug = resolvedTarget?.identitySlug;
+      const adoptionSlug = resolvedTarget?.adoptionSlug;
+      const targetSlug = resolvedTarget?.targetSlug || templateSlug;
       const existing = await engine.getPage(targetSlug, { sourceId });
       if (adoptionSlug && !identitySlug && !existing) {
         throw new Error(`explicit adoption target not found for ${record.external_id}: ${adoptionSlug}`);
