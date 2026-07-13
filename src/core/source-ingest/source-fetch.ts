@@ -72,7 +72,15 @@ async function resolveSourceConnectorConfig(ctx: SourceFetchContext, source: Sou
     }
   }
   const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, fallbackConnectorId, fallbackObjectName);
-  return { connectorId: fallbackConnectorId, objectName: fallbackObjectName, config: { ...(primary ? (ctx.connectorConfigOverride || {}) : {}), ...secretConfig } };
+  return {
+    connectorId: fallbackConnectorId,
+    objectName: fallbackObjectName,
+    config: {
+      ...(primary ? (ctx.connectorConfigOverride || {}) : {}),
+      table_name: fallbackObjectName,
+      ...secretConfig,
+    },
+  };
 }
 
 export async function connectorConfigForSource(ctx: SourceFetchContext, connectorId: string, objectName: string, sourceTableId?: string): Promise<Record<string, unknown>> {

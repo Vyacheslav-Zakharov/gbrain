@@ -1,7 +1,7 @@
 import { fetchWithSSRFGuard, validateAndResolveUrl } from '../../ssrf-validate.ts';
 import type { SourceConnector, SourceObjectDescriptor, SourceRecord, SourceRecordBatch, SourceFetchOptions } from './types.ts';
 
-export interface AppSheetVehicleConnectorConfig {
+export interface AppSheetConnectorConfig {
   connectorId?: string;
   appId?: string;
   accessKey?: string;
@@ -12,9 +12,12 @@ export interface AppSheetVehicleConnectorConfig {
   fetchImpl?: typeof fetch;
 }
 
-export class AppSheetVehicleConnector implements SourceConnector {
+/** @deprecated Use AppSheetConnectorConfig. Kept for source compatibility. */
+export type AppSheetVehicleConnectorConfig = AppSheetConnectorConfig;
+
+export class AppSheetConnector implements SourceConnector {
   id = 'appsheet-vehicles';
-  displayName = 'AppSheet автотранспорт';
+  displayName = 'AppSheet';
   private readonly tableName: string;
   private readonly explicitTableName: boolean;
   private readonly primaryKeyField?: string;
@@ -22,8 +25,11 @@ export class AppSheetVehicleConnector implements SourceConnector {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
 
-  constructor(private readonly config: AppSheetVehicleConnectorConfig = {}) {
+  constructor(private readonly config: AppSheetConnectorConfig = {}) {
     this.id = config.connectorId?.trim() || 'appsheet-vehicles';
+    this.displayName = this.id === 'appsheet-vehicles' || this.id === 'appsheet'
+      ? 'AppSheet автотранспорт'
+      : `AppSheet (${this.id})`;
     this.explicitTableName = typeof config.tableName === 'string' && config.tableName.trim().length > 0;
     this.tableName = config.tableName?.trim() || 'vehicles';
     this.primaryKeyField = config.primaryKeyField?.trim() || undefined;
@@ -57,10 +63,11 @@ export class AppSheetVehicleConnector implements SourceConnector {
 
   private async fetchRows(objectName: string, opts: { limit?: number; since?: string; fields?: string[] }): Promise<Record<string, unknown>[]> {
     if (objectName !== this.objectName() && !(objectName === 'vehicle' && !this.usesGenericRecordShape())) throw new Error(`AppSheet connector is configured for object/table ${this.objectName()}, got ${objectName}`);
-    const appId = this.config.appId || process.env.APPSHEET_VEHICLES_APP_ID;
-    const accessKey = this.config.accessKey || process.env.APPSHEET_VEHICLES_ACCESS_KEY;
+    const legacyVehicleConnector = this.id === 'appsheet-vehicles' || this.id === 'appsheet';
+    const appId = this.config.appId || (legacyVehicleConnector ? process.env.APPSHEET_VEHICLES_APP_ID : undefined);
+    const accessKey = this.config.accessKey || (legacyVehicleConnector ? process.env.APPSHEET_VEHICLES_ACCESS_KEY : undefined);
     if (!appId || !accessKey) {
-      throw new Error('AppSheet vehicle connector is scaffolded but not configured: set APPSHEET_VEHICLES_APP_ID and APPSHEET_VEHICLES_ACCESS_KEY or pass config explicitly.');
+      throw new Error(`AppSheet credentials are not configured for connector ${this.id}; store app_id/access_key under connector:${this.id}.`);
     }
     const url = `${this.baseUrl}/${encodeURIComponent(appId)}/tables/${encodeURIComponent(this.tableName)}/Action`;
     const changedSinceField = this.updatedAtField || (this.usesGenericRecordShape() ? undefined : 'updated_at');
@@ -86,7 +93,7 @@ export class AppSheetVehicleConnector implements SourceConnector {
       maxRedirects: 3,
       timeoutMs: 10000,
     });
-    if (!res.ok) throw new Error(`AppSheet vehicle fetch failed: HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`AppSheet fetch failed for connector ${this.id}, table ${this.tableName}: HTTP ${res.status}`);
     const json = await res.json() as unknown;
     const hasRowsEnvelope = json !== null && typeof json === 'object' && !Array.isArray(json) && Array.isArray((json as Record<string, unknown>).Rows);
     if (!Array.isArray(json) && !hasRowsEnvelope) {
@@ -126,6 +133,9 @@ export class AppSheetVehicleConnector implements SourceConnector {
     return this.fetchImpl(target.resolvedUrl, { ...init, redirect: 'manual', headers });
   }
 }
+
+/** @deprecated Use AppSheetConnector. Kept for existing imports and legacy vehicle profiles. */
+export class AppSheetVehicleConnector extends AppSheetConnector {}
 
 function normalizeAppSheetSince(since: string): string {
   const trimmed = since.trim();

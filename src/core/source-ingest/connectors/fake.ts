@@ -1,5 +1,5 @@
 import type { SourceConnector, SourceObjectDescriptor, SourceRecord, SourceRecordBatch } from './types.ts';
-import { AppSheetVehicleConnector } from './appsheet-vehicles.ts';
+import { AppSheetConnector } from './appsheet-vehicles.ts';
 import { PostgresSourceConnector } from './postgres.ts';
 
 const vehicleRecords: SourceRecord[] = [
@@ -88,7 +88,7 @@ export class FakeSourceConnector implements SourceConnector {
 
 export function getSourceConnector(id: string, config?: Record<string, unknown>): SourceConnector | null {
   if (id === 'fake-source' || id === 'fake') return new FakeSourceConnector();
-  if (id === 'appsheet-vehicles' || id === 'appsheet' || id.startsWith('appsheet-')) return new AppSheetVehicleConnector({
+  if (id === 'appsheet-vehicles' || id === 'appsheet' || id.startsWith('appsheet-')) return new AppSheetConnector({
     connectorId: id,
     appId: typeof config?.app_id === 'string' ? config.app_id : (typeof config?.appId === 'string' ? config.appId : undefined),
     accessKey: typeof config?.access_key === 'string' ? config.access_key : (typeof config?.accessKey === 'string' ? config.accessKey : undefined),

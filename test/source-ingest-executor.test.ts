@@ -23,7 +23,7 @@ import { rowToVehicleRecord, AppSheetVehicleConnector } from '../src/core/source
 import { runCycle } from '../src/core/cycle.ts';
 import { buildSourceDryRun } from '../src/core/source-ingest/dry-run.ts';
 import { draftSourceIngestProfile } from '../src/core/source-ingest/draft.ts';
-import { buildProfileSampleRecords } from '../src/core/source-ingest/source-fetch.ts';
+import { buildProfileSampleRecords, connectorConfigForSource } from '../src/core/source-ingest/source-fetch.ts';
 import { executeSourceTransform } from '../src/core/source-ingest/transform.ts';
 import { discoverSourceObject, profileRecords } from '../src/core/source-ingest/discovery.ts';
 import { renderArticleTemplate, renderTemplateString } from '../src/core/source-ingest/template-renderer.ts';
@@ -917,6 +917,65 @@ describe('source-ingest Stage 3A executor', () => {
     expect(profile.fields.map(f => f.name)).not.toContain('name');
     expect(profile.fields.map(f => f.name)).not.toContain('type');
     expect(profile.idCandidates).toContain('VehicleID');
+  });
+
+  test('custom AppSheet connector does not inherit legacy vehicle env credentials', async () => {
+    let called = false;
+    const fetchImpl = (async () => {
+      called = true;
+      return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as unknown as typeof fetch;
+    const previousAppId = process.env.APPSHEET_VEHICLES_APP_ID;
+    const previousAccessKey = process.env.APPSHEET_VEHICLES_ACCESS_KEY;
+    process.env.APPSHEET_VEHICLES_APP_ID = 'legacy-vehicle-app';
+    process.env.APPSHEET_VEHICLES_ACCESS_KEY = 'legacy-vehicle-key';
+    try {
+      const connector = new AppSheetVehicleConnector({
+        connectorId: 'appsheet-protokolist',
+        tableName: 'PeriodicMeetingSeries',
+        primaryKeyField: 'seriesID',
+        baseUrl: 'https://203.0.113.10/api/v2/apps',
+        fetchImpl,
+      });
+      const error = await connector.sample('PeriodicMeetingSeries', 1).catch(e => e);
+      expect(error).toBeInstanceOf(Error);
+      expect(String(error.message)).toContain('credentials are not configured for connector appsheet-protokolist');
+      expect(called).toBe(false);
+    } finally {
+      if (previousAppId === undefined) delete process.env.APPSHEET_VEHICLES_APP_ID;
+      else process.env.APPSHEET_VEHICLES_APP_ID = previousAppId;
+      if (previousAccessKey === undefined) delete process.env.APPSHEET_VEHICLES_ACCESS_KEY;
+      else process.env.APPSHEET_VEHICLES_ACCESS_KEY = previousAccessKey;
+    }
+  });
+
+  test('draft AppSheet base view resolves connector-scoped DB secrets and its object as table', async () => {
+    await putSourceConnectorConfig(engine, {
+      config_id: 'connector:appsheet-protokolist',
+      connector_id: 'appsheet-protokolist',
+      source_object: '__connection__',
+      display_name: 'Protocolist',
+      enabled: true,
+      config_json: { connector_level: true, kind: 'appsheet' },
+    }, { actor: 'test' });
+    await putSourceConnectorSecrets(engine, {
+      config_id: 'connector:appsheet-protokolist',
+      connector_id: 'appsheet-protokolist',
+      source_object: '__connection__',
+      secret_json: { app_id: 'protocolist-app', access_key: 'protocolist-key' },
+    }, { actor: 'test' });
+
+    const config = await connectorConfigForSource({
+      engine,
+      defaultConnector: 'appsheet-protokolist',
+      defaultObject: 'PeriodicMeetingSeries',
+    }, 'appsheet-protokolist', 'PeriodicMeetingSeries');
+
+    expect(config).toMatchObject({
+      app_id: 'protocolist-app',
+      access_key: 'protocolist-key',
+      table_name: 'PeriodicMeetingSeries',
+    });
   });
 
   test('AppSheet connector supports arbitrary table configs with explicit primary/update fields', async () => {
