@@ -96,6 +96,7 @@ export function getSourceConnector(id: string, config?: Record<string, unknown>)
     primaryKeyField: typeof config?.primary_key_field === 'string' ? config.primary_key_field : undefined,
     updatedAtField: typeof config?.updated_at_field === 'string' ? config.updated_at_field : undefined,
     baseUrl: typeof config?.base_url === 'string' ? config.base_url : undefined,
+    timeoutMs: typeof config?.timeout_ms === 'number' ? config.timeout_ms : undefined,
   });
   if (id === 'postgres' || id.startsWith('postgres-')) return new PostgresSourceConnector({
     connectorId: id,

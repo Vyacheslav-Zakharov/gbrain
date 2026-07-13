@@ -9,6 +9,7 @@ export interface AppSheetConnectorConfig {
   primaryKeyField?: string;
   updatedAtField?: string;
   baseUrl?: string;
+  timeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -23,6 +24,7 @@ export class AppSheetConnector implements SourceConnector {
   private readonly primaryKeyField?: string;
   private readonly updatedAtField?: string;
   private readonly baseUrl: string;
+  private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
   constructor(private readonly config: AppSheetConnectorConfig = {}) {
@@ -35,6 +37,7 @@ export class AppSheetConnector implements SourceConnector {
     this.primaryKeyField = config.primaryKeyField?.trim() || undefined;
     this.updatedAtField = config.updatedAtField?.trim() || undefined;
     this.baseUrl = config.baseUrl || 'https://api.appsheet.com/api/v2/apps';
+    this.timeoutMs = Number.isFinite(config.timeoutMs) ? Math.min(Math.max(Number(config.timeoutMs), 1_000), 120_000) : 30_000;
     this.fetchImpl = config.fetchImpl || fetch;
   }
 
@@ -91,7 +94,7 @@ export class AppSheetConnector implements SourceConnector {
       headers: { 'ApplicationAccessKey': accessKey, 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       maxRedirects: 3,
-      timeoutMs: 10000,
+      timeoutMs: this.timeoutMs,
     });
     if (!res.ok) throw new Error(`AppSheet fetch failed for connector ${this.id}, table ${this.tableName}: HTTP ${res.status}`);
     const json = await res.json() as unknown;
