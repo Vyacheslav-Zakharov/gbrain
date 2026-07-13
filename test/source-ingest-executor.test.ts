@@ -488,16 +488,21 @@ describe('source-ingest Stage 3A executor', () => {
 
     await putSourceIngestProfile(engine, {
       ...profile,
-      identity: { ...profile.identity, existing_slug_map: { 'veh-001': slug }, require_existing_binding: true },
+      identity: { ...profile.identity, existing_slug_map: { 'veh-001': slug }, require_explicit_resolution: true },
     }, { createdBy: 'test', changeNote: 'require complete adoption plan' });
     await expect(runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-incomplete', no_embed: true }))
-      .rejects.toThrow('existing binding required before source ingest for veh-002');
+      .rejects.toThrow('explicit identity resolution required before source ingest for veh-002');
     expect((await engine.getPage(slug, { sourceId: 'shared' }))?.compiled_truth).not.toContain('source-sync:start');
 
     await putSourceIngestProfile(engine, {
       ...profile,
-      identity: { ...profile.identity, existing_slug_map: { 'veh-001': slug } },
-    }, { createdBy: 'test', changeNote: 'approve explicit adoption' });
+      identity: {
+        ...profile.identity,
+        existing_slug_map: { 'veh-001': slug },
+        explicit_create_ids: ['veh-002'],
+        require_explicit_resolution: true,
+      },
+    }, { createdBy: 'test', changeNote: 'approve explicit adoption and create resolutions' });
     const adopted = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-approved', no_embed: true });
     expect(adopted.results.find(r => r.external_id === 'veh-001')?.status).toBe('written');
     const page = await engine.getPage(slug, { sourceId: 'shared' });

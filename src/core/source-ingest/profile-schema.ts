@@ -88,8 +88,10 @@ export interface SourceIngestProfile {
     display_name_field: string;
     /** Explicit external-id → existing page slug adoption map. Never inferred automatically. */
     existing_slug_map?: Record<string, string>;
-    /** Fail the complete run before the first write unless every record resolves to an existing identity or explicit adoption target. */
-    require_existing_binding?: boolean;
+    /** External ids explicitly approved to create a new page rather than adopt one. */
+    explicit_create_ids?: string[];
+    /** Fail the complete run before the first write unless every record resolves to identity, adoption, or explicit create. */
+    require_explicit_resolution?: boolean;
   };
   freshness?: { policy?: string; on_access?: SourceIngestOnAccess; changed_since_field?: string };
   mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown>; source_fields?: string[]; article_template?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, string> } };
@@ -170,8 +172,15 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
       if (!Array.isArray(p.identity.natural_key_fields)) issues.push(issue('identity.natural_key_fields', 'invalid_type', 'natural_key_fields must be an array.'));
       else p.identity.natural_key_fields.forEach((v, i) => validateFieldPath(`identity.natural_key_fields.${i}`, v, issues));
     }
-    if (p.identity.require_existing_binding !== undefined && typeof p.identity.require_existing_binding !== 'boolean') {
-      issues.push(issue('identity.require_existing_binding', 'invalid_type', 'require_existing_binding must be boolean.'));
+    if (p.identity.require_explicit_resolution !== undefined && typeof p.identity.require_explicit_resolution !== 'boolean') {
+      issues.push(issue('identity.require_explicit_resolution', 'invalid_type', 'require_explicit_resolution must be boolean.'));
+    }
+    if (p.identity.explicit_create_ids !== undefined) {
+      if (!Array.isArray(p.identity.explicit_create_ids) || p.identity.explicit_create_ids.some(v => typeof v !== 'string' || !v.trim())) {
+        issues.push(issue('identity.explicit_create_ids', 'invalid_type', 'explicit_create_ids must contain non-empty external ids.'));
+      } else if (new Set(p.identity.explicit_create_ids).size !== p.identity.explicit_create_ids.length) {
+        issues.push(issue('identity.explicit_create_ids', 'duplicate_external_id', 'explicit_create_ids must not contain duplicates.'));
+      }
     }
     if (p.identity.existing_slug_map !== undefined) {
       if (!isObject(p.identity.existing_slug_map)) {
@@ -189,6 +198,13 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
             }
             claimedSlugs.set(slug, externalId);
           }
+        }
+      }
+    }
+    if (Array.isArray(p.identity.explicit_create_ids) && isObject(p.identity.existing_slug_map)) {
+      for (const externalId of p.identity.explicit_create_ids) {
+        if (Object.prototype.hasOwnProperty.call(p.identity.existing_slug_map, externalId)) {
+          issues.push(issue(`identity.explicit_create_ids.${externalId}`, 'conflicting_resolution', 'External id cannot be both explicit-create and explicit-adoption.'));
         }
       }
     }

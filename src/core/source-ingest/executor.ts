@@ -449,7 +449,7 @@ export async function runSourceIngestExecutor(
     }
   }
   const limited = opts.limit ? records.slice(0, opts.limit) : records;
-  const resolvedTargets = new Map<string, { identitySlug?: string; adoptionSlug?: string; targetSlug: string }>();
+  const resolvedTargets = new Map<string, { identitySlug?: string; adoptionSlug?: string; explicitCreate: boolean; targetSlug: string }>();
   const claimedTargets = new Map<string, string>();
   for (const record of limited) {
     if (!includeRecord(profile, record).include) continue;
@@ -464,14 +464,18 @@ export async function runSourceIngestExecutor(
     );
     const identitySlug = priorIdentityRows[0]?.slug;
     const adoptionSlug = profile.identity.existing_slug_map?.[record.external_id];
+    const explicitCreate = profile.identity.explicit_create_ids?.includes(record.external_id) === true;
     const targetSlug = identitySlug || adoptionSlug || renderSlugTemplate(profile.target.slug_template, record.data);
-    if (profile.identity.require_existing_binding && !identitySlug && !adoptionSlug) {
-      throw new Error(`existing binding required before source ingest for ${record.external_id}`);
+    if (profile.identity.require_explicit_resolution && !identitySlug && !adoptionSlug && !explicitCreate) {
+      throw new Error(`explicit identity resolution required before source ingest for ${record.external_id}`);
     }
-    if (profile.identity.require_existing_binding) {
+    if (profile.identity.require_explicit_resolution) {
       const existing = await engine.getPage(targetSlug, { sourceId });
-      if (!existing) throw new Error(`required existing binding target not found for ${record.external_id}: ${targetSlug}`);
-      if (existing.type && existing.type !== profile.target.gbrain_type) {
+      if (explicitCreate && existing) {
+        throw new Error(`explicit create target already exists and requires adoption: ${record.external_id} -> ${targetSlug}`);
+      }
+      if (!explicitCreate && !existing) throw new Error(`required existing binding target not found for ${record.external_id}: ${targetSlug}`);
+      if (existing?.type && existing.type !== profile.target.gbrain_type) {
         throw new Error(`existing page type is incompatible with binding: ${targetSlug} (${existing.type} != ${profile.target.gbrain_type})`);
       }
     }
@@ -480,7 +484,7 @@ export async function runSourceIngestExecutor(
       throw new Error(`multiple source records resolve to the same target slug: ${priorClaim}, ${record.external_id} -> ${targetSlug}`);
     }
     claimedTargets.set(targetSlug, record.external_id);
-    resolvedTargets.set(record.external_id, { identitySlug, adoptionSlug, targetSlug });
+    resolvedTargets.set(record.external_id, { identitySlug, adoptionSlug, explicitCreate, targetSlug });
   }
   const key: OpCheckpointKey = {
     op: 'source_ingest',
