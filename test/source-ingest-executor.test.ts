@@ -432,7 +432,9 @@ describe('source-ingest Stage 3A executor', () => {
     const record = { external_id: 'series-1', data: { Id: 'series-1', Название: 'Еженедельное совещание по ТОиРО', 'Незакрытые задачи серии': 'Проверить график' } };
     const slug = renderTemplateString(meetingProfile.target.slug_template, record, [], new Set(meetingProfile.mapping?.source_fields));
     const article = renderArticleTemplate(meetingProfile, record);
+    const preview = buildSourceDryRun(meetingProfile, [record]);
     expect(slug).toBe('meetings/series/ezhenedelnoe-soveshchanie-po-toiro');
+    expect(preview.sample_pages[0].slug).toBe(slug);
     expect(article.body).toContain('## Поручения');
     expect(article.body).toContain('Проверить график');
     expect(article.body).not.toContain('## Характеристики');

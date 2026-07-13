@@ -1,7 +1,7 @@
 import type { SourceRecord } from './connectors/types.ts';
 import type { SourceFilterRule, SourceIngestProfile, SourceLinkRule } from './profile-schema.ts';
 import { renderManagedBlock } from './managed-block.ts';
-import { renderArticleTemplate } from './template-renderer.ts';
+import { renderArticleTemplate, slugifyTemplateValue } from './template-renderer.ts';
 
 function flatten(obj: Record<string, unknown>, prefix = ''): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -17,12 +17,11 @@ function valueAt(data: Record<string, unknown>, path: string): unknown {
   return flatten(data)[path];
 }
 
-function slugify(v: unknown): string {
-  return String(v ?? '').toLowerCase().replace(/[^a-z0-9а-яё]+/gi, '-').replace(/^-+|-+$/g, '') || 'item';
-}
-
 export function renderSlugTemplate(template: string, data: Record<string, unknown>): string {
-  return template.replace(/{{\s*([A-Za-z_][A-Za-z0-9_.]*)(?:\s*\|\s*slugify)?\s*}}/g, (_m, field) => slugify(valueAt(data, field)));
+  return template.replace(/{{\s*([^{}|]+?)(?:\s*\|\s*slugify)?\s*}}/g, (_m, rawField: string) => {
+    const value = slugifyTemplateValue(String(valueAt(data, rawField.trim()) ?? ''));
+    return value || 'item';
+  });
 }
 
 function filterMatches(rule: SourceFilterRule, data: Record<string, unknown>): boolean {

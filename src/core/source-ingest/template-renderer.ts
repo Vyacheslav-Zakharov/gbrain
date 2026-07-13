@@ -33,7 +33,7 @@ function stringifyValue(v: unknown): string {
   return String(v);
 }
 
-function transliterateSlugValue(value: string): string {
+export function slugifyTemplateValue(value: string): string {
   const map: Record<string, string> = {
     а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'yo', ж: 'zh', з: 'z', и: 'i', й: 'y',
     к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't', у: 'u', ф: 'f',
@@ -62,7 +62,7 @@ export function renderTemplateString(template: string, record: SourceRecord, emp
       emptySlots.push(`${field} (unknown filter: ${filter})`);
       return '';
     }
-    if (filter === 'slugify') return transliterateSlugValue(s);
+    if (filter === 'slugify') return slugifyTemplateValue(s);
     return s;
   });
 }
