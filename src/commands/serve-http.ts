@@ -15,7 +15,7 @@ import type { Request, Response, NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
-import { randomBytes, createHash } from 'crypto';
+import { randomBytes, randomInt, createHash } from 'crypto';
 import { safeHexEqual } from '../core/timing-safe.ts';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -528,6 +528,395 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   // Express 5 app
   const app = express();
+
+// === CUSTOM PORTAL AND LOGIN WORKFLOWS ===
+
+const adminEmails = (() => {
+  const envStr = process.env.GBRAIN_ADMIN_EMAILS;
+  if (!envStr) return new Set<string>();
+  return new Set(String(envStr).toLowerCase().split(',').map(x => x.trim()).filter(Boolean));
+})();
+function isAdminEmail(email: string | undefined): boolean {
+  if (!email) return false;
+  return adminEmails.has(String(email).toLowerCase().trim());
+}
+
+const otpPepper = randomBytes(32).toString('hex');
+const pendingOtps = new Map<string, { codeHash: string; expiresAt: number; attempts: number }>();
+const hashPortalOtp = (email: string, code: string) => createHash('sha256').update(otpPepper).update('\0').update(email).update('\0').update(code).digest('hex');
+
+const userPermissionsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
+const accessRequestsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'access_requests.json');
+const onboardingSeenPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'portal_onboarding_seen.json');
+const readOnboardingSeen = () => {
+  const fs = require('fs');
+  try {
+    const p = onboardingSeenPath();
+    if (!fs.existsSync(p)) return {};
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (e3) {
+    console.error('[Portal] Failed to read portal_onboarding_seen.json:', e3);
+    return {};
+  }
+};
+const hasSeenPortalOnboarding = (email: string) => !!readOnboardingSeen()[String(email || '').trim().toLowerCase()];
+const markPortalOnboardingSeen = (email: string) => {
+  const seen = readOnboardingSeen();
+  seen[String(email || '').trim().toLowerCase()] = new Date().toISOString();
+  const fs = require('fs');
+  fs.writeFileSync(onboardingSeenPath(), JSON.stringify(seen, null, 2), 'utf8');
+};
+
+const sharedAccessArea = { id: "shared", sourceId: "shared", label: "Shared / Общая база", hint: "общие справочники, инструкции и корпоративная архитектура" };
+const internalAccessAreas = [
+  { id: "бухгалтерия", sourceId: "internal-accounting", label: "Бухгалтерия и финансы", hint: "финансы, сверки, платежи, налоги, управленческий учет" },
+  { id: "юридическая-служба", sourceId: "internal-legal", label: "Юридическая служба", hint: "договоры, претензии, суды, корпоративные документы" },
+  { id: "производство", sourceId: "internal-production", label: "Производство", hint: "внутренние показатели, сменные регламенты, технологические карты" },
+  { id: "ит", sourceId: "internal-it", label: "ИТ", hint: "интеграции, API, схемы данных, эксплуатация систем" },
+  { id: "кадры", sourceId: "internal-hr", label: "Кадры и HR", hint: "адаптация, роли, должностные требования, HR-процессы" },
+  { id: "снабжение-и-закупки", sourceId: "internal-procurement", label: "Снабжение и закупки", hint: "поставщики, условия закупок, заявки, контроль остатков" },
+  { id: "продажи-и-маркетинг", sourceId: "internal-sales-marketing", label: "Продажи и маркетинг", hint: "коммерческие правила, каналы спроса, аналитика продаж" },
+  { id: "охрана-труда-и-безопасность", sourceId: "internal-safety", label: "Охрана труда и безопасность", hint: "ОТиТБ, инциденты, инструктажи, чек-листы" },
+  { id: "руководство", sourceId: "internal-management", label: "Руководство и стратегия", hint: "закрытые планы, стратегические инициативы, протоколы" }
+];
+const managedAccessAreas = [sharedAccessArea, ...internalAccessAreas];
+const getUserPermissions = async (email: string) => {
+  const configPath = require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
+  try {
+    let data: any = {};
+    if (require('fs').existsSync(configPath)) {
+      data = JSON.parse(require('fs').readFileSync(configPath, 'utf8'));
+    }
+    if (data[email]) {
+      return {
+        source_id: data[email].source_id || 'shared',
+        federated_read: data[email].federated_read || ['shared'],
+        federated_write: data[email].federated_write || [data[email].source_id].filter(Boolean)
+      };
+    } else {
+      const emailPrefix = email.split('@')[0].trim().toLowerCase();
+      const sourceId = emailPrefix.replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+      return {
+        source_id: sourceId,
+        federated_read: ['shared'],
+        federated_write: [sourceId].filter(Boolean)
+      };
+    }
+  } catch (err) {
+    console.error(`[GBrain] Failed to read ${configPath}:`, err);
+    return {
+      source_id: 'shared',
+      federated_read: ['shared'],
+      federated_write: []
+    };
+  }
+};
+const managedAreaById = (areaId: string) => managedAccessAreas.find((a) => a.id === areaId);
+const managedSourceIdForArea = (areaId: string) => managedAreaById(areaId)?.sourceId || null;
+
+const escapeHtmlLocal = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;"
+}[ch] || ch));
+
+const requirePortalUser = (req: any, res: any) => {
+    const userEmail = req.cookies?.session_user;
+    if (!userEmail) {
+      res.status(401).json({ error: "Unauthorized: login through GBrain first" });
+      return null;
+    }
+    return String(userEmail);
+  }
+
+const resolvePortalPath = (root, relativePathRaw) => {
+    const path = require("path");
+    const relativePath = String(relativePathRaw || "").replace(/^\/+/, "");
+    const rootResolved = path.resolve(root);
+    const target = path.resolve(rootResolved, relativePath);
+    if (target !== rootResolved && !target.startsWith(rootResolved + path.sep))
+      return null;
+    return target;
+  }
+
+const saveInternalAccessRequest = async (userEmail, rawValues, reasonRaw) => {
+    const selected = normalizeAccessRequestValues(rawValues);
+    if (selected.length === 0)
+      return;
+    const perms = await getUserPermissions(userEmail);
+    const existingRead = new Set(Array.isArray(perms.federated_read) ? perms.federated_read : []);
+    const existingWrite = new Set(Array.isArray(perms.federated_write) ? perms.federated_write : []);
+    if (perms.source_id) {
+      existingRead.add(perms.source_id);
+      existingWrite.add(perms.source_id);
+    }
+    const byArea = new Map;
+    for (const item of selected) {
+      const [area, level] = item.split(":");
+      if (!managedAccessAreas.some((a) => a.id === area))
+        continue;
+      const sourceId = managedSourceIdForArea(area);
+      if (!sourceId)
+        continue;
+      const current = byArea.get(area) || { area, source_id: sourceId, read: false, write: false };
+      if (level === "read")
+        current.read = true;
+      if (level === "write") {
+        current.write = true;
+        current.read = true;
+      }
+      byArea.set(area, current);
+    }
+    const requests = Array.from(byArea.values()).map((r4) => {
+      const sourceId = r4.source_id || managedSourceIdForArea(r4.area);
+      if (!sourceId)
+        return null;
+      const missingWrite = !!r4.write && !existingWrite.has(sourceId);
+      const missingRead = (!!r4.read || !!r4.write) && !existingRead.has(sourceId) && !missingWrite;
+      if (!missingRead && !missingWrite)
+        return null;
+      return { ...r4, source_id: sourceId, read: missingRead || missingWrite, write: missingWrite };
+    }).filter(Boolean);
+    if (requests.length === 0)
+      return;
+    const fs = require("fs");
+    const path = require("path");
+    const requestPath = path.join(process.env.HOME || "/home/avers", ".gbrain", "access_requests.json");
+    let data = [];
+    try {
+      if (fs.existsSync(requestPath)) {
+        const parsed = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+        if (Array.isArray(parsed))
+          data = parsed;
+      }
+    } catch (e3) {
+      console.error("[Auth] Error reading access_requests.json:", e3);
+    }
+    const request2 = {
+      id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      email: userEmail,
+      requested_at: new Date().toISOString(),
+      requests,
+      reason: String(reasonRaw || "").trim().slice(0, 2000),
+      status: "pending",
+      approved_by: null,
+      approved_at: null
+    };
+    data.push(request2);
+    fs.writeFileSync(requestPath, JSON.stringify(data, null, 2), "utf8");
+    console.log(`[Auth] Saved access request ${request2.id} for ${userEmail}`);
+    try {
+      const body2 = [
+        `Новая заявка GBrain на доступ`,
+        ``,
+        `Сотрудник: ${userEmail}`,
+        `ID заявки: ${request2.id}`,
+        `Время: ${request2.requested_at}`,
+        ``,
+        `Запрошенные области:`,
+        ...requests.map((r4) => `- ${r4.area} (${r4.source_id}): ${r4.write ? "чтение + запись" : "чтение"}`),
+        ``,
+        `Причина:`,
+        request2.reason || "(не указана)",
+        ``,
+        `Админка заявок: ${publicUrl || "http://127.0.0.1:" + port}/admin/access-requests`,
+        ``,
+        `Файл заявок: ${requestPath}`
+      ].join(`
+`);
+      const { spawn: spawn5 } = require("child_process");
+      const proc = spawn5("/home/avers/.gbrain/send_access_request.py", [userEmail, body2], { detached: true, stdio: "ignore" });
+      proc.unref();
+    } catch (e3) {
+      console.error("[Auth] Failed to send access request notification:", e3);
+    }
+  }
+
+const normalizeAccessRequestValues = (raw) => {
+    if (!raw)
+      return [];
+    const values2 = Array.isArray(raw) ? raw : [raw];
+    return values2.map((v7) => String(v7)).filter(Boolean);
+  }
+
+const getAllowedSourceIdsForUser = async (email) => {
+    const perms = await getUserPermissions(email);
+    const ids = new Set;
+    if (perms.source_id)
+      ids.add(perms.source_id);
+    for (const id of perms.federated_read || [])
+      ids.add(id);
+    return Array.from(ids).filter(Boolean);
+  }
+
+const getSourceRowsForUser = async (email) => {
+    const allowed = await getAllowedSourceIdsForUser(email);
+    const rows = [];
+    for (const id of allowed) {
+      try {
+        const found = await sql`SELECT id, name, local_path FROM sources WHERE id = ${id} LIMIT 1`;
+        if (found[0]?.local_path)
+          rows.push(found[0]);
+      } catch (e3) {
+        console.error(`[Portal] Failed to read source ${id}:`, e3);
+      }
+    }
+    return rows;
+  }
+
+const loadJsonFileLocal = (filePath, fallback) => {
+    const fs = require("fs");
+    try {
+      if (!fs.existsSync(filePath))
+        return fallback;
+      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+    } catch (e3) {
+      console.error(`[GBrain] Failed to read ${filePath}:`, e3);
+      return fallback;
+    }
+  }
+
+const writeJsonFileLocal = (filePath, value) => {
+    const fs = require("fs");
+    fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+  }
+
+const personalSourceIdFromEmail = (email: string): string => {
+    const prefix = String(email || "").split("@")[0].trim().toLowerCase();
+    return prefix.replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "") || "user";
+  }
+
+const personalDirNameFromEmail = (email: string): string => {
+    const prefix = String(email || "").split("@")[0].trim().toLowerCase();
+    return prefix.replace(/[^a-z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "") || "user";
+  }
+
+const writeIfMissingLocal = (filePath: string, content: string) => {
+    const fs = require("fs");
+    const path = require("path");
+    if (fs.existsSync(filePath))
+      return false;
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content, "utf8");
+    return true;
+  }
+
+const createPersonalSourceSkeleton = (root: string) => {
+    const fs = require("fs");
+    const path = require("path");
+    fs.mkdirSync(root, { recursive: true });
+    writeIfMissingLocal(path.join(root, "README.md"), `# Добро пожаловать в вашу личную базу знаний GBrain!\n\nЭто ваше персональное цифровое рабочее пространство. Всё, что вы здесь запишете, будет известно вашему ИИ-ассистенту и поможет ему эффективнее отвечать на ваши вопросы, писать отчеты и автоматизировать задачи.\n\n## Как этим пользоваться\n\n1. Ведите заметки в Obsidian или любом другом markdown-редакторе.\n2. Просите ИИ-ассистента добавлять заметки, проекты и ежедневные отчеты.\n3. Личные данные хранятся в вашей персональной области и не публикуются в общую базу без явного решения.\n`);
+    writeIfMissingLocal(path.join(root, "AGENTS.md"), `# AGENTS.md — правила ведения личной базы знаний\n\n## Структура\n\n- \`notes/\` — личные заметки, идеи, шпаргалки, профессиональные знания.\n- \`projects/\` — проекты, задачи, планы и вехи.\n- \`daily/\` — ежедневные отчеты и планы.\n- \`_templates/\` — шаблоны заметок.\n- \`_attachments/\` — документы и медиа-файлы.\n\n## Правила\n\n1. Перед созданием новой заметки проверь, нет ли похожей.\n2. Перекрестные ссылки оформляй в стиле Obsidian: \`[[имя-заметки]]\`.\n3. Личные заметки не записывай в \`shared\` или \`internal-*\` без явного указания пользователя.\n4. Если пользователь явно просит записать документ в закрытую область ИТ, используй \`source_id: internal-it\` и \`access_area: ит\`.\n`);
+    writeIfMissingLocal(path.join(root, "index.md"), `# Навигация по Базе Знаний\n\nДобро пожаловать в ваш личный навигатор знаний.\n\n## Разделы\n\n- [[notes/index|Личные заметки]] — профессиональные знания, памятки и шпаргалки.\n- [[projects/index|Проекты]] — рабочие задачи и вехи.\n- [[daily/index|Ежедневный лог]] — хронология работы, планы и отчеты.\n`);
+    writeIfMissingLocal(path.join(root, "notes", "index.md"), `---\ntitle: Личные заметки\nstatus: active\ntags: [личная-база, заметки]\n---\n\n# Личные заметки\n\nЗдесь хранятся личные рабочие заметки и справочные материалы.\n`);
+    writeIfMissingLocal(path.join(root, "projects", "index.md"), `---\ntitle: Проекты\nstatus: active\ntags: [личная-база, проекты]\n---\n\n# Проекты\n\nЗдесь хранятся проекты, задачи, планы и вехи.\n`);
+    writeIfMissingLocal(path.join(root, "daily", "index.md"), `---\ntitle: Ежедневный лог\nstatus: active\ntags: [личная-база, daily]\n---\n\n# Ежедневный лог\n\nЗдесь можно вести ежедневные отчеты и планы.\n`);
+    writeIfMissingLocal(path.join(root, "_templates", "note.md"), `---\ntitle: <Название заметки>\ncreated: YYYY-MM-DD\nupdated: YYYY-MM-DD\ntags: [личная-база]\nstatus: draft\n---\n\n# <Название заметки>\n`);
+    writeIfMissingLocal(path.join(root, "_templates", "project.md"), `---\ntitle: <Название проекта>\ncreated: YYYY-MM-DD\nupdated: YYYY-MM-DD\ntags: [личная-база, проект]\nstatus: draft\n---\n\n# <Название проекта>\n`);
+    writeIfMissingLocal(path.join(root, "_templates", "daily.md"), `---\ntitle: Ежедневный отчет YYYY-MM-DD\ncreated: YYYY-MM-DD\nupdated: YYYY-MM-DD\ntags: [личная-база, daily]\nstatus: draft\n---\n\n# Ежедневный отчет YYYY-MM-DD\n`);
+  }
+
+const ensurePersonalGitRepo = (root: string) => {
+    const fs = require("fs");
+    const { spawnSync } = require("child_process");
+    if (!fs.existsSync(`${root}/.git`)) {
+      spawnSync("git", ["init", "-q"], { cwd: root });
+    }
+    const status = spawnSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
+    if (String(status.stdout || "").trim()) {
+      spawnSync("git", ["add", "."], { cwd: root });
+      spawnSync("git", ["-c", "user.name=GBrain Admin", "-c", "user.email=vyacheslav.zakharov@avers.kz", "commit", "-q", "-m", "Initialize personal GBrain source"], { cwd: root });
+    }
+  }
+
+const schedulePersonalSourceSync = (sourceId: string) => {
+    try {
+      const { spawn } = require("child_process");
+      const script = `set -e; source "$HOME/.gbrain/env.sh" 2>/dev/null || true; source "$HOME/.gbrain/pg.sh" 2>/dev/null || true; export PATH="$HOME/.bun/bin:$PATH"; gbrain sync --source ${JSON.stringify(sourceId)} --no-pull --yes; gbrain extract --stale --source-id ${JSON.stringify(sourceId)} --yes`;
+      const proc = spawn("bash", ["-lc", script], { detached: true, stdio: "ignore" });
+      proc.unref();
+    } catch (e3) {
+      console.error(`[Provision] Failed to schedule sync for ${sourceId}:`, e3);
+    }
+  }
+
+const ensurePortalUserProvisioned = async (emailRaw: string) => {
+    const fs = require("fs");
+    const path = require("path");
+    const email = String(emailRaw || "").trim().toLowerCase();
+    if (!email.endsWith("@avers.kz"))
+      throw new Error("Only @avers.kz users can be provisioned");
+    const sourceId = personalSourceIdFromEmail(email);
+    const dirName = personalDirNameFromEmail(email);
+    const personalRoot = path.join(process.env.HOME || "/home/avers", "brain-repos", "personal", dirName);
+    const displayName = `Личная база (${dirName})`;
+    let shouldSync = false;
+
+    if (!fs.existsSync(personalRoot)) {
+      createPersonalSourceSkeleton(personalRoot);
+      ensurePersonalGitRepo(personalRoot);
+      shouldSync = true;
+      console.log(`[Provision] Created personal source directory for ${email}: ${personalRoot}`);
+    } else {
+      ensurePersonalGitRepo(personalRoot);
+    }
+
+    const existingSource = await sql`SELECT id FROM sources WHERE id = ${sourceId} LIMIT 1`;
+    if (!existingSource[0]) {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config)
+         VALUES ($1, $2, $3, $4::jsonb)
+         ON CONFLICT (id) DO NOTHING`,
+        [sourceId, displayName, personalRoot, JSON.stringify({ federated: false, contextual_retrieval_mode: "balanced" })],
+      );
+      shouldSync = true;
+      console.log(`[Provision] Registered personal source ${sourceId} for ${email}`);
+    }
+
+    const permsPath = userPermissionsPath();
+    const perms = loadJsonFileLocal(permsPath, {});
+    const existing = perms[email] || { source_id: sourceId, federated_read: [], federated_write: [] };
+    existing.source_id = existing.source_id || sourceId;
+    const read = new Set(Array.isArray(existing.federated_read) ? existing.federated_read : []);
+    const write = new Set(Array.isArray(existing.federated_write) ? existing.federated_write : []);
+    read.add(sourceId);
+    read.add("shared");
+    write.add(sourceId);
+    existing.federated_read = Array.from(read).filter(Boolean);
+    existing.federated_write = Array.from(write).filter(Boolean);
+    if (JSON.stringify(perms[email]) !== JSON.stringify(existing)) {
+      perms[email] = existing;
+      writeJsonFileLocal(permsPath, perms);
+      console.log(`[Provision] Updated permissions for ${email}`);
+    }
+
+    if (shouldSync)
+      schedulePersonalSourceSync(sourceId);
+  }
+
+const readAccessRequests = () => {
+    const data = loadJsonFileLocal(accessRequestsPath(), []);
+    return Array.isArray(data) ? data : [];
+  }
+
+const writeAccessRequests = (items) => writeJsonFileLocal(accessRequestsPath(), items);
+
+
+
+
+  // v0.41.3 (T8): configurable trust-proxy via GBRAIN_HTTP_TRUST_PROXY env.
+  // Default 'loopback' (trust Caddy/Tailscale on the same host) preserves
+  // pre-v0.41.3 behavior. Operators behind Fly.io / Render / Vercel / nginx
+  // set GBRAIN_HTTP_TRUST_PROXY=1 (one hop) so X-Forwarded-For lands as the
+  // real client IP for rate-limiting and req.secure detection. The legacy
+  // transport already reads this env var (src/mcp/http-transport.ts:111)
+  // for the same purpose; T8 makes the Express path agree.
+  app.set('trust proxy', resolveTrustProxy(process.env.GBRAIN_HTTP_TRUST_PROXY));
+
+
   // v0.41.3 (T8): configurable trust-proxy via GBRAIN_HTTP_TRUST_PROXY env.
   // Default 'loopback' (trust Caddy/Tailscale on the same host) preserves
   // pre-v0.41.3 behavior. Operators behind Fly.io / Render / Vercel / nginx
@@ -598,6 +987,21 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     standardHeaders: true,
     legacyHeaders: false,
     message: 'Too many magic-link attempts. Wait a minute before trying again.',
+  });
+
+  const portalOtpSendRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Слишком много запросов кода. Повторите позже.',
+  });
+  const portalOtpVerifyRateLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Слишком много попыток входа. Повторите позже.',
   });
 
   const mcpRateLimiter = rateLimit({
@@ -759,6 +1163,553 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     next();
   });
 
+const escapePortalHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch] || ch));
+const portalLoginHtml = (title: string, body: string) => `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapePortalHtml(title)}</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(420px,calc(100vw - 32px));padding:28px;background:#242424;border:1px solid #3b3b3b;border-radius:12px}h1{font-size:22px;margin:0 0 10px}.muted{color:#aaa;font-size:14px;line-height:1.45}label{display:block;margin:18px 0 7px}input{width:100%;padding:12px;background:#181818;color:#fff;border:1px solid #555;border-radius:7px;font-size:16px}button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:7px;background:#1677ff;color:#fff;font-weight:700;cursor:pointer}</style></head><body><main class="card">${body}</main></body></html>`;
+
+app.get("/login", (req: any, res: any) => {
+    if (req.cookies?.session_user) return res.redirect("/portal");
+    const oauthQuery = new URLSearchParams(req.query as Record<string, string>).toString();
+    res.type("html").send(portalLoginHtml("Вход в GBrain", `<h1>Вход в GBrain</h1><p class="muted">Введите корпоративный email. Одноразовый код действует 10 минут.</p><form action="/login/send-code" method="POST"><input type="hidden" name="oauth_query" value="${escapePortalHtml(oauthQuery)}"><label for="email">Рабочий email</label><input type="email" id="email" name="email" placeholder="user@avers.kz" autocomplete="email" required><button type="submit">Получить код</button></form>`));
+  });
+
+  app.post("/login/send-code", portalOtpSendRateLimiter, express.urlencoded({ extended: false }), async (req: any, res: any) => {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const oauthQuery = String(req.body?.oauth_query || "");
+    if (!/^[^@\s]+@avers\.kz$/.test(email)) return res.status(400).send("Допускаются только корпоративные адреса @avers.kz");
+    const code = randomInt(100000, 1000000).toString();
+    pendingOtps.set(email, { codeHash: hashPortalOtp(email, code), expiresAt: Date.now() + 10 * 60 * 1000, attempts: 0 });
+    const { spawnSync } = require("child_process");
+    const sent = spawnSync("/home/avers/.gbrain/send_otp.py", [email, code], { encoding: "utf8", timeout: 15000 });
+    if (sent.error || sent.status !== 0) {
+      pendingOtps.delete(email);
+      console.error(`[OTP] Delivery failed for ${email}:`, sent.error?.message || String(sent.stderr || "sender failed").trim());
+      return res.status(500).send("Ошибка при отправке письма с кодом подтверждения.");
+    }
+    res.type("html").send(portalLoginHtml("Подтверждение входа", `<h1>Введите код</h1><p class="muted">Код отправлен на ${escapePortalHtml(email)}.</p><form action="/login/verify-code" method="POST"><input type="hidden" name="email" value="${escapePortalHtml(email)}"><input type="hidden" name="oauth_query" value="${escapePortalHtml(oauthQuery)}"><label for="code">6-значный код</label><input type="text" id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus><button type="submit">Войти</button></form>`));
+  });
+
+  app.post("/login/verify-code", portalOtpVerifyRateLimiter, express.urlencoded({ extended: false }), async (req: any, res: any) => {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const code = String(req.body?.code || "").trim();
+    const oauthQuery = String(req.body?.oauth_query || "");
+    const saved = pendingOtps.get(email);
+    if (!saved || saved.expiresAt < Date.now()) {
+      pendingOtps.delete(email);
+      return res.status(400).send("Код истёк или не запрашивался. Запросите новый код.");
+    }
+    saved.attempts += 1;
+    if (saved.attempts > 5) {
+      pendingOtps.delete(email);
+      return res.status(429).send("Превышено число попыток. Запросите новый код.");
+    }
+    if (!/^\d{6}$/.test(code) || !safeHexEqual(saved.codeHash, hashPortalOtp(email, code))) {
+      return res.status(400).send("Неверный код подтверждения.");
+    }
+    pendingOtps.delete(email);
+    try {
+      await ensurePortalUserProvisioned(email);
+    } catch (e) {
+      console.error(`[Provision] Failed to provision ${email}:`, e);
+      return res.status(500).send("Не удалось подготовить личную базу GBrain. Обратитесь к администратору.");
+    }
+    res.cookie("session_user", email, { httpOnly: true, secure: req.secure || issuerUrl.protocol === "https:", sameSite: "lax", maxAge: 30 * 24 * 60 * 60 * 1000, path: "/" });
+    const oauthParams = new URLSearchParams(oauthQuery);
+    return res.redirect(oauthParams.get("client_id") ? `/authorize?${oauthParams.toString()}` : "/portal");
+  });
+
+app.get("/portal/welcome", async (req: any, res: any) => {
+    const userEmail = req.cookies?.session_user;
+    if (!userEmail)
+      return res.redirect("/login");
+    try {
+      await ensurePortalUserProvisioned(String(userEmail));
+    } catch (e3) {
+      console.error(`[Provision] Failed to provision ${userEmail} from welcome:`, e3);
+      return res.status(500).send("Не удалось подготовить личную базу GBrain. Обратитесь к администратору.");
+    }
+    const areas = managedAccessAreas.map((a) => `
+      <div class="area">
+        <div><b>${escapeHtmlLocal(a.label)}</b><small>${escapeHtmlLocal(a.hint)}</small></div>
+        <label><input type="checkbox" name="access" value="${escapeHtmlLocal(a.id)}:read"> чтение</label>
+        <label><input type="checkbox" name="access" value="${escapeHtmlLocal(a.id)}:write"> запись</label>
+      </div>`).join("\n");
+    res.set("Content-Type", "text/html");
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Добро пожаловать в GBrain</title><style>
+body{margin:0;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;line-height:1.55}.wrap{max-width:920px;margin:0 auto;padding:32px}.card{background:#202028;border:1px solid #333;border-radius:12px;padding:22px;margin:16px 0}.muted{color:#aaa}.btn{display:inline-block;background:#007acc;color:white;border:0;border-radius:7px;padding:10px 14px;text-decoration:none;cursor:pointer;font-weight:600}.btn.gray{background:#444}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.area{display:flex;gap:10px;border:1px solid #333;border-radius:8px;padding:10px;background:#191919}.area small{display:block;color:#aaa;margin-top:3px}.reason{width:100%;min-height:80px;background:#151515;color:#fff;border:1px solid #444;border-radius:8px;padding:10px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}@media(max-width:720px){.grid{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+  <h1>GBrain: первый вход</h1>
+  <div class="muted">Вы вошли как ${escapeHtmlLocal(userEmail)}. Личная база уже подготовлена автоматически.</div>
+  <div class="card"><h2>Что здесь есть</h2><ol>
+    <li><b>Личная база</b> — ваши заметки, проекты и ежедневные записи. По умолчанию запись идёт туда.</li>
+    <li><b>Shared / Общая база</b> — корпоративные справочники и общие инструкции, доступна на чтение.</li>
+    <li><b>Закрытые разделы</b> — ИТ, производство, кадры и другие internal-области выдаются по заявке администратора.</li>
+  </ol></div>
+  <div class="card"><h2>Запросить доступ</h2><p class="muted">Отметьте разделы, которые нужны для работы. Заявка уйдет администратору на почту и появится в админке.</p>
+    <form method="POST" action="/portal/welcome">
+      <div class="grid">${areas}</div>
+      <p><label>Зачем нужен доступ</label><textarea class="reason" name="reason" placeholder="Например: нужен доступ к разделу ИТ для работы с интеграциями"></textarea></p>
+      <div class="actions"><button class="btn" type="submit">Отправить заявку и открыть портал</button><button class="btn gray" type="submit" name="skip" value="1">Открыть портал без заявки</button></div>
+    </form>
+  </div>
+  <div class="card"><h2>Ссылка на портал</h2><p><a class="btn" href="/portal/welcome/skip">Открыть портал знаний</a></p><p class="muted">Если вы уже вошли на этом компьютере, GBrain может использовать cookie и не спрашивать почту повторно.</p></div>
+</div></body></html>`);
+  });
+
+app.get("/portal/welcome/skip", (req: any, res: any) => {
+    const userEmail = req.cookies?.session_user;
+    if (!userEmail)
+      return res.redirect("/login");
+    markPortalOnboardingSeen(String(userEmail));
+    res.redirect("/portal");
+  });
+
+app.post("/portal/welcome", express.urlencoded({ extended: false }), async (req: any, res: any) => {
+    const userEmail = req.cookies?.session_user;
+    if (!userEmail)
+      return res.redirect("/login");
+    try {
+      await ensurePortalUserProvisioned(String(userEmail));
+      if (!req.body?.skip)
+        await saveInternalAccessRequest(String(userEmail), req.body?.access, req.body?.reason);
+      markPortalOnboardingSeen(String(userEmail));
+      res.redirect("/portal");
+    } catch (e3) {
+      console.error(`[Portal] Failed to handle welcome for ${userEmail}:`, e3);
+      res.status(500).send("Не удалось сохранить заявку. Обратитесь к администратору.");
+    }
+  });
+
+app.get("/portal", (req, res) => {
+    const userEmail = req.cookies?.session_user;
+    if (!userEmail)
+      return res.redirect("/login");
+    if (!hasSeenPortalOnboarding(String(userEmail)))
+      return res.redirect("/portal/welcome");
+    res.set("Content-Type", "text/html");
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>GBrain Portal</title><style>
+*{box-sizing:border-box}body{margin:0;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;height:100vh;display:grid;grid-template-columns:360px 1fr}.sidebar{border-right:1px solid #333;background:#202020;overflow:auto;padding:16px}.main{overflow:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:16px}.muted{color:#aaa;font-size:13px}.source-select{width:100%;background:#1d1d1d;color:#e5e5e5;border:1px solid #3a3a3a;border-radius:8px;padding:10px;margin-bottom:12px;font:inherit}.source-select:focus{outline:0;border-color:#007acc;box-shadow:0 0 0 2px rgba(0,122,204,.25)}.entry{padding:8px 10px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;gap:8px;align-items:center}.entry:hover{background:#2b2b2b}.entry-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.crumb{color:#8cc8ff;cursor:pointer}.viewer{background:#1d1d1d;border:1px solid #333;border-radius:8px;padding:22px;min-height:260px}.markdown{line-height:1.65;max-width:980px}.markdown h1,.markdown h2,.markdown h3{color:#fff;margin:1.2em 0 .5em}.markdown h1{border-bottom:1px solid #444;padding-bottom:.25em}.markdown code{background:#2b2b2b;border:1px solid #3c3c3c;border-radius:4px;padding:1px 5px}.markdown pre{background:#111;border:1px solid #333;border-radius:8px;padding:14px;overflow:auto}.markdown pre code{background:transparent;border:0;padding:0}.markdown blockquote{border-left:3px solid #007acc;margin:1em 0;padding:.2em 1em;color:#cfcfcf;background:#202a33}.markdown a{color:#8cc8ff}.markdown .table-wrap{overflow:auto;margin:1em 0;border:1px solid #3a3a3a;border-radius:8px}.markdown table{width:100%;border-collapse:collapse;background:#191919}.markdown th,.markdown td{border:1px solid #3a3a3a;padding:8px 10px;vertical-align:top;text-align:left}.markdown th{background:#242424;color:#fff;font-weight:700}.markdown tr:nth-child(even) td{background:#202020}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;display:inline-block}.error{color:#ff9c9c}.search{margin:14px 0}.search input{width:100%;padding:10px;border-radius:6px;border:1px solid #444;background:#171717;color:#fff}.search-results{margin-top:8px;border-top:1px solid #333}.badge{font-size:11px;color:#bbb;background:#333;border-radius:999px;padding:2px 7px}</style></head><body>
+<aside class="sidebar"><h2>GBrain</h2><div class="muted">${escapeHtmlLocal(userEmail)} \xB7 просмотр без редактирования</div><div id="adminBtnSection" style="display:none;gap:8px;flex-wrap:wrap;margin:12px 0"><a class="btn" href="/admin/access-requests">Заявки на доступ <span id="accessReqBadge" class="badge" style="display:none;background:#ffd479;color:#111;margin-left:6px"></span></a></div><div class="search"><input id="searchBox" type="search" placeholder="Поиск по доступным файлам..."><div id="searchResults" class="search-results"></div></div><h3>Источники</h3><div id="sources"></div><h3>Папки и файлы</h3><div id="tree" class="muted">Выберите источник</div></aside>
+<main class="main"><div class="top"><div><h2 id="title">Портал знаний</h2><div id="breadcrumbs" class="muted"></div></div><a class="btn" href="/authorize" onclick="history.back();return false">Назад</a></div><div id="viewer" class="viewer muted">Выберите markdown-файл для просмотра или другой файл для скачивания.</div></main>
+<script>
+let currentSource=null,currentPath='',searchTimer=null;const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));async function api(url){const r=await fetch(url);if(!r.ok)throw new Error(await r.text());return r.json()}
+function fileIcon(name,type,isText){if(type==='dir')return '\u{1F4C1}';const n=String(name||'').toLowerCase();if(n.endsWith('.md')||n.endsWith('.markdown'))return '\u{1F4DD}';if(n.endsWith('.txt'))return '\u{1F4C4}';if(n.endsWith('.pdf'))return '\u{1F4D5}';if(['.png','.jpg','.jpeg','.gif','.webp','.svg'].some(ext=>n.endsWith(ext)))return '\u{1F5BC}\uFE0F';if(['.xlsx','.xls','.csv'].some(ext=>n.endsWith(ext)))return '\u{1F4CA}';if(['.docx','.doc','.odt'].some(ext=>n.endsWith(ext)))return '\u{1F4D8}';if(['.pptx','.ppt'].some(ext=>n.endsWith(ext)))return '\u{1F4FD}\uFE0F';if(['.zip','.7z','.rar','.tar','.gz'].some(ext=>n.endsWith(ext)))return '\u{1F5DC}\uFE0F';return isText?'\u{1F4C4}':'\u2B07\uFE0F'}
+function renderWikilinks(s){if(!s.includes('[['))return esc(s);const parts=s.split('[[');let html=esc(parts[0]);for(let i=1;i<parts.length;i++){const end=parts[i].indexOf(']]');if(end<0){html+='[['+esc(parts[i]);continue}const content=parts[i].slice(0,end);const rest=parts[i].slice(end+2);const bar=content.indexOf('|');const target=bar>=0?content.slice(0,bar).trim():content.trim();const label=bar>=0?content.slice(bar+1).trim():target;html+='<a href="#" class="wikilink" style="color:#ffd479;text-decoration:underline" data-target="'+esc(target)+'" onclick="clickWiki(this);return false;">'+esc(label)+'</a>'+esc(rest)}return html}
+async function clickWiki(el){const target=el.dataset.target;try{const data=await api('/portal/api/resolve-link?link='+encodeURIComponent(target)+'&currentSource='+encodeURIComponent(currentSource||''));if(data.found){await selectSource(data.source);await loadTree(data.path.split('/').slice(0,-1).join('/'));openFile(data.path,true)}else{alert('Файл "'+target+'" не найден в доступных вам источниках.')}}catch(e){alert('Ошибка перехода по ссылке: '+e.message)}}
+function renderInline(s){const bs=String.fromCharCode(92),tick=String.fromCharCode(96);return renderWikilinks(s).replace(new RegExp(bs+'*'+bs+'*'+'([^*]+)'+bs+'*'+bs+'*','g'),'<strong>$1</strong>').replace(new RegExp(tick+'([^'+tick+']+)'+tick,'g'),'<code>$1</code>').replace(new RegExp(bs+'[([^'+bs+']+)'+bs+']'+bs+'(([^)]+)'+bs+')','g'),(m,t,u)=>'<a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(t)+'</a>')}
+function resetMainScroll(){const m=document.querySelector('.main');if(m)m.scrollTop=0;window.scrollTo(0,0)}
+function splitTableRow(line){let t=String(line||'').trim();if(t.startsWith('|'))t=t.slice(1);if(t.endsWith('|'))t=t.slice(0,-1);const cells=[];let cur='',escNext=false;for(const ch of t){if(escNext){cur+=ch;escNext=false;continue}if(ch===String.fromCharCode(92)){escNext=true;continue}if(ch==='|'){cells.push(cur.trim());cur='';continue}cur+=ch}cells.push(cur.trim());return cells}
+function isTableSeparator(line){const cells=splitTableRow(line);return cells.length>0&&cells.every(c=>{const x=c.trim();return /^:?-{3,}:?$/.test(x)})}
+function isTableStart(lines,i){if(i+1>=lines.length)return false;const a=String(lines[i]||'').trim(),b=String(lines[i+1]||'').trim();return a.includes('|')&&b.includes('|')&&isTableSeparator(b)}
+function renderTable(rows){const header=splitTableRow(rows[0]);const aligns=splitTableRow(rows[1]).map(c=>{const x=c.trim();if(x.startsWith(':')&&x.endsWith(':'))return 'center';if(x.endsWith(':'))return 'right';return 'left'});let html='<div class="table-wrap"><table><thead><tr>'+header.map((c,i)=>'<th style="text-align:'+esc(aligns[i]||'left')+'">'+renderInline(c)+'</th>').join('')+'</tr></thead><tbody>';for(let r=2;r<rows.length;r++){const cells=splitTableRow(rows[r]);html+='<tr>'+header.map((_,i)=>'<td style="text-align:'+esc(aligns[i]||'left')+'">'+renderInline(cells[i]||'')+'</td>').join('')+'</tr>'}return html+'</tbody></table></div>'}
+function renderMarkdown(md){const fence=String.fromCharCode(96).repeat(3),nl=String.fromCharCode(10);let lines=String(md||'').split(nl).map(x=>x.endsWith(String.fromCharCode(13))?x.slice(0,-1):x);if(lines[0]&&lines[0].trim()==='---'){const end=lines.slice(1).findIndex(x=>x.trim()==='---');if(end>=0)lines=lines.slice(end+2)}let html='',inList=false,inCode=false,code=[];const close=()=>{if(inList){html+='</ul>';inList=false}};for(let i=0;i<lines.length;i++){const line=lines[i],t=line.trim();if(t.startsWith(fence)){if(inCode){html+='<pre><code>'+esc(code.join(nl))+'</code></pre>';code=[];inCode=false}else{close();inCode=true}continue}if(inCode){code.push(line);continue}if(isTableStart(lines,i)){close();const rows=[lines[i],lines[i+1]];i+=2;while(i<lines.length&&String(lines[i]||'').trim().includes('|')&&String(lines[i]||'').trim()!==''){rows.push(lines[i]);i++}i--;html+=renderTable(rows);continue}if(line.startsWith('### ')){close();html+='<h3>'+renderInline(line.slice(4))+'</h3>';continue}if(line.startsWith('## ')){close();html+='<h2>'+renderInline(line.slice(3))+'</h2>';continue}if(line.startsWith('# ')){close();html+='<h1>'+renderInline(line.slice(2))+'</h1>';continue}if(line.startsWith('>')){close();html+='<blockquote>'+renderInline(line.slice(line.startsWith('> ')?2:1))+'</blockquote>';continue}if(line.startsWith('- ')||line.startsWith('* ')){if(!inList){html+='<ul>';inList=true}html+='<li>'+renderInline(line.slice(2))+'</li>';continue}if(!t){close();continue}close();html+='<p>'+renderInline(line)+'</p>'}close();if(inCode)html+='<pre><code>'+esc(code.join(nl))+'</code></pre>';return '<div class="markdown">'+html+'</div>'}
+async function loadSources(){try{const data=await api('/portal/api/sources');const box=document.getElementById('sources');if(!data.sources.length){box.innerHTML='<div class="muted">Нет доступных источников</div>';return}box.innerHTML='<select id="sourceSelect" class="source-select" aria-label="Источник">'+data.sources.map(s=>'<option value="'+esc(s.id)+'">'+esc(s.name||s.id)+' · '+esc(s.id)+'</option>').join('')+'</select>';const sel=document.getElementById('sourceSelect');sel.onchange=()=>selectSource(sel.value);selectSource(data.sources[0].id)}catch(e){document.getElementById('sources').innerHTML='<div class="error">'+esc(e.message)+'</div>'}}
+async function selectSource(id){currentSource=id;currentPath='';const sel=document.getElementById('sourceSelect');if(sel&&sel.value!==id)sel.value=id;await loadTree('')}
+function breadcrumbs(){const parts=currentPath?currentPath.split('/').filter(Boolean):[];let html='<span class="crumb" data-path="">'+esc(currentSource||'')+'</span>',acc='';for(const p of parts){acc+=(acc?'/':'')+p;html+=' / <span class="crumb" data-path="'+esc(acc)+'">'+esc(p)+'</span>'}document.getElementById('breadcrumbs').innerHTML=html;document.querySelectorAll('.crumb').forEach(e=>e.onclick=()=>loadTree(e.dataset.path||''))}
+async function loadTree(path){currentPath=path||'';breadcrumbs();const data=await api('/portal/api/tree?source='+encodeURIComponent(currentSource)+'&path='+encodeURIComponent(currentPath));document.getElementById('title').textContent=currentPath||currentSource;const rows=[];if(currentPath){const parent=currentPath.split('/').slice(0,-1).join('/');rows.push('<div class="entry" data-dir="'+esc(parent)+'"><span class="entry-name">↩ ..</span></div>')}for(const d of data.entries.filter(e=>e.type==='dir'))rows.push('<div class="entry" data-dir="'+esc(d.path)+'"><span class="entry-name">'+fileIcon(d.name,'dir')+' '+esc(d.name)+'</span></div>');for(const f of data.entries.filter(e=>e.type==='file'))rows.push('<div class="entry" data-file="'+esc(f.path)+'" data-md="'+(f.markdown?'1':'0')+'"><span class="entry-name">'+fileIcon(f.name,'file',f.markdown)+' '+esc(f.name)+'</span><span class="badge">'+esc(f.size)+' байт</span></div>');document.getElementById('tree').innerHTML=rows.join('')||'<div class="muted">Папка пуста</div>';document.querySelectorAll('[data-dir]').forEach(e=>e.onclick=()=>loadTree(e.dataset.dir||''));document.querySelectorAll('[data-file]').forEach(e=>e.onclick=()=>openFile(e.dataset.file,e.dataset.md==='1'))}
+async function openFile(path,isMd){const viewer=document.getElementById('viewer');if(!isMd){viewer.innerHTML='<p>Этот файл не markdown. Его можно скачать.</p><a class="btn" href="/portal/download?source='+encodeURIComponent(currentSource)+'&path='+encodeURIComponent(path)+'">Скачать файл</a>';resetMainScroll();return}const data=await api('/portal/api/file?source='+encodeURIComponent(currentSource)+'&path='+encodeURIComponent(path));document.getElementById('title').textContent=data.path;viewer.innerHTML=renderMarkdown(data.content);resetMainScroll()}
+async function runSearch(q){const box=document.getElementById('searchResults');if(!q.trim()){box.innerHTML='';return}box.innerHTML='<div class="muted">Поиск...</div>';try{const data=await api('/portal/api/search?q='+encodeURIComponent(q.trim()));box.innerHTML=data.results.map(r=>'<div class="entry" data-src="'+esc(r.source)+'" data-path="'+esc(r.path)+'" data-md="'+(r.markdown?'1':'0')+'"><span class="entry-name">'+fileIcon(r.name,'file',r.markdown)+' '+esc(r.source)+' / '+esc(r.path)+'</span></div>').join('')||'<div class="muted">Ничего не найдено</div>';box.querySelectorAll('[data-src]').forEach(e=>e.onclick=async()=>{await selectSource(e.dataset.src);await loadTree(e.dataset.path.split('/').slice(0,-1).join('/'));openFile(e.dataset.path,e.dataset.md==='1')})}catch(e){box.innerHTML='<div class="error">'+esc(e.message)+'</div>'}}
+async function loadAccessRequestBadge(){try{const data=await api('/admin/api/access-requests');const count=(data.requests||[]).filter(r=>r.status==='pending').length;const btn=document.getElementById('adminBtnSection');if(btn)btn.style.display='flex';const b=document.getElementById('accessReqBadge');if(b&&count>0){b.textContent=String(count);b.style.display='inline-block'}}catch(e){}}
+document.getElementById('searchBox').addEventListener('input',e=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>runSearch(e.target.value),250)});loadSources();loadAccessRequestBadge();
+</script></body></html>`);
+  });
+
+
+app.get("/portal/api/sources", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const sources = await getSourceRowsForUser(userEmail);
+    res.json({ sources: sources.map((source) => ({ id: source.id, name: source.name })) });
+  });
+  app.get("/portal/api/tree", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const fs = require("fs");
+    const path = require("path");
+    const sourceId = String(req.query.source || "");
+    const sources = await getSourceRowsForUser(userEmail);
+    const source = sources.find((source) => source.id === sourceId);
+    if (!source)
+      return res.status(403).json({ error: "Source is not allowed" });
+    const target = resolvePortalPath(source.local_path, req.query.path);
+    if (!target)
+      return res.status(400).json({ error: "Invalid path" });
+    let stat;
+    try {
+      stat = fs.statSync(target);
+    } catch {
+      return res.status(404).json({ error: "Path not found" });
+    }
+    if (!stat.isDirectory())
+      return res.status(400).json({ error: "Path is not a directory" });
+    const entries = fs.readdirSync(target, { withFileTypes: true }).filter((entry) => entry.name !== ".git" && !entry.name.startsWith(".")).map((entry) => {
+      const full = path.join(target, entry.name);
+      const rel = path.relative(source.local_path, full).split(path.sep).join("/");
+      const st = fs.statSync(full);
+      return { name: entry.name, path: rel, type: entry.isDirectory() ? "dir" : "file", markdown: entry.isFile() && /\.(md|markdown|txt)$/i.test(entry.name), size: st.size };
+    }).sort((a, b) => a.type === b.type ? a.name.localeCompare(b.name, "ru") : a.type === "dir" ? -1 : 1);
+    res.json({ source: source.id, path: req.query.path || "", entries });
+  });
+  app.get("/portal/api/file", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const fs = require("fs");
+    const sourceId = String(req.query.source || "");
+    const sources = await getSourceRowsForUser(userEmail);
+    const source = sources.find((source) => source.id === sourceId);
+    if (!source)
+      return res.status(403).json({ error: "Source is not allowed" });
+    const target = resolvePortalPath(source.local_path, req.query.path);
+    if (!target)
+      return res.status(400).json({ error: "Invalid path" });
+    if (!/\.(md|markdown|txt)$/i.test(String(req.query.path || "")))
+      return res.status(400).json({ error: "Only markdown/text preview is allowed here" });
+    let stat;
+    try {
+      stat = fs.statSync(target);
+    } catch {
+      return res.status(404).json({ error: "File not found" });
+    }
+    if (!stat.isFile())
+      return res.status(400).json({ error: "Path is not a file" });
+    if (stat.size > 1024 * 1024)
+      return res.status(413).json({ error: "File is too large for preview; download it instead" });
+    res.json({ path: req.query.path || "", content: fs.readFileSync(target, "utf8") });
+  });
+  app.get("/portal/api/search", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const fs = require("fs");
+    const path = require("path");
+    const q = String(req.query.q || "").trim().toLowerCase();
+    if (q.length < 2)
+      return res.json({ results: [] });
+    const sources = await getSourceRowsForUser(userEmail);
+    const results = [];
+    const maxResults = 50;
+    const maxFileSize = 512 * 1024;
+    const walk = (source, dir) => {
+      if (results.length >= maxResults)
+        return;
+      let entries = [];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (results.length >= maxResults)
+          return;
+        if (entry.name === ".git" || entry.name.startsWith("."))
+          continue;
+        const full = path.join(dir, entry.name);
+        const rel = path.relative(source.local_path, full).split(path.sep).join("/");
+        if (entry.isDirectory()) {
+          walk(source, full);
+          continue;
+        }
+        if (!entry.isFile())
+          continue;
+        const nameMatch = entry.name.toLowerCase().includes(q) || rel.toLowerCase().includes(q);
+        const markdown = /\.(md|markdown|txt)$/i.test(entry.name);
+        let contentMatch = false;
+        if (markdown) {
+          try {
+            const st = fs.statSync(full);
+            if (st.size <= maxFileSize)
+              contentMatch = fs.readFileSync(full, "utf8").toLowerCase().includes(q);
+          } catch {}
+        }
+        if (nameMatch || contentMatch) {
+          let size = 0;
+          try {
+            size = fs.statSync(full).size;
+          } catch {}
+          results.push({ source: source.id, sourceName: source.name, name: entry.name, path: rel, markdown, size: size, match: contentMatch ? "content" : "name" });
+        }
+      }
+    };
+    for (const source of sources)
+      walk(source, source.local_path);
+    res.json({ query: q, results });
+  });
+  app.get("/portal/api/resolve-link", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const fs = require("fs");
+    const path = require("path");
+    const link = String(req.query.link || "").trim().replace(/\\/g, "/");
+    const currentSourceId = String(req.query.currentSource || "");
+    if (!link)
+      return res.status(400).json({ error: "Link is required" });
+    const sources = await getSourceRowsForUser(userEmail);
+    let targetLink = link;
+    let requestedSourceId = null;
+    for (const source of sources) {
+      const prefix = `${source.id}:`;
+      if (link.startsWith(prefix)) {
+        requestedSourceId = source.id;
+        targetLink = link.slice(prefix.length);
+        break;
+      }
+    }
+    const orderedSources = requestedSourceId ? sources.filter((source) => source.id === requestedSourceId) : [...sources].sort((a, b) => {
+      if (a.id === currentSourceId)
+        return -1;
+      if (b.id === currentSourceId)
+        return 1;
+      if (a.id === "shared")
+        return -1;
+      if (b.id === "shared")
+        return 1;
+      return 0;
+    });
+    const extensions = [".md", ".markdown", ".txt", ""];
+    const findFile = (localPath, targetLink) => {
+      const linkParts = targetLink.split("/");
+      const basename = linkParts[linkParts.length - 1].toLowerCase();
+      const walk = (dir) => {
+        let entries;
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return null;
+        }
+        for (const entry of entries) {
+          if (entry.name === ".git" || entry.name.startsWith("."))
+            continue;
+          const fullPath = path.join(dir, entry.name);
+          const relPath = path.relative(localPath, fullPath).split(path.sep).join("/");
+          if (entry.isDirectory()) {
+            const found = walk(fullPath);
+            if (found)
+              return found;
+          } else if (entry.isFile()) {
+            const relLower = relPath.toLowerCase();
+            const nameLower = entry.name.toLowerCase();
+            for (const ext of extensions) {
+              const targetWithExt = targetLink.toLowerCase() + ext;
+              const basenameWithExt = basename + ext;
+              if (relLower === targetWithExt || relLower.endsWith("/" + targetWithExt) || nameLower === basenameWithExt) {
+                return relPath;
+              }
+            }
+          }
+        }
+        return null;
+      };
+      return walk(localPath);
+    };
+    for (const source of orderedSources) {
+      for (const ext of extensions) {
+        const testPath = targetLink + ext;
+        const target = resolvePortalPath(source.local_path, testPath);
+        if (target) {
+          try {
+            const st = fs.statSync(target);
+            if (st.isFile()) {
+              return res.json({ found: true, source: source.id, sourceName: source.name, path: testPath });
+            }
+          } catch {}
+        }
+      }
+      const relPath = findFile(source.local_path, targetLink);
+      if (relPath) {
+        return res.json({ found: true, source: source.id, sourceName: source.name, path: relPath });
+      }
+    }
+    res.json({ found: false });
+  });
+  app.get("/portal/download", async (req: any, res: any) => {
+    const userEmail = req.cookies?.session_user;
+    if (!userEmail)
+      return res.status(401).send("Unauthorized");
+    const fs = require("fs");
+    const path = require("path");
+    const sourceId = String(req.query.source || "");
+    const sources = await getSourceRowsForUser(String(userEmail));
+    const source = sources.find((source) => source.id === sourceId);
+    if (!source)
+      return res.status(403).send("Source is not allowed");
+    const target = resolvePortalPath(source.local_path, req.query.path);
+    if (!target)
+      return res.status(400).send("Invalid path");
+    let stat;
+    try {
+      stat = fs.statSync(target);
+    } catch {
+      return res.status(404).send("File not found");
+    }
+    if (!stat.isFile())
+      return res.status(400).send("Path is not a file");
+    res.download(target, path.basename(target));
+  });
+
+
+app.get("/admin/access-requests", requireAdmin, (_req: any, res: any) => {
+    res.set("Content-Type", "text/html");
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>GBrain Access Requests</title><style>
+body{margin:0;background:#101014;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}.wrap{max-width:1180px;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;cursor:pointer}.btn.gray{background:#444}.btn.red{background:#8b2f2f}.btn:disabled{opacity:.55;cursor:not-allowed}.card{background:#1d1d24;border:1px solid #333;border-radius:10px;padding:16px;margin:14px 0}.muted{color:#aaa;font-size:13px}.actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}pre{white-space:pre-wrap;background:#15151a;border-radius:8px;padding:10px}.status-pending{color:#ffd479}.status-approved,.status-approved_partial{color:#91e091}.status-rejected{color:#ff9c9c}.grant-table{width:100%;border-collapse:collapse;margin-top:12px}.grant-table th,.grant-table td{border-bottom:1px solid #333;padding:8px;text-align:left}.grant-table th{color:#aaa;font-weight:500}.grant-table input{transform:scale(1.1)}.denied{color:#ffb7b7}.approved-list{color:#b7f0b7}
+</style></head><body><div class="wrap"><div class="top"><div><h1>Заявки доступа GBrain</h1><div class="muted">Можно утвердить заявку целиком или скорректировать галочками, какие права выдать.</div></div><div><a class="btn gray" href="/admin/permissions">Права пользователей</a> <a class="btn gray" href="/admin/">Админ-панель</a></div></div><div id="list">Загрузка...</div></div><script>
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()}
+function requestedLabel(a){return a.write?'чтение+запись':(a.read?'чтение':'нет')}
+function renderPendingRows(r){return '<table class="grant-table"><thead><tr><th>Область</th><th>Source</th><th>Запрошено</th><th>Дать чтение</th><th>Дать запись</th></tr></thead><tbody>'+((r.requests||[]).map((a,i)=>'<tr><td>'+esc(a.area)+'</td><td><code>'+esc(a.source_id||'')+'</code></td><td>'+esc(requestedLabel(a))+'</td><td><input class="grant-read" type="checkbox" data-index="'+i+'" '+((a.read||a.write)?'checked':'')+'></td><td><input class="grant-write" type="checkbox" data-index="'+i+'" '+(a.write?'checked':'')+'></td></tr>').join(''))+'</tbody></table>'}
+function renderDecidedRows(r){const approved=(r.approved_requests||[]).map(a=>'<div class="approved-list">✓ '+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</div>').join('');const denied=(r.denied_requests||[]).map(a=>'<div class="denied">\xD7 '+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</div>').join('');if(approved||denied)return '<div style="margin-top:10px">'+approved+denied+'</div>';return '<div style="margin-top:10px">'+((r.requests||[]).map(a=>'<span>'+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</span>').join('<br>'))+'</div>'}
+function collectGrants(card){const grants=[];card.querySelectorAll('tbody tr').forEach(row=>{const idx=Number(row.querySelector('input').dataset.index);const read=row.querySelector('.grant-read').checked;const write=row.querySelector('.grant-write').checked;grants.push({index:idx,read:read||write,write})});return grants}
+function renderReq(r){const pending=r.status==='pending';const rows=pending?renderPendingRows(r):renderDecidedRows(r);const actions=pending?'<div class="actions"><button class="btn js-decision" data-id="'+esc(r.id)+'" data-action="approve">Утвердить выбранные права</button><button class="btn gray js-check-all" type="button">Отметить всё как запрошено</button><button class="btn gray js-clear" type="button">Снять все галочки</button><button class="btn red js-decision" data-id="'+esc(r.id)+'" data-action="reject">Отклонить всё</button></div>':'';return '<div class="card" data-request-id="'+esc(r.id)+'"><h3>'+esc(r.email)+' <span class="status-'+esc(r.status)+'">'+esc(r.status)+'</span></h3><div class="muted">'+esc(r.id)+' \xB7 '+esc(r.requested_at||'')+'</div>'+rows+'<pre>'+esc(r.reason||'(причина не указана)')+'</pre>'+actions+(r.decided_at?'<div class="muted">Решение: '+esc(r.decided_at)+' \xB7 '+esc(r.decided_by||'')+'</div>':'')+'</div>'}
+function bindCard(card){card.querySelectorAll('.grant-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=card.querySelector('.grant-read[data-index="'+w.dataset.index+'"]');if(r)r.checked=true}});card.querySelectorAll('.grant-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=card.querySelector('.grant-write[data-index="'+r.dataset.index+'"]');if(w)w.checked=false}});const all=card.querySelector('.js-check-all');if(all)all.onclick=()=>{card.querySelectorAll('tbody tr').forEach(row=>{const read=row.querySelector('.grant-read');const write=row.querySelector('.grant-write');read.checked=true;write.checked=row.children[2].textContent.includes('запись')})};const clear=card.querySelector('.js-clear');if(clear)clear.onclick=()=>{card.querySelectorAll('input[type="checkbox"]').forEach(i=>i.checked=false)}}
+async function load(){try{const data=await api('/admin/api/access-requests');document.getElementById('list').innerHTML=data.requests.map(renderReq).join('')||'<div class="card muted">Заявок нет</div>';document.querySelectorAll('.card').forEach(bindCard);document.querySelectorAll('.js-decision').forEach(b=>b.onclick=()=>decide(b))}catch(e){document.getElementById('list').innerHTML='<div class="card">Ошибка: '+esc(e.message)+'</div>'}}
+async function decide(button){const id=button.dataset.id,action=button.dataset.action;const card=button.closest('.card');if(action==='approve'){const grants=collectGrants(card);const selected=grants.filter(g=>g.read||g.write).length;if(!selected){alert('Не выбрано ни одного права. Если нужно отказать полностью, нажмите \xABОтклонить всё\xBB.');return}if(!confirm('Утвердить выбранные права? Неотмеченные пункты будут записаны как невыданные.'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants})})}else{if(!confirm('Отклонить заявку полностью?'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})}await load()}
+load();
+</script></body></html>`);
+  });
+  app.get("/admin/api/access-requests", requireAdmin, (_req: any, res: any) => {
+    const requests = readAccessRequests().sort((a, b) => String(b.requested_at || "").localeCompare(String(a.requested_at || "")));
+    res.json({ requests });
+  });
+  app.post("/admin/api/access-requests/:id/approve", requireAdmin, express.json(), (req: any, res: any) => {
+    const id = String(req.params.id || "");
+    const requests = readAccessRequests();
+    const item = requests.find((r4) => r4.id === id);
+    if (!item) {
+      res.status(404).json({ error: "Request not found" });
+      return;
+    }
+    if (item.status !== "pending") {
+      res.status(400).json({ error: "Request is not pending" });
+      return;
+    }
+    const requestedRows = Array.isArray(item.requests) ? item.requests : [];
+    const rawGrants = Array.isArray(req.body?.grants) ? req.body.grants : null;
+    const selectedRows = requestedRows.map((row, index) => {
+      const grant = rawGrants ? rawGrants.find((g8) => Number(g8?.index) === index) : row;
+      const write2 = !!grant?.write && !!row.write;
+      const read2 = (!!grant?.read || write2) && (!!row.read || !!row.write);
+      const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
+      return { area: row.area, source_id: sourceId, read: read2, write: write2, requested_read: !!row.read, requested_write: !!row.write };
+    }).filter((row) => row.source_id && (row.read || row.write));
+    if (selectedRows.length === 0) {
+      res.status(400).json({ error: "No permissions selected. Reject the request if nothing should be granted." });
+      return;
+    }
+    const permsPath = userPermissionsPath();
+    const perms = loadJsonFileLocal(permsPath, {});
+    const defaultSource = String(item.email || "").split("@")[0].replace(/[^a-z0-9]/g, "-");
+    const user = perms[item.email] || { source_id: defaultSource, federated_read: [defaultSource, "shared"], federated_write: [defaultSource] };
+    const read = new Set(Array.isArray(user.federated_read) ? user.federated_read : []);
+    const write = new Set(Array.isArray(user.federated_write) ? user.federated_write : []);
+    if (user.source_id)
+      read.add(user.source_id);
+    for (const row of selectedRows) {
+      if (!row.source_id)
+        continue;
+      if (row.read || row.write)
+        read.add(row.source_id);
+      if (row.write)
+        write.add(row.source_id);
+    }
+    user.federated_read = Array.from(read).filter(Boolean);
+    user.federated_write = Array.from(write).filter(Boolean);
+    perms[item.email] = user;
+    writeJsonFileLocal(permsPath, perms);
+    const selectedBySource = new Map(selectedRows.map((row) => [row.source_id, row]));
+    const deniedRows = requestedRows.map((row) => {
+      const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
+      const selected = selectedBySource.get(sourceId);
+      const deniedRead = (!!row.read || !!row.write) && !selected?.read;
+      const deniedWrite = !!row.write && !selected?.write;
+      if (!deniedRead && !deniedWrite)
+        return null;
+      return { area: row.area, source_id: sourceId, read: deniedRead, write: deniedWrite };
+    }).filter(Boolean);
+    const fullyApproved = deniedRows.length === 0 && selectedRows.length === requestedRows.length;
+    item.status = fullyApproved ? "approved" : "approved_partial";
+    item.decided_at = new Date().toISOString();
+    item.decided_by = String(req.cookies?.session_user || "admin");
+    item.approved_at = item.decided_at;
+    item.approved_by = item.decided_by;
+    item.approved_requests = selectedRows.map((row) => ({ area: row.area, source_id: row.source_id, read: row.read, write: row.write }));
+    item.denied_requests = deniedRows;
+    writeAccessRequests(requests);
+    res.json({ approved: true, partial: item.status === "approved_partial", permissions: user, approved_requests: item.approved_requests, denied_requests: item.denied_requests });
+  });
+  app.post("/admin/api/access-requests/:id/reject", requireAdmin, express.json(), (req: any, res: any) => {
+    const id = String(req.params.id || "");
+    const requests = readAccessRequests();
+    const item = requests.find((r4) => r4.id === id);
+    if (!item) {
+      res.status(404).json({ error: "Request not found" });
+      return;
+    }
+    if (item.status !== "pending") {
+      res.status(400).json({ error: "Request is not pending" });
+      return;
+    }
+    item.status = "rejected";
+    item.decided_at = new Date().toISOString();
+    item.decided_by = "admin";
+    item.rejection_reason = String(req.body?.reason || "").slice(0, 1000);
+    writeAccessRequests(requests);
+    res.json({ rejected: true });
+  });
+
+
+
+  app.get('/admin/permissions', requireAdmin, (_req: Request, res: Response) => {
+    res.set('Content-Type', 'text/html');
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>GBrain User Permissions</title><style>
+body{margin:0;background:#101014;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}.wrap{max-width:1320px;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;cursor:pointer}.btn.gray{background:#444}.muted{color:#aaa;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:18px;background:#1d1d24;border:1px solid #333;border-radius:10px;overflow:hidden}th,td{border-bottom:1px solid #333;padding:8px;text-align:center;vertical-align:middle}th{color:#bbb;font-weight:600;background:#181820;position:sticky;top:0}td.email{text-align:left;white-space:nowrap}td.source{text-align:left;color:#aaa;font-size:12px}input[type=checkbox]{transform:scale(1.1)}.cell{display:flex;gap:6px;justify-content:center;align-items:center}.r{color:#8cc8ff}.w{color:#ffd479}.saved{color:#91e091;margin-left:10px}.err{color:#ff9c9c;margin-left:10px}</style></head><body><div class="wrap"><div class="top"><div><h1>Права пользователей GBrain</h1><div class="muted">Таблица читает и меняет <code>~/.gbrain/user_permissions.json</code>. R = чтение, W = запись.</div></div><div><a class="btn gray" href="/admin/access-requests">Заявки</a> <a class="btn gray" href="/admin/">Админ-панель</a></div></div><div id="msg" class="muted"></div><div id="root">Загрузка...</div></div><script>
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()}
+function render(data){const areas=data.areas||[];const users=data.users||[];let html='<table><thead><tr><th>Пользователь</th><th>Личная область</th>'+areas.map(a=>'<th>'+esc(a.label)+'<br><span class="muted">'+esc(a.sourceId)+'</span></th>').join('')+'<th></th></tr></thead><tbody>';for(const u of users){html+='<tr data-email="'+esc(u.email)+'"><td class="email">'+esc(u.email)+'</td><td class="source"><code>'+esc(u.source_id||'')+'</code></td>'+areas.map(a=>{const r=(u.federated_read||[]).includes(a.sourceId);const w=(u.federated_write||[]).includes(a.sourceId);return '<td><div class="cell"><label class="r">R <input class="p-read" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(r?'checked':'')+'></label><label class="w">W <input class="p-write" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(w?'checked':'')+'></label></div></td>'}).join('')+'<td><button class="btn save">Сохранить</button></td></tr>'}html+='</tbody></table>';document.getElementById('root').innerHTML=html;document.querySelectorAll('tr[data-email]').forEach(bindRow)}
+function bindRow(row){row.querySelectorAll('.p-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=row.querySelector('.p-read[data-source="'+w.dataset.source+'"]');if(r)r.checked=true}});row.querySelectorAll('.p-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');if(w)w.checked=false}});row.querySelector('.save').onclick=async()=>{const email=row.dataset.email;const grants=[];row.querySelectorAll('.p-read').forEach(r=>{const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');grants.push({source_id:r.dataset.source,read:r.checked||w.checked,write:w.checked})});const msg=document.getElementById('msg');msg.className='muted';msg.textContent='Сохранение...';try{await api('/admin/api/permissions/'+encodeURIComponent(email),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants})});msg.className='saved';msg.textContent='Сохранено: '+email}catch(e){msg.className='err';msg.textContent='Ошибка: '+e.message}}}
+async function load(){try{render(await api('/admin/api/permissions'))}catch(e){document.getElementById('root').innerHTML='<div class="err">'+esc(e.message)+'</div>'}}load();
+</script></body></html>`);
+  });
+
+  app.get('/admin/api/permissions', requireAdmin, (_req: Request, res: Response) => {
+    const perms = loadJsonFileLocal(userPermissionsPath(), {});
+    const users = Object.entries(perms).sort(([a], [b]) => a.localeCompare(b)).map(([email, p]: any) => ({
+      email,
+      source_id: p?.source_id || '',
+      federated_read: Array.isArray(p?.federated_read) ? p.federated_read : [],
+      federated_write: Array.isArray(p?.federated_write) ? p.federated_write : [],
+    }));
+    res.json({ areas: managedAccessAreas, users });
+  });
+
+  app.post('/admin/api/permissions/:email', requireAdmin, express.json(), (req: Request, res: Response) => {
+    const email = String(req.params.email || '').toLowerCase();
+    const perms = loadJsonFileLocal(userPermissionsPath(), {});
+    const user = perms[email];
+    if (!user) { res.status(404).json({ error: 'User not found' }); return; }
+    const allowedManaged = new Set(managedAccessAreas.map(a => a.sourceId));
+    const grants = Array.isArray(req.body?.grants) ? req.body.grants : [];
+    const read = new Set<string>(Array.isArray(user.federated_read) ? user.federated_read.filter((x: string) => !allowedManaged.has(x)) : []);
+    const write = new Set<string>(Array.isArray(user.federated_write) ? user.federated_write.filter((x: string) => !allowedManaged.has(x)) : []);
+    if (user.source_id) { read.add(user.source_id); write.add(user.source_id); }
+    for (const grant of grants) {
+      const sourceId = String(grant?.source_id || '');
+      if (!allowedManaged.has(sourceId)) continue;
+      const canWrite = !!grant.write;
+      const canRead = !!grant.read || canWrite;
+      if (canRead) read.add(sourceId);
+      if (canWrite) write.add(sourceId);
+    }
+    user.federated_read = Array.from(read).filter(Boolean);
+    user.federated_write = Array.from(write).filter(Boolean);
+    perms[email] = user;
+    writeJsonFileLocal(userPermissionsPath(), perms);
+    res.json({ ok: true, user });
+  });
+
+
+
   app.use(authRouter);
 
   // ---------------------------------------------------------------------------
@@ -910,18 +1861,33 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   // Admin auth middleware
   function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
-    const sessionId = (req.cookies as Record<string, string>)?.gbrain_admin;
-    if (!sessionId || !adminSessions.has(sessionId)) {
-      res.status(401).json({ error: 'Admin authentication required' });
-      return;
-    }
-    const expiresAt = adminSessions.get(sessionId)!;
-    if (Date.now() > expiresAt) {
+    const cookies = (req.cookies as Record<string, string>) || {};
+    const sessionId = cookies.gbrain_admin;
+    if (sessionId && adminSessions.has(sessionId)) {
+      const expiresAt = adminSessions.get(sessionId)!;
+      if (Date.now() <= expiresAt) {
+        next();
+        return;
+      }
       adminSessions.delete(sessionId);
-      res.status(401).json({ error: 'Session expired' });
+    }
+
+    // CUSTOM PORTAL AND LOGIN WORKFLOWS: allow admin-listed portal users to
+    // enter /admin with their existing portal cookie. The allowlist is
+    // GBRAIN_ADMIN_EMAILS; this bridges the portal Google/OTP login UX to the
+    // same HttpOnly gbrain_admin session used by magic links, so normal admin
+    // API routes do not need to know about portal auth.
+    const portalEmail = typeof cookies.session_user === 'string' ? cookies.session_user.toLowerCase().trim() : '';
+    if (isAdminEmail(portalEmail)) {
+      const bridgedSessionId = randomBytes(32).toString('hex');
+      const bridgedTtlMs = 30 * 24 * 60 * 60 * 1000;
+      adminSessions.set(bridgedSessionId, Date.now() + bridgedTtlMs);
+      res.cookie('gbrain_admin', bridgedSessionId, adminCookie(req, bridgedTtlMs));
+      next();
       return;
     }
-    next();
+
+    res.status(401).json({ error: 'Admin authentication required' });
   }
 
   // ---------------------------------------------------------------------------
@@ -1242,18 +2208,15 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       const credentialsConfigured = (credentialStatus.configured !== false);
       const isAppSheet = connectorId === 'appsheet' || connectorId === 'appsheet-vehicles' || connectorId.startsWith('appsheet-');
       const shouldProbeObjects = credentialsConfigured && (!!objectName || connectorId === 'postgres' || connectorId.startsWith('postgres-'));
-      let objects: unknown[] = [];
-      if (shouldProbeObjects) {
-        if (isAppSheet && objectName) await connector.sample(objectName, 1);
-        objects = await connector.listObjects();
-      }
+      if (shouldProbeObjects && isAppSheet && objectName) await connector.sample(objectName, 1);
+      const objects = shouldProbeObjects ? await connector.listObjects() : [];
       if (!credentialsConfigured) {
         await recordSourceConnectorTest(engine, connectorId, false);
         res.json({ ok: false, status: 'credentials_missing', connector_id: connectorId, elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: 'Connector-level test does not require a table. Add credentials here; table-specific extraction is tested from Base view.' });
         return;
       }
       await recordSourceConnectorTest(engine, connectorId, true);
-      res.json({ ok: true, status: shouldProbeObjects ? 'connection_ok' : 'credentials_stored_unverified', connector_id: connectorId, ...(objectName ? { source_object: objectName } : {}), elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: shouldProbeObjects ? 'Connector credentials are valid; remote object probe succeeded.' : 'Credentials are stored but not remotely verified. Test a concrete table from Base view.' });
+      res.json({ ok: true, status: shouldProbeObjects ? 'connection_ok' : 'credentials_stored_unverified', connector_id: connectorId, ...(objectName ? { source_object: objectName } : {}), elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: shouldProbeObjects ? 'Connector credentials are valid; object discovery succeeded.' : 'Credentials are stored but were not verified against a concrete AppSheet table. Create or open a Base view to run a remote read probe.' });
     } catch (e) {
       const connectorId = typeof req.body?.connector_id === 'string' ? req.body.connector_id : '';
       if (connectorId) await recordSourceConnectorTest(engine, connectorId, false).catch(() => undefined);
