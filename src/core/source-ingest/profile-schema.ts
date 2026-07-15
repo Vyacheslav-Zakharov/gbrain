@@ -100,6 +100,8 @@ export interface SourceIngestProfile {
   update_policy: {
     mode: SourceIngestUpdateMode;
     preserve_manual_sections: true;
+    /** Manage the generated article body in its own block for source-created pages. Explicitly adopted pages remain human-owned. */
+    manage_generated_article?: boolean;
     field_allowlist?: string[];
     /** Article-frontmatter keys allowed to overwrite an explicitly adopted manual page. */
     frontmatter_allowlist?: string[];
@@ -287,6 +289,9 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
   } else {
     if (p.update_policy.mode !== 'managed_block') issues.push(issue('update_policy.mode', 'invalid_mode', 'Only managed_block is supported in Stage 1.'));
     if (p.update_policy.preserve_manual_sections !== true) issues.push(issue('update_policy.preserve_manual_sections', 'required', 'Must explicitly preserve manual sections.'));
+    if (p.update_policy.manage_generated_article !== undefined && typeof p.update_policy.manage_generated_article !== 'boolean') {
+      issues.push(issue('update_policy.manage_generated_article', 'invalid_type', 'manage_generated_article must be boolean.'));
+    }
     const allow = p.update_policy.field_allowlist;
     if (Array.isArray(allow) && allow.some(v => typeof v === 'string' && v.startsWith('source_sync'))) issues.push(issue('update_policy.field_allowlist', 'sync_metadata_in_frontmatter', 'Mutable source_sync fields must not be written to frontmatter.'));
     const frontmatterAllow = p.update_policy.frontmatter_allowlist;

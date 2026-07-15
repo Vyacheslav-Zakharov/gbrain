@@ -530,6 +530,7 @@ describe('source-ingest Stage 3A executor', () => {
 
     await putSourceIngestProfile(engine, {
       ...profile,
+      update_policy: { ...profile.update_policy, manage_generated_article: true },
       identity: { ...profile.identity, existing_slug_map: { 'veh-001': slug }, require_explicit_resolution: true },
     }, { createdBy: 'test', changeNote: 'require complete adoption plan' });
     await expect(runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-incomplete', no_embed: true }))
@@ -538,6 +539,7 @@ describe('source-ingest Stage 3A executor', () => {
 
     await putSourceIngestProfile(engine, {
       ...profile,
+      update_policy: { ...profile.update_policy, manage_generated_article: true },
       identity: {
         ...profile.identity,
         existing_slug_map: { 'veh-001': slug },
@@ -580,6 +582,55 @@ describe('source-ingest Stage 3A executor', () => {
       ['veh-001'],
     );
     expect(sync[0]).toEqual({ run_id: 'run-test-2', last_result: 'unchanged' });
+  }, 30000);
+
+  test('managed generated article refreshes source-created body and preserves manual text outside the article block', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    const managedProfile: SourceIngestProfile = {
+      ...profile,
+      update_policy: { ...profile.update_policy, manage_generated_article: true },
+    };
+    await putSourceIngestProfile(engine, managedProfile, { createdBy: 'test', changeNote: 'manage generated article body' });
+    await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-managed-article-1', limit: 1, no_embed: true });
+
+    const first = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(first?.compiled_truth).toContain('<!-- gbrain-source-article:start');
+    expect(first?.compiled_truth).toContain('Toyota Hilux A001 — тестовая единица техники.');
+    const withManualOutside = first!.compiled_truth.replace(
+      '<!-- gbrain-source-sync:start',
+      'Manual text outside generated article.\n\n<!-- gbrain-source-sync:start',
+    );
+    await importFromContent(engine, 'source-ingest/vehicles/a-001', withManualOutside, {
+      noEmbed: true,
+      sourceId: 'shared',
+      sourcePath: 'source-ingest/vehicles/a-001.md',
+      source_kind: 'manual_test_edit',
+      source_uri: 'test:outside-article-block',
+      ingested_via: 'test',
+      remote: false,
+    });
+
+    await putSourceIngestProfile(engine, {
+      ...managedProfile,
+      mapping: {
+        ...managedProfile.mapping,
+        article_template: {
+          ...managedProfile.mapping?.article_template,
+          sections: {
+            ...managedProfile.mapping?.article_template?.sections,
+            summary: 'Refreshed generated summary for {{ code }}.',
+          },
+        },
+      },
+    }, { createdBy: 'test', changeNote: 'refresh generated article template' });
+    const out = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-managed-article-2', limit: 1, no_embed: true });
+    const refreshed = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(out.results[0]?.status).toBe('written');
+    expect(refreshed?.compiled_truth).toContain('Refreshed generated summary for A-001.');
+    expect(refreshed?.compiled_truth).not.toContain('Toyota Hilux — тестовая единица техники.');
+    expect(refreshed?.compiled_truth).toContain('Manual text outside generated article.');
+    expect(refreshed?.compiled_truth.match(/gbrain-source-article:start/g)).toHaveLength(1);
   }, 30000);
 
   test('blocks dirty git-backed source before writing', async () => {
