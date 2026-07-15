@@ -74,6 +74,8 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Lineage / цепочка публикации');
     expect(ui).toContain('lastAppliedHashRoute.current = nextHash');
     expect(ui).toContain('if (window.location.hash === lastAppliedHashRoute.current) return;');
+    expect(ui).toContain('const preserveExistingSections = opts.resetEmpty === true && articleDirty;');
+    expect(ui).not.toContain('setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries');
     expect(ui).toContain("window.addEventListener('keydown', onKeyDown)");
     expect(ui).toContain('handleSelectCatalogNode(hit.node)');
     expect(ui).toContain('Поиск по каталогу…');

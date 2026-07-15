@@ -728,7 +728,8 @@ export function SourceIngestPage() {
       const tmpl = await api.sourceIngestArticleTemplate(type.trim());
       setArticleTemplate(tmpl);
       const sections = asArr<Record<string, unknown>>(asObj(tmpl).sections);
-      if (sections.length > 0) {
+      const preserveExistingSections = opts.resetEmpty === true && articleDirty;
+      if (sections.length > 0 && !preserveExistingSections) {
         setArticleSections(prev => {
           const shouldReset = opts.resetEmpty === true && !articleDirty;
           const next: Record<string, string> = {};
@@ -952,7 +953,7 @@ export function SourceIngestPage() {
     if (savedFields.length > 0) setSelectedSourceFields(savedFields);
     const savedSections = asObj(savedJson.article_sections);
     if (Object.keys(savedSections).length > 0) {
-      setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(savedSections).map(([k, v]) => [k, String(v ?? '')])) });
+      setArticleSections(Object.fromEntries(Object.entries(savedSections).map(([k, v]) => [k, String(v ?? '')])));
       setArticleDirty(true);
     }
     setTransformEnabled(savedJson.transform_enabled === true);
@@ -1522,7 +1523,7 @@ export function SourceIngestPage() {
     });
     setArticleChangePolicy(parseChangeIntelligence(article.change_intelligence));
     if (Object.keys(sections).length > 0) {
-      setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])) });
+      setArticleSections(Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])));
       setArticleDirty(true);
     }
     setArticleViewSaveResult(null);
@@ -1725,7 +1726,7 @@ export function SourceIngestPage() {
     const sections = asObj(articleTemplate.sections);
     const draftedFields = asArr(mapping.source_fields).map(String).filter(Boolean);
     if (draftedFields.length > 0 && selectedSourceFields.length === 0) setSelectedSourceFields(draftedFields);
-    if (!articleDirty && Object.keys(sections).length > 0) setArticleSections({ ...DEFAULT_ARTICLE_SECTIONS, ...Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])) });
+    if (!articleDirty && Object.keys(sections).length > 0) setArticleSections(Object.fromEntries(Object.entries(sections).map(([k, v]) => [k, String(v ?? '')])));
     setDraft(out);
     setDryRun(null);
     setTransformPreview(null);
