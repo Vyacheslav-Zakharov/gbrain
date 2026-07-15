@@ -50,6 +50,12 @@ import { validateSourceIngestProfile } from '../core/source-ingest/profile-schem
 import { sourceIngestConnectorDescriptors } from '../core/source-ingest/connector-registry.ts';
 import { getSourceConnector } from '../core/source-ingest/connectors/fake.ts';
 import { recordSourceConnectorTest } from '../core/source-ingest/catalog.ts';
+import {
+  PortalSessionStore,
+  isPortalFileAllowed,
+  portalSessionCookieName,
+  resolvePortalPathSecure,
+} from '../core/portal-security.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -529,6 +535,45 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // Express 5 app
   const app = express();
 
+  const portalSessionTtlMs = 30 * 24 * 60 * 60 * 1000;
+  const portalSessions = new PortalSessionStore(
+    process.env.GBRAIN_PORTAL_SESSION_FILE || require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'portal_sessions.json'),
+    portalSessionTtlMs,
+  );
+  const isSecurePortalRequest = (req: express.Request): boolean => req.secure || issuerUrl.protocol === 'https:';
+  const portalCookieOptions = (req: express.Request, maxAge = portalSessionTtlMs) => ({
+    httpOnly: true,
+    secure: isSecurePortalRequest(req),
+    sameSite: 'lax' as const,
+    maxAge,
+    path: '/',
+  });
+  const portalSessionToken = (req: express.Request): string => {
+    const cookies = (req.cookies as Record<string, string> | undefined) || {};
+    return cookies.__Host_gbrain_portal || cookies['__Host-gbrain_portal'] || cookies.gbrain_portal || '';
+  };
+  const clearPortalSessionCookies = (req: express.Request, res: express.Response): void => {
+    res.clearCookie('__Host-gbrain_portal', { httpOnly: true, secure: true, sameSite: 'lax', path: '/' });
+    res.clearCookie('gbrain_portal', { httpOnly: true, secure: false, sameSite: 'lax', path: '/' });
+    // Remove the legacy unsigned identity cookie during the migration release.
+    res.clearCookie('session_user', { httpOnly: true, secure: isSecurePortalRequest(req), sameSite: 'lax', path: '/' });
+  };
+  const resolvePortalUser = (req: express.Request, res?: express.Response): string | null => {
+    const token = portalSessionToken(req);
+    const email = portalSessions.resolve(token);
+    if (!email && res && (token || (req.cookies as Record<string, string> | undefined)?.session_user)) {
+      clearPortalSessionCookies(req, res);
+    }
+    return email;
+  };
+  const issuePortalSession = (req: express.Request, res: express.Response, email: string): void => {
+    const oldToken = portalSessionToken(req);
+    if (oldToken) portalSessions.revoke(oldToken);
+    clearPortalSessionCookies(req, res);
+    const token = portalSessions.issue(email);
+    res.cookie(portalSessionCookieName(isSecurePortalRequest(req)), token, portalCookieOptions(req));
+  };
+
 // === CUSTOM PORTAL AND LOGIN WORKFLOWS ===
 
 const adminEmails = (() => {
@@ -623,26 +668,48 @@ const escapeHtmlLocal = (value: unknown): string => String(value ?? "").replace(
   "'": "&#39;"
 }[ch] || ch));
 
-const requirePortalUser = (req: any, res: any) => {
-    const userEmail = req.cookies?.session_user;
+const requirePortalUser = (req: express.Request, res: express.Response): string | null => {
+    const userEmail = resolvePortalUser(req, res);
     if (!userEmail) {
       res.status(401).json({ error: "Unauthorized: login through GBrain first" });
       return null;
     }
-    return String(userEmail);
+    return userEmail;
   }
 
-const resolvePortalPath = (root, relativePathRaw) => {
-    const path = require("path");
-    const relativePath = String(relativePathRaw || "").replace(/^\/+/, "");
-    const rootResolved = path.resolve(root);
-    const target = path.resolve(rootResolved, relativePath);
-    if (target !== rootResolved && !target.startsWith(rootResolved + path.sep))
-      return null;
-    return target;
-  }
+const resolvePortalPath = (root: string, relativePathRaw: unknown, allowRoot = false): string | null =>
+  resolvePortalPathSecure(root, relativePathRaw, allowRoot);
+type PortalSourceRow = { id: string; name: string; local_path: string };
+type PortalAccessRow = {
+  area: string;
+  source_id: string;
+  read: boolean;
+  write: boolean;
+  requested_read?: boolean;
+  requested_write?: boolean;
+};
+type PortalAccessRequest = {
+  id: string;
+  email: string;
+  requested_at: string;
+  requests: PortalAccessRow[];
+  reason: string;
+  status: string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  decided_by?: string;
+  decided_at?: string;
+  approved_requests?: PortalAccessRow[];
+  denied_requests?: PortalAccessRow[];
+  rejection_reason?: string;
+};
+type PortalUserPermissions = {
+  source_id?: string;
+  federated_read?: string[];
+  federated_write?: string[];
+};
 
-const saveInternalAccessRequest = async (userEmail, rawValues, reasonRaw) => {
+const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, reasonRaw: unknown): Promise<void> => {
     const selected = normalizeAccessRequestValues(rawValues);
     if (selected.length === 0)
       return;
@@ -653,7 +720,7 @@ const saveInternalAccessRequest = async (userEmail, rawValues, reasonRaw) => {
       existingRead.add(perms.source_id);
       existingWrite.add(perms.source_id);
     }
-    const byArea = new Map;
+    const byArea = new Map<string, PortalAccessRow>();
     for (const item of selected) {
       const [area, level] = item.split(":");
       if (!managedAccessAreas.some((a) => a.id === area))
@@ -670,7 +737,7 @@ const saveInternalAccessRequest = async (userEmail, rawValues, reasonRaw) => {
       }
       byArea.set(area, current);
     }
-    const requests = Array.from(byArea.values()).map((r4) => {
+    const requests = Array.from(byArea.values()).map((r4): PortalAccessRow | null => {
       const sourceId = r4.source_id || managedSourceIdForArea(r4.area);
       if (!sourceId)
         return null;
@@ -679,13 +746,13 @@ const saveInternalAccessRequest = async (userEmail, rawValues, reasonRaw) => {
       if (!missingRead && !missingWrite)
         return null;
       return { ...r4, source_id: sourceId, read: missingRead || missingWrite, write: missingWrite };
-    }).filter(Boolean);
+    }).filter((row): row is PortalAccessRow => row !== null);
     if (requests.length === 0)
       return;
     const fs = require("fs");
     const path = require("path");
     const requestPath = path.join(process.env.HOME || "/home/avers", ".gbrain", "access_requests.json");
-    let data = [];
+    let data: PortalAccessRequest[] = [];
     try {
       if (fs.existsSync(requestPath)) {
         const parsed = JSON.parse(fs.readFileSync(requestPath, "utf8"));
@@ -735,16 +802,16 @@ const saveInternalAccessRequest = async (userEmail, rawValues, reasonRaw) => {
     }
   }
 
-const normalizeAccessRequestValues = (raw) => {
+const normalizeAccessRequestValues = (raw: unknown): string[] => {
     if (!raw)
       return [];
-    const values2 = Array.isArray(raw) ? raw : [raw];
+    const values2: unknown[] = Array.isArray(raw) ? raw : [raw];
     return values2.map((v7) => String(v7)).filter(Boolean);
   }
 
-const getAllowedSourceIdsForUser = async (email) => {
+const getAllowedSourceIdsForUser = async (email: string): Promise<string[]> => {
     const perms = await getUserPermissions(email);
-    const ids = new Set;
+    const ids = new Set<string>();
     if (perms.source_id)
       ids.add(perms.source_id);
     for (const id of perms.federated_read || [])
@@ -752,14 +819,14 @@ const getAllowedSourceIdsForUser = async (email) => {
     return Array.from(ids).filter(Boolean);
   }
 
-const getSourceRowsForUser = async (email) => {
+const getSourceRowsForUser = async (email: string): Promise<PortalSourceRow[]> => {
     const allowed = await getAllowedSourceIdsForUser(email);
-    const rows = [];
+    const rows: PortalSourceRow[] = [];
     for (const id of allowed) {
       try {
         const found = await sql`SELECT id, name, local_path FROM sources WHERE id = ${id} LIMIT 1`;
         if (found[0]?.local_path)
-          rows.push(found[0]);
+          rows.push(found[0] as unknown as PortalSourceRow);
       } catch (e3) {
         console.error(`[Portal] Failed to read source ${id}:`, e3);
       }
@@ -767,19 +834,19 @@ const getSourceRowsForUser = async (email) => {
     return rows;
   }
 
-const loadJsonFileLocal = (filePath, fallback) => {
+const loadJsonFileLocal = <T>(filePath: string, fallback: T): T => {
     const fs = require("fs");
     try {
       if (!fs.existsSync(filePath))
         return fallback;
-      return JSON.parse(fs.readFileSync(filePath, "utf8"));
+      return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
     } catch (e3) {
       console.error(`[GBrain] Failed to read ${filePath}:`, e3);
       return fallback;
     }
   }
 
-const writeJsonFileLocal = (filePath, value) => {
+const writeJsonFileLocal = (filePath: string, value: unknown): void => {
     const fs = require("fs");
     fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
   }
@@ -877,7 +944,7 @@ const ensurePortalUserProvisioned = async (emailRaw: string) => {
     }
 
     const permsPath = userPermissionsPath();
-    const perms = loadJsonFileLocal(permsPath, {});
+    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(permsPath, {});
     const existing = perms[email] || { source_id: sourceId, federated_read: [], federated_write: [] };
     existing.source_id = existing.source_id || sourceId;
     const read = new Set(Array.isArray(existing.federated_read) ? existing.federated_read : []);
@@ -897,12 +964,12 @@ const ensurePortalUserProvisioned = async (emailRaw: string) => {
       schedulePersonalSourceSync(sourceId);
   }
 
-const readAccessRequests = () => {
-    const data = loadJsonFileLocal(accessRequestsPath(), []);
+const readAccessRequests = (): PortalAccessRequest[] => {
+    const data = loadJsonFileLocal<PortalAccessRequest[]>(accessRequestsPath(), []);
     return Array.isArray(data) ? data : [];
   }
 
-const writeAccessRequests = (items) => writeJsonFileLocal(accessRequestsPath(), items);
+const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFileLocal(accessRequestsPath(), items);
 
 
 
@@ -1167,7 +1234,7 @@ const escapePortalHtml = (value: unknown) => String(value ?? '').replace(/[&<>"'
 const portalLoginHtml = (title: string, body: string) => `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapePortalHtml(title)}</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(420px,calc(100vw - 32px));padding:28px;background:#242424;border:1px solid #3b3b3b;border-radius:12px}h1{font-size:22px;margin:0 0 10px}.muted{color:#aaa;font-size:14px;line-height:1.45}label{display:block;margin:18px 0 7px}input{width:100%;padding:12px;background:#181818;color:#fff;border:1px solid #555;border-radius:7px;font-size:16px}button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:7px;background:#1677ff;color:#fff;font-weight:700;cursor:pointer}</style></head><body><main class="card">${body}</main></body></html>`;
 
 app.get("/login", (req: any, res: any) => {
-    if (req.cookies?.session_user) return res.redirect("/portal");
+    if (resolvePortalUser(req, res)) return res.redirect("/portal");
     const oauthQuery = new URLSearchParams(req.query as Record<string, string>).toString();
     res.type("html").send(portalLoginHtml("Вход в GBrain", `<h1>Вход в GBrain</h1><p class="muted">Введите корпоративный email. Одноразовый код действует 10 минут.</p><form action="/login/send-code" method="POST"><input type="hidden" name="oauth_query" value="${escapePortalHtml(oauthQuery)}"><label for="email">Рабочий email</label><input type="email" id="email" name="email" placeholder="user@avers.kz" autocomplete="email" required><button type="submit">Получить код</button></form>`));
   });
@@ -1212,13 +1279,19 @@ app.get("/login", (req: any, res: any) => {
       console.error(`[Provision] Failed to provision ${email}:`, e);
       return res.status(500).send("Не удалось подготовить личную базу GBrain. Обратитесь к администратору.");
     }
-    res.cookie("session_user", email, { httpOnly: true, secure: req.secure || issuerUrl.protocol === "https:", sameSite: "lax", maxAge: 30 * 24 * 60 * 60 * 1000, path: "/" });
+    issuePortalSession(req, res, email);
     const oauthParams = new URLSearchParams(oauthQuery);
     return res.redirect(oauthParams.get("client_id") ? `/authorize?${oauthParams.toString()}` : "/portal");
   });
 
+  app.post('/logout', (req: Request, res: Response) => {
+    portalSessions.revoke(portalSessionToken(req));
+    clearPortalSessionCookies(req, res);
+    res.status(204).end();
+  });
+
 app.get("/portal/welcome", async (req: any, res: any) => {
-    const userEmail = req.cookies?.session_user;
+    const userEmail = resolvePortalUser(req, res);
     if (!userEmail)
       return res.redirect("/login");
     try {
@@ -1256,7 +1329,7 @@ body{margin:0;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMa
   });
 
 app.get("/portal/welcome/skip", (req: any, res: any) => {
-    const userEmail = req.cookies?.session_user;
+    const userEmail = resolvePortalUser(req, res);
     if (!userEmail)
       return res.redirect("/login");
     markPortalOnboardingSeen(String(userEmail));
@@ -1264,7 +1337,7 @@ app.get("/portal/welcome/skip", (req: any, res: any) => {
   });
 
 app.post("/portal/welcome", express.urlencoded({ extended: false }), async (req: any, res: any) => {
-    const userEmail = req.cookies?.session_user;
+    const userEmail = resolvePortalUser(req, res);
     if (!userEmail)
       return res.redirect("/login");
     try {
@@ -1279,8 +1352,12 @@ app.post("/portal/welcome", express.urlencoded({ extended: false }), async (req:
     }
   });
 
-app.get("/portal", (req, res) => {
-    const userEmail = req.cookies?.session_user;
+// Temporary rollback surface retained for one release. The production route below
+// serves the componentized Portal SPA; remove this legacy handler after acceptance.
+app.get("/portal-legacy", (req, res) => {
+    return res.status(410).type('text').send('Legacy Portal disabled after SPA migration');
+    /* c8 ignore start */ // retained temporarily only as rollback source text
+    const userEmail = resolvePortalUser(req, res);
     if (!userEmail)
       return res.redirect("/login");
     if (!hasSeenPortalOnboarding(String(userEmail)))
@@ -1312,7 +1389,88 @@ async function loadAccessRequestBadge(){try{const data=await api('/admin/api/acc
 document.getElementById('searchBox').addEventListener('input',e=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>runSearch(e.target.value),250)});loadSources();loadAccessRequestBadge();
 </script></body></html>`);
   });
+/* c8 ignore stop */
 
+// Portal SPA static files. The server remains the authorization boundary;
+// the browser bundle never receives a source that /portal/api/sources did not grant.
+const portalPathModule = await import('path');
+const portalFsModule = await import('fs');
+const portalDistPath = portalPathModule.join(process.cwd(), 'portal', 'dist');
+const portalDevAssets = portalFsModule.existsSync(portalDistPath);
+const portalEmbedded = portalDevAssets ? null : await import('../portal-embedded.ts');
+const portalAssetCache = new Map<string, Buffer>();
+
+const setPortalDocumentHeaders = (res: Response): void => {
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cache-Control', 'private, no-store');
+};
+
+const requirePortalPage = (req: Request, res: Response, next: NextFunction) => {
+  const userEmail = resolvePortalUser(req, res);
+  if (!userEmail) return res.redirect('/login');
+  if (!hasSeenPortalOnboarding(String(userEmail))) return res.redirect('/portal/welcome');
+  next();
+};
+
+const sendPortalIndex = (_req: Request, res: Response) => {
+  setPortalDocumentHeaders(res);
+  if (portalDevAssets) return res.sendFile(portalPathModule.join(portalDistPath, 'index.html'));
+  const asset = portalEmbedded?.PORTAL_INDEX_HTML;
+  if (!asset) return res.status(404).send('portal SPA not available');
+  let body = portalAssetCache.get(asset.path);
+  if (!body) {
+    body = portalFsModule.readFileSync(asset.path);
+    portalAssetCache.set(asset.path, body);
+  }
+  res.setHeader('Content-Type', asset.mime);
+  res.send(body);
+};
+
+if (portalDevAssets) {
+  app.use('/portal/assets', requirePortalPage, express.static(portalPathModule.join(portalDistPath, 'assets'), {
+    immutable: true,
+    maxAge: '1y',
+    setHeaders: (res) => res.setHeader('X-Content-Type-Options', 'nosniff'),
+  }));
+} else {
+  app.get('/portal/assets/{*path}', requirePortalPage, (req: Request, res: Response) => {
+    const asset = portalEmbedded?.PORTAL_ASSETS[req.path];
+    if (!asset) return res.status(404).send('portal asset not found');
+    let body = portalAssetCache.get(asset.path);
+    if (!body) {
+      body = portalFsModule.readFileSync(asset.path);
+      portalAssetCache.set(asset.path, body);
+    }
+    res.setHeader('Content-Type', asset.mime);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(body);
+  });
+}
+app.get(['/portal', '/portal/'], requirePortalPage, sendPortalIndex);
+
+app.use('/portal/api', (_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
+app.use('/portal/download', (_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
+
+app.get('/portal/api/session', (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  res.json({
+    email: userEmail,
+    isAdmin: adminEmails.has(String(userEmail).trim().toLowerCase()),
+    readOnly: true,
+  });
+});
 
 app.get("/portal/api/sources", async (req: any, res: any) => {
     const userEmail = requirePortalUser(req, res);
@@ -1331,10 +1489,10 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const sources = await getSourceRowsForUser(userEmail);
     const source = sources.find((source) => source.id === sourceId);
     if (!source)
-      return res.status(403).json({ error: "Source is not allowed" });
-    const target = resolvePortalPath(source.local_path, req.query.path);
+      return res.status(404).json({ error: "Not found" });
+    const target = resolvePortalPath(source.local_path, req.query.path, true);
     if (!target)
-      return res.status(400).json({ error: "Invalid path" });
+      return res.status(404).json({ error: "Not found" });
     let stat;
     try {
       stat = fs.statSync(target);
@@ -1343,12 +1501,24 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     }
     if (!stat.isDirectory())
       return res.status(400).json({ error: "Path is not a directory" });
-    const entries = fs.readdirSync(target, { withFileTypes: true }).filter((entry) => entry.name !== ".git" && !entry.name.startsWith(".")).map((entry) => {
+    const entries = fs.readdirSync(target, { withFileTypes: true }).filter((entry: any) =>
+      entry.name !== ".git" &&
+      !entry.name.startsWith(".") &&
+      !entry.isSymbolicLink() &&
+      (entry.isDirectory() || (entry.isFile() && isPortalFileAllowed(entry.name)))
+    ).map((entry: any) => {
       const full = path.join(target, entry.name);
       const rel = path.relative(source.local_path, full).split(path.sep).join("/");
       const st = fs.statSync(full);
-      return { name: entry.name, path: rel, type: entry.isDirectory() ? "dir" : "file", markdown: entry.isFile() && /\.(md|markdown|txt)$/i.test(entry.name), size: st.size };
-    }).sort((a, b) => a.type === b.type ? a.name.localeCompare(b.name, "ru") : a.type === "dir" ? -1 : 1);
+      return {
+        name: entry.name,
+        path: rel,
+        type: entry.isDirectory() ? "dir" : "file",
+        markdown: entry.isFile() && /\.(md|markdown|txt)$/i.test(entry.name),
+        size: st.size,
+        updatedAt: st.mtime.toISOString(),
+      };
+    }).sort((a: any, b: any) => a.type === b.type ? a.name.localeCompare(b.name, "ru") : a.type === "dir" ? -1 : 1);
     res.json({ source: source.id, path: req.query.path || "", entries });
   });
   app.get("/portal/api/file", async (req: any, res: any) => {
@@ -1360,10 +1530,10 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const sources = await getSourceRowsForUser(userEmail);
     const source = sources.find((source) => source.id === sourceId);
     if (!source)
-      return res.status(403).json({ error: "Source is not allowed" });
+      return res.status(404).json({ error: "Not found" });
     const target = resolvePortalPath(source.local_path, req.query.path);
     if (!target)
-      return res.status(400).json({ error: "Invalid path" });
+      return res.status(404).json({ error: "Not found" });
     if (!/\.(md|markdown|txt)$/i.test(String(req.query.path || "")))
       return res.status(400).json({ error: "Only markdown/text preview is allowed here" });
     let stat;
@@ -1376,8 +1546,81 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       return res.status(400).json({ error: "Path is not a file" });
     if (stat.size > 1024 * 1024)
       return res.status(413).json({ error: "File is too large for preview; download it instead" });
-    res.json({ path: req.query.path || "", content: fs.readFileSync(target, "utf8") });
+    const content = fs.readFileSync(target, "utf8");
+    const frontmatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/);
+    const frontmatter = frontmatterMatch?.[1] || '';
+    const readField = (field: string) => {
+      const match = frontmatter.match(new RegExp(`^${field}:\\s*(.+)$`, 'mi'));
+      return match ? match[1].trim().replace(/^['"]|['"]$/g, '') : '';
+    };
+    const rawTags = readField('tags');
+    const tags = rawTags
+      ? rawTags.replace(/^\[|\]$/g, '').split(',').map((tag: string) => tag.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+      : [];
+    const requestedPath = String(req.query.path || '');
+    const slug = readField('slug') || requestedPath.replace(/\.(md|markdown|txt)$/i, '');
+    const firstHeading = content.replace(/^---\s*\n[\s\S]*?\n---(?:\s*\n|$)/, '').match(/^#\s+(.+)$/m)?.[1]?.trim() || '';
+    const title = readField('title') || firstHeading || path.basename(requestedPath).replace(/\.(md|markdown|txt)$/i, '').replace(/[-_]/g, ' ');
+    res.json({
+      source: source.id,
+      sourceName: source.name,
+      path: requestedPath,
+      name: path.basename(requestedPath),
+      content,
+      size: stat.size,
+      updatedAt: stat.mtime.toISOString(),
+      slug,
+      title,
+      type: readField('type'),
+      status: readField('status'),
+      tags,
+    });
   });
+
+  app.get('/portal/api/context', async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail) return;
+    const fs = require('fs');
+    const sourceId = String(req.query.source || '');
+    const sources = await getSourceRowsForUser(userEmail);
+    const source = sources.find((candidate) => candidate.id === sourceId);
+    if (!source) return res.status(404).json({ error: 'Not found' });
+    const target = resolvePortalPath(source.local_path, req.query.path);
+    if (!target) return res.status(404).json({ error: 'Not found' });
+    let content = '';
+    try {
+      const stat = fs.statSync(target);
+      if (!stat.isFile()) return res.status(400).json({ error: 'Path is not a file' });
+      content = fs.readFileSync(target, 'utf8');
+    } catch {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    const frontmatter = content.match(/^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/)?.[1] || '';
+    const slug = frontmatter.match(/^slug:\s*(.+)$/mi)?.[1]?.trim().replace(/^['"]|['"]$/g, '')
+      || String(req.query.path || '').replace(/\.(md|markdown|txt)$/i, '');
+    let backlinks: Array<Record<string, unknown>> = [];
+    try {
+      const links = await engine.getBacklinks(slug, { sourceIds: sources.map((candidate) => candidate.id) });
+      const seen = new Set<string>();
+      backlinks = links.flatMap((link) => {
+        const linkSource = link.from_source_id || source.id;
+        const key = `${linkSource}:${link.from_slug}:${link.link_type}`;
+        if (seen.has(key)) return [];
+        seen.add(key);
+        return [{
+          source: linkSource,
+          slug: link.from_slug,
+          title: link.from_slug.split('/').pop()?.replace(/[-_]/g, ' ') || link.from_slug,
+          type: link.link_type,
+          context: link.context || '',
+        }];
+      }).slice(0, 30);
+    } catch (error) {
+      console.warn('[portal] backlinks unavailable:', error instanceof Error ? error.message : error);
+    }
+    res.json({ source: source.id, slug, backlinks });
+  });
+
   app.get("/portal/api/search", async (req: any, res: any) => {
     const userEmail = requirePortalUser(req, res);
     if (!userEmail)
@@ -1388,20 +1631,61 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     if (q.length < 2)
       return res.json({ results: [] });
     const sources = await getSourceRowsForUser(userEmail);
-    const results = [];
+    const results: Array<Record<string, unknown>> = [];
+    const seenResults = new Set<string>();
     const maxResults = 50;
-    const maxFileSize = 512 * 1024;
-    const walk = (source, dir) => {
-      if (results.length >= maxResults)
+
+    // Indexed content search keeps request latency independent of repository size.
+    // Source IDs come from the same ACL projection used by every portal route.
+    try {
+      const indexed = await engine.searchKeyword(q, {
+        limit: 35,
+        sourceIds: sources.map((source) => source.id),
+      });
+      for (const hit of indexed) {
+        const source = sources.find((candidate) => candidate.id === (hit.source_id || 'default'));
+        if (!source) continue;
+        const fsCandidates = [`${hit.slug}.md`, `${hit.slug}.markdown`, `${hit.slug}.txt`];
+        const candidatePath = fsCandidates.find((candidate) => {
+          const resolved = resolvePortalPath(source.local_path, candidate);
+          try { return Boolean(resolved && fs.statSync(resolved).isFile()); } catch { return false; }
+        });
+        if (!candidatePath) continue;
+        const key = `${source.id}:${candidatePath}`;
+        if (seenResults.has(key)) continue;
+        seenResults.add(key);
+        results.push({
+          source: source.id,
+          sourceName: source.name,
+          name: path.basename(candidatePath),
+          path: candidatePath,
+          markdown: true,
+          size: 0,
+          match: 'content',
+          title: hit.title || hit.slug,
+          snippet: String(hit.chunk_text || '').replace(/\s+/g, ' ').trim().slice(0, 220),
+          score: hit.score,
+        });
+        if (results.length >= maxResults) break;
+      }
+    } catch (error) {
+      console.warn('[portal] indexed search unavailable, using filename fallback:', error instanceof Error ? error.message : error);
+    }
+
+    // Bounded filename fallback also finds attachments that are not indexed pages.
+    let scannedEntries = 0;
+    const walk = (source: PortalSourceRow, dir: string): void => {
+      if (results.length >= maxResults || scannedEntries >= 10_000)
         return;
-      let entries = [];
+      let entries: any[] = [];
       try {
         entries = fs.readdirSync(dir, { withFileTypes: true });
       } catch {
         return;
       }
       for (const entry of entries) {
-        if (results.length >= maxResults)
+        scannedEntries += 1;
+        if (results.length >= maxResults || scannedEntries >= 10_000)
           return;
         if (entry.name === ".git" || entry.name.startsWith("."))
           continue;
@@ -1413,22 +1697,18 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
         }
         if (!entry.isFile())
           continue;
+        if (!isPortalFileAllowed(rel))
+          continue;
         const nameMatch = entry.name.toLowerCase().includes(q) || rel.toLowerCase().includes(q);
         const markdown = /\.(md|markdown|txt)$/i.test(entry.name);
-        let contentMatch = false;
-        if (markdown) {
-          try {
-            const st = fs.statSync(full);
-            if (st.size <= maxFileSize)
-              contentMatch = fs.readFileSync(full, "utf8").toLowerCase().includes(q);
-          } catch {}
-        }
-        if (nameMatch || contentMatch) {
+        const key = `${source.id}:${rel}`;
+        if (nameMatch && !seenResults.has(key)) {
           let size = 0;
           try {
             size = fs.statSync(full).size;
           } catch {}
-          results.push({ source: source.id, sourceName: source.name, name: entry.name, path: rel, markdown, size: size, match: contentMatch ? "content" : "name" });
+          seenResults.add(key);
+          results.push({ source: source.id, sourceName: source.name, name: entry.name, path: rel, markdown, size, match: "name", title: entry.name });
         }
       }
     };
@@ -1448,13 +1728,13 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       return res.status(400).json({ error: "Link is required" });
     const sources = await getSourceRowsForUser(userEmail);
     let targetLink = link;
-    let requestedSourceId = null;
-    for (const source of sources) {
-      const prefix = `${source.id}:`;
-      if (link.startsWith(prefix)) {
-        requestedSourceId = source.id;
-        targetLink = link.slice(prefix.length);
-        break;
+    let requestedSourceId: string | null = null;
+    const qualified = link.match(/^([a-z0-9-]{1,32}):(.*)$/);
+    if (qualified) {
+      requestedSourceId = qualified[1];
+      targetLink = qualified[2];
+      if (!sources.some((source) => source.id === requestedSourceId)) {
+        return res.json({ found: false });
       }
     }
     const orderedSources = requestedSourceId ? sources.filter((source) => source.id === requestedSourceId) : [...sources].sort((a, b) => {
@@ -1469,23 +1749,27 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       return 0;
     });
     const extensions = [".md", ".markdown", ".txt", ""];
-    const findFile = (localPath, targetLink) => {
+    const findFile = (localPath: string, targetLink: string): string | null => {
       const linkParts = targetLink.split("/");
       const basename = linkParts[linkParts.length - 1].toLowerCase();
-      const walk = (dir) => {
-        let entries;
+      let scanned = 0;
+      const walk = (dir: string): string | null => {
+        if (scanned >= 5_000) return null;
+        let entries: any[];
         try {
           entries = fs.readdirSync(dir, { withFileTypes: true });
         } catch {
           return null;
         }
         for (const entry of entries) {
+          scanned += 1;
+          if (scanned >= 5_000) return null;
           if (entry.name === ".git" || entry.name.startsWith("."))
             continue;
           const fullPath = path.join(dir, entry.name);
           const relPath = path.relative(localPath, fullPath).split(path.sep).join("/");
           if (entry.isDirectory()) {
-            const found = walk(fullPath);
+            const found: string | null = walk(fullPath);
             if (found)
               return found;
           } else if (entry.isFile()) {
@@ -1525,7 +1809,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     res.json({ found: false });
   });
   app.get("/portal/download", async (req: any, res: any) => {
-    const userEmail = req.cookies?.session_user;
+    const userEmail = resolvePortalUser(req, res);
     if (!userEmail)
       return res.status(401).send("Unauthorized");
     const fs = require("fs");
@@ -1534,10 +1818,13 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const sources = await getSourceRowsForUser(String(userEmail));
     const source = sources.find((source) => source.id === sourceId);
     if (!source)
-      return res.status(403).send("Source is not allowed");
-    const target = resolvePortalPath(source.local_path, req.query.path);
+      return res.status(404).send("Not found");
+    const requestedPath = String(req.query.path || '');
+    if (!isPortalFileAllowed(requestedPath))
+      return res.status(404).send("Not found");
+    const target = resolvePortalPath(source.local_path, requestedPath);
     if (!target)
-      return res.status(400).send("Invalid path");
+      return res.status(404).send("Not found");
     let stat;
     try {
       stat = fs.statSync(target);
@@ -1585,20 +1872,21 @@ load();
       return;
     }
     const requestedRows = Array.isArray(item.requests) ? item.requests : [];
-    const rawGrants = Array.isArray(req.body?.grants) ? req.body.grants : null;
-    const selectedRows = requestedRows.map((row, index) => {
+    const rawGrants: Array<{ index?: unknown; read?: unknown; write?: unknown }> | null = Array.isArray(req.body?.grants) ? req.body.grants : null;
+    const selectedRows = requestedRows.map((row, index): PortalAccessRow | null => {
       const grant = rawGrants ? rawGrants.find((g8) => Number(g8?.index) === index) : row;
       const write2 = !!grant?.write && !!row.write;
       const read2 = (!!grant?.read || write2) && (!!row.read || !!row.write);
       const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
+      if (!sourceId) return null;
       return { area: row.area, source_id: sourceId, read: read2, write: write2, requested_read: !!row.read, requested_write: !!row.write };
-    }).filter((row) => row.source_id && (row.read || row.write));
+    }).filter((row): row is PortalAccessRow => row !== null && (row.read || row.write));
     if (selectedRows.length === 0) {
       res.status(400).json({ error: "No permissions selected. Reject the request if nothing should be granted." });
       return;
     }
     const permsPath = userPermissionsPath();
-    const perms = loadJsonFileLocal(permsPath, {});
+    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(permsPath, {});
     const defaultSource = String(item.email || "").split("@")[0].replace(/[^a-z0-9]/g, "-");
     const user = perms[item.email] || { source_id: defaultSource, federated_read: [defaultSource, "shared"], federated_write: [defaultSource] };
     const read = new Set(Array.isArray(user.federated_read) ? user.federated_read : []);
@@ -1618,19 +1906,20 @@ load();
     perms[item.email] = user;
     writeJsonFileLocal(permsPath, perms);
     const selectedBySource = new Map(selectedRows.map((row) => [row.source_id, row]));
-    const deniedRows = requestedRows.map((row) => {
+    const deniedRows = requestedRows.map((row): PortalAccessRow | null => {
       const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
+      if (!sourceId) return null;
       const selected = selectedBySource.get(sourceId);
       const deniedRead = (!!row.read || !!row.write) && !selected?.read;
       const deniedWrite = !!row.write && !selected?.write;
       if (!deniedRead && !deniedWrite)
         return null;
       return { area: row.area, source_id: sourceId, read: deniedRead, write: deniedWrite };
-    }).filter(Boolean);
+    }).filter((row): row is PortalAccessRow => row !== null);
     const fullyApproved = deniedRows.length === 0 && selectedRows.length === requestedRows.length;
     item.status = fullyApproved ? "approved" : "approved_partial";
     item.decided_at = new Date().toISOString();
-    item.decided_by = String(req.cookies?.session_user || "admin");
+    item.decided_by = resolvePortalUser(req) || "admin";
     item.approved_at = item.decided_at;
     item.approved_by = item.decided_by;
     item.approved_requests = selectedRows.map((row) => ({ area: row.area, source_id: row.source_id, read: row.read, write: row.write }));
@@ -1673,7 +1962,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   });
 
   app.get('/admin/api/permissions', requireAdmin, (_req: Request, res: Response) => {
-    const perms = loadJsonFileLocal(userPermissionsPath(), {});
+    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(userPermissionsPath(), {});
     const users = Object.entries(perms).sort(([a], [b]) => a.localeCompare(b)).map(([email, p]: any) => ({
       email,
       source_id: p?.source_id || '',
@@ -1685,7 +1974,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/permissions/:email', requireAdmin, express.json(), (req: Request, res: Response) => {
     const email = String(req.params.email || '').toLowerCase();
-    const perms = loadJsonFileLocal(userPermissionsPath(), {});
+    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(userPermissionsPath(), {});
     const user = perms[email];
     if (!user) { res.status(404).json({ error: 'User not found' }); return; }
     const allowedManaged = new Set(managedAccessAreas.map(a => a.sourceId));
@@ -1872,12 +2161,9 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       adminSessions.delete(sessionId);
     }
 
-    // CUSTOM PORTAL AND LOGIN WORKFLOWS: allow admin-listed portal users to
-    // enter /admin with their existing portal cookie. The allowlist is
-    // GBRAIN_ADMIN_EMAILS; this bridges the portal Google/OTP login UX to the
-    // same HttpOnly gbrain_admin session used by magic links, so normal admin
-    // API routes do not need to know about portal auth.
-    const portalEmail = typeof cookies.session_user === 'string' ? cookies.session_user.toLowerCase().trim() : '';
+    // Bridge only a server-resolved opaque Portal session into an admin session.
+    // The legacy unsigned session_user cookie is intentionally ignored.
+    const portalEmail = resolvePortalUser(req, res) || '';
     if (isAdminEmail(portalEmail)) {
       const bridgedSessionId = randomBytes(32).toString('hex');
       const bridgedTtlMs = 30 * 24 * 60 * 60 * 1000;
