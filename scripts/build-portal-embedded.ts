@@ -55,7 +55,7 @@ for (let index = 0; index < files.length; index += 1) {
   entries.push(`  ${JSON.stringify(`/portal/${rel.split(/[\\/]/).join('/')}`)}: { path: ${ident} as unknown as string, mime: ${JSON.stringify(mimeFor(rel))} },`);
 }
 
-const content = `// AUTO-GENERATED — do not edit by hand.\n// Run \`bun run scripts/build-portal-embedded.ts\` to regenerate.\n// Source: portal/dist at ${new Date().toISOString().slice(0, 10)}.\n\n${imports.join('\n')}\n\nexport interface PortalAsset { path: string; mime: string; }\nexport const PORTAL_ASSETS: Record<string, PortalAsset> = {\n${entries.join('\n')}\n};\nexport const PORTAL_INDEX_HTML = PORTAL_ASSETS['/portal/index.html'];\nexport const PORTAL_ASSET_COUNT = ${files.length};\n`;
+const content = `// AUTO-GENERATED — do not edit by hand.\n// Run \`bun run scripts/build-portal-embedded.ts\` to regenerate.\n// Source: portal/dist (deterministic; no generation timestamp).\n\n${imports.join('\n')}\n\nexport interface PortalAsset { path: string; mime: string; }\nexport const PORTAL_ASSETS: Record<string, PortalAsset> = {\n${entries.join('\n')}\n};\nexport const PORTAL_INDEX_HTML = PORTAL_ASSETS['/portal/index.html'];\nexport const PORTAL_ASSET_COUNT = ${files.length};\n`;
 
 const existing = existsSync(OUT) ? readFileSync(OUT, 'utf8') : '';
 if (existing === content) console.log(`[build-portal-embedded] up to date (${files.length} files)`);

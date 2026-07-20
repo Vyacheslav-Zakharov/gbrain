@@ -1,6 +1,6 @@
 // AUTO-GENERATED — do not edit by hand.
 // Run `bun run scripts/build-portal-embedded.ts` to regenerate.
-// Source: portal/dist at 2026-07-15.
+// Source: portal/dist (deterministic; no generation timestamp).
 
 // @ts-ignore — type: file is Bun ESM syntax
 import P_0_assets_index_BhKGH_Hf_css from '../portal/dist/assets/index-BhKGH_Hf.css' with { type: 'file' };
