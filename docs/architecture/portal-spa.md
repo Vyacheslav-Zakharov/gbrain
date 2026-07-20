@@ -110,9 +110,14 @@ Before deployment:
 
 Deployment copies both `src/commands/serve-http.ts`, `src/core/portal-security.ts`, `src/portal-embedded.ts`, and the embedded Portal asset files into the installed package. The update-guard manifest must include every copied file and semantic markers for the embedded SPA and opaque session store. Two sequential service restarts are required to prove the guard does not revert the deployment.
 
+## Operational acceptance and backlog
+
+- Moderated pilot protocol and measurable gates: [`../portal-operational-acceptance.md`](../portal-operational-acceptance.md).
+- Prioritized post-launch backlog and legacy-removal gate: [`../portal-backlog.md`](../portal-backlog.md).
+
 ## Deferred scope
 
 - Editing and write workflows.
 - Server-side favorites/history.
 - Graph visualization. If evaluated later, it must remain a contextual 1–2 hop view rather than the primary navigation model.
-- Removal of the disabled legacy source block after the rollback window.
+- Removal of the disabled legacy source block after the rollback window and operational acceptance gate.
