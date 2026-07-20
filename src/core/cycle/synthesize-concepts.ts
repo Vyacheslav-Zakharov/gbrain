@@ -44,10 +44,11 @@ export interface SynthesizeConceptsOpts {
   /** Test seam: alternative chat function. */
   _chat?: typeof gatewayChat;
   /** Test seam: skip DB query; cluster these atoms directly. */
-  _atoms?: Array<{ slug: string; concept_refs: string[]; body: string; title: string }>;
+  _atoms?: Array<{ slug: string; concept_refs: string[]; body: string; title: string; sourceId?: string }>;
 }
 
 interface AtomGroup {
+  sourceId: string;
   conceptSlug: string;
   atomTitles: string[];
   atomBodies: string[];
@@ -72,12 +73,13 @@ export async function runPhaseSynthesizeConcepts(
   if (atoms.length === 0 && opts._atoms === undefined) {
     try {
       const rows = await engine.executeRaw<{
+        source_id: string;
         slug: string;
         title: string;
         compiled_truth: string;
         frontmatter: { concepts?: string[]; imported_from?: string };
       }>(
-        `SELECT slug, title, compiled_truth, frontmatter
+        `SELECT source_id, slug, title, compiled_truth, frontmatter
            FROM pages
           WHERE type = 'atom'
             AND deleted_at IS NULL
@@ -90,6 +92,7 @@ export async function runPhaseSynthesizeConcepts(
           title: r.title,
           body: r.compiled_truth,
           concept_refs: r.frontmatter!.concepts!,
+          sourceId: r.source_id,
         }));
     } catch {
       // No atoms table or query failed — phase no-ops cleanly.
@@ -107,25 +110,38 @@ export async function runPhaseSynthesizeConcepts(
   }
 
   // 2. Group atoms by concept slug
-  const groups = new Map<string, { titles: string[]; bodies: string[] }>();
+  const groups = new Map<string, {
+    sourceId: string;
+    conceptSlug: string;
+    titles: string[];
+    bodies: string[];
+  }>();
   for (const atom of atoms) {
+    const sourceId = atom.sourceId ?? 'default';
     for (const conceptSlug of atom.concept_refs) {
-      const existing = groups.get(conceptSlug) ?? { titles: [], bodies: [] };
+      const groupKey = `${sourceId}\u0000${conceptSlug}`;
+      const existing = groups.get(groupKey) ?? {
+        sourceId,
+        conceptSlug,
+        titles: [],
+        bodies: [],
+      };
       existing.titles.push(atom.title);
       existing.bodies.push(atom.body);
-      groups.set(conceptSlug, existing);
+      groups.set(groupKey, existing);
     }
   }
 
   // 3. Filter to count ≥2, assign tier
   const atomGroups: AtomGroup[] = [];
-  for (const [conceptSlug, data] of groups) {
+  for (const data of groups.values()) {
     const count = data.titles.length;
     if (count < TIER_T3_MIN) continue;
     const tier: AtomGroup['tier'] =
       count >= TIER_T1_MIN ? 'T1' : count >= TIER_T2_MIN ? 'T2' : 'T3';
     atomGroups.push({
-      conceptSlug,
+      sourceId: data.sourceId,
+      conceptSlug: data.conceptSlug,
       atomTitles: data.titles,
       atomBodies: data.bodies,
       tier,
@@ -192,7 +208,9 @@ export async function runPhaseSynthesizeConcepts(
                     .join('\n\n')}`,
               },
             ],
-            maxTokens: 500,
+            // Reasoning providers consume output tokens before emitting the
+            // narrative. Keep enough headroom to avoid empty/truncated text.
+            maxTokens: 2048,
           });
           // Post-await yield (T3): the LLM call is the main TTL hazard
           // codex flagged. Throttle inside maybeYield bounds the actual
@@ -216,20 +234,24 @@ export async function runPhaseSynthesizeConcepts(
 
     if (!opts.dryRun) {
       const title = group.conceptSlug.split('/').pop() ?? group.conceptSlug;
-      await engine.putPage(`concepts/${title}`, {
-        title: title.replace(/-/g, ' '),
-        type: 'concept',
-        compiled_truth: narrative,
-        frontmatter: {
+      await engine.putPage(
+        `concepts/${title}`,
+        {
+          title: title.replace(/-/g, ' '),
           type: 'concept',
-          tier: group.tier,
-          mention_count: group.atomTitles.length,
-          composite_score: group.atomTitles.length,
-          synthesized_at: new Date().toISOString(),
-          synthesized_by: 'synthesize_concepts-v0.41',
+          compiled_truth: narrative,
+          frontmatter: {
+            type: 'concept',
+            tier: group.tier,
+            mention_count: group.atomTitles.length,
+            composite_score: group.atomTitles.length,
+            synthesized_at: new Date().toISOString(),
+            synthesized_by: 'synthesize_concepts-v0.41',
+          },
+          timeline: '',
         },
-        timeline: '',
-      });
+        { sourceId: group.sourceId },
+      );
     }
     conceptsWritten++;
     // v0.41.19.0 (T4): one tick per concept group with running count.

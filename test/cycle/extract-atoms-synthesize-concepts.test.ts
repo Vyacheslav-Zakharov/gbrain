@@ -101,6 +101,15 @@ describe('v0.41 T5: parseAtomsResponse', () => {
     expect(parseAtomsResponse(`[{"title":"a","atom_type":"insight","body":"b","virality_score":-5}]`)[0].virality_score).toBeUndefined();
     expect(parseAtomsResponse(`[{"title":"a","atom_type":"insight","body":"b","virality_score":75}]`)[0].virality_score).toBe(75);
   });
+
+  test('normalizes and caps concept refs for synthesis', () => {
+    const raw = `[{"title":"a","atom_type":"insight","body":"b","concepts":["Privacy First","Task/Execution","Privacy First",42,"Third","Fourth"]}]`;
+    expect(parseAtomsResponse(raw)[0].concepts).toEqual([
+      'privacy-first',
+      'task-execution',
+      'third',
+    ]);
+  });
 });
 
 describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
@@ -115,8 +124,8 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
 
   test('extracts atoms from transcript via stub chat', async () => {
     const chat = stubChat(`[
-      {"title":"Renders vs physical proof","atom_type":"insight","body":"Enterprise buyers want tangible prototypes."},
-      {"title":"Founder lesson","atom_type":"anecdote","body":"Story about a founder."}
+      {"title":"Renders vs physical proof","atom_type":"insight","body":"Enterprise buyers want tangible prototypes.","concepts":["enterprise-prototyping"]},
+      {"title":"Founder lesson","atom_type":"anecdote","body":"Story about a founder.","concepts":["founder-learning"]}
     ]`);
     const result = await runPhaseExtractAtoms(engine, {
       _transcripts: [{ filePath: '/fake/meeting.txt', content: 'content', contentHash: 'abc123def' }],
@@ -128,10 +137,11 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
     expect(result.details?.transcripts_processed).toBe(1);
 
     // Verify pages were written
-    const rows = await engine.executeRaw<{ slug: string; type: string }>(
-      `SELECT slug, type FROM pages WHERE type = 'atom'`,
+    const rows = await engine.executeRaw<{ slug: string; type: string; frontmatter: { concepts?: string[] } }>(
+      `SELECT slug, type, frontmatter FROM pages WHERE type = 'atom' ORDER BY slug`,
     );
     expect(rows.length).toBe(2);
+    expect(rows.every((row) => Array.isArray(row.frontmatter.concepts))).toBe(true);
   });
 
   test('dry-run counts but does NOT write', async () => {
@@ -315,5 +325,26 @@ describe('v0.41 T6: runPhaseSynthesizeConcepts via stubbed chat', () => {
       `SELECT compiled_truth FROM pages WHERE slug = 'concepts/theme'`,
     );
     expect(rows[0].compiled_truth).toContain('Custom synthesized narrative');
+  });
+
+  test('keeps identical concept slugs isolated by source', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES
+       ('source-a', 'source-a', '{}'::jsonb),
+       ('source-b', 'source-b', '{}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    const atoms = [
+      { slug: 'a1', title: 'A1', body: 'b1', concept_refs: ['theme'], sourceId: 'source-a' },
+      { slug: 'a2', title: 'A2', body: 'b2', concept_refs: ['theme'], sourceId: 'source-a' },
+      { slug: 'b1', title: 'B1', body: 'b3', concept_refs: ['theme'], sourceId: 'source-b' },
+      { slug: 'b2', title: 'B2', body: 'b4', concept_refs: ['theme'], sourceId: 'source-b' },
+    ];
+    const result = await runPhaseSynthesizeConcepts(engine, { _atoms: atoms });
+    expect(result.details?.concepts_written).toBe(2);
+    const rows = await engine.executeRaw<{ source_id: string }>(
+      `SELECT source_id FROM pages WHERE slug = 'concepts/theme' ORDER BY source_id`,
+    );
+    expect(rows.map((r) => r.source_id)).toEqual(['source-a', 'source-b']);
   });
 });

@@ -116,6 +116,8 @@ interface ExtractedAtom {
   title: string;
   atom_type: typeof ATOM_TYPES[number];
   body: string;
+  /** Stable, kebab-case concept slugs used by synthesize_concepts. */
+  concepts?: string[];
   source_quote?: string;
   lesson?: string;
   virality_score?: number;
@@ -131,7 +133,8 @@ quote, or short essay angle. Each atom must:
   - Be specific (not a generic platitude)
 
 Output a JSON array of atoms (1-3 per transcript, never more than 3).
-Each atom: {title (≤80 chars), atom_type, body (2-4 sentences),
+Each atom: {title (≤80 chars), atom_type, body (2-4 sentences), concepts
+(1-3 reusable kebab-case topic slugs, e.g. "privacy-first-task-sharing"),
 source_quote (verbatim ≤200 chars), lesson (one sentence), virality_score
 (0-100), emotional_register (one of: shocking, inspiring, funny, sobering,
 practical, controversial)}.
@@ -534,6 +537,7 @@ export async function runPhaseExtractAtoms(
               frontmatter: {
                 type: 'atom',
                 atom_type: atom.atom_type,
+                ...(atom.concepts && atom.concepts.length > 0 ? { concepts: atom.concepts } : {}),
                 ...originFrontmatter,
                 source_hash: item.contentHash.slice(0, 16),
                 ...(atom.source_quote && { source_quote: atom.source_quote }),
@@ -672,6 +676,12 @@ export function parseAtomsResponse(raw: string): ExtractedAtom[] {
       title,
       atom_type: atomType as typeof ATOM_TYPES[number],
       body,
+      concepts: Array.isArray(obj.concepts)
+        ? [...new Set(obj.concepts
+            .filter((v): v is string => typeof v === 'string')
+            .map((v) => slugify(v.replace(/[\/_]+/g, ' ')))
+            .filter(Boolean))].slice(0, 3)
+        : undefined,
       source_quote: typeof obj.source_quote === 'string' ? obj.source_quote.slice(0, 500) : undefined,
       lesson: typeof obj.lesson === 'string' ? obj.lesson : undefined,
       virality_score:
