@@ -94,7 +94,8 @@ export function PortalApp() {
   const [sourceId, setSourceId] = useState('');
   const [folder, setFolder] = useState('');
   const [entries, setEntries] = useState<TreeEntry[]>([]);
-  const [treeSummary, setTreeSummary] = useState({ sections: 0, documents: 0 });
+  const [treeSummary, setTreeSummary] = useState({ sections: 0, documents: 0, complete: true });
+  const [sourceSummary, setSourceSummary] = useState({ sections: 0, documents: 0, complete: true });
   const [document, setDocument] = useState<FileResponse | null>(null);
   const [binary, setBinary] = useState<TreeEntry | null>(null);
   const [context, setContext] = useState<ContextResponse | null>(null);
@@ -137,6 +138,7 @@ export function PortalApp() {
       setFolder(nextFolder);
       setEntries(data.entries);
       setTreeSummary(data.summary);
+      setSourceSummary(data.sourceSummary);
       setDocument(null);
       setBinary(null);
       setContext(null);
@@ -165,9 +167,10 @@ export function PortalApp() {
       portalApi.tree(nextSource, parentPath(path)).then((data) => {
         setEntries(data.entries);
         setTreeSummary(data.summary);
+        setSourceSummary(data.sourceSummary);
       }).catch(() => {
         setEntries([]);
-        setTreeSummary({ sections: 0, documents: 0 });
+        setTreeSummary({ sections: 0, documents: 0, complete: true });
       });
       setSourceId(nextSource);
       setFolder(parentPath(path));
@@ -193,6 +196,7 @@ export function PortalApp() {
       if (tree) {
         setEntries(tree.entries);
         setTreeSummary(tree.summary);
+        setSourceSummary(tree.sourceSummary);
       }
       if (storageKeys) localStorage.setItem(storageKeys.lastSource, nextSource);
       rememberDocument(file);
@@ -417,7 +421,7 @@ export function PortalApp() {
             {sources.map((source) => <option key={source.id} value={source.id}>{source.name || source.id}</option>)}
           </select>
           {selectedSource && <span className="source-id">{selectedSource.id}</span>}
-          {selectedSource && <span className="source-summary">Разделы: {treeSummary.sections} · Документы: {treeSummary.documents}</span>}
+          {selectedSource && <span className="source-summary">Разделы: {sourceSummary.complete ? '' : '≥'}{sourceSummary.sections} · Документы: {sourceSummary.complete ? '' : '≥'}{sourceSummary.documents}</span>}
         </div>
 
         <nav className="folder-breadcrumbs" aria-label="Путь к папке">
@@ -428,7 +432,7 @@ export function PortalApp() {
           })}
         </nav>
 
-        <div className="tree-heading"><span>{folder ? 'Содержимое папки' : 'Разделы и документы'}</span><span>{treeSummary.sections} разд. · {treeSummary.documents} док.</span></div>
+        <div className="tree-heading"><span>{folder ? 'Содержимое папки' : 'Разделы и документы'}</span><span>{treeSummary.complete ? '' : '≥'}{treeSummary.sections} разд. · {treeSummary.complete ? '' : '≥'}{treeSummary.documents} док.</span></div>
         <div className="tree-list" role="tree" aria-busy={loadingTree}>
           {folder && <button className="tree-row parent-row" onClick={() => void loadFolder(sourceId, parentPath(folder), true)}><Icon name="back" /><span>На уровень выше</span></button>}
           {loadingTree && <div className="skeleton-list">{[1, 2, 3, 4, 5].map((item) => <span key={item} />)}</div>}

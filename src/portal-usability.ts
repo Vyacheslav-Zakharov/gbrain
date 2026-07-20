@@ -54,7 +54,7 @@ export function classifyPortalSearchMatch(input: {
 function stripSearchMarkup(raw: string): string {
   return String(raw || '')
     .replace(/^---\s*\n[\s\S]*?\n---(?:\s*\n|$)/, ' ')
-    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/```[^\n]*\n([\s\S]*?)```/g, ' $1 ')
     .replace(/`([^`]+)`/g, '$1')
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
@@ -103,33 +103,6 @@ const GOVERNANCE_FILES = new Set([
   'schema.md',
   'log.md',
 ]);
-
-export function extractPortalAliases(content: string): string[] {
-  const frontmatter = String(content || '').match(/^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/)?.[1] || '';
-  if (!frontmatter) return [];
-  const lines = frontmatter.split(/\r?\n/);
-  const aliases: string[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
-    const match = lines[index].match(/^aliases:\s*(.*)$/i);
-    if (!match) continue;
-    const inline = match[1].trim();
-    if (inline.startsWith('[') && inline.endsWith(']')) {
-      aliases.push(...inline.slice(1, -1).split(','));
-    } else if (inline) {
-      aliases.push(inline);
-    } else {
-      for (let child = index + 1; child < lines.length; child += 1) {
-        const item = lines[child].match(/^\s+-\s+(.+)$/);
-        if (!item) break;
-        aliases.push(item[1]);
-      }
-    }
-    break;
-  }
-  return aliases
-    .map((alias) => alias.trim().replace(/^['"]|['"]$/g, '').replace(/\\/g, '/'))
-    .filter(Boolean);
-}
 
 export function isPortalVisibleDirectory(relativePath: string): boolean {
   const normalized = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');

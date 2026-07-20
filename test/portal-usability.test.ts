@@ -3,7 +3,6 @@ import {
   classifyPortalSearchMatch,
   cleanPortalSearchSnippet,
   comparePortalSearchResults,
-  extractPortalAliases,
   isPortalCountedDocument,
   isPortalVisibleDirectory,
 } from '../src/portal-usability';
@@ -32,6 +31,12 @@ describe('Portal search usability', () => {
     expect(snippet).not.toContain('##');
     expect(snippet.length).toBeLessThanOrEqual(93);
   });
+
+  test('keeps matching code content while removing Markdown fences', () => {
+    const snippet = cleanPortalSearchSnippet('before\n```json\n{"workflow": "equipment defects"}\n```\nafter', 'equipment defects');
+    expect(snippet).toContain('equipment defects');
+    expect(snippet).not.toContain('```');
+  });
 });
 
 describe('Portal tree counts', () => {
@@ -49,18 +54,5 @@ describe('Portal tree counts', () => {
     expect(isPortalVisibleDirectory('_templates')).toBe(false);
     expect(isPortalVisibleDirectory('_attachments')).toBe(false);
     expect(isPortalVisibleDirectory('generated')).toBe(false);
-  });
-});
-
-describe('Portal wikilink aliases', () => {
-  test('extracts inline and YAML-list aliases from frontmatter', () => {
-    expect(extractPortalAliases('---\naliases: [projects/old-one, "projects/old-two"]\n---\n# Page')).toEqual([
-      'projects/old-one',
-      'projects/old-two',
-    ]);
-    expect(extractPortalAliases('---\naliases:\n  - projects/legacy-page\n  - "projects/older-page"\nstatus: active\n---')).toEqual([
-      'projects/legacy-page',
-      'projects/older-page',
-    ]);
   });
 });

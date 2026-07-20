@@ -71,6 +71,8 @@ describe('portal path confinement', () => {
     expect(isPortalFileAllowed('notes/отчёт.md')).toBeTrue();
     expect(isPortalFileAllowed('config.json')).toBeFalse();
     expect(isPortalFileAllowed('server-private-key.pem')).toBeFalse();
+    expect(isPortalFileAllowed('credentials/private-key.md')).toBeFalse();
+    expect(isPortalFileAllowed('docs/secret.md')).toBeFalse();
     expect(isPortalFileAllowed('credentials')).toBeFalse();
   });
 

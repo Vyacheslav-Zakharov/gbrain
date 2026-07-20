@@ -19,14 +19,18 @@ export interface TreeEntry {
   documentCount?: number;
 }
 
+export interface TreeSummary {
+  sections: number;
+  documents: number;
+  complete: boolean;
+}
+
 export interface TreeResponse {
   source: string;
   path: string;
   entries: TreeEntry[];
-  summary: {
-    sections: number;
-    documents: number;
-  };
+  summary: TreeSummary;
+  sourceSummary: TreeSummary;
 }
 
 export interface FileResponse {
