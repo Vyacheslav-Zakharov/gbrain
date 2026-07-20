@@ -145,6 +145,41 @@ function existingManagedBlock(content: string): string | null {
   return content.slice(s, e + SOURCE_SYNC_END.length);
 }
 
+const SOURCE_ARTICLE_BEGIN = '<!-- gbrain-source-article:start';
+const SOURCE_ARTICLE_END = '<!-- gbrain-source-article:end -->';
+
+function escapeManagedRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function articleBlockRe(profileId: string, externalRef: string): RegExp {
+  return new RegExp(`<!-- gbrain-source-article:start\\s+profile="${escapeManagedRe(profileId)}"\\s+external_ref="${escapeManagedRe(externalRef)}"\\s+-->[\\s\\S]*?<!-- gbrain-source-article:end -->`, 'm');
+}
+
+function renderArticleManagedBlock(profileId: string, externalRef: string, body: string): string {
+  return `${SOURCE_ARTICLE_BEGIN} profile="${profileId}" external_ref="${externalRef}" -->\n${body.trim()}\n${SOURCE_ARTICLE_END}`;
+}
+
+function mergeGeneratedArticle(
+  existingContent: string,
+  profileId: string,
+  externalRef: string,
+  articleBody: string,
+  sourceBody: string,
+): string {
+  const articleBlock = renderArticleManagedBlock(profileId, externalRef, articleBody);
+  const sourceMerged = mergeManagedBlock(existingContent, profileId, externalRef, sourceBody).content;
+  const match = sourceMerged.match(articleBlockRe(profileId, externalRef));
+  if (match) return sourceMerged.replace(match[0], articleBlock);
+
+  // One-time migration for a page already owned by this source identity. The legacy
+  // generated article occupied everything before the source-data block. Explicitly
+  // adopted pages never enter this path, so their human-owned body remains untouched.
+  const sourceStart = sourceMerged.indexOf(SOURCE_SYNC_BEGIN);
+  if (sourceStart < 0) return `${articleBlock}\n\n${sourceMerged.trimStart()}`;
+  return `${articleBlock}\n\n${sourceMerged.slice(sourceStart).trimStart()}`;
+}
+
 function yamlScalar(v: unknown): string {
   if (v === null || v === undefined) return 'null';
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
@@ -167,9 +202,15 @@ function renderMarkdown(
   const externalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
   const article = renderArticleTemplate(profile, record);
   const generatedBlock = renderManagedBlock(profile.profile_id, externalRef, managedBody(profile, record));
-  const articleBodyWithBlock = `${article.body.trimEnd()}\n\n${generatedBlock}\n`;
+  const manageGeneratedArticle = profile.update_policy.manage_generated_article === true && !explicitAdoption;
+  const articleBody = manageGeneratedArticle
+    ? renderArticleManagedBlock(profile.profile_id, externalRef, article.body)
+    : article.body.trimEnd();
+  const articleBodyWithBlock = `${articleBody}\n\n${generatedBlock}\n`;
   const mergedCore = existingBody
-    ? mergeManagedBlock(existingBody, profile.profile_id, externalRef, managedBody(profile, record)).content
+    ? manageGeneratedArticle
+      ? mergeGeneratedArticle(existingBody, profile.profile_id, externalRef, article.body, managedBody(profile, record))
+      : mergeManagedBlock(existingBody, profile.profile_id, externalRef, managedBody(profile, record)).content
     : articleBodyWithBlock;
   // Engine parsing separates timeline content from compiled_truth. Reattach it after the
   // managed block so adoption never drops curated timeline entries or places source data

@@ -31,7 +31,9 @@ export type SourceTransformFetcher = (source: SourceTransformSource) => Promise<
 
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SQL_DENY_RE = /\b(insert|update|delete|drop|alter|truncate|create|grant|revoke|copy|call|do|vacuum|analyze|attach|detach)\b/i;
-const DEFAULT_TRANSFORM_TIMEOUT_MS = 15_000;
+// Multi-source AppSheet transforms may stage 1k+ projected rows before executing a small result query.
+// Keep the worker hard-bounded, but allow enough time for PGlite initialization and temp-table loading.
+const DEFAULT_TRANSFORM_TIMEOUT_MS = 60_000;
 const DEFAULT_TRANSFORM_ROW_CAP = 5_000;
 
 function sanitizeIdentifier(raw: string): string | null {
