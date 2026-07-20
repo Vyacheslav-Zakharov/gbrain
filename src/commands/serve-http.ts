@@ -56,6 +56,15 @@ import {
   portalSessionCookieName,
   resolvePortalPathSecure,
 } from '../core/portal-security.ts';
+import {
+  classifyPortalSearchMatch,
+  cleanPortalSearchSnippet,
+  comparePortalSearchResults,
+  extractPortalAliases,
+  isPortalCountedDocument,
+  isPortalVisibleDirectory,
+  type PortalSearchRank,
+} from '../portal-usability.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -1501,11 +1510,38 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     }
     if (!stat.isDirectory())
       return res.status(400).json({ error: "Path is not a directory" });
+    let scannedForCounts = 0;
+    const countDocuments = (dir: string): number => {
+      if (scannedForCounts >= 50_000)
+        return 0;
+      let children: any[] = [];
+      try {
+        children = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return 0;
+      }
+      let count = 0;
+      for (const child of children) {
+        scannedForCounts += 1;
+        if (scannedForCounts >= 50_000)
+          break;
+        if (child.name === ".git" || child.name.startsWith(".") || child.isSymbolicLink())
+          continue;
+        const full = path.join(dir, child.name);
+        const rel = path.relative(source.local_path, full).split(path.sep).join("/");
+        if (child.isDirectory()) {
+          if (isPortalVisibleDirectory(rel)) count += countDocuments(full);
+        } else if (child.isFile() && isPortalFileAllowed(child.name) && isPortalCountedDocument(rel)) {
+          count += 1;
+        }
+      }
+      return count;
+    };
     const entries = fs.readdirSync(target, { withFileTypes: true }).filter((entry: any) =>
       entry.name !== ".git" &&
       !entry.name.startsWith(".") &&
       !entry.isSymbolicLink() &&
-      (entry.isDirectory() || (entry.isFile() && isPortalFileAllowed(entry.name)))
+      ((entry.isDirectory() && isPortalVisibleDirectory(entry.name)) || (entry.isFile() && isPortalFileAllowed(entry.name)))
     ).map((entry: any) => {
       const full = path.join(target, entry.name);
       const rel = path.relative(source.local_path, full).split(path.sep).join("/");
@@ -1517,9 +1553,15 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
         markdown: entry.isFile() && /\.(md|markdown|txt)$/i.test(entry.name),
         size: st.size,
         updatedAt: st.mtime.toISOString(),
+        documentCount: entry.isDirectory() ? countDocuments(full) : undefined,
       };
     }).sort((a: any, b: any) => a.type === b.type ? a.name.localeCompare(b.name, "ru") : a.type === "dir" ? -1 : 1);
-    res.json({ source: source.id, path: req.query.path || "", entries });
+    const sections = entries.filter((entry: any) => entry.type === 'dir').length;
+    const documents = entries.reduce((total: number, entry: any) => {
+      if (entry.type === 'dir') return total + Number(entry.documentCount || 0);
+      return total + (isPortalCountedDocument(entry.path) ? 1 : 0);
+    }, 0);
+    res.json({ source: source.id, path: req.query.path || "", entries, summary: { sections, documents } });
   });
   app.get("/portal/api/file", async (req: any, res: any) => {
     const userEmail = requirePortalUser(req, res);
@@ -1631,7 +1673,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     if (q.length < 2)
       return res.json({ results: [] });
     const sources = await getSourceRowsForUser(userEmail);
-    const results: Array<Record<string, unknown>> = [];
+    const results: Array<Record<string, any> & PortalSearchRank> = [];
     const seenResults = new Set<string>();
     const maxResults = 50;
 
@@ -1639,7 +1681,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     // Source IDs come from the same ACL projection used by every portal route.
     try {
       const indexed = await engine.searchKeyword(q, {
-        limit: 35,
+        limit: 100,
         sourceIds: sources.map((source) => source.id),
       });
       for (const hit of indexed) {
@@ -1654,6 +1696,14 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
         const key = `${source.id}:${candidatePath}`;
         if (seenResults.has(key)) continue;
         seenResults.add(key);
+        const classification = classifyPortalSearchMatch({
+          query: q,
+          title: hit.title || hit.slug,
+          slug: hit.slug,
+          path: candidatePath,
+          chunkText: String(hit.chunk_text || ''),
+          score: hit.score,
+        });
         results.push({
           source: source.id,
           sourceName: source.name,
@@ -1661,12 +1711,13 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
           path: candidatePath,
           markdown: true,
           size: 0,
-          match: 'content',
+          match: classification.match,
           title: hit.title || hit.slug,
-          snippet: String(hit.chunk_text || '').replace(/\s+/g, ' ').trim().slice(0, 220),
+          snippet: cleanPortalSearchSnippet(String(hit.chunk_text || ''), q),
           score: hit.score,
+          rank: classification.rank,
         });
-        if (results.length >= maxResults) break;
+
       }
     } catch (error) {
       console.warn('[portal] indexed search unavailable, using filename fallback:', error instanceof Error ? error.message : error);
@@ -1675,7 +1726,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     // Bounded filename fallback also finds attachments that are not indexed pages.
     let scannedEntries = 0;
     const walk = (source: PortalSourceRow, dir: string): void => {
-      if (results.length >= maxResults || scannedEntries >= 10_000)
+      if (scannedEntries >= 10_000)
         return;
       let entries: any[] = [];
       try {
@@ -1685,7 +1736,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       }
       for (const entry of entries) {
         scannedEntries += 1;
-        if (results.length >= maxResults || scannedEntries >= 10_000)
+        if (scannedEntries >= 10_000)
           return;
         if (entry.name === ".git" || entry.name.startsWith("."))
           continue;
@@ -1708,13 +1759,28 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
             size = fs.statSync(full).size;
           } catch {}
           seenResults.add(key);
-          results.push({ source: source.id, sourceName: source.name, name: entry.name, path: rel, markdown, size, match: "name", title: entry.name });
+          const classification = classifyPortalSearchMatch({ query: q, title: entry.name, path: rel });
+          results.push({
+            source: source.id,
+            sourceName: source.name,
+            name: entry.name,
+            path: rel,
+            markdown,
+            size,
+            match: "name",
+            title: entry.name,
+            rank: Math.max(350, classification.rank - 50),
+          });
         }
       }
     };
     for (const source of sources)
       walk(source, source.local_path);
-    res.json({ query: q, results });
+    const ordered = results
+      .sort(comparePortalSearchResults)
+      .slice(0, maxResults)
+      .map(({ rank: _rank, ...result }) => result);
+    res.json({ query: q, results: ordered });
   });
   app.get("/portal/api/resolve-link", async (req: any, res: any) => {
     const userEmail = requirePortalUser(req, res);
@@ -1781,6 +1847,16 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
               if (relLower === targetWithExt || relLower.endsWith("/" + targetWithExt) || nameLower === basenameWithExt) {
                 return relPath;
               }
+            }
+            if (/\.(md|markdown|txt)$/i.test(entry.name)) {
+              try {
+                const content = fs.readFileSync(fullPath, 'utf8');
+                const normalizedTarget = targetLink.toLowerCase().replace(/\.(md|markdown|txt)$/i, '');
+                const matchesAlias = extractPortalAliases(content).some((alias) =>
+                  alias.toLowerCase().replace(/\.(md|markdown|txt)$/i, '') === normalizedTarget
+                );
+                if (matchesAlias) return relPath;
+              } catch {}
             }
           }
         }

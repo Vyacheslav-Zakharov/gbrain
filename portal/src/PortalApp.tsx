@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { portalApi } from './api';
 import { fallbackTitle, renderMarkdown, type OutlineItem } from './markdown';
 import { buildPortalHref, isPreviewable, parentPath, parsePortalLocation } from './navigation';
+import { isGlobalSearchShortcut } from './keyboard';
 import type {
   Backlink,
   ContextResponse,
@@ -93,6 +94,7 @@ export function PortalApp() {
   const [sourceId, setSourceId] = useState('');
   const [folder, setFolder] = useState('');
   const [entries, setEntries] = useState<TreeEntry[]>([]);
+  const [treeSummary, setTreeSummary] = useState({ sections: 0, documents: 0 });
   const [document, setDocument] = useState<FileResponse | null>(null);
   const [binary, setBinary] = useState<TreeEntry | null>(null);
   const [context, setContext] = useState<ContextResponse | null>(null);
@@ -134,6 +136,7 @@ export function PortalApp() {
       setSourceId(nextSource);
       setFolder(nextFolder);
       setEntries(data.entries);
+      setTreeSummary(data.summary);
       setDocument(null);
       setBinary(null);
       setContext(null);
@@ -159,7 +162,13 @@ export function PortalApp() {
     if (!nextSource || !path) return;
     if (!isPreviewable(path)) {
       const name = path.split('/').pop() || path;
-      portalApi.tree(nextSource, parentPath(path)).then((data) => setEntries(data.entries)).catch(() => setEntries([]));
+      portalApi.tree(nextSource, parentPath(path)).then((data) => {
+        setEntries(data.entries);
+        setTreeSummary(data.summary);
+      }).catch(() => {
+        setEntries([]);
+        setTreeSummary({ sections: 0, documents: 0 });
+      });
       setSourceId(nextSource);
       setFolder(parentPath(path));
       setDocument(null);
@@ -181,7 +190,10 @@ export function PortalApp() {
       setDocument(file);
       setBinary(null);
       setContext(nextContext);
-      if (tree) setEntries(tree.entries);
+      if (tree) {
+        setEntries(tree.entries);
+        setTreeSummary(tree.summary);
+      }
       if (storageKeys) localStorage.setItem(storageKeys.lastSource, nextSource);
       rememberDocument(file);
       if (push) writeLocation(nextSource, path, '');
@@ -243,7 +255,7 @@ export function PortalApp() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      if (isGlobalSearchShortcut(event)) {
         event.preventDefault();
         setSearchOpen(true);
       }
@@ -386,7 +398,7 @@ export function PortalApp() {
         <button ref={searchTriggerRef} className="global-search" onClick={() => setSearchOpen(true)}>
           <Icon name="search" />
           <span>Найти документ или раздел</span>
-          <kbd>⌘ K</kbd>
+          <kbd>Ctrl K</kbd>
         </button>
         <div className="topbar-actions">
           {session?.isAdmin && <a className="quiet-link" href="/admin/">Администрирование</a>}
@@ -405,6 +417,7 @@ export function PortalApp() {
             {sources.map((source) => <option key={source.id} value={source.id}>{source.name || source.id}</option>)}
           </select>
           {selectedSource && <span className="source-id">{selectedSource.id}</span>}
+          {selectedSource && <span className="source-summary">Разделы: {treeSummary.sections} · Документы: {treeSummary.documents}</span>}
         </div>
 
         <nav className="folder-breadcrumbs" aria-label="Путь к папке">
@@ -415,7 +428,7 @@ export function PortalApp() {
           })}
         </nav>
 
-        <div className="tree-heading"><span>{folder ? 'Содержимое папки' : 'Разделы и документы'}</span><span>{entries.length || ''}</span></div>
+        <div className="tree-heading"><span>{folder ? 'Содержимое папки' : 'Разделы и документы'}</span><span>{treeSummary.sections} разд. · {treeSummary.documents} док.</span></div>
         <div className="tree-list" role="tree" aria-busy={loadingTree}>
           {folder && <button className="tree-row parent-row" onClick={() => void loadFolder(sourceId, parentPath(folder), true)}><Icon name="back" /><span>На уровень выше</span></button>}
           {loadingTree && <div className="skeleton-list">{[1, 2, 3, 4, 5].map((item) => <span key={item} />)}</div>}
@@ -424,7 +437,7 @@ export function PortalApp() {
             return <button key={entry.path} role="treeitem" aria-selected={active} className={`tree-row ${active ? 'active' : ''}`} onClick={() => chooseEntry(entry)} title={entry.path}>
               <span className={`file-icon ${fileKind(entry)}`}><Icon name={fileKind(entry)} /></span>
               <span className="tree-row-label"><strong>{entry.name}</strong>{entry.type === 'file' && <small>{humanBytes(entry.size)}</small>}</span>
-              {entry.type === 'dir' && <Icon name="chevron" size={15} />}
+              {entry.type === 'dir' && <><span className="tree-count" aria-label={`${entry.documentCount || 0} документов`}>{entry.documentCount || 0}</span><Icon name="chevron" size={15} /></>}
             </button>;
           })}
           {!loadingTree && !entries.length && !error && <div className="empty-compact">В этой папке пока ничего нет</div>}
@@ -499,7 +512,7 @@ export function PortalApp() {
             {!searchLoading && searchResults.map((result, index) => <button role="option" aria-selected={index === activeSearchIndex} id={`portal-search-result-${index}`} className={`search-result ${index === activeSearchIndex ? 'active' : ''}`} key={`${result.source}:${result.path}`} onMouseEnter={() => setActiveSearchIndex(index)} onClick={() => chooseSearchResult(result)}>
               <span className="search-result-icon"><Icon name={result.markdown ? 'doc' : 'file'} /></span>
               <span className="search-result-copy"><strong>{result.title || result.name}</strong><small>{result.sourceName || result.source} / {result.path}</small>{result.snippet && <p>{result.snippet}</p>}</span>
-              <span className="search-match">{result.match === 'content' ? 'текст' : 'имя'}</span>
+              <span className="search-match">{{ title: 'Название', path: 'Путь', heading: 'Раздел', content: 'Содержание', name: 'Имя файла' }[result.match]}</span>
             </button>)}
           </div>
           <footer className="search-footer"><span><kbd>↑</kbd><kbd>↓</kbd> выбрать</span><span><kbd>Enter</kbd> открыть</span><span>{searchResults.length ? `${searchResults.length} результатов` : ''}</span></footer>

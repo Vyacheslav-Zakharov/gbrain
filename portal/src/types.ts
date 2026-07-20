@@ -16,12 +16,17 @@ export interface TreeEntry {
   markdown: boolean;
   size: number;
   updatedAt?: string;
+  documentCount?: number;
 }
 
 export interface TreeResponse {
   source: string;
   path: string;
   entries: TreeEntry[];
+  summary: {
+    sections: number;
+    documents: number;
+  };
 }
 
 export interface FileResponse {
@@ -46,7 +51,7 @@ export interface SearchResult {
   path: string;
   markdown: boolean;
   size: number;
-  match: 'content' | 'name';
+  match: 'title' | 'path' | 'heading' | 'content' | 'name';
   title?: string;
   snippet?: string;
   score?: number;

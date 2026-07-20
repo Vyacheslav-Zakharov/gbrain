@@ -43,12 +43,23 @@ describe('portal SPA contract', () => {
     expect(serveSource).toContain("X-Content-Type-Options', 'nosniff'");
   });
 
+  test('resolves source-qualified legacy aliases inside an allowed source', () => {
+    const resolveStart = serveSource.indexOf('app.get("/portal/api/resolve-link"');
+    const resolveEnd = serveSource.indexOf('app.get("/portal/download"', resolveStart);
+    const resolveRoute = serveSource.slice(resolveStart, resolveEnd);
+    expect(resolveRoute).toContain('extractPortalAliases(content)');
+    expect(resolveRoute).toContain('requestedSourceId');
+    expect(resolveRoute).toContain('sources.some((source) => source.id === requestedSourceId)');
+  });
+
   test('does not read every markdown body during filename fallback', () => {
     const searchStart = serveSource.indexOf('app.get("/portal/api/search"');
     const searchEnd = serveSource.indexOf('app.get("/portal/api/resolve-link"', searchStart);
     const searchRoute = serveSource.slice(searchStart, searchEnd);
     expect(searchRoute).not.toContain('readFileSync(full');
-    expect(searchRoute).toContain("match: 'content'");
+    expect(searchRoute).toContain('classifyPortalSearchMatch({');
+    expect(searchRoute).toContain('cleanPortalSearchSnippet(');
+    expect(searchRoute).toContain('.sort(comparePortalSearchResults)');
     expect(searchRoute).toContain('match: "name"');
   });
 });
