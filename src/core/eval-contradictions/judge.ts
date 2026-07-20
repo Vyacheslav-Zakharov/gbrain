@@ -348,7 +348,11 @@ export async function judgeContradiction(input: JudgeInput): Promise<JudgeOutput
   const result = await callFn({
     model: input.model,
     messages: [{ role: 'user', content: prompt }],
-    maxTokens: 200,
+    // Gemini reasoning models consume output tokens for hidden thinking before
+    // emitting the small JSON verdict. A 200-token cap truncates them at
+    // `{"` (or returns empty text), turning every pair into a judge error.
+    // 2048 is still bounded while leaving enough room for reasoning + schema.
+    maxTokens: 2048,
     abortSignal: input.abortSignal,
   });
   if (isRefusalResponse(result)) {

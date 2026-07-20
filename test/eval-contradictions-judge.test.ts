@@ -333,6 +333,20 @@ describe('judgeContradiction', () => {
     expect(capturedPrompt.split('x'.repeat(101)).length).toBe(1);
   });
 
+  test('allows reasoning models enough output budget to emit the JSON verdict', async () => {
+    let capturedMaxTokens = 0;
+    await judgeContradiction({
+      ...baseInput,
+      chatFn: stubChat(async (opts) => {
+        capturedMaxTokens = opts.maxTokens ?? 0;
+        return mkResult(JSON.stringify({
+          verdict: 'no_contradiction', severity: 'info', confidence: 0.5,
+        }));
+      }),
+    });
+    expect(capturedMaxTokens).toBe(2048);
+  });
+
   test('default maxPairChars constant is 1500', () => {
     expect(DEFAULT_MAX_PAIR_CHARS).toBe(1500);
   });
