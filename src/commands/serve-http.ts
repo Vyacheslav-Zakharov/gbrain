@@ -945,7 +945,7 @@ const ensurePortalUserProvisioned = async (emailRaw: string) => {
     if (!existingSource[0]) {
       await engine.executeRaw(
         `INSERT INTO sources (id, name, local_path, config)
-         VALUES ($1, $2, $3, $4::jsonb)
+         VALUES ($1, $2, $3, $4::text::jsonb)
          ON CONFLICT (id) DO NOTHING`,
         [sourceId, displayName, personalRoot, JSON.stringify({ federated: false, contextual_retrieval_mode: "balanced" })],
       );
@@ -2471,6 +2471,42 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       res.status(500).json({ error: msg });
+    }
+  });
+
+  // Historical Minion/autopilot activity. Admin-only and intentionally
+  // returns a curated report shape rather than raw job data (which may contain
+  // repo paths or handler-specific parameters).
+  app.get('/admin/api/activity/runs', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const first = (value: unknown): string | undefined => {
+        if (typeof value === 'string') return value;
+        if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+        return undefined;
+      };
+      const integer = (value: unknown): number | undefined => {
+        const raw = first(value);
+        if (raw === undefined) return undefined;
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      };
+      const { readActivitySnapshot } = await import('./activity-runs.ts');
+      const report = await readActivitySnapshot(engine, {
+        period: first(req.query.period),
+        since: first(req.query.since),
+        until: first(req.query.until),
+        status: first(req.query.status),
+        name: first(req.query.name),
+        source: first(req.query.source),
+        limit: integer(req.query.limit),
+        offset: integer(req.query.offset),
+        exportAll: first(req.query.export) === 'true' || first(req.query.export) === '1',
+      });
+      res.json(report);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const invalid = /Invalid |must be earlier|cannot exceed/.test(msg);
+      res.status(invalid ? 400 : 500).json({ error: msg });
     }
   });
 

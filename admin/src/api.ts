@@ -52,6 +52,13 @@ export const api = {
     apiFetchText(`/admin/api/calibration/charts/${encodeURIComponent(type)}${holder ? `?holder=${encodeURIComponent(holder)}` : ''}`),
   // v0.41 D2 — live minion-jobs dashboard snapshot.
   jobsWatch: () => apiFetch('/admin/api/jobs/watch'),
+  activityRuns: (filters: { period?: string; since?: string; until?: string; source?: string; name?: string; status?: string; limit?: number; offset?: number; export?: boolean } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== undefined && value !== '') qs.set(key, String(value));
+    }
+    return apiFetch(`/admin/api/activity/runs?${qs.toString()}`);
+  },
   sourceIngestOverview: () => apiFetch('/admin/api/source-ingest/overview'),
   sourceIngestCatalogTree: () => apiFetch('/admin/api/source-ingest/catalog/tree'),
   sourceIngestSchemaView: () => apiFetch('/admin/api/source-ingest/schema-view'),

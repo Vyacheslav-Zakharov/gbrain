@@ -418,4 +418,16 @@ label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
   .main { padding: 16px; }
   .metrics { flex-wrap: wrap; }
   .drawer { width: 100%; }
+  .activity-page { padding: 0 !important; }
+  .activity-content-grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .activity-run-row {
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    gap: 6px 10px !important;
+  }
+  .activity-run-row > span:nth-child(1) { grid-column: 1; grid-row: 2; }
+  .activity-run-row > span:nth-child(2) { grid-column: 1 / -1; grid-row: 1; }
+  .activity-run-row > span:nth-child(3) { grid-column: 1; grid-row: 3; }
+  .activity-run-row > span:nth-child(4) { grid-column: 2; grid-row: 2; }
+  .activity-run-row > span:nth-child(5) { grid-column: 2; grid-row: 3; text-align: right; }
+  .activity-run-row > span:nth-child(6) { grid-column: 2; grid-row: 1; }
 }

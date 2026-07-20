@@ -5,10 +5,11 @@ import { AgentsPage } from './pages/Agents';
 import { RequestLogPage } from './pages/RequestLog';
 import { CalibrationPage } from './pages/Calibration';
 import { JobsWatchPage } from './pages/JobsWatch';
+import { ActivityPage } from './pages/Activity';
 import { SourceIngestPage } from './pages/SourceIngest';
 import { api } from './api';
 
-type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs' | 'source-ingest';
+type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs' | 'activity' | 'source-ingest';
 
 const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: string }> = [
   { page: 'dashboard', label: 'Dashboard', icon: '▣' },
@@ -16,13 +17,14 @@ const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: stri
   { page: 'log', label: 'Request Log', icon: '≋' },
   { page: 'calibration', label: 'Calibration', icon: '◌' },
   { page: 'jobs', label: 'Jobs Watch', icon: '⚙' },
+  { page: 'activity', label: 'Activity', icon: '◫' },
   { page: 'source-ingest', label: 'Source Ingest', icon: '⇄' },
 ];
 
 function getPage(): Page {
   const hash = window.location.hash.replace(/^#/, '') || 'dashboard';
   const topLevel = hash.split('/')[0];
-  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'source-ingest'].includes(topLevel)) return topLevel as Page;
+  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'activity', 'source-ingest'].includes(topLevel)) return topLevel as Page;
   return 'dashboard';
 }
 
@@ -104,6 +106,7 @@ export function App() {
         {page === 'log' && <RequestLogPage />}
         {page === 'calibration' && <CalibrationPage />}
         {page === 'jobs' && <JobsWatchPage />}
+        {page === 'activity' && <ActivityPage />}
         {page === 'source-ingest' && <SourceIngestPage />}
       </main>
     </div>

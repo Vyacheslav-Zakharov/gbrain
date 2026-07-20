@@ -1223,11 +1223,10 @@ describe('source-ingest Stage 3A executor', () => {
       called = true;
       return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
     }) as unknown as typeof fetch;
-    const previousAppId = process.env.APPSHEET_VEHICLES_APP_ID;
-    const previousAccessKey = process.env.APPSHEET_VEHICLES_ACCESS_KEY;
-    process.env.APPSHEET_VEHICLES_APP_ID = 'legacy-vehicle-app';
-    process.env.APPSHEET_VEHICLES_ACCESS_KEY = 'legacy-vehicle-key';
-    try {
+    await withEnv({
+      APPSHEET_VEHICLES_APP_ID: 'legacy-vehicle-app',
+      APPSHEET_VEHICLES_ACCESS_KEY: 'legacy-vehicle-key',
+    }, async () => {
       const connector = new AppSheetVehicleConnector({
         connectorId: 'appsheet-protokolist',
         tableName: 'PeriodicMeetingSeries',
@@ -1239,12 +1238,7 @@ describe('source-ingest Stage 3A executor', () => {
       expect(error).toBeInstanceOf(Error);
       expect(String(error.message)).toContain('credentials are not configured for connector appsheet-protokolist');
       expect(called).toBe(false);
-    } finally {
-      if (previousAppId === undefined) delete process.env.APPSHEET_VEHICLES_APP_ID;
-      else process.env.APPSHEET_VEHICLES_APP_ID = previousAppId;
-      if (previousAccessKey === undefined) delete process.env.APPSHEET_VEHICLES_ACCESS_KEY;
-      else process.env.APPSHEET_VEHICLES_ACCESS_KEY = previousAccessKey;
-    }
+    });
   });
 
   test('draft AppSheet base view resolves connector-scoped DB secrets and its object as table', async () => {
