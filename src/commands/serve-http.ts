@@ -1722,9 +1722,15 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
         const cached = await getPortalPages(source.id);
         const pagesBySlug = new Map(cached.pages.map((page) => [page.slug, page]));
         const slugs = new Set(await engine.resolveSlugs(q, { sourceId: source.id }));
-        for (const page of cached.pages) {
-          if (isPortalTitlePrefixMatch(q, page.title, page.slug)) slugs.add(page.slug);
-        }
+        const titlePrefixMatches = cached.pages
+          .filter((page) => isPortalTitlePrefixMatch(q, page.title))
+          .map((page) => ({
+            page,
+            ranking: classifyPortalSearchMatch({ query: q, title: page.title, slug: page.slug }),
+          }))
+          .sort((a, b) => comparePortalSearchResults(a.ranking, b.ranking))
+          .slice(0, 100);
+        for (const { page } of titlePrefixMatches) slugs.add(page.slug);
         if (normalizedAlias) {
           const aliases = await engine.resolveAliases([normalizedAlias], { sourceId: source.id });
           for (const ref of aliases.get(normalizedAlias) || []) slugs.add(ref.slug);

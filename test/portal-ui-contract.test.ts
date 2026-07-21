@@ -61,7 +61,8 @@ describe('portal SPA contract', () => {
     expect(searchRoute).not.toContain('readFileSync(full');
     expect(searchRoute).toContain('engine.resolveSlugs(q, { sourceId: source.id })');
     expect(searchRoute).toContain('getPortalPages(source.id)');
-    expect(searchRoute).toContain('isPortalTitlePrefixMatch(q, page.title, page.slug)');
+    expect(searchRoute).toContain('isPortalTitlePrefixMatch(q, page.title)');
+    expect(searchRoute).toContain('.slice(0, 100)');
     expect(searchRoute).toContain('engine.getPage(slug, { sourceId: source.id })');
     expect(searchRoute).toContain('classifyPortalSearchMatch({');
     expect(searchRoute).toContain('cleanPortalSearchSnippet(');
