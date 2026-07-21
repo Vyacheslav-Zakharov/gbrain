@@ -3,6 +3,7 @@ import { portalApi } from './api';
 import { fallbackTitle, renderMarkdown, type OutlineItem } from './markdown';
 import { buildPortalHref, isPreviewable, parentPath, parsePortalLocation } from './navigation';
 import { isGlobalSearchShortcut } from './keyboard';
+import { keepExplorerOpenAfterFolderNavigation } from './mobile-navigation';
 import type {
   Backlink,
   ContextResponse,
@@ -148,9 +149,9 @@ export function PortalApp() {
       setError(caught instanceof Error ? caught.message : 'Не удалось открыть папку');
     } finally {
       setLoadingTree(false);
-      setExplorerOpen(false);
+      if (!keepExplorerOpenAfterFolderNavigation(mobile)) setExplorerOpen(false);
     }
-  }, [storageKeys]);
+  }, [mobile, storageKeys]);
 
   const rememberDocument = useCallback((file: FileResponse) => {
     setRecents((current) => {
