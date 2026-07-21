@@ -12,6 +12,38 @@ function normalizeSearchText(value: string): string {
   return String(value || '').normalize('NFKC').toLocaleLowerCase('ru-RU').replace(/\s+/g, ' ').trim();
 }
 
+function portalSearchTokens(value: string): string[] {
+  return normalizeSearchText(value).replace(/[^\p{L}\p{N}]+/gu, ' ').split(' ').filter(Boolean);
+}
+
+function isOneEditPrefix(queryToken: string, candidateToken: string): boolean {
+  if (candidateToken.startsWith(queryToken)) return true;
+  if (queryToken.length < 4 || candidateToken.length < queryToken.length) return false;
+  const prefix = candidateToken.slice(0, queryToken.length);
+  let differences = 0;
+  for (let index = 0; index < queryToken.length; index += 1) {
+    if (queryToken[index] !== prefix[index]) differences += 1;
+    if (differences > 1) return false;
+  }
+  return differences === 1;
+}
+
+export function isPortalTitlePrefixMatch(query: string, title: string, slug = ''): boolean {
+  const queryTokens = portalSearchTokens(query);
+  if (!queryTokens.length || queryTokens.join('').length < 3) return false;
+  const candidates = [title, slug.replace(/[\/_-]+/g, ' ')];
+  return candidates.some((candidate) => {
+    const words = portalSearchTokens(candidate);
+    let cursor = 0;
+    for (const token of queryTokens) {
+      const found = words.findIndex((word, index) => index >= cursor && isOneEditPrefix(token, word));
+      if (found < 0) return false;
+      cursor = found + 1;
+    }
+    return true;
+  });
+}
+
 export function classifyPortalSearchMatch(input: {
   query: string;
   title?: string;
@@ -41,6 +73,9 @@ export function classifyPortalSearchMatch(input: {
   } else if (title.includes(query)) {
     match = 'title';
     rank = 500;
+  } else if (isPortalTitlePrefixMatch(query, input.title || '')) {
+    match = 'title';
+    rank = 480;
   } else if (path.includes(query)) {
     match = 'path';
     rank = 400;

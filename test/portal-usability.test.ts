@@ -4,6 +4,7 @@ import {
   cleanPortalSearchSnippet,
   comparePortalSearchResults,
   isPortalCountedDocument,
+  isPortalTitlePrefixMatch,
   isPortalVisibleDirectory,
 } from '../src/portal-usability';
 
@@ -36,6 +37,13 @@ describe('Portal search usability', () => {
     const snippet = cleanPortalSearchSnippet('before\n```json\n{"workflow": "equipment defects"}\n```\nafter', 'equipment defects');
     expect(snippet).toContain('equipment defects');
     expect(snippet).not.toContain('```');
+  });
+
+  test('matches incomplete and one-edit title prefixes without relying on body text', () => {
+    expect(isPortalTitlePrefixMatch('Дефекты ТО', 'Дефекты ТОиР — общий обзор', 'projects/defects')).toBe(true);
+    expect(isPortalTitlePrefixMatch('Лаб', 'Лаборатория — входной контроль', 'projects/laboratoriya')).toBe(true);
+    expect(isPortalTitlePrefixMatch('Лаба', 'Лаборатория — входной контроль', 'projects/laboratoriya')).toBe(true);
+    expect(isPortalTitlePrefixMatch('Прод', 'Лаборатория — входной контроль', 'projects/laboratoriya')).toBe(false);
   });
 });
 

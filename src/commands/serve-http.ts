@@ -61,6 +61,7 @@ import {
   cleanPortalSearchSnippet,
   comparePortalSearchResults,
   isPortalCountedDocument,
+  isPortalTitlePrefixMatch,
   isPortalVisibleDirectory,
   type PortalSearchRank,
 } from '../portal-usability.ts';
@@ -1488,27 +1489,35 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const sources = await getSourceRowsForUser(userEmail);
     res.json({ sources: sources.map((source) => ({ id: source.id, name: source.name })) });
   });
-  const portalPageSlugCache = new Map<string, { expiresAt: number; slugs: string[]; complete: boolean }>();
-  const getPortalCountedSlugs = async (sourceId: string): Promise<{ slugs: string[]; complete: boolean }> => {
-    const cached = portalPageSlugCache.get(sourceId);
+  type PortalCachedPage = { slug: string; title: string; compiledTruth: string };
+  const portalPageCache = new Map<string, { expiresAt: number; pages: PortalCachedPage[]; complete: boolean }>();
+  const getPortalPages = async (sourceId: string): Promise<{ pages: PortalCachedPage[]; complete: boolean }> => {
+    const cached = portalPageCache.get(sourceId);
     if (cached && cached.expiresAt > Date.now()) return cached;
-    const slugs: string[] = [];
+    const pages: PortalCachedPage[] = [];
     const pageSize = 500;
     let offset = 0;
     let complete = true;
-    while (slugs.length < 50_000) {
-      const pages = await engine.listPages({ sourceId, limit: pageSize, offset, sort: 'slug' });
-      for (const page of pages) {
+    while (pages.length < 50_000) {
+      const batch = await engine.listPages({ sourceId, limit: pageSize, offset, sort: 'slug' });
+      for (const page of batch) {
         const slug = String(page.slug || '').replace(/^\/+|\/+$/g, '');
-        if (slug && isPortalCountedDocument(`${slug}.md`)) slugs.push(slug);
+        if (slug) pages.push({ slug, title: String(page.title || slug), compiledTruth: String(page.compiled_truth || '') });
       }
-      if (pages.length < pageSize) break;
-      offset += pages.length;
+      if (batch.length < pageSize) break;
+      offset += batch.length;
     }
-    if (slugs.length >= 50_000) complete = false;
-    const next = { expiresAt: Date.now() + 30_000, slugs, complete };
-    portalPageSlugCache.set(sourceId, next);
+    if (pages.length >= 50_000) complete = false;
+    const next = { expiresAt: Date.now() + 30_000, pages, complete };
+    portalPageCache.set(sourceId, next);
     return next;
+  };
+  const getPortalCountedSlugs = async (sourceId: string): Promise<{ slugs: string[]; complete: boolean }> => {
+    const cached = await getPortalPages(sourceId);
+    return {
+      slugs: cached.pages.map((page) => page.slug).filter((slug) => isPortalCountedDocument(`${slug}.md`)),
+      complete: cached.complete,
+    };
   };
 
   app.get("/portal/api/tree", async (req: any, res: any) => {
@@ -1710,7 +1719,12 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     try {
       const normalizedAlias = normalizeAlias(q);
       for (const source of sources) {
+        const cached = await getPortalPages(source.id);
+        const pagesBySlug = new Map(cached.pages.map((page) => [page.slug, page]));
         const slugs = new Set(await engine.resolveSlugs(q, { sourceId: source.id }));
+        for (const page of cached.pages) {
+          if (isPortalTitlePrefixMatch(q, page.title, page.slug)) slugs.add(page.slug);
+        }
         if (normalizedAlias) {
           const aliases = await engine.resolveAliases([normalizedAlias], { sourceId: source.id });
           for (const ref of aliases.get(normalizedAlias) || []) slugs.add(ref.slug);
@@ -1720,12 +1734,14 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
           if (!candidatePath) continue;
           const key = `${source.id}:${candidatePath}`;
           if (seenResults.has(key)) continue;
-          const page = await engine.getPage(slug, { sourceId: source.id });
-          if (!page) continue;
-          const candidateText = String(page.compiled_truth || '');
+          const indexedPage = pagesBySlug.get(slug);
+          const storedPage = indexedPage ? null : await engine.getPage(slug, { sourceId: source.id });
+          if (!indexedPage && !storedPage) continue;
+          const title = indexedPage?.title || storedPage?.title || slug;
+          const candidateText = indexedPage?.compiledTruth || String(storedPage?.compiled_truth || '');
           const classification = classifyPortalSearchMatch({
             query: q,
-            title: page.title || slug,
+            title,
             slug,
             path: candidatePath,
             chunkText: candidateText,
@@ -1739,7 +1755,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
             markdown: true,
             size: 0,
             match: classification.match,
-            title: page.title || slug,
+            title,
             snippet: cleanPortalSearchSnippet(candidateText, q),
             score: 0,
             rank: classification.rank,
