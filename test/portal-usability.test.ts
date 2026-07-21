@@ -44,6 +44,9 @@ describe('Portal search usability', () => {
     expect(isPortalTitlePrefixMatch('Лаб', 'Лаборатория — входной контроль', 'projects/laboratoriya')).toBe(true);
     expect(isPortalTitlePrefixMatch('Лаба', 'Лаборатория — входной контроль', 'projects/laboratoriya')).toBe(true);
     expect(isPortalTitlePrefixMatch('Прод', 'Лаборатория — входной контроль', 'projects/laboratoriya')).toBe(false);
+    const leading = classifyPortalSearchMatch({ query: 'Лаба', title: 'Лаборатория — входной контроль' });
+    const later = classifyPortalSearchMatch({ query: 'Лаба', title: '1С:УНФ — справочники для лаборатории' });
+    expect(leading.rank).toBeGreaterThan(later.rank);
   });
 });
 

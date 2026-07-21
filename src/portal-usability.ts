@@ -28,20 +28,30 @@ function isOneEditPrefix(queryToken: string, candidateToken: string): boolean {
   return differences === 1;
 }
 
-export function isPortalTitlePrefixMatch(query: string, title: string, slug = ''): boolean {
+function portalTitlePrefixWordIndex(query: string, candidate: string): number {
   const queryTokens = portalSearchTokens(query);
-  if (!queryTokens.length || queryTokens.join('').length < 3) return false;
-  const candidates = [title, slug.replace(/[\/_-]+/g, ' ')];
-  return candidates.some((candidate) => {
-    const words = portalSearchTokens(candidate);
-    let cursor = 0;
-    for (const token of queryTokens) {
-      const found = words.findIndex((word, index) => index >= cursor && isOneEditPrefix(token, word));
-      if (found < 0) return false;
-      cursor = found + 1;
-    }
-    return true;
-  });
+  if (!queryTokens.length || queryTokens.join('').length < 3) return -1;
+  const words = portalSearchTokens(candidate);
+  let cursor = 0;
+  let firstMatch = -1;
+  for (const token of queryTokens) {
+    const found = words.findIndex((word, index) => index >= cursor && isOneEditPrefix(token, word));
+    if (found < 0) return -1;
+    if (firstMatch < 0) firstMatch = found;
+    cursor = found + 1;
+  }
+  return firstMatch;
+}
+
+export function portalTitlePrefixMatchRank(query: string, title: string): number {
+  const wordIndex = portalTitlePrefixWordIndex(query, title);
+  if (wordIndex < 0) return 0;
+  return wordIndex === 0 ? 480 : 450;
+}
+
+export function isPortalTitlePrefixMatch(query: string, title: string, slug = ''): boolean {
+  return portalTitlePrefixMatchRank(query, title) > 0
+    || portalTitlePrefixWordIndex(query, slug.replace(/[\/_-]+/g, ' ')) >= 0;
 }
 
 export function classifyPortalSearchMatch(input: {
@@ -61,6 +71,7 @@ export function classifyPortalSearchMatch(input: {
     .split(/\r?\n/)
     .filter((line) => /^\s{0,3}#{1,6}\s+/.test(line))
     .map((line) => normalizeSearchText(line.replace(/^\s{0,3}#{1,6}\s+/, '')));
+  const fuzzyTitleRank = portalTitlePrefixMatchRank(query, input.title || '');
 
   let match: PortalSearchMatch = 'content';
   let rank = 100;
@@ -73,9 +84,9 @@ export function classifyPortalSearchMatch(input: {
   } else if (title.includes(query)) {
     match = 'title';
     rank = 500;
-  } else if (isPortalTitlePrefixMatch(query, input.title || '')) {
+  } else if (fuzzyTitleRank > 0) {
     match = 'title';
-    rank = 480;
+    rank = fuzzyTitleRank;
   } else if (path.includes(query)) {
     match = 'path';
     rank = 400;
