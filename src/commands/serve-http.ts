@@ -1489,7 +1489,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const sources = await getSourceRowsForUser(userEmail);
     res.json({ sources: sources.map((source) => ({ id: source.id, name: source.name })) });
   });
-  type PortalCachedPage = { slug: string; title: string; compiledTruth: string };
+  type PortalCachedPage = { slug: string; title: string };
   const portalPageCache = new Map<string, { expiresAt: number; pages: PortalCachedPage[]; complete: boolean }>();
   const getPortalPages = async (sourceId: string): Promise<{ pages: PortalCachedPage[]; complete: boolean }> => {
     const cached = portalPageCache.get(sourceId);
@@ -1502,7 +1502,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       const batch = await engine.listPages({ sourceId, limit: pageSize, offset, sort: 'slug' });
       for (const page of batch) {
         const slug = String(page.slug || '').replace(/^\/+|\/+$/g, '');
-        if (slug) pages.push({ slug, title: String(page.title || slug), compiledTruth: String(page.compiled_truth || '') });
+        if (slug) pages.push({ slug, title: String(page.title || slug) });
       }
       if (batch.length < pageSize) break;
       offset += batch.length;
@@ -1735,10 +1735,10 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
           const key = `${source.id}:${candidatePath}`;
           if (seenResults.has(key)) continue;
           const indexedPage = pagesBySlug.get(slug);
-          const storedPage = indexedPage ? null : await engine.getPage(slug, { sourceId: source.id });
+          const storedPage = await engine.getPage(slug, { sourceId: source.id });
           if (!indexedPage && !storedPage) continue;
           const title = indexedPage?.title || storedPage?.title || slug;
-          const candidateText = indexedPage?.compiledTruth || String(storedPage?.compiled_truth || '');
+          const candidateText = String(storedPage?.compiled_truth || '');
           const classification = classifyPortalSearchMatch({
             query: q,
             title,
