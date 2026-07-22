@@ -5716,6 +5716,29 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
   },
+  {
+    version: 127,
+    name: 'source_ingest_change_intelligence_snapshots',
+    // Change Intelligence v1 persists the previous normalized source record so
+    // the executor can produce deterministic, idempotent timeline field diffs.
+    // The snapshot remains internal DB state; article rendering still obeys the
+    // profile field allowlists and managed-block ownership rules.
+    idempotent: true,
+    sql: `
+      ALTER TABLE source_sync_state
+        ADD COLUMN IF NOT EXISTS last_source_snapshot JSONB;
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass AND to_regclass('public.source_sync_state') IS NOT NULL THEN
+          ALTER TABLE source_sync_state ENABLE ROW LEVEL SECURITY;
+        END IF;
+      END $$;
+    `,
+    sqlFor: { pglite: `ALTER TABLE source_sync_state ADD COLUMN IF NOT EXISTS last_source_snapshot JSONB;` },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
