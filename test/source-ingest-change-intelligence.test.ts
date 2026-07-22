@@ -72,4 +72,36 @@ describe('source-ingest Change Intelligence', () => {
     expect(second).toEqual(first);
     expect(first.map(entry => entry.source)).toEqual(second.map(entry => entry.source));
   });
+
+  test('fails closed for field changes without a stable effective timestamp', () => {
+    const p = profile();
+    delete p.change_intelligence!.effective_at_field;
+    const entries = buildSourceTimelineEntries({
+      profile: p,
+      record: {
+        external_id: 'person-1',
+        data: { person_id: 'person-1', status: 'уволен' },
+      },
+      slug: 'hcm/employees/person-1',
+      sourceId: 'internal-hr',
+      previousSnapshot: { person_id: 'person-1', status: 'работает' },
+    });
+    expect(entries).toEqual([]);
+  });
+
+  test('current_state mode never emits timeline events', () => {
+    const p = profile();
+    p.change_intelligence!.mode = 'current_state';
+    const entries = buildSourceTimelineEntries({
+      profile: p,
+      record: {
+        external_id: 'person-1',
+        data: { person_id: 'person-1', status: 'уволен', updated_at: '2026-07-22T10:00:00Z' },
+      },
+      slug: 'hcm/employees/person-1',
+      sourceId: 'internal-hr',
+      previousSnapshot: { person_id: 'person-1', status: 'работает' },
+    });
+    expect(entries).toEqual([]);
+  });
 });

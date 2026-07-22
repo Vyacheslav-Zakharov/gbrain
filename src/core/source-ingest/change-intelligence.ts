@@ -47,14 +47,14 @@ function cap(value: string, max = 160): string {
   return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
 }
 
-function effectiveDate(policy: SourceChangeIntelligencePolicy, record: SourceRecord): string {
+function effectiveTimestamp(policy: SourceChangeIntelligencePolicy, record: SourceRecord): string | null {
   const raw = policy.effective_at_field ? valueAt(record.data, policy.effective_at_field) : record.source_updated_at;
-  const parsed = raw instanceof Date ? raw : raw ? new Date(String(raw)) : new Date();
-  const date = Number.isNaN(parsed.getTime()) ? new Date() : parsed;
-  return date.toISOString().slice(0, 10);
+  if (raw === null || raw === undefined || raw === '') return null;
+  const parsed = raw instanceof Date ? raw : new Date(String(raw));
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
-function dateFromValue(value: unknown, fallback: string): string {
+function dateFromValue(value: unknown, fallback: string | null): string | null {
   if (value !== null && value !== undefined && value !== '') {
     const parsed = new Date(String(value));
     if (!Number.isNaN(parsed.getTime())) return parsed.toISOString().slice(0, 10);
@@ -97,15 +97,17 @@ export function buildSourceTimelineEntries(args: {
   previousSnapshot: Record<string, unknown> | null;
 }): TimelineBatchInput[] {
   const policy = args.profile.change_intelligence;
-  if (!policy?.enabled) return [];
+  if (!policy?.enabled || policy.mode !== 'hybrid') return [];
   const current = sourceSnapshot(args.profile, args.record);
   if (!current) return [];
-  const date = effectiveDate(policy, args.record);
+  const effectiveAt = effectiveTimestamp(policy, args.record);
+  const date = effectiveAt?.slice(0, 10) ?? null;
   if (!args.previousSnapshot) {
     return (policy.baseline_timeline_fields || []).flatMap(field => {
       const value = valueAt(current, field);
       if (value === null || value === undefined || value === '') return [];
       const eventDate = dateFromValue(value, date);
+      if (!eventDate) return [];
       const payload = stableJson({
         profile_id: args.profile.profile_id,
         external_id: args.record.external_id,
@@ -124,6 +126,7 @@ export function buildSourceTimelineEntries(args: {
       }];
     });
   }
+  if (!date || !effectiveAt) return [];
   return diffTimelineFields(policy, args.previousSnapshot, current).map(change => {
     const before = cap(displayValue(change.before));
     const after = cap(displayValue(change.after));
@@ -134,7 +137,7 @@ export function buildSourceTimelineEntries(args: {
       before: change.before ?? null,
       after: change.after ?? null,
       effective_date: date,
-      source_updated_at: args.record.source_updated_at ?? null,
+      effective_at: effectiveAt,
     });
     const eventId = createHash('sha256').update(payload).digest('hex').slice(0, 16);
     return {
