@@ -5,7 +5,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { putSourceIngestProfile, profileHash } from '../src/core/source-ingest/store.ts';
-import { runSourceIngestExecutor, sourceIngestLockId } from '../src/core/source-ingest/executor.ts';
+import { buildSourceGraphLinks, runSourceIngestExecutor, sourceIngestLockId } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
 import { listDueSourceRefreshes, parseFreshnessPolicyMs, enqueueDueSourceRefreshJobs } from '../src/core/source-ingest/freshness.ts';
@@ -125,7 +125,7 @@ describe('source-ingest Stage 3A executor', () => {
     expect(out.ok).toBe(true);
     expect(out.counts.written).toBe(2);
     expect(out.counts.skipped).toBe(1);
-    expect(out.graph_writes).toBe('deferred');
+    expect(out.graph_writes).toEqual({ created: 0, removed: 0 });
     expect(out.git_commit?.committed).toBe(true);
     expect(out.results.every(r => r.status !== 'failed')).toBe(true);
     const page = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
@@ -145,6 +145,74 @@ describe('source-ingest Stage 3A executor', () => {
     expect(rows[0].managed_block_hash).toBe(rows[0].content_fingerprint);
     expect(execFileSync('git', ['-C', repo, 'status', '--porcelain'], { encoding: 'utf8' }).trim()).toBe('');
     expect(execFileSync('git', ['-C', repo, 'log', '-1', '--oneline'], { encoding: 'utf8' })).toContain('source-ingest run_id=run-test-1');
+  }, 30000);
+
+  test('keeps sync identity and snapshots independent per profile projection', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    const restricted: SourceIngestProfile = {
+      ...profile,
+      profile_id: 'fake-source-vehicle-restricted-v1',
+      target: { ...profile.target, slug_template: 'restricted/vehicles/{{ code | slugify }}' },
+      security: { classification: 'restricted', pii: true },
+    };
+    await putSourceIngestProfile(engine, restricted, { createdBy: 'test', changeNote: 'second projection' });
+    expect((await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-shared-projection', no_embed: true })).ok).toBe(true);
+    expect((await runSourceIngestExecutor(engine, { profile_id: restricted.profile_id, run_id: 'run-restricted-projection', no_embed: true })).ok).toBe(true);
+    const rows = await engine.executeRaw<{ profile_id: string; n: number }>(
+      `SELECT profile_id, count(*)::int AS n
+         FROM source_sync_state
+        WHERE connector_id = 'fake-source' AND source_object = 'vehicle'
+        GROUP BY profile_id ORDER BY profile_id`,
+    );
+    expect(rows).toEqual([
+      { profile_id: 'fake-source-vehicle-restricted-v1', n: 2 },
+      { profile_id: 'fake-source-vehicle-v1', n: 2 },
+    ]);
+  }, 30000);
+
+  test('projects array-valued assignments into typed graph links without duplicates', () => {
+    const graphProfile: SourceIngestProfile = {
+      ...profile,
+      links: [{
+        id: 'holds-position',
+        type: 'holds_position',
+        target: {
+          type: 'position',
+          lookup: 'field_value',
+          value_field: 'position_ids',
+          slug_template: 'business-architecture/positions/{{ value }}',
+        },
+      }],
+    };
+    const links = buildSourceGraphLinks(graphProfile, { position_ids: ['pos-1', 'pos-2', 'pos-1'] }, 'hcm/employees/alice-example', 'shared');
+    expect(links.map(l => [l.link_type, l.to_slug, l.link_source, l.origin_field])).toEqual([
+      ['holds_position', 'business-architecture/positions/pos-1', 'source-ingest', 'holds-position'],
+      ['holds_position', 'business-architecture/positions/pos-2', 'source-ingest', 'holds-position'],
+    ]);
+    expect(links.every(l => l.from_source_id === 'shared' && l.to_source_id === 'shared')).toBe(true);
+  });
+
+  test('writes typed source-ingest graph links idempotently after durable article commits', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await importFromContent(engine, 'facility-almaty-yard', '---\ntype: facility\ntitle: Example Facility\n---\n', { sourceId: 'shared', noEmbed: true });
+    const graphProfile: SourceIngestProfile = {
+      ...profile,
+      profile_id: 'fake-source-vehicle-graph-v1',
+      links: [{
+        id: 'located-at-facility',
+        type: 'located_at',
+        target: { type: 'facility', lookup: 'field_value', value_field: 'location_id', slug_template: '{{ value }}' },
+      }],
+    };
+    await putSourceIngestProfile(engine, graphProfile, { createdBy: 'test', changeNote: 'graph projection' });
+    const first = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-first', no_embed: true });
+    expect(first.graph_writes).toEqual({ created: 2, removed: 0 });
+    const second = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-second', no_embed: true });
+    expect(second.graph_writes).toEqual({ created: 0, removed: 0 });
+    const links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(links.some(l => l.to_slug === 'facility-almaty-yard' && l.link_type === 'located_at' && l.link_source === 'source-ingest')).toBe(true);
   }, 30000);
 
   test('draft template only uses selected discovery fields and drops noisy/unselected fields', () => {
@@ -530,7 +598,7 @@ describe('source-ingest Stage 3A executor', () => {
 
     await putSourceIngestProfile(engine, {
       ...profile,
-      update_policy: { ...profile.update_policy, manage_generated_article: true },
+      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true },
       identity: { ...profile.identity, existing_slug_map: { 'veh-001': slug }, require_explicit_resolution: true },
     }, { createdBy: 'test', changeNote: 'require complete adoption plan' });
     await expect(runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-incomplete', no_embed: true }))
@@ -539,7 +607,7 @@ describe('source-ingest Stage 3A executor', () => {
 
     await putSourceIngestProfile(engine, {
       ...profile,
-      update_policy: { ...profile.update_policy, manage_generated_article: true },
+      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true },
       identity: {
         ...profile.identity,
         existing_slug_map: { 'veh-001': slug },
@@ -553,6 +621,9 @@ describe('source-ingest Stage 3A executor', () => {
     expect(refreshed.ok).toBe(true);
     const page = await engine.getPage(slug, { sourceId: 'shared' });
     expect(page?.compiled_truth).toContain('Human-owned context.');
+    expect(page?.compiled_truth).toContain('gbrain-source-article:start');
+    expect(page?.compiled_truth).toContain('Toyota Hilux A001');
+    expect(page?.compiled_truth?.indexOf('Human-owned context.')).toBeLessThan(page?.compiled_truth?.indexOf('gbrain-source-article:start') ?? -1);
     expect(page?.compiled_truth).toContain('source-sync:start');
     expect(page?.timeline).toContain('Human timeline entry.');
     const persistedMarkdown = readFileSync(join(repo, `${slug}.md`), 'utf8');
@@ -641,7 +712,7 @@ describe('source-ingest Stage 3A executor', () => {
     await seed(repo);
     const managedProfile: SourceIngestProfile = {
       ...profile,
-      update_policy: { ...profile.update_policy, manage_generated_article: true },
+      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true },
     };
     await putSourceIngestProfile(engine, managedProfile, { createdBy: 'test', changeNote: 'manage generated article body' });
     await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-managed-article-1', limit: 1, no_embed: true });
