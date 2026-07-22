@@ -120,38 +120,48 @@ function samplePage(profile: SourceIngestProfile, record: SourceRecord) {
 }
 
 function summarizeLinkRule(rule: SourceLinkRule, records: SourceRecord[]) {
-  const values = new Map<string, number>();
   const unresolved: string[] = [];
   const sampleEdges: Array<{ from_external_id: string; target_value: string }> = [];
   const applies = records.filter(r => ruleApplies(rule, r));
+  let edgeCount = 0;
+  let matchedRecords = 0;
+  let multiTargetRecords = 0;
   for (const r of applies) {
     const field = rule.target.value_field;
     const raw = field ? valueAt(r.data, field) : undefined;
-    if (raw === undefined || raw === null || raw === '') {
+    const targets = (Array.isArray(raw) ? raw : [raw])
+      .flatMap(value => Array.isArray(value) ? value : [value])
+      .map(value => value === undefined || value === null ? '' : String(value).trim())
+      .filter(Boolean);
+    const uniqueTargets = Array.from(new Set(targets));
+    if (uniqueTargets.length === 0) {
       unresolved.push(r.external_id);
       continue;
     }
-    const value = String(raw);
-    values.set(value, (values.get(value) || 0) + 1);
-    if (sampleEdges.length < 5) sampleEdges.push({ from_external_id: r.external_id, target_value: value });
+    matchedRecords++;
+    edgeCount += uniqueTargets.length;
+    if (uniqueTargets.length > 1) multiTargetRecords++;
+    for (const value of uniqueTargets) {
+      if (sampleEdges.length < 5) sampleEdges.push({ from_external_id: r.external_id, target_value: value });
+    }
   }
-  const ambiguousTargets = Array.from(values.entries()).filter(([, count]) => count > 1).map(([target_value, count]) => ({ target_value, count }));
   return {
     rule_id: rule.id,
     type: rule.type,
     target_type: rule.target.type,
-    matched: applies.length - unresolved.length,
+    matched: matchedRecords,
+    edge_count: edgeCount,
+    multi_target_records: multiTargetRecords,
     total: records.length,
     applies_to: applies.length,
     unresolved_bucket: unresolved.length,
-    ambiguous_bucket: ambiguousTargets.length,
+    ambiguous_bucket: 0,
     low_confidence_bucket: (rule.confidence ?? 1) < 0.75 ? applies.length : 0,
     unresolved_sample: unresolved.slice(0, 5),
-    ambiguous_targets: ambiguousTargets.slice(0, 5),
+    ambiguous_targets: [],
     sample_edges: sampleEdges,
     warnings: [
       ...((rule.confidence ?? 1) < 0.75 ? ['low_confidence_rule'] : []),
-      ...(ambiguousTargets.length > 0 ? ['ambiguous_target_values_in_sample'] : []),
     ],
   };
 }
