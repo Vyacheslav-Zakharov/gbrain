@@ -579,6 +579,7 @@ export async function runSourceIngestExecutor(
     let renderedSlug = templateSlug;
     let renderedPath = `${renderedSlug}.md`;
     let createdThisRecord = false;
+    let pageDurable = false;
     try {
       const resolvedTarget = resolvedTargets.get(record.external_id);
       const identitySlug = resolvedTarget?.identitySlug;
@@ -674,11 +675,15 @@ export async function runSourceIngestExecutor(
         sourceId,
         previousSnapshot,
       });
-      const timelineCreated = await engine.addTimelineEntriesBatch(timelineEntries, { auditSite: 'source-ingest.change-intelligence' });
       const writePathDirty = writeThrough.path
         ? Boolean(execFileSync('git', ['-C', storage.local_path, 'status', '--porcelain', '--', writeThrough.path], { encoding: 'utf8' }).trim())
         : false;
       if (writeThrough.path && writePathDirty) writtenPaths.push(writeThrough.path);
+      if (writePathDirty && writeThrough.path) {
+        lastRecordCommit = await commitGitBackedRun(storage.local_path, [writeThrough.path], runId, profile.profile_id);
+      }
+      pageDurable = true;
+      const timelineCreated = await engine.addTimelineEntriesBatch(timelineEntries, { auditSite: 'source-ingest.change-intelligence' });
       await writeSyncState(engine, {
         profile,
         profileVersion: version,
@@ -700,18 +705,15 @@ export async function runSourceIngestExecutor(
         priorVersionId,
         result: status === 'unchanged' ? 'unchanged' : 'success',
       });
-      if (writePathDirty && writeThrough.path) {
-        lastRecordCommit = await commitGitBackedRun(storage.local_path, [writeThrough.path], runId, profile.profile_id);
-      }
       await appendCompleted(engine, key, [checkpointKey]);
       completed.add(checkpointKey);
       results.push({ external_id: record.external_id, slug: rendered.slug, status, warnings, content_hash: after?.content_hash ?? null, write_through: writeThrough, timeline_created: timelineCreated });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (createdThisRecord) {
+      if (!pageDurable && createdThisRecord) {
         try { await engine.deletePage(renderedSlug, { sourceId }); } catch {}
       }
-      if (storage.mode === 'git-backed') cleanupUncommittedPath(storage.local_path, renderedPath);
+      if (!pageDurable && storage.mode === 'git-backed') cleanupUncommittedPath(storage.local_path, renderedPath);
       results.push({ external_id: record.external_id, slug: renderedSlug, status: 'failed', reason: msg });
       await writeSyncState(engine, { profile, profileVersion: version, record, slug: renderedSlug, runId, managedBlockHash: '', sourceHash: hashText(stableJson(record.data)), sourceSnapshot: null, result: 'failed', error: msg });
       await appendRunItem(engine, { profile, profileVersion: version, record, slug: renderedSlug, runId, action: 'failed', result: 'failed', error: msg });
