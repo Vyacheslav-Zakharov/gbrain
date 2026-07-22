@@ -18,6 +18,7 @@ import { getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './co
 import { buildProfileAllRecords } from './source-fetch.ts';
 import { normalizeTransformConfig } from './transform.ts';
 import { LockUnavailableError, withRefreshingLock, syncLockId } from '../db-lock.ts';
+import { buildSourceTimelineEntries, changeIntelligenceFetchFields, sourceSnapshot } from './change-intelligence.ts';
 
 export interface SourceIngestExecutorOptions {
   profile_id: string;
@@ -37,6 +38,7 @@ export interface SourceIngestRecordResult {
   warnings?: string[];
   content_hash?: string | null;
   write_through?: { written: boolean; path?: string; skipped?: string; error?: string };
+  timeline_created?: number;
 }
 
 export interface SourceIngestExecutorResult {
@@ -268,6 +270,7 @@ async function writeSyncState(engine: BrainEngine, args: {
   runId: string;
   managedBlockHash: string;
   sourceHash: string;
+  sourceSnapshot: Record<string, unknown> | null;
   result: string;
   error?: string | null;
 }) {
@@ -275,8 +278,8 @@ async function writeSyncState(engine: BrainEngine, args: {
   await engine.executeRaw(
     `INSERT INTO source_sync_state
        (connector_id, source_object, external_id, slug, approved_source_id, profile_id, profile_version,
-        content_fingerprint, managed_block_hash, last_source_hash, source_updated_at, last_synced_at, stale_after, freshness_policy, run_id, last_result, last_error, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,$10,now(),$11,$12,$13,$14,$15,now())
+        content_fingerprint, managed_block_hash, last_source_hash, last_source_snapshot, source_updated_at, last_synced_at, stale_after, freshness_policy, run_id, last_result, last_error, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,$10,$11,now(),$12,$13,$14,$15,$16,now())
      ON CONFLICT (connector_id, source_object, external_id) DO UPDATE SET
        slug = EXCLUDED.slug,
        approved_source_id = EXCLUDED.approved_source_id,
@@ -285,6 +288,7 @@ async function writeSyncState(engine: BrainEngine, args: {
        content_fingerprint = EXCLUDED.content_fingerprint,
        managed_block_hash = EXCLUDED.managed_block_hash,
        last_source_hash = EXCLUDED.last_source_hash,
+       last_source_snapshot = COALESCE(EXCLUDED.last_source_snapshot, source_sync_state.last_source_snapshot),
        source_updated_at = EXCLUDED.source_updated_at,
        last_synced_at = EXCLUDED.last_synced_at,
        stale_after = EXCLUDED.stale_after,
@@ -303,6 +307,7 @@ async function writeSyncState(engine: BrainEngine, args: {
       args.profileVersion,
       args.managedBlockHash,
       hashText(stableJson(args.record.data)),
+      args.sourceSnapshot,
       args.record.source_updated_at ?? null,
       staleAfter?.toISOString() ?? null,
       args.profile.freshness?.policy ?? null,
@@ -445,8 +450,14 @@ export async function runSourceIngestExecutor(
   const seenExternalIds = new Set(records.map(r => r.external_id));
   let iterable: AsyncIterable<{ records: SourceRecord[]; cursor?: string | null }> | undefined;
   let forceFullScanForFailedRetry = false;
-  const fetchFields = Array.isArray(profile.mapping?.source_fields) ? profile.mapping.source_fields : profile.update_policy.field_allowlist;
-  const fetchOpts = fetchFields?.length ? { fields: fetchFields } : {};
+  const configuredFetchFields = Array.isArray(profile.mapping?.source_fields) ? profile.mapping.source_fields : profile.update_policy.field_allowlist;
+  const fetchFields = Array.from(new Set([
+    ...(configuredFetchFields || []),
+    profile.identity.external_id_field,
+    profile.identity.display_name_field,
+    ...changeIntelligenceFetchFields(profile),
+  ].filter(Boolean)));
+  const fetchOpts = fetchFields.length ? { fields: fetchFields } : {};
   if (!transformedRecords && opts.changed_since) {
     const failedRows = await engine.executeRaw<{ external_id: string }>(
       `SELECT external_id
@@ -616,8 +627,8 @@ export async function runSourceIngestExecutor(
       renderedPath = `${rendered.slug}.md`;
       const existingBlock = existing ? existingManagedBlock(existing.compiled_truth) : null;
       const warnings: string[] = [];
-      const oldState = await engine.executeRaw<{ managed_block_hash: string | null; content_fingerprint: string | null }>(
-        `SELECT managed_block_hash, content_fingerprint FROM source_sync_state WHERE connector_id = $1 AND source_object = $2 AND external_id = $3`,
+      const oldState = await engine.executeRaw<{ managed_block_hash: string | null; content_fingerprint: string | null; last_source_snapshot: unknown }>(
+        `SELECT managed_block_hash, content_fingerprint, last_source_snapshot FROM source_sync_state WHERE connector_id = $1 AND source_object = $2 AND external_id = $3`,
         [profile.source_connector, profile.source_object, record.external_id],
       );
       const priorManagedHash = oldState[0]?.managed_block_hash ?? oldState[0]?.content_fingerprint;
@@ -643,6 +654,27 @@ export async function runSourceIngestExecutor(
       if (!writeThrough.written) throw new Error(`write-through failed: ${writeThrough.skipped || writeThrough.error || 'unknown'}`);
       const after = await engine.getPage(rendered.slug, { sourceId });
       const status = beforeHash && after?.content_hash === beforeHash ? 'unchanged' : 'written';
+      const rawPreviousSnapshot = oldState[0]?.last_source_snapshot;
+      let previousSnapshot: Record<string, unknown> | null = null;
+      if (rawPreviousSnapshot && typeof rawPreviousSnapshot === 'object' && !Array.isArray(rawPreviousSnapshot)) {
+        previousSnapshot = rawPreviousSnapshot as Record<string, unknown>;
+      } else if (typeof rawPreviousSnapshot === 'string') {
+        try {
+          const parsed = JSON.parse(rawPreviousSnapshot) as unknown;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) previousSnapshot = parsed as Record<string, unknown>;
+          else warnings.push('change_intelligence_snapshot_invalid');
+        } catch {
+          warnings.push('change_intelligence_snapshot_invalid');
+        }
+      }
+      const timelineEntries = buildSourceTimelineEntries({
+        profile,
+        record,
+        slug: rendered.slug,
+        sourceId,
+        previousSnapshot,
+      });
+      const timelineCreated = await engine.addTimelineEntriesBatch(timelineEntries, { auditSite: 'source-ingest.change-intelligence' });
       const writePathDirty = writeThrough.path
         ? Boolean(execFileSync('git', ['-C', storage.local_path, 'status', '--porcelain', '--', writeThrough.path], { encoding: 'utf8' }).trim())
         : false;
@@ -655,6 +687,7 @@ export async function runSourceIngestExecutor(
         runId,
         managedBlockHash: rendered.managedBlockHash,
         sourceHash: hashText(stableJson(record.data)),
+        sourceSnapshot: sourceSnapshot(profile, record),
         result: status === 'unchanged' ? 'unchanged' : 'success',
       });
       await appendRunItem(engine, {
@@ -672,7 +705,7 @@ export async function runSourceIngestExecutor(
       }
       await appendCompleted(engine, key, [checkpointKey]);
       completed.add(checkpointKey);
-      results.push({ external_id: record.external_id, slug: rendered.slug, status, warnings, content_hash: after?.content_hash ?? null, write_through: writeThrough });
+      results.push({ external_id: record.external_id, slug: rendered.slug, status, warnings, content_hash: after?.content_hash ?? null, write_through: writeThrough, timeline_created: timelineCreated });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (createdThisRecord) {
@@ -680,7 +713,7 @@ export async function runSourceIngestExecutor(
       }
       if (storage.mode === 'git-backed') cleanupUncommittedPath(storage.local_path, renderedPath);
       results.push({ external_id: record.external_id, slug: renderedSlug, status: 'failed', reason: msg });
-      await writeSyncState(engine, { profile, profileVersion: version, record, slug: renderedSlug, runId, managedBlockHash: '', sourceHash: hashText(stableJson(record.data)), result: 'failed', error: msg });
+      await writeSyncState(engine, { profile, profileVersion: version, record, slug: renderedSlug, runId, managedBlockHash: '', sourceHash: hashText(stableJson(record.data)), sourceSnapshot: null, result: 'failed', error: msg });
       await appendRunItem(engine, { profile, profileVersion: version, record, slug: renderedSlug, runId, action: 'failed', result: 'failed', error: msg });
     }
   }

@@ -500,6 +500,8 @@ export class PGLiteEngine implements BrainEngine {
                 WHERE table_schema='public' AND table_name='source_sync_state') AS source_sync_state_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='source_sync_state' AND column_name='managed_block_hash') AS source_sync_state_managed_block_hash_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='source_sync_state' AND column_name='last_source_snapshot') AS source_sync_state_last_source_snapshot_exists,
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name='source_ingest_profiles') AS source_ingest_profiles_exists,
         EXISTS (SELECT 1 FROM information_schema.tables
@@ -548,6 +550,7 @@ export class PGLiteEngine implements BrainEngine {
       pages_links_extracted_at_exists: boolean;
       source_sync_state_exists: boolean;
       source_sync_state_managed_block_hash_exists: boolean;
+      source_sync_state_last_source_snapshot_exists: boolean;
       source_ingest_profiles_exists: boolean;
       source_ingest_run_items_exists: boolean;
     };
@@ -630,6 +633,8 @@ export class PGLiteEngine implements BrainEngine {
     // Existing v120 brains have source_sync_state already, so CREATE TABLE IF
     // NOT EXISTS in the schema blob is a no-op and cannot add the column.
     const needsSourceSyncManagedBlockHash = probe.source_sync_state_exists && !probe.source_sync_state_managed_block_hash_exists;
+    // v127: deterministic Change Intelligence compares the last JSON snapshot.
+    const needsSourceSyncLastSourceSnapshot = probe.source_sync_state_exists && !probe.source_sync_state_last_source_snapshot_exists;
     // v125 (source_ingest_run_items_backfill): repair brains stamped at v120+
     // before the append-only run ledger table was folded into v120.
     const needsSourceIngestRunItems = probe.source_ingest_profiles_exists && !probe.source_ingest_run_items_exists;
@@ -646,6 +651,7 @@ export class PGLiteEngine implements BrainEngine {
         && !needsPagesEmbeddingSignature
         && !needsPagesLinksExtractedAt
         && !needsSourceSyncManagedBlockHash
+        && !needsSourceSyncLastSourceSnapshot
         && !needsSourceIngestRunItems) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
@@ -900,6 +906,12 @@ export class PGLiteEngine implements BrainEngine {
       // visible before schema replay and early post-init code paths.
       await this.db.exec(`
         ALTER TABLE source_sync_state ADD COLUMN IF NOT EXISTS managed_block_hash TEXT;
+      `);
+    }
+
+    if (needsSourceSyncLastSourceSnapshot) {
+      await this.db.exec(`
+        ALTER TABLE source_sync_state ADD COLUMN IF NOT EXISTS last_source_snapshot JSONB;
       `);
     }
 

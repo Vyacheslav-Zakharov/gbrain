@@ -36,6 +36,8 @@ export interface SourceChangeIntelligencePolicy {
   effective_at_field?: string;
   current_state_fields: string[];
   timeline_fields: string[];
+  /** Fields that become dated baseline events on the first successful snapshot. */
+  baseline_timeline_fields?: string[];
   relationship_rules: SourceChangeRelationshipRule[];
   related_pages: { policy: 'graph_projection' | 'managed_derived_blocks' | 'agent_proposals' };
   agent: {

@@ -584,6 +584,58 @@ describe('source-ingest Stage 3A executor', () => {
     expect(sync[0]).toEqual({ run_id: 'run-test-2', last_result: 'unchanged' });
   }, 30000);
 
+  test('change intelligence snapshots source rows and writes idempotent timeline diffs', async () => {
+    const repo = tempGitRepo();
+    const intelligentProfile: SourceIngestProfile = {
+      ...profile,
+      change_intelligence: {
+        version: 1,
+        enabled: true,
+        mode: 'hybrid',
+        snapshot_strategy: 'full_record',
+        effective_at_field: 'updated_at',
+        current_state_fields: ['name', 'status', 'updated_at'],
+        timeline_fields: ['status'],
+        baseline_timeline_fields: [],
+        relationship_rules: [],
+        related_pages: { policy: 'graph_projection' },
+        agent: { enabled: false, semantic_fields: [], confidence_threshold: 0.9, allowed_actions: [] },
+        approval: { deterministic: 'auto', agent: 'review', cascade: 'review' },
+      },
+    };
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES ($1,$2,$3,'{"federated": true}'::jsonb)
+       ON CONFLICT (id) DO UPDATE SET local_path = EXCLUDED.local_path`,
+      ['shared', 'shared', repo],
+    );
+    await putSourceIngestProfile(engine, intelligentProfile, { createdBy: 'test', changeNote: 'change-intelligence' });
+
+    const baseline = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-ci-baseline', limit: 1, no_embed: true });
+    expect(baseline.results[0]?.timeline_created).toBe(0);
+    const snapshot = await engine.executeRaw<{ last_source_snapshot: Record<string, unknown> }>(
+      `SELECT last_source_snapshot FROM source_sync_state WHERE external_id = 'veh-001'`,
+    );
+    expect(snapshot[0].last_source_snapshot).toMatchObject({ id: 'veh-001', status: 'active' });
+
+    // Simulate the previous source state while keeping the connector's next row
+    // deterministic. The next run observes repair -> active and emits one event.
+    await engine.executeRaw(
+      `UPDATE source_sync_state
+          SET last_source_snapshot = jsonb_set(last_source_snapshot, '{status}', '"repair"'::jsonb)
+        WHERE external_id = 'veh-001'`,
+    );
+    const changed = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-ci-changed', limit: 1, no_embed: true });
+    expect(changed.results[0]?.timeline_created).toBe(1);
+    const timeline = await engine.getTimeline('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(timeline).toHaveLength(1);
+    expect(timeline[0].summary).toBe('Изменено поле «status»: repair → active');
+    expect(timeline[0].source).toMatch(/^source-ingest:fake-source-vehicle-v1:[a-f0-9]{16}$/);
+
+    const repeated = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-ci-repeated', limit: 1, no_embed: true });
+    expect(repeated.results[0]?.timeline_created).toBe(0);
+    expect(await engine.getTimeline('source-ingest/vehicles/a-001', { sourceId: 'shared' })).toHaveLength(1);
+  }, 30000);
+
   test('managed generated article refreshes source-created body and preserves manual text outside the article block', async () => {
     const repo = tempGitRepo();
     await seed(repo);
