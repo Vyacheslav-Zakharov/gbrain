@@ -288,8 +288,9 @@ function escapeManagedRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function articleBlockRe(profileId: string, externalRef: string): RegExp {
-  return new RegExp(`<!-- gbrain-source-article:start\\s+profile="${escapeManagedRe(profileId)}"\\s+external_ref="${escapeManagedRe(externalRef)}"\\s+-->[\\s\\S]*?<!-- gbrain-source-article:end -->`, 'm');
+function articleBlockRe(profileId: string, externalRef?: string): RegExp {
+  const ref = externalRef === undefined ? '[^\"]*' : escapeManagedRe(externalRef);
+  return new RegExp(`<!-- gbrain-source-article:start\\s+profile="${escapeManagedRe(profileId)}"\\s+external_ref="${ref}"\\s+-->[\\s\\S]*?<!-- gbrain-source-article:end -->`, 'm');
 }
 
 function renderArticleManagedBlock(profileId: string, externalRef: string, body: string): string {
@@ -305,7 +306,8 @@ function mergeGeneratedArticle(
 ): string {
   const articleBlock = renderArticleManagedBlock(profileId, externalRef, articleBody);
   const sourceMerged = mergeManagedBlock(existingContent, profileId, externalRef, sourceBody).content;
-  const match = sourceMerged.match(articleBlockRe(profileId, externalRef));
+  const match = sourceMerged.match(articleBlockRe(profileId, externalRef))
+    ?? sourceMerged.match(articleBlockRe(profileId));
   if (match) return sourceMerged.replace(match[0], articleBlock);
 
   // One-time migration for a page already owned by this source identity. The legacy
@@ -324,7 +326,8 @@ function mergeAdoptedGeneratedArticle(
 ): string {
   const articleBlock = renderArticleManagedBlock(profileId, externalRef, articleBody);
   const sourceMerged = mergeManagedBlock(existingContent, profileId, externalRef, sourceBody).content;
-  const match = sourceMerged.match(articleBlockRe(profileId, externalRef));
+  const match = sourceMerged.match(articleBlockRe(profileId, externalRef))
+    ?? sourceMerged.match(articleBlockRe(profileId));
   if (match) return sourceMerged.replace(match[0], articleBlock);
   const sourceStart = sourceMerged.indexOf(SOURCE_SYNC_BEGIN);
   if (sourceStart < 0) return `${sourceMerged.trimEnd()}\n\n${articleBlock}\n`;
@@ -350,7 +353,9 @@ function renderMarkdown(
   explicitAdoption = false,
 ) {
   const slug = targetSlug || renderSlugTemplate(profile.target.slug_template, record.data);
-  const externalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
+  const externalRef = profile.update_policy.include_external_id_in_content === false
+    ? 'hidden'
+    : `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
   const article = renderArticleTemplate(profile, record);
   const generatedBlock = renderManagedBlock(profile.profile_id, externalRef, managedBody(profile, record));
   const manageGeneratedArticle = profile.update_policy.manage_generated_article === true

@@ -11,8 +11,9 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function blockStartRe(profileId: string, externalRef: string): RegExp {
-  return new RegExp(`<!-- gbrain-source-sync:start\\s+profile="${escapeRe(profileId)}"\\s+external_ref="${escapeRe(externalRef)}"\\s+-->[\\s\\S]*?<!-- gbrain-source-sync:end -->`, 'm');
+function blockStartRe(profileId: string, externalRef?: string): RegExp {
+  const ref = externalRef === undefined ? '[^\"]*' : escapeRe(externalRef);
+  return new RegExp(`<!-- gbrain-source-sync:start\\s+profile="${escapeRe(profileId)}"\\s+external_ref="${ref}"\\s+-->[\\s\\S]*?<!-- gbrain-source-sync:end -->`, 'm');
 }
 
 export function renderManagedBlock(profileId: string, externalRef: string, body: string): string {
@@ -21,7 +22,8 @@ export function renderManagedBlock(profileId: string, externalRef: string, body:
 
 export function mergeManagedBlock(existingContent: string, profileId: string, externalRef: string, body: string): ManagedBlockMergeResult {
   const nextBlock = renderManagedBlock(profileId, externalRef, body);
-  const match = existingContent.match(blockStartRe(profileId, externalRef));
+  const match = existingContent.match(blockStartRe(profileId, externalRef))
+    ?? existingContent.match(blockStartRe(profileId));
   if (!match) {
     const sep = existingContent.endsWith('\n') || existingContent.length === 0 ? '' : '\n\n';
     return { content: `${existingContent}${sep}${nextBlock}\n`, action: 'inserted' };
