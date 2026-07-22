@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { existsSync, lstatSync, readdirSync, rmSync } from 'fs';
-import type { BrainEngine } from '../engine.ts';
+import type { BrainEngine, LinkBatchInput } from '../engine.ts';
 import { importFromContent } from '../import-file.ts';
 import { writePageThrough } from '../write-through.ts';
 import { appendCompleted, clearOpCheckpoint, fingerprint, loadOpCheckpoint, type OpCheckpointKey } from '../op-checkpoint.ts';
@@ -11,7 +11,7 @@ import { renderManagedBlock, mergeManagedBlock, SOURCE_SYNC_BEGIN, SOURCE_SYNC_E
 import { renderSlugTemplate } from './dry-run.ts';
 import { renderArticleTemplate } from './template-renderer.ts';
 import { profileHash, stableJson } from './store.ts';
-import { validateSourceIngestProfile, type SourceFilterRule, type SourceIngestProfile } from './profile-schema.ts';
+import { validateSourceIngestProfile, type SourceFilterRule, type SourceIngestProfile, type SourceLinkRule } from './profile-schema.ts';
 import { resolveSourceIngestStorageMode, type SourceIngestStorageMode } from './executor-preflight.ts';
 import { nextStaleAfter } from './freshness.ts';
 import { getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
@@ -39,6 +39,8 @@ export interface SourceIngestRecordResult {
   content_hash?: string | null;
   write_through?: { written: boolean; path?: string; skipped?: string; error?: string };
   timeline_created?: number;
+  graph_links_created?: number;
+  graph_links_removed?: number;
 }
 
 export interface SourceIngestExecutorResult {
@@ -49,7 +51,7 @@ export interface SourceIngestExecutorResult {
   storage: SourceIngestStorageMode;
   counts: { sampled: number; written: number; unchanged: number; skipped: number; failed: number };
   results: SourceIngestRecordResult[];
-  graph_writes: 'deferred';
+  graph_writes: 'deferred' | { created: number; removed: number };
   git_commit?: { committed: boolean; sha?: string; reason?: string };
   checkpoint: { op: string; fingerprint: string; loaded: number; cleared: boolean };
 }
@@ -125,6 +127,57 @@ function includeRecord(profile: SourceIngestProfile, record: SourceRecord): { in
   return { include: true };
 }
 
+function graphValues(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value : [value];
+  return [...new Set(raw
+    .filter(v => v !== undefined && v !== null && v !== '')
+    .map(v => String(v).trim())
+    .filter(Boolean))];
+}
+
+function graphTargetSlugs(rule: SourceLinkRule, data: Record<string, unknown>): string[] {
+  const valueField = rule.target.value_field;
+  if (!valueField) return [];
+  const values = graphValues(valueAt(data, valueField));
+  if (rule.target.lookup === 'slug' && !rule.target.slug_template) return values;
+  if (!rule.target.slug_template) return [];
+  return values.map(value => renderSlugTemplate(rule.target.slug_template!, { ...data, value }));
+}
+
+/** Deterministic graph projection for one source record. Array-valued fields
+ * intentionally fan out so one person can hold multiple simultaneous
+ * company/department/position assignments. */
+export function buildSourceGraphLinks(
+  profile: SourceIngestProfile,
+  data: Record<string, unknown>,
+  fromSlug: string,
+  sourceId: string,
+): LinkBatchInput[] {
+  const links: LinkBatchInput[] = [];
+  const seen = new Set<string>();
+  for (const rule of profile.links || []) {
+    if ((rule.when || []).some(filter => !filterMatches(filter, data))) continue;
+    for (const toSlug of graphTargetSlugs(rule, data)) {
+      const key = `${rule.type}\u0000${toSlug}\u0000${rule.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      links.push({
+        from_slug: fromSlug,
+        to_slug: toSlug,
+        link_type: rule.type,
+        context: `source-ingest rule ${rule.id}`,
+        link_source: 'source-ingest',
+        origin_slug: fromSlug,
+        origin_field: rule.id,
+        from_source_id: sourceId,
+        to_source_id: sourceId,
+        origin_source_id: sourceId,
+      });
+    }
+  }
+  return links;
+}
+
 function hashText(s: string): string {
   return createHash('sha256').update(s).digest('hex');
 }
@@ -176,11 +229,26 @@ function mergeGeneratedArticle(
   if (match) return sourceMerged.replace(match[0], articleBlock);
 
   // One-time migration for a page already owned by this source identity. The legacy
-  // generated article occupied everything before the source-data block. Explicitly
-  // adopted pages never enter this path, so their human-owned body remains untouched.
+  // generated article occupied everything before the source-data block.
   const sourceStart = sourceMerged.indexOf(SOURCE_SYNC_BEGIN);
   if (sourceStart < 0) return `${articleBlock}\n\n${sourceMerged.trimStart()}`;
   return `${articleBlock}\n\n${sourceMerged.slice(sourceStart).trimStart()}`;
+}
+
+function mergeAdoptedGeneratedArticle(
+  existingContent: string,
+  profileId: string,
+  externalRef: string,
+  articleBody: string,
+  sourceBody: string,
+): string {
+  const articleBlock = renderArticleManagedBlock(profileId, externalRef, articleBody);
+  const sourceMerged = mergeManagedBlock(existingContent, profileId, externalRef, sourceBody).content;
+  const match = sourceMerged.match(articleBlockRe(profileId, externalRef));
+  if (match) return sourceMerged.replace(match[0], articleBlock);
+  const sourceStart = sourceMerged.indexOf(SOURCE_SYNC_BEGIN);
+  if (sourceStart < 0) return `${sourceMerged.trimEnd()}\n\n${articleBlock}\n`;
+  return `${sourceMerged.slice(0, sourceStart).trimEnd()}\n\n${articleBlock}\n\n${sourceMerged.slice(sourceStart).trimStart()}`;
 }
 
 function yamlScalar(v: unknown): string {
@@ -205,14 +273,17 @@ function renderMarkdown(
   const externalRef = `${profile.source_connector}:${profile.source_object}:${record.external_id}`;
   const article = renderArticleTemplate(profile, record);
   const generatedBlock = renderManagedBlock(profile.profile_id, externalRef, managedBody(profile, record));
-  const manageGeneratedArticle = profile.update_policy.manage_generated_article === true && !explicitAdoption;
+  const manageGeneratedArticle = profile.update_policy.manage_generated_article === true
+    && (!explicitAdoption || profile.update_policy.manage_adopted_article === true);
   const articleBody = manageGeneratedArticle
     ? renderArticleManagedBlock(profile.profile_id, externalRef, article.body)
     : article.body.trimEnd();
   const articleBodyWithBlock = `${articleBody}\n\n${generatedBlock}\n`;
   const mergedCore = existingBody
     ? manageGeneratedArticle
-      ? mergeGeneratedArticle(existingBody, profile.profile_id, externalRef, article.body, managedBody(profile, record))
+      ? explicitAdoption
+        ? mergeAdoptedGeneratedArticle(existingBody, profile.profile_id, externalRef, article.body, managedBody(profile, record))
+        : mergeGeneratedArticle(existingBody, profile.profile_id, externalRef, article.body, managedBody(profile, record))
       : mergeManagedBlock(existingBody, profile.profile_id, externalRef, managedBody(profile, record)).content
     : articleBodyWithBlock;
   // Engine parsing separates timeline content from compiled_truth. Reattach it after the
@@ -281,7 +352,7 @@ async function writeSyncState(engine: BrainEngine, args: {
        (connector_id, source_object, external_id, slug, approved_source_id, profile_id, profile_version,
         content_fingerprint, managed_block_hash, last_source_hash, last_source_snapshot, source_updated_at, last_synced_at, stale_after, freshness_policy, run_id, last_result, last_error, updated_at)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8,$9,$10,$11,now(),$12,$13,$14,$15,$16,now())
-     ON CONFLICT (connector_id, source_object, external_id) DO UPDATE SET
+     ON CONFLICT (profile_id, connector_id, source_object, external_id) DO UPDATE SET
        slug = EXCLUDED.slug,
        approved_source_id = EXCLUDED.approved_source_id,
        profile_id = EXCLUDED.profile_id,
@@ -563,6 +634,8 @@ export async function runSourceIngestExecutor(
   const completed = new Set(await loadOpCheckpoint(engine, key));
   const results: SourceIngestRecordResult[] = [];
   const writtenPaths: string[] = [];
+  let graphLinksCreated = 0;
+  let graphLinksRemoved = 0;
   let lastRecordCommit: SourceIngestExecutorResult['git_commit'];
 
   for (const record of limited) {
@@ -630,8 +703,10 @@ export async function runSourceIngestExecutor(
       const existingBlock = existing ? existingManagedBlock(existing.compiled_truth) : null;
       const warnings: string[] = [];
       const oldState = await engine.executeRaw<{ managed_block_hash: string | null; content_fingerprint: string | null; last_source_snapshot: unknown }>(
-        `SELECT managed_block_hash, content_fingerprint, last_source_snapshot FROM source_sync_state WHERE connector_id = $1 AND source_object = $2 AND external_id = $3`,
-        [profile.source_connector, profile.source_object, record.external_id],
+        `SELECT managed_block_hash, content_fingerprint, last_source_snapshot
+           FROM source_sync_state
+          WHERE profile_id = $1 AND connector_id = $2 AND source_object = $3 AND external_id = $4`,
+        [profile.profile_id, profile.source_connector, profile.source_object, record.external_id],
       );
       const priorManagedHash = oldState[0]?.managed_block_hash ?? oldState[0]?.content_fingerprint;
       if (existingBlock && priorManagedHash && hashText(existingBlock) !== priorManagedHash) {
@@ -684,6 +759,22 @@ export async function runSourceIngestExecutor(
         lastRecordCommit = await commitGitBackedRun(storage.local_path, [writeThrough.path], runId, profile.profile_id);
       }
       pageDurable = true;
+      const currentGraphLinks = buildSourceGraphLinks(profile, record.data, rendered.slug, sourceId);
+      const previousGraphLinks = previousSnapshot
+        ? buildSourceGraphLinks(profile, previousSnapshot, rendered.slug, sourceId)
+        : [];
+      const currentGraphKeys = new Set(currentGraphLinks.map(link => `${link.link_type ?? ''}\u0000${link.to_slug}\u0000${link.origin_field ?? ''}`));
+      const staleGraphLinks = previousGraphLinks.filter(link => !currentGraphKeys.has(`${link.link_type ?? ''}\u0000${link.to_slug}\u0000${link.origin_field ?? ''}`));
+      for (const link of staleGraphLinks) {
+        await engine.removeLink(link.from_slug, link.to_slug, link.link_type, 'source-ingest', {
+          fromSourceId: sourceId,
+          toSourceId: sourceId,
+        });
+      }
+      const graphCreatedForRecord = await engine.addLinksBatch(currentGraphLinks, { auditSite: 'source-ingest.change-intelligence' });
+      const graphRemovedForRecord = staleGraphLinks.length;
+      graphLinksCreated += graphCreatedForRecord;
+      graphLinksRemoved += graphRemovedForRecord;
       const timelineCreated = await engine.addTimelineEntriesBatch(timelineEntries, { auditSite: 'source-ingest.change-intelligence' });
       await writeSyncState(engine, {
         profile,
@@ -708,7 +799,7 @@ export async function runSourceIngestExecutor(
       });
       await appendCompleted(engine, key, [checkpointKey]);
       completed.add(checkpointKey);
-      results.push({ external_id: record.external_id, slug: rendered.slug, status, warnings, content_hash: after?.content_hash ?? null, write_through: writeThrough, timeline_created: timelineCreated });
+      results.push({ external_id: record.external_id, slug: rendered.slug, status, warnings, content_hash: after?.content_hash ?? null, write_through: writeThrough, timeline_created: timelineCreated, graph_links_created: graphCreatedForRecord, graph_links_removed: graphRemovedForRecord });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       if (!pageDurable && createdThisRecord) {
@@ -744,7 +835,7 @@ export async function runSourceIngestExecutor(
       failed,
     },
     results,
-    graph_writes: 'deferred',
+    graph_writes: { created: graphLinksCreated, removed: graphLinksRemoved },
     git_commit: gitCommit,
     checkpoint: { op: key.op, fingerprint: key.fingerprint, loaded: completed.size, cleared: failed === 0 },
   };

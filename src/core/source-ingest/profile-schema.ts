@@ -104,6 +104,8 @@ export interface SourceIngestProfile {
     preserve_manual_sections: true;
     /** Manage the generated article body in its own block for source-created pages. Explicitly adopted pages remain human-owned. */
     manage_generated_article?: boolean;
+    /** Append/update a generated article block on explicitly adopted pages while preserving their manual body. */
+    manage_adopted_article?: boolean;
     /** Include the stable external ID in the rendered Source data block. Defaults to true for compatibility. */
     include_external_id_in_content?: boolean;
     field_allowlist?: string[];
@@ -261,7 +263,13 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
       if (!isObject(l)) { issues.push(issue(`links.${i}`, 'invalid_link', 'Link rule must be an object.')); return; }
       if (typeof l.id !== 'string' || l.id.length === 0) issues.push(issue(`links.${i}.id`, 'required', 'Link rule id is required.'));
       if (typeof l.type !== 'string' || l.type.length === 0) issues.push(issue(`links.${i}.type`, 'required', 'Link type is required.'));
-      if (!isObject(l.target)) issues.push(issue(`links.${i}.target`, 'required', 'Link target is required.'));
+      if (!isObject(l.target)) {
+        issues.push(issue(`links.${i}.target`, 'required', 'Link target is required.'));
+      } else {
+        if (typeof l.target.type !== 'string' || !l.target.type) issues.push(issue(`links.${i}.target.type`, 'required', 'Link target type is required.'));
+        if (!['external_id', 'slug', 'field_value'].includes(String(l.target.lookup))) issues.push(issue(`links.${i}.target.lookup`, 'invalid_lookup', 'Unsupported link target lookup.'));
+        if (l.target.value_field !== undefined) validateFieldPath(`links.${i}.target.value_field`, l.target.value_field, issues);
+      }
       if (Array.isArray(l.when)) l.when.forEach((r, j) => validateFilter(`links.${i}.when.${j}`, r, issues));
     });
   }

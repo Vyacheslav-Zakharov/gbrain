@@ -5425,7 +5425,7 @@ export const MIGRATIONS: Migration[] = [
           CHECK (last_result IN ('pending', 'success', 'unchanged', 'skipped', 'failed', 'archived')),
         last_error            TEXT,
         updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (connector_id, source_object, external_id)
+        PRIMARY KEY (profile_id, connector_id, source_object, external_id)
       );
 
       CREATE INDEX IF NOT EXISTS source_ingest_profiles_status_idx
@@ -5738,6 +5738,19 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
     sqlFor: { pglite: `ALTER TABLE source_sync_state ADD COLUMN IF NOT EXISTS last_source_snapshot JSONB;` },
+  },
+  {
+    version: 128,
+    name: 'source_sync_state_profile_identity',
+    // One source record may have multiple approved projections (for example a
+    // shared organizational card and a restricted HR card). Keep each
+    // projection's identity binding, snapshot and retry state independent.
+    sql: `
+      ALTER TABLE source_sync_state DROP CONSTRAINT source_sync_state_pkey;
+      ALTER TABLE source_sync_state
+        ADD CONSTRAINT source_sync_state_pkey
+        PRIMARY KEY (profile_id, connector_id, source_object, external_id);
+    `,
   },
 ];
 
