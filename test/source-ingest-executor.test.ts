@@ -601,7 +601,7 @@ describe('source-ingest Stage 3A executor', () => {
 
     await putSourceIngestProfile(engine, {
       ...profile,
-      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true },
+      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true, include_external_id_in_content: false },
       identity: { ...profile.identity, existing_slug_map: { 'veh-001': slug }, require_explicit_resolution: true },
     }, { createdBy: 'test', changeNote: 'require complete adoption plan' });
     await expect(runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-incomplete', no_embed: true }))
@@ -610,7 +610,7 @@ describe('source-ingest Stage 3A executor', () => {
 
     await putSourceIngestProfile(engine, {
       ...profile,
-      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true },
+      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true, include_external_id_in_content: false },
       identity: {
         ...profile.identity,
         existing_slug_map: { 'veh-001': slug },
@@ -634,6 +634,8 @@ describe('source-ingest Stage 3A executor', () => {
     const persistedMarkdown = readFileSync(join(repo, `${slug}.md`), 'utf8');
     expect(persistedMarkdown).toContain('<!-- timeline -->');
     expect(persistedMarkdown).toContain('Human timeline entry.');
+    expect(persistedMarkdown).not.toContain('veh-001');
+    expect((persistedMarkdown.match(/external_ref="hidden"/g) || [])).toHaveLength(2);
     expect(page?.frontmatter.status).toBe('curated');
     expect(page?.title).toBe('Manual A-001');
     expect(page?.frontmatter.aliases).toEqual(['manual-a001']);
@@ -717,7 +719,7 @@ describe('source-ingest Stage 3A executor', () => {
     await seed(repo);
     const managedProfile: SourceIngestProfile = {
       ...profile,
-      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true },
+      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true, include_external_id_in_content: false },
     };
     await putSourceIngestProfile(engine, managedProfile, { createdBy: 'test', changeNote: 'manage generated article body' });
     await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-managed-article-1', limit: 1, no_embed: true });
