@@ -804,7 +804,7 @@ CREATE TABLE IF NOT EXISTS source_sync_state (
     CHECK (last_result IN ('pending', 'success', 'unchanged', 'skipped', 'failed', 'archived')),
   last_error            TEXT,
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (connector_id, source_object, external_id)
+  PRIMARY KEY (profile_id, connector_id, source_object, external_id)
 );
 
 CREATE INDEX IF NOT EXISTS source_ingest_profiles_status_idx
