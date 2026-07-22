@@ -1,6 +1,7 @@
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
-import { existsSync, lstatSync, readdirSync, rmSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync } from 'fs';
+import { resolve, sep } from 'path';
 import type { BrainEngine, LinkBatchInput } from '../engine.ts';
 import { importFromContent } from '../import-file.ts';
 import { writePageThrough } from '../write-through.ts';
@@ -19,6 +20,7 @@ import { buildProfileAllRecords } from './source-fetch.ts';
 import { normalizeTransformConfig } from './transform.ts';
 import { LockUnavailableError, withRefreshingLock, syncLockId } from '../db-lock.ts';
 import { buildSourceTimelineEntries, changeIntelligenceFetchFields, sourceSnapshot } from './change-intelligence.ts';
+import { parseMarkdown } from '../markdown.ts';
 
 export interface SourceIngestExecutorOptions {
   profile_id: string;
@@ -127,6 +129,24 @@ function includeRecord(profile: SourceIngestProfile, record: SourceRecord): { in
   return { include: true };
 }
 
+function readGitBackedAdoptionPage(localPath: string, slug: string) {
+  const root = resolve(localPath);
+  const file = resolve(root, `${slug}.md`);
+  if (file !== root && !file.startsWith(`${root}${sep}`)) throw new Error(`adoption slug escapes source worktree: ${slug}`);
+  if (!existsSync(file)) return null;
+  const parsed = parseMarkdown(readFileSync(file, 'utf8'), `${slug}.md`);
+  return {
+    compiled_truth: parsed.compiled_truth,
+    timeline: parsed.timeline,
+    frontmatter: {
+      type: parsed.type,
+      title: parsed.title,
+      ...(parsed.tags.length > 0 ? { tags: parsed.tags } : {}),
+      ...parsed.frontmatter,
+    } as Record<string, unknown>,
+  };
+}
+
 function graphValues(value: unknown): string[] {
   const raw = Array.isArray(value) ? value : [value];
   return [...new Set(raw
@@ -135,13 +155,72 @@ function graphValues(value: unknown): string[] {
     .filter(Boolean))];
 }
 
-function graphTargetSlugs(rule: SourceLinkRule, data: Record<string, unknown>): string[] {
+interface GraphTargetResolution {
+  slug: string;
+  sourceId: string;
+}
+
+type GraphTargetResolutionMap = Map<string, GraphTargetResolution>;
+
+function graphResolutionKey(profileId: string, externalId: string): string {
+  return `${profileId}\u0000${externalId}`;
+}
+
+function graphTargets(
+  rule: SourceLinkRule,
+  data: Record<string, unknown>,
+  sourceId: string,
+  resolutions?: GraphTargetResolutionMap,
+): GraphTargetResolution[] {
   const valueField = rule.target.value_field;
   if (!valueField) return [];
   const values = graphValues(valueAt(data, valueField));
-  if (rule.target.lookup === 'slug' && !rule.target.slug_template) return values;
+  if (rule.target.lookup === 'external_id') {
+    if (!rule.target.profile_id) return [];
+    return values.map(value => {
+      const resolved = resolutions?.get(graphResolutionKey(rule.target.profile_id!, value));
+      if (!resolved) throw new Error(`external_id graph target unresolved for rule ${rule.id}`);
+      return resolved;
+    });
+  }
+  if (rule.target.lookup === 'slug' && !rule.target.slug_template) {
+    return values.map(slug => ({ slug, sourceId: rule.target.source_id || sourceId }));
+  }
   if (!rule.target.slug_template) return [];
-  return values.map(value => renderSlugTemplate(rule.target.slug_template!, { ...data, value }));
+  return values.map(value => ({
+    slug: renderSlugTemplate(rule.target.slug_template!, { ...data, value }),
+    sourceId: rule.target.source_id || sourceId,
+  }));
+}
+
+async function prefetchGraphTargetResolutions(
+  engine: BrainEngine,
+  profile: SourceIngestProfile,
+  records: SourceRecord[],
+): Promise<GraphTargetResolutionMap> {
+  const out: GraphTargetResolutionMap = new Map();
+  for (const rule of profile.links || []) {
+    if (rule.target.lookup !== 'external_id') continue;
+    const targetProfileId = rule.target.profile_id;
+    const valueField = rule.target.value_field;
+    if (!targetProfileId) continue;
+    if (!valueField) throw new Error(`external_id graph rule requires target.value_field: ${rule.id}`);
+    const externalIds = [...new Set(records.flatMap(record => graphValues(valueAt(record.data, valueField))))];
+    if (externalIds.length === 0) continue;
+    const rows = await engine.executeRaw<{ external_id: string; slug: string; approved_source_id: string }>(
+      `SELECT external_id, slug, approved_source_id
+         FROM source_sync_state
+        WHERE profile_id = $1
+          AND external_id = ANY($2::text[])
+          AND last_result IN ('success', 'unchanged')`,
+      [targetProfileId, externalIds],
+    );
+    for (const row of rows) out.set(graphResolutionKey(targetProfileId, row.external_id), { slug: row.slug, sourceId: row.approved_source_id });
+    if (rows.length !== externalIds.length) {
+      throw new Error(`external_id graph target resolution incomplete for rule ${rule.id}: resolved ${rows.length} of ${externalIds.length}`);
+    }
+  }
+  return out;
 }
 
 /** Deterministic graph projection for one source record. Array-valued fields
@@ -152,25 +231,26 @@ export function buildSourceGraphLinks(
   data: Record<string, unknown>,
   fromSlug: string,
   sourceId: string,
+  resolutions?: GraphTargetResolutionMap,
 ): LinkBatchInput[] {
   const links: LinkBatchInput[] = [];
   const seen = new Set<string>();
   for (const rule of profile.links || []) {
     if ((rule.when || []).some(filter => !filterMatches(filter, data))) continue;
-    for (const toSlug of graphTargetSlugs(rule, data)) {
-      const key = `${rule.type}\u0000${toSlug}\u0000${rule.id}`;
+    for (const target of graphTargets(rule, data, sourceId, resolutions)) {
+      const key = `${rule.type}\u0000${target.sourceId}\u0000${target.slug}\u0000${rule.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
       links.push({
         from_slug: fromSlug,
-        to_slug: toSlug,
+        to_slug: target.slug,
         link_type: rule.type,
         context: `source-ingest rule ${rule.id}`,
         link_source: 'source-ingest',
         origin_slug: fromSlug,
         origin_field: rule.id,
         from_source_id: sourceId,
-        to_source_id: sourceId,
+        to_source_id: target.sourceId,
         origin_source_id: sourceId,
       });
     }
@@ -580,6 +660,7 @@ export async function runSourceIngestExecutor(
     }
   }
   const limited = opts.limit ? records.slice(0, opts.limit) : records;
+  const graphTargetResolutions = await prefetchGraphTargetResolutions(engine, profile, limited);
   const resolvedTargets = new Map<string, { identitySlug?: string; adoptionSlug?: string; explicitCreate: boolean; targetSlug: string }>();
   const claimedTargets = new Map<string, string>();
   for (const record of limited) {
@@ -689,18 +770,25 @@ export async function runSourceIngestExecutor(
       createdThisRecord = !existing;
       const priorVersions = existing ? await engine.getVersions(targetSlug, { sourceId }) : [];
       const priorVersionId = priorVersions[0]?.id ?? null;
+      const rawAdoptionPage = existing && adoptionSlug
+        ? readGitBackedAdoptionPage(storage.local_path, targetSlug)
+        : null;
+      const existingContent = rawAdoptionPage?.compiled_truth ?? existing?.compiled_truth ?? null;
+      const existingTimeline = rawAdoptionPage?.timeline ?? existing?.timeline ?? null;
+      const existingFrontmatter = rawAdoptionPage?.frontmatter
+        ?? (existing ? { type: existing.type, title: existing.title, ...(existing.frontmatter as Record<string, unknown>) } : null);
       const rendered = renderMarkdown(
         profile,
         record,
-        existing?.compiled_truth ?? null,
-        existing?.timeline ?? null,
-        existing ? { type: existing.type, title: existing.title, ...(existing.frontmatter as Record<string, unknown>) } : null,
+        existingContent,
+        existingTimeline,
+        existingFrontmatter,
         targetSlug,
         Boolean(adoptionSlug),
       );
       renderedSlug = rendered.slug;
       renderedPath = `${rendered.slug}.md`;
-      const existingBlock = existing ? existingManagedBlock(existing.compiled_truth) : null;
+      const existingBlock = existingContent ? existingManagedBlock(existingContent) : null;
       const warnings: string[] = [];
       const oldState = await engine.executeRaw<{ managed_block_hash: string | null; content_fingerprint: string | null; last_source_snapshot: unknown }>(
         `SELECT managed_block_hash, content_fingerprint, last_source_snapshot
@@ -759,20 +847,12 @@ export async function runSourceIngestExecutor(
         lastRecordCommit = await commitGitBackedRun(storage.local_path, [writeThrough.path], runId, profile.profile_id);
       }
       pageDurable = true;
-      const currentGraphLinks = buildSourceGraphLinks(profile, record.data, rendered.slug, sourceId);
-      const previousGraphLinks = previousSnapshot
-        ? buildSourceGraphLinks(profile, previousSnapshot, rendered.slug, sourceId)
-        : [];
-      const currentGraphKeys = new Set(currentGraphLinks.map(link => `${link.link_type ?? ''}\u0000${link.to_slug}\u0000${link.origin_field ?? ''}`));
-      const staleGraphLinks = previousGraphLinks.filter(link => !currentGraphKeys.has(`${link.link_type ?? ''}\u0000${link.to_slug}\u0000${link.origin_field ?? ''}`));
-      for (const link of staleGraphLinks) {
-        await engine.removeLink(link.from_slug, link.to_slug, link.link_type, 'source-ingest', {
-          fromSourceId: sourceId,
-          toSourceId: sourceId,
-        });
-      }
+      const currentGraphLinks = buildSourceGraphLinks(profile, record.data, rendered.slug, sourceId, graphTargetResolutions);
+      // Physical source-ingest edges are add-only until profile-scoped ownership
+      // reconciliation is available. Deleting by from/to/type/source alone can
+      // remove an edge still owned by another Article View.
       const graphCreatedForRecord = await engine.addLinksBatch(currentGraphLinks, { auditSite: 'source-ingest.change-intelligence' });
-      const graphRemovedForRecord = staleGraphLinks.length;
+      const graphRemovedForRecord = 0;
       graphLinksCreated += graphCreatedForRecord;
       graphLinksRemoved += graphRemovedForRecord;
       const timelineCreated = await engine.addTimelineEntriesBatch(timelineEntries, { auditSite: 'source-ingest.change-intelligence' });
