@@ -69,9 +69,14 @@ export class PostgresSourceConnector implements SourceConnector {
   async *fetchAll(objectName: string, cursorOrOpts?: string | SourceFetchOptions, opts: SourceFetchOptions = {}): AsyncIterable<SourceRecordBatch> {
     const object = this.assertAllowedObject(objectName);
     const effectiveOpts = typeof cursorOrOpts === 'object' && cursorOrOpts !== null ? cursorOrOpts : opts;
-    const offset = typeof cursorOrOpts === 'string' ? Number(cursorOrOpts) || 0 : 0;
-    const rows = await this.fetchPage(object, { offset, fields: effectiveOpts.fields });
-    yield { records: rows.map(row => this.toSourceRecord(object, row)), cursor: rows.length >= this.batchSize ? String(offset + rows.length) : null };
+    let offset = typeof cursorOrOpts === 'string' ? Number(cursorOrOpts) || 0 : 0;
+    while (true) {
+      const rows = await this.fetchPage(object, { offset, fields: effectiveOpts.fields });
+      const next = rows.length >= this.batchSize ? offset + rows.length : null;
+      yield { records: rows.map(row => this.toSourceRecord(object, row)), cursor: next === null ? null : String(next) };
+      if (next === null || rows.length === 0) break;
+      offset = next;
+    }
   }
 
   async *fetchChangedSince(objectName: string, since: string, opts: SourceFetchOptions = {}): AsyncIterable<SourceRecordBatch> {
@@ -81,11 +86,17 @@ export class PostgresSourceConnector implements SourceConnector {
     const fields = await this.selectedColumns(object, opts.fields);
     const pk = this.primaryKeyFor(object);
     const updatedAt = this.updatedAtField;
-    const rows = await this.withSql(sql => sql.unsafe(
-      `SELECT ${fields.map(quoteIdentifier).join(', ')} FROM ${this.qualifiedTable(object)} WHERE ${quoteIdentifier(updatedAt)} > $1 ORDER BY ${quoteIdentifier(updatedAt)} ASC, ${quoteIdentifier(pk)} ASC LIMIT $2`,
-      [sinceDate.toISOString(), this.batchSize],
-    ) as Promise<Array<Record<string, unknown>>>);
-    yield { records: rows.map(row => this.toSourceRecord(object, row)), cursor: null };
+    let offset = 0;
+    while (true) {
+      const rows = await this.withSql(sql => sql.unsafe(
+        `SELECT ${fields.map(quoteIdentifier).join(', ')} FROM ${this.qualifiedTable(object)} WHERE ${quoteIdentifier(updatedAt)} > $1 ORDER BY ${quoteIdentifier(updatedAt)} ASC, ${quoteIdentifier(pk)} ASC LIMIT $2 OFFSET $3`,
+        [sinceDate.toISOString(), this.batchSize, offset],
+      ) as Promise<Array<Record<string, unknown>>>);
+      const next = rows.length >= this.batchSize ? offset + rows.length : null;
+      yield { records: rows.map(row => this.toSourceRecord(object, row)), cursor: next === null ? null : String(next) };
+      if (next === null || rows.length === 0) break;
+      offset = next;
+    }
   }
 
   async fetchById(objectName: string, id: string, opts: SourceFetchOptions = {}): Promise<SourceRecord | null> {
