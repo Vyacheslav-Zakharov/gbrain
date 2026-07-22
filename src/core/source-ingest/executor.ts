@@ -818,7 +818,7 @@ export async function runSourceIngestExecutor(
       });
       if (!writeThrough.written) throw new Error(`write-through failed: ${writeThrough.skipped || writeThrough.error || 'unknown'}`);
       const after = await engine.getPage(rendered.slug, { sourceId });
-      const status = beforeHash && after?.content_hash === beforeHash ? 'unchanged' : 'written';
+      let status: 'unchanged' | 'written' = beforeHash && after?.content_hash === beforeHash ? 'unchanged' : 'written';
       const rawPreviousSnapshot = oldState[0]?.last_source_snapshot;
       let previousSnapshot: Record<string, unknown> | null = null;
       if (rawPreviousSnapshot && typeof rawPreviousSnapshot === 'object' && !Array.isArray(rawPreviousSnapshot)) {
@@ -842,6 +842,7 @@ export async function runSourceIngestExecutor(
       const writePathDirty = writeThrough.path
         ? Boolean(execFileSync('git', ['-C', storage.local_path, 'status', '--porcelain', '--', writeThrough.path], { encoding: 'utf8' }).trim())
         : false;
+      if (writeThrough.path) status = writePathDirty ? 'written' : 'unchanged';
       if (writeThrough.path && writePathDirty) writtenPaths.push(writeThrough.path);
       if (writePathDirty && writeThrough.path) {
         lastRecordCommit = await commitGitBackedRun(storage.local_path, [writeThrough.path], runId, profile.profile_id);
