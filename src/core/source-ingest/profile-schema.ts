@@ -104,6 +104,8 @@ export interface SourceIngestProfile {
     preserve_manual_sections: true;
     /** Manage the generated article body in its own block for source-created pages. Explicitly adopted pages remain human-owned. */
     manage_generated_article?: boolean;
+    /** Include the stable external ID in the rendered Source data block. Defaults to true for compatibility. */
+    include_external_id_in_content?: boolean;
     field_allowlist?: string[];
     /** Article-frontmatter keys allowed to overwrite an explicitly adopted manual page. */
     frontmatter_allowlist?: string[];

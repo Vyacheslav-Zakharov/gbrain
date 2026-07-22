@@ -131,7 +131,8 @@ function hashText(s: string): string {
 
 function managedBody(profile: SourceIngestProfile, record: SourceRecord): string {
   const title = String(valueAt(record.data, profile.identity.display_name_field) ?? record.external_id);
-  const lines = [`## Source data`, ``, `- Name: ${title}`, `- External ID: ${record.external_id}`];
+  const lines = [`## Source data`, ``, `- Name: ${title}`];
+  if (profile.update_policy.include_external_id_in_content !== false) lines.push(`- External ID: ${record.external_id}`);
   for (const field of profile.update_policy.field_allowlist || []) {
     const v = valueAt(record.data, field);
     if (v !== undefined && v !== null && v !== '') lines.push(`- ${field}: ${String(v)}`);
