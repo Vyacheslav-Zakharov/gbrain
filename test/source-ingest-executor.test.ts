@@ -591,6 +591,9 @@ describe('source-ingest Stage 3A executor', () => {
     execFileSync('git', ['add', `${slug}.md`], { cwd: repo });
     execFileSync('git', ['commit', '-q', '-m', 'manual equipment page'], { cwd: repo });
     await importFromContent(engine, slug, manual, { sourceId: 'shared', sourcePath: `${slug}.md`, noEmbed: true, remote: false });
+    writeFileSync(join(repo, `${slug}.md`), `${manual}\n## Disk-only manual appendix\n\nPreserve this Git-backed source text.\n`);
+    execFileSync('git', ['add', `${slug}.md`], { cwd: repo });
+    execFileSync('git', ['commit', '-q', '-m', 'add disk-only manual appendix'], { cwd: repo });
 
     const blocked = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-adoption-blocked', limit: 1, no_embed: true });
     expect(blocked.results.find(r => r.external_id === 'veh-001')).toMatchObject({ status: 'failed' });
@@ -621,6 +624,8 @@ describe('source-ingest Stage 3A executor', () => {
     expect(refreshed.ok).toBe(true);
     const page = await engine.getPage(slug, { sourceId: 'shared' });
     expect(page?.compiled_truth).toContain('Human-owned context.');
+    expect(page?.timeline).toContain('Disk-only manual appendix');
+    expect(page?.timeline).toContain('Preserve this Git-backed source text.');
     expect(page?.compiled_truth).toContain('gbrain-source-article:start');
     expect(page?.compiled_truth).toContain('Toyota Hilux A001');
     expect(page?.compiled_truth?.indexOf('Human-owned context.')).toBeLessThan(page?.compiled_truth?.indexOf('gbrain-source-article:start') ?? -1);

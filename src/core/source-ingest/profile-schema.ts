@@ -16,6 +16,10 @@ export interface SourceLinkRule {
     type: string;
     lookup: 'external_id' | 'slug' | 'field_value';
     value_field?: string;
+    /** Source profile whose sync-state identity resolves external IDs to canonical page slugs. */
+    profile_id?: string;
+    /** Explicit target source for slug-based resolution; defaults to the publishing source. */
+    source_id?: string;
     slug_template?: string;
   };
   confidence?: number;
