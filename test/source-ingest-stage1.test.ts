@@ -118,6 +118,19 @@ describe('source-ingest Stage 1 contract', () => {
     expect(out.warnings).toContain('shared_profile_has_pii_candidates');
   });
 
+  test('source_dry_run counts array-valued multi-assignment targets as distinct edges', () => {
+    const profile = {
+      ...vehicleProfile,
+      links: [{ id: 'holds-position', type: 'holds_position', target: { type: 'position', lookup: 'field_value', value_field: 'position_ids', slug_template: 'positions/{{ value }}' } }],
+    };
+    const out = buildSourceDryRun(profile as any, [
+      { external_id: 'emp-1', data: { code: 'emp-1', position_ids: ['pos-1', 'pos-2', 'pos-1'] } },
+      { external_id: 'emp-2', data: { code: 'emp-2', position_ids: [] } },
+    ]);
+    expect(out.link_rules[0]).toMatchObject({ matched: 1, edge_count: 2, multi_target_records: 1, unresolved_bucket: 1, ambiguous_bucket: 0 });
+    expect(out.link_rules[0].sample_edges.map((e: any) => e.target_value)).toEqual(['pos-1', 'pos-2']);
+  });
+
   test('source_dry_run detects slug collisions and surfaces collision worst-case sample', () => {
     const sample = [
       { external_id: 'veh-null-1', data: { id: 'veh-null-1', code: null, name: 'Missing code 1', is_group: false, status: 'active' } },
