@@ -2172,8 +2172,17 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     writeJsonFileLocal(userPermissionsPath(), perms);
     res.json({ ok: true, user });
   });
-
-
+  // OAuth authorization must be bound to the same opaque, server-side Portal
+  // session used by the rest of the application. Never let the SDK issue an
+  // authorization code without a verified resource owner.
+  app.use('/authorize', (req: Request, res: Response, next: NextFunction) => {
+    const portalEmail = resolvePortalUser(req, res);
+    if (!portalEmail) {
+      return res.redirect(`/login?${req.originalUrl.split('?')[1] || ''}`);
+    }
+    res.locals.gbrainPortalUser = portalEmail;
+    next();
+  });
 
   app.use(authRouter);
 

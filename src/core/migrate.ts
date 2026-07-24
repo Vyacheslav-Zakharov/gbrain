@@ -5773,6 +5773,25 @@ export const MIGRATIONS: Migration[] = [
          AND discovery_json ? 'updated_at_field';
     `,
   },
+  {
+    version: 130,
+    name: 'oauth_user_source_grants',
+    // Authorization-code tokens act on behalf of a Portal user. Snapshot the
+    // verified user's source grants into the code/token rows so refresh-token
+    // rotation preserves the resource-owner boundary.
+    idempotent: true,
+    sql: `
+      ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS federated_write TEXT[] NOT NULL DEFAULT '{}';
+      ALTER TABLE oauth_codes ADD COLUMN IF NOT EXISTS source_id TEXT;
+      ALTER TABLE oauth_codes ADD COLUMN IF NOT EXISTS federated_read TEXT[];
+      ALTER TABLE oauth_codes ADD COLUMN IF NOT EXISTS federated_write TEXT[];
+      ALTER TABLE oauth_codes ADD COLUMN IF NOT EXISTS user_email TEXT;
+      ALTER TABLE oauth_tokens ADD COLUMN IF NOT EXISTS source_id TEXT;
+      ALTER TABLE oauth_tokens ADD COLUMN IF NOT EXISTS federated_read TEXT[];
+      ALTER TABLE oauth_tokens ADD COLUMN IF NOT EXISTS federated_write TEXT[];
+      ALTER TABLE oauth_tokens ADD COLUMN IF NOT EXISTS user_email TEXT;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

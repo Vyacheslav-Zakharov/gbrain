@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { PORTAL_ASSET_COUNT, PORTAL_ASSETS, PORTAL_INDEX_HTML } from '../src/portal-embedded';
 
 const serveSource = await Bun.file(new URL('../src/commands/serve-http.ts', import.meta.url)).text();
+const oauthSource = await Bun.file(new URL('../src/core/oauth-provider.ts', import.meta.url)).text();
 
 describe('portal SPA contract', () => {
   test('ships an embedded index, JavaScript, and CSS bundle', () => {
@@ -32,6 +33,10 @@ describe('portal SPA contract', () => {
     expect(serveSource).toContain('new PortalSessionStore(');
     expect(serveSource).toContain('portalSessions.issue(email)');
     expect(serveSource).toContain('const portalEmail = resolvePortalUser(req, res)');
+    expect(serveSource).toContain('res.locals.gbrainPortalUser = portalEmail');
+    expect(serveSource).toContain("return res.redirect(`/login?${req.originalUrl.split('?')[1] || ''}`)");
+    expect(oauthSource).toContain('readUserSourceGrant((res as any).locals?.gbrainPortalUser)');
+    expect(oauthSource).not.toContain('cookies?.session_user');
     expect(serveSource).not.toContain('res.cookie("session_user"');
     expect(serveSource).not.toContain("const portalEmail = typeof cookies.session_user");
   });

@@ -884,6 +884,7 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
   deleted_at              TIMESTAMPTZ,
   source_id               TEXT REFERENCES sources(id) ON DELETE RESTRICT,
   federated_read          TEXT[] NOT NULL DEFAULT '{}',
+  federated_write         TEXT[] NOT NULL DEFAULT '{}',
   -- v0.38 Slice 2 + 3: per-OAuth-client budget cap (v84) + agent binding (v85).
   -- bound_* columns are NULL on legacy clients (no agent scope by default).
   budget_usd_per_day      NUMERIC(10, 2) NULL,
@@ -911,6 +912,10 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   scopes       TEXT[],
   expires_at   BIGINT,
   resource     TEXT,
+  source_id    TEXT,
+  federated_read TEXT[],
+  federated_write TEXT[],
+  user_email   TEXT,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -927,6 +932,10 @@ CREATE TABLE IF NOT EXISTS oauth_codes (
   state                  TEXT,
   resource               TEXT,
   expires_at             BIGINT NOT NULL,
+  source_id              TEXT,
+  federated_read         TEXT[],
+  federated_write        TEXT[],
+  user_email             TEXT,
   created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
