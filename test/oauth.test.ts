@@ -408,6 +408,26 @@ describe('authorization code flow', () => {
     expect(Number(rows[0].count)).toBe(0);
   });
 
+  test('shared broad client is clamped to Portal user read/write scopes', async () => {
+    const broad = 'admin agent read sources_admin users_admin write';
+    const { clientId } = await provider.registerClientManual(
+      'broad-portal-client', ['authorization_code'], broad,
+      ['http://localhost:3000/callback'],
+    );
+    const client = (await provider.clientsStore.getClient(clientId))!;
+    let redirectUrl = '';
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
+    await provider.authorize(client, {
+      codeChallenge: 'challenge',
+      redirectUri: 'http://localhost:3000/callback',
+      scopes: broad.split(' '),
+    }, mockRes);
+    const code = new URL(redirectUrl).searchParams.get('code')!;
+    const tokens = await provider.exchangeAuthorizationCode(client, code);
+    const auth = await provider.verifyAccessToken(tokens.access_token);
+    expect(auth.scopes.sort()).toEqual(['read', 'write']);
+  });
+
   test('code issuance and exchange', async () => {
     const { clientId } = await provider.registerClientManual(
       'authcode-test', ['authorization_code'], 'read write',
@@ -942,11 +962,7 @@ describe('F2/F3 refresh hardening', () => {
     ).rejects.toThrow(/scope/i);
   });
 
-  // T1 (eng-review): admin grant must be refreshable down to sources_admin
-  // via hasScope. Pre-v0.28 the F3 check was exact-string-match, so an
-  // admin grant could not refresh down to sources_admin even though admin
-  // implies it. gstack /setup-gbrain Path 4 needs this to work.
-  test('admin grant CAN refresh down to sources_admin (hasScope hierarchy)', async () => {
+  test('Portal user cannot inherit sources_admin from a shared admin client', async () => {
     const { clientId } = await provider.registerClientManual(
       'admin-down-test', ['authorization_code'], 'admin',
       ['http://localhost:3000/callback'],
@@ -962,29 +978,14 @@ describe('F2/F3 refresh hardening', () => {
     }, mockRes);
     const code = new URL(redirectUrl).searchParams.get('code')!;
     const tokens = await provider.exchangeAuthorizationCode(client, code);
-
-    // Refresh requesting only sources_admin — admin implies it, so this
-    // must succeed and the new token must carry only the requested subset.
-    const rotated = await provider.exchangeRefreshToken(
-      client, tokens.refresh_token!, ['sources_admin'],
-    );
-    expect(rotated.access_token).toBeDefined();
-    expect(rotated.scope).toBe('sources_admin');
-
-    // The original refresh token must be dead (single-use rotation).
+    const auth = await provider.verifyAccessToken(tokens.access_token);
+    expect(auth.scopes).toEqual([]);
     await expect(
-      provider.exchangeRefreshToken(client, tokens.refresh_token!),
-    ).rejects.toThrow();
-
-    // Note: rotated.refresh_token's grant is now sources_admin, not admin.
-    // Refreshing it up to users_admin would correctly fail (sibling
-    // non-implication) — that constraint is exercised in the F3 sibling
-    // test below. To prove "admin implies users_admin too" we'd need a
-    // fresh authorize round trip, which the existing F2 hardening tests
-    // already cover. One direction at a time.
+      provider.exchangeRefreshToken(client, tokens.refresh_token!, ['sources_admin']),
+    ).rejects.toThrow(/scope/i);
   });
 
-  test('admin grant CAN refresh down to users_admin (different axis)', async () => {
+  test('Portal user cannot inherit users_admin from a shared admin client', async () => {
     const { clientId } = await provider.registerClientManual(
       'admin-down-users-test', ['authorization_code'], 'admin',
       ['http://localhost:3000/callback'],
@@ -1001,10 +1002,9 @@ describe('F2/F3 refresh hardening', () => {
     const code = new URL(redirectUrl).searchParams.get('code')!;
     const tokens = await provider.exchangeAuthorizationCode(client, code);
 
-    const rotated = await provider.exchangeRefreshToken(
-      client, tokens.refresh_token!, ['users_admin'],
-    );
-    expect(rotated.scope).toBe('users_admin');
+    await expect(
+      provider.exchangeRefreshToken(client, tokens.refresh_token!, ['users_admin']),
+    ).rejects.toThrow(/scope/i);
   });
 
   // T1 sibling: write grant cannot refresh up to sources_admin (different axis)

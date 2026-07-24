@@ -469,12 +469,11 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const federatedRead = userGrant.federated_read!;
     const federatedWrite = userGrant.federated_write!;
     const userEmail = userGrant.user_email!;
-    // A read-only resource owner cannot inherit write/admin capabilities from
-    // a broadly registered client. Non-empty write grants keep normal scope
-    // clamping; source-level ACLs remain authoritative in the token snapshot.
-    const grantedScopes = federatedWrite.length === 0
-      ? requestedScopes.filter(s => s === 'read' && hasScope(allowedScopes, s))
-      : requestedScopes.filter(s => hasScope(allowedScopes, s));
+    // Portal users have source-level read/write ACLs, not platform-admin roles.
+    // A broadly registered shared client must never promote a user to
+    // admin/agent/sources_admin/users_admin. Exact read/write only.
+    const userScopes = federatedWrite.length > 0 ? new Set(['read', 'write']) : new Set(['read']);
+    const grantedScopes = requestedScopes.filter(s => userScopes.has(s) && hasScope(allowedScopes, s));
 
     await this.sql`
       INSERT INTO oauth_codes (code_hash, client_id, scopes, code_challenge,
@@ -628,7 +627,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       federated_write: normalizeStringArray(row.federated_write),
       user_email: userEmail,
     } : undefined;
-    return this.issueTokens(client.client_id, tokenScopes, resource, true, undefined, sourceGrant);
+    const effectiveTokenScopes = userEmail
+      ? tokenScopes.filter(s => s === 'read' || (s === 'write' && (sourceGrant?.federated_write?.length ?? 0) > 0))
+      : tokenScopes;
+    return this.issueTokens(client.client_id, effectiveTokenScopes, resource, true, undefined, sourceGrant);
   }
 
   // -------------------------------------------------------------------------
@@ -718,11 +720,15 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       if (userEmail && (!sourceId || allowedSources === undefined || writeSources === undefined)) {
         throw new InvalidTokenError('Invalid user-bound token source grant');
       }
+      const rowScopes = (row.scopes as string[]) || [];
+      const effectiveScopes = userEmail
+        ? rowScopes.filter(s => s === 'read' || (s === 'write' && (writeSources?.length ?? 0) > 0))
+        : rowScopes;
       return {
         token,
         clientId: row.client_id as string,
         clientName: (row.client_name as string | null) ?? undefined,
-        scopes: (row.scopes as string[]) || [],
+        scopes: effectiveScopes,
         expiresAt,
         resource: row.resource ? new URL(row.resource as string) : undefined,
         // v0.34.1 (#861, D2): source-isolation scope from oauth_clients.

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { operations, resolveFederatedWriteSourceId } from '../src/core/operations.ts';
+import { filterSourcesForCaller, operations, resolveFederatedWriteSourceId } from '../src/core/operations.ts';
 
 describe('federated put_page write routing', () => {
   const remoteCtx = {
@@ -34,5 +34,29 @@ describe('federated put_page write routing', () => {
   test('trusted local callers retain explicit source routing', () => {
     expect(resolveFederatedWriteSourceId({ remote: false, sourceId: 'default' } as any, 'internal-example'))
       .toBe('internal-example');
+  });
+});
+
+describe('remote source metadata visibility', () => {
+  test('returns only granted sources and strips host-local paths', () => {
+    const ctx = {
+      remote: true,
+      sourceId: 'alice-example',
+      auth: { allowedSources: ['alice-example', 'internal-example'] },
+    } as any;
+    const rows = [
+      { id: 'alice-example', local_path: '/private/alice', name: 'Alice' },
+      { id: 'internal-example', local_path: '/private/internal', clone_dir: '/private/clone', name: 'Internal' },
+      { id: 'restricted-example', local_path: '/private/restricted', name: 'Restricted' },
+    ];
+    expect(filterSourcesForCaller(ctx, rows)).toEqual([
+      { id: 'alice-example', name: 'Alice' },
+      { id: 'internal-example', name: 'Internal' },
+    ]);
+  });
+
+  test('trusted local callers retain the full source catalog', () => {
+    const rows = [{ id: 'restricted-example', local_path: '/local/path' }];
+    expect(filterSourcesForCaller({ remote: false } as any, rows)).toBe(rows);
   });
 });

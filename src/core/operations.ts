@@ -5241,6 +5241,21 @@ const sources_add: Operation = {
   cliHints: { name: 'sources_add', hidden: true },
 };
 
+export function filterSourcesForCaller(
+  ctx: OperationContext,
+  rows: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  if (ctx.remote === false) return rows;
+  const allowed = new Set(
+    ctx.auth?.allowedSources?.length
+      ? ctx.auth.allowedSources
+      : ctx.sourceId ? [ctx.sourceId] : [],
+  );
+  return rows
+    .filter(row => typeof row.id === 'string' && allowed.has(row.id))
+    .map(({ local_path: _localPath, clone_dir: _cloneDir, ...safe }) => safe);
+}
+
 const sources_list: Operation = {
   name: 'sources_list',
   description:
@@ -5253,10 +5268,11 @@ const sources_list: Operation = {
   scope: 'read',
   handler: async (ctx, p) => {
     const { listSources } = await import('./sources-ops.ts');
+    const rows = await listSources(ctx.engine, {
+      includeArchived: (p.include_archived as boolean) === true,
+    });
     return {
-      sources: await listSources(ctx.engine, {
-        includeArchived: (p.include_archived as boolean) === true,
-      }),
+      sources: filterSourcesForCaller(ctx, rows as unknown as Array<Record<string, unknown>>),
     };
   },
   cliHints: { name: 'sources_list', hidden: true },
