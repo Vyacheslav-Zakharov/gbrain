@@ -807,6 +807,7 @@ CREATE TABLE IF NOT EXISTS source_sync_state (
   content_fingerprint   TEXT,
   managed_block_hash    TEXT,
   last_source_hash      TEXT,
+  last_source_snapshot  JSONB,
   source_updated_at     TIMESTAMPTZ,
   last_synced_at        TIMESTAMPTZ,
   stale_after           TIMESTAMPTZ,

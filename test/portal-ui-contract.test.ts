@@ -35,7 +35,8 @@ describe('portal SPA contract', () => {
     expect(serveSource).toContain('const portalEmail = resolvePortalUser(req, res)');
     expect(serveSource).toContain('res.locals.gbrainPortalUser = portalEmail');
     expect(serveSource).toContain("return res.redirect(`/login?${req.originalUrl.split('?')[1] || ''}`)");
-    expect(oauthSource).toContain('readUserSourceGrant((res as any).locals?.gbrainPortalUser)');
+    expect(oauthSource).toContain('this.resolveUserSourceGrant(String(portalEmail');
+    expect(oauthSource).toContain('OAuth authorization denied: valid Portal user source grant required');
     expect(oauthSource).not.toContain('cookies?.session_user');
     expect(serveSource).not.toContain('res.cookie("session_user"');
     expect(serveSource).not.toContain("const portalEmail = typeof cookies.session_user");
