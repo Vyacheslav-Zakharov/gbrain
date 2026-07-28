@@ -5,8 +5,8 @@
 # of E2E) inside Docker. See docker-compose.ci.yml.
 #
 # Modes:
-#   bash scripts/ci-local.sh              # full local gate: gitleaks + unit + ALL E2E (4-way sharded)
-#   bash scripts/ci-local.sh --diff       # full local gate: gitleaks + unit + selected E2E (4-way sharded)
+#   bash scripts/ci-local.sh              # full local gate: gitleaks + unit + ALL E2E (4 logical shards, 2 concurrent)
+#   bash scripts/ci-local.sh --diff       # full local gate: gitleaks + unit + selected E2E (4 logical shards, 2 concurrent)
 #   bash scripts/ci-local.sh --no-pull    # skip docker compose pull (offline / debug)
 #   bash scripts/ci-local.sh --clean      # nuke named volumes for cold debug
 #   bash scripts/ci-local.sh --no-shard   # debug: run E2E sequentially against postgres-1 only
@@ -178,8 +178,9 @@ fi
 echo "[ci-local] Smoke OK ($SMOKE_NO_ARGS files no-arg, 1 single-arg, ${SHARD_TOTAL}=4-shard total)."
 
 # Step 4: build the runner-side command.
-# Tier 1: 4-shard parallel UNIT + E2E. Each shard runs ~46 unit files + ~9
-# E2E files against postgres-N. Guards + typecheck run ONCE before fan-out.
+# Tier 1: 4 logical UNIT + E2E shards, with at most 2 active concurrently.
+# Each shard runs its files against postgres-N. Guards + typecheck run ONCE
+# before fan-out.
 # --no-shard runs the legacy unsharded flow (debug aid).
 if [ "$NO_SHARD" = "1" ]; then
   if [ "$DIFF" = "1" ]; then
@@ -218,7 +219,8 @@ bash scripts/run-e2e.sh'
   fi
 else
   # Tier 1 sharded path. Each shard runs unit+E2E sequentially against its
-  # own postgres-N. Shards run in parallel via xargs -P4.
+  # own postgres-N. Four PGLite-heavy unit processes can exceed 12 GiB, so
+  # xargs admits only two logical shards at a time.
   if [ "$DIFF" = "1" ]; then
     DIFF_E2E_PREP='SELECTED=$(bun run scripts/select-e2e.ts)
 if [ -z "$SELECTED" ]; then
@@ -246,9 +248,9 @@ export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
 mkdir -p /tmp/shard-logs
-echo \"[runner] Tier 1: 4-shard parallel unit + E2E (xargs -P4)\"
+echo \"[runner] Tier 1: 4 logical unit + E2E shards, 2 concurrent (xargs -P2)\"
 set +e
-printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
+printf '%s\\n' 1 2 3 4 | xargs -P2 -I{} sh -c '
   shard=\$1
   log=/tmp/shard-logs/shard-\${shard}.log
   echo \"[shard \${shard}] start\" > \$log

@@ -13,8 +13,8 @@
 # PGLite embeds PostgreSQL in WASM; its allocator does not reliably return all
 # memory to the OS between test files inside one long-lived process. Recycling
 # the process between batches bounds cumulative RSS without reducing coverage.
-# Shards can still run in parallel (4 in ci-local); batches within one shard are
-# deliberately sequential.
+# Shards can still run in parallel (two at a time in ci-local); batches within
+# one shard are deliberately sequential.
 
 set -euo pipefail
 
