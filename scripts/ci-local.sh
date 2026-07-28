@@ -247,12 +247,15 @@ fi
 export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
-mkdir -p /tmp/shard-logs
+# Keep full logs on the bind-mounted workspace so they survive runner teardown
+# and remain inspectable after a failed exact-SHA gate.
+mkdir -p .context/ci-local-shards
+rm -f .context/ci-local-shards/shard-*.log
 echo \"[runner] Tier 1: 4 logical unit + E2E shards, 2 concurrent (xargs -P2)\"
 set +e
 printf '%s\\n' 1 2 3 4 | xargs -P2 -I{} sh -c '
   shard=\$1
-  log=/tmp/shard-logs/shard-\${shard}.log
+  log=.context/ci-local-shards/shard-\${shard}.log
   echo \"[shard \${shard}] start\" > \$log
   echo \"[shard \${shard}] unit phase (SHARD=\${shard}/4, DATABASE_URL unset)\" >> \$log
   env -u DATABASE_URL SHARD=\${shard}/4 bash scripts/run-unit-shard.sh >> \$log 2>&1
@@ -289,13 +292,13 @@ echo \"=== SHARD LOGS (last 30 lines each + unit/e2e summaries) ===\"
 for s in 1 2 3 4; do
   echo \"\"
   echo \"--- shard \$s ---\"
-  if [ -f /tmp/shard-logs/shard-\$s.log ]; then
+  if [ -f .context/ci-local-shards/shard-\$s.log ]; then
     # Pull the unit + E2E summary lines explicitly so they survive even if
     # the file is huge. Match: bun's '<N> pass / <N> fail' pairs, run-e2e.sh's
     # 'Files: ... / Tests: ...' summary, and our own shard markers.
-    grep -E '^\\[shard|^Files: |^Tests: |Ran [0-9]+ tests|^[[:space:]]+[0-9]+ (pass|fail|skip)\$' /tmp/shard-logs/shard-\$s.log || true
+    grep -E '^\\[shard|^Files: |^Tests: |Ran [0-9]+ tests|^[[:space:]]+[0-9]+ (pass|fail|skip)\$' .context/ci-local-shards/shard-\$s.log || true
     echo \"  (last 30 lines for context)\"
-    tail -30 /tmp/shard-logs/shard-\$s.log
+    tail -30 .context/ci-local-shards/shard-\$s.log
   else
     echo \"(no log file written — shard never started)\"
   fi
