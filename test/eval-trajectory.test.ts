@@ -29,12 +29,6 @@ beforeEach(async () => {
   await engine.executeRaw(`DELETE FROM facts WHERE entity_slug LIKE 'cli-traj-%'`);
 });
 
-function unitVec(idx = 0): string {
-  const a = new Float32Array(1536);
-  a[idx % 1536] = 1.0;
-  return '[' + Array.from(a).join(',') + ']';
-}
-
 async function insertTyped(args: {
   entity_slug: string;
   metric: string;
@@ -45,12 +39,11 @@ async function insertTyped(args: {
   await engine.executeRaw(
     `INSERT INTO facts (source_id, entity_slug, fact, kind, source, valid_from,
                         claim_metric, claim_value, claim_unit, claim_period,
-                        visibility, embedding, embedded_at)
+                        visibility)
      VALUES ('default', $1, $2, 'fact', 'test', $3::timestamptz,
-             $4, $5, $6, 'monthly',
-             'private', $7::vector, $3::timestamptz)`,
+             $4, $5, $6, 'monthly', 'private')`,
     [args.entity_slug, `${args.metric} ${args.value}`, args.valid_from.toISOString(),
-     args.metric, args.value, args.unit ?? 'USD', unitVec()],
+     args.metric, args.value, args.unit ?? 'USD'],
   );
 }
 

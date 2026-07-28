@@ -49,7 +49,7 @@ describe('source-ingest round3 P0 hardening', () => {
 
     const result = await runMigrations(engine);
 
-    expect(result.applied).toBe(LATEST_VERSION - 120);
+    expect(result.applied).toBe(MIGRATIONS.filter(m => m.version > 120).length);
     expect(result.current).toBe(LATEST_VERSION);
     expect(await hasTable(engine, 'source_ingest_run_items')).toBe(true);
     expect(await hasIndex(engine, 'source_ingest_run_items_run_idx')).toBe(true);

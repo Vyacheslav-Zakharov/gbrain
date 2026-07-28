@@ -3242,7 +3242,7 @@ const source_base_view_upsert: Operation = {
     object_name: { type: 'string', required: true },
     display_name: { type: 'string' },
     selected_fields: { type: 'array', items: { type: 'string' } },
-    row_filter: { type: 'array' },
+    row_filter: { type: 'array', items: { type: 'object' } },
     sample_limit: { type: 'number' },
     discovery_json: { type: 'object' },
   },
@@ -3358,7 +3358,7 @@ const source_transform_view_upsert: Operation = {
   params: {
     transform_view_id: { type: 'string', required: true },
     display_name: { type: 'string' },
-    inputs: { type: 'array', required: true },
+    inputs: { type: 'array', items: { type: 'object' }, required: true },
     sql: { type: 'string', required: true },
     primary_key_field: { type: 'string', required: true },
     updated_at_field: { type: 'string' },

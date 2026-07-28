@@ -7,16 +7,16 @@
 // 1-3 seconds of cold init and load the post-schema state directly.
 //
 // Output: test/fixtures/pglite-snapshot.tar (binary, gitignored)
-//         test/fixtures/pglite-snapshot.version (hex SHA256 of MIGRATIONS SQL)
+//         test/fixtures/pglite-snapshot.version (hex SHA256 of rendered schema + migrations)
 //
 // The version file lets the engine detect snapshot staleness — if the tar's
-// recorded version doesn't match the current MIGRATIONS hash, the engine
+// recorded version doesn't match the current rendered-schema/migrations hash, the engine
 // ignores the snapshot and runs a normal initSchema.
 //
 // Run: bun run scripts/build-pglite-snapshot.ts
 //      (or: bun run build:pglite-snapshot)
 //
-// Re-run whenever you touch src/core/migrate.ts or src/schema.sql.
+// Re-run whenever you touch migrations, PGLite schema rendering, or embedding dimensions/model.
 
 import { writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -24,10 +24,26 @@ import * as crypto from "node:crypto";
 
 import { PGLiteEngine, computeSnapshotSchemaHash } from "../src/core/pglite-engine.ts";
 import { MIGRATIONS } from "../src/core/migrate.ts";
-import { PGLITE_SCHEMA_SQL } from "../src/core/pglite-schema.ts";
+import { getPGLiteSchema } from "../src/core/pglite-schema.ts";
+import { configureGateway, getEmbeddingDimensions, getEmbeddingModel } from "../src/core/ai/gateway.ts";
+import { DEFAULT_EMBEDDING_DIMENSIONS, DEFAULT_EMBEDDING_MODEL } from "../src/core/ai/defaults.ts";
+
+// bunfig.toml preloads this legacy shape for the unit suite. The snapshot is a
+// test fixture, so build it against the same schema instead of the production
+// gateway default (currently ZeroEntropy/1280). Otherwise every `bun test`
+// process correctly rejects the freshly-built snapshot as incompatible.
+const TEST_EMBEDDING_MODEL = 'openai:text-embedding-3-large';
+const TEST_EMBEDDING_DIMENSIONS = 1536;
 
 function computeSchemaHash(): string {
-  return computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+  let dims = DEFAULT_EMBEDDING_DIMENSIONS;
+  let model = DEFAULT_EMBEDDING_MODEL;
+  try {
+    dims = getEmbeddingDimensions();
+    model = getEmbeddingModel() || model;
+  } catch { /* gateway not configured — same defaults as initSchema() */ }
+  const renderedSchema = getPGLiteSchema(dims, model);
+  return computeSnapshotSchemaHash(MIGRATIONS, renderedSchema, crypto);
 }
 
 async function main() {
@@ -35,6 +51,11 @@ async function main() {
   const versionPath = "test/fixtures/pglite-snapshot.version";
   mkdirSync(dirname(fixturePath), { recursive: true });
 
+  configureGateway({
+    embedding_model: TEST_EMBEDDING_MODEL,
+    embedding_dimensions: TEST_EMBEDDING_DIMENSIONS,
+    env: { ...process.env },
+  });
   const schemaHash = computeSchemaHash();
   console.log(`[build-pglite-snapshot] schema hash: ${schemaHash.slice(0, 16)}...`);
   console.log(`[build-pglite-snapshot] booting PGLite (in-memory)...`);

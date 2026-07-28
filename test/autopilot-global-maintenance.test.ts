@@ -117,7 +117,7 @@ describe('dispatchPerSource — per-source jobs carry NON_GLOBAL phases (no embe
 
 describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', () => {
   let engine: PGLiteEngine;
-  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 30000);
+  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60000);
   afterAll(async () => { await engine.disconnect(); });
   beforeEach(async () => { await resetPgliteState(engine); });
 

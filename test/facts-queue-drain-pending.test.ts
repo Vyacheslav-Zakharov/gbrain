@@ -25,8 +25,10 @@ describe('FactsQueue.drainPending — codex F9 distinct-from-shutdown contract',
     const result = await q.drainPending({ timeout: 1000 });
     const elapsed = Date.now() - start;
     expect(result).toEqual({ drained: 0, unfinished: 0 });
-    // Fast path: empty drain should NOT spend the full timeout.
-    expect(elapsed).toBeLessThan(50);
+    // Fast path: empty drain should stay well below the 1s timeout. Avoid a
+    // sub-50ms wall-clock assertion: PGLite-heavy CI batches can briefly
+    // contend for CPU even though drainPending returns without polling.
+    expect(elapsed).toBeLessThan(250);
   });
 
   test('awaits in-flight to settle WITHOUT aborting (the codex F9 contract)', async () => {

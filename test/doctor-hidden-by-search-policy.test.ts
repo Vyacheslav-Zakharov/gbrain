@@ -24,12 +24,6 @@ import type { ChunkInput } from '../src/core/types.ts';
 
 let engine: PGLiteEngine;
 
-function basisEmbedding(idx: number, dim = 1536): Float32Array {
-  const emb = new Float32Array(dim);
-  emb[idx % dim] = 1.0;
-  return emb;
-}
-
 async function seed(
   slug: string,
   opts: { chunks?: number; frontmatter?: Record<string, unknown> } = {},
@@ -49,7 +43,6 @@ async function seed(
         chunk_index: i,
         chunk_text: `chunk ${i} of ${slug}`,
         chunk_source: 'compiled_truth',
-        embedding: basisEmbedding(100 + i),
         token_count: 4,
       });
     }

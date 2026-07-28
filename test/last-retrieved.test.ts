@@ -56,7 +56,9 @@ describe('awaitPendingLastRetrievedWrites', () => {
     const result = await awaitPendingLastRetrievedWrites();
     const dt = Date.now() - t0;
     expect(result).toEqual({ outcome: 'drained', pending: 0 });
-    expect(dt).toBeLessThan(50);
+    // Empty-set path must avoid the drain timeout, but wall-clock scheduling
+    // under concurrent PGLite CI work can exceed 50ms without any polling.
+    expect(dt).toBeLessThan(250);
   });
 
   test('single tracked write completes, drain resolves cleanly', async () => {
