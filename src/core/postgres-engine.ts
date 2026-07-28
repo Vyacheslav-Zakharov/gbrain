@@ -3226,30 +3226,64 @@ export class PostgresEngine implements BrainEngine {
     }));
   }
 
-  async getBacklinkCounts(slugs: string[]): Promise<Map<string, number>> {
+  async getBacklinkCounts(
+    refs: Array<{ slug: string; source_id?: string | null }>,
+    opts?: { sourceIds?: string[] },
+  ): Promise<Map<string, number>> {
     const result = new Map<string, number>();
-    if (slugs.length === 0) return result;
-    for (const s of slugs) result.set(s, 0);
+    if (refs.length === 0) return result;
 
-    // v0.41.18.0 D12: filter mentions OUT of backlink-count for search
-    // ranking. `link_source='mentions'` rows are auto-linked body-text
-    // mentions from `gbrain extract links --by-mention`; they're
-    // graph-completeness signal, NOT human-intent signal. Counting them
-    // toward backlinks would shift search ranking globally on first
-    // --by-mention run, boosting popular-mention pages over intentional-
-    // backlink pages. `IS DISTINCT FROM` is NULL-safe so legacy rows with
-    // NULL link_source still count (NULL != 'mentions' → row included).
+    const normalized = Array.from(
+      new Map(
+        refs.map(r => {
+          const sourceId = r.source_id ?? 'default';
+          return [`${sourceId}::${r.slug}`, { slug: r.slug, source_id: sourceId }];
+        }),
+      ).values(),
+    );
+    for (const r of normalized) result.set(`${r.source_id}::${r.slug}`, 0);
+
+    const slugs = normalized.map(r => r.slug);
+    const srcs = normalized.map(r => r.source_id);
     const sql = this.sql;
-    const rows = await sql`
-      SELECT p.slug as slug, COUNT(l.id)::int as cnt
-      FROM pages p
-      LEFT JOIN links l ON l.to_page_id = p.id
-        AND l.link_source IS DISTINCT FROM 'mentions'
-      WHERE p.slug = ANY(${slugs}::text[])
-      GROUP BY p.slug
-    `;
-    for (const r of rows as unknown as { slug: string; cnt: number }[]) {
-      result.set(r.slug, Number(r.cnt));
+
+    // Cross-source edge hardening: backlink boost is keyed by (source_id,
+    // slug), and scoped callers get ranking credit only from accessible FROM
+    // endpoints. `mentions` remain excluded per v0.41.18.0 D12.
+    const rows = opts?.sourceIds && opts.sourceIds.length > 0
+      ? await sql`
+          WITH targets AS (
+            SELECT p.id, p.slug, p.source_id
+            FROM unnest(${slugs}::text[], ${srcs}::text[]) AS v(slug, source_id)
+            JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
+            WHERE p.deleted_at IS NULL
+              AND p.source_id = ANY(${opts.sourceIds}::text[])
+          )
+          SELECT t.source_id, t.slug, COUNT(f.id)::int as cnt
+          FROM targets t
+          LEFT JOIN links l ON l.to_page_id = t.id
+            AND l.link_source IS DISTINCT FROM 'mentions'
+          LEFT JOIN pages f ON f.id = l.from_page_id
+            AND f.deleted_at IS NULL
+            AND f.source_id = ANY(${opts.sourceIds}::text[])
+          GROUP BY t.source_id, t.slug
+        `
+      : await sql`
+          WITH targets AS (
+            SELECT p.id, p.slug, p.source_id
+            FROM unnest(${slugs}::text[], ${srcs}::text[]) AS v(slug, source_id)
+            JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
+            WHERE p.deleted_at IS NULL
+          )
+          SELECT t.source_id, t.slug, COUNT(l.id)::int as cnt
+          FROM targets t
+          LEFT JOIN links l ON l.to_page_id = t.id
+            AND l.link_source IS DISTINCT FROM 'mentions'
+          GROUP BY t.source_id, t.slug
+        `;
+
+    for (const r of rows as unknown as { source_id: string; slug: string; cnt: number }[]) {
+      result.set(`${r.source_id ?? 'default'}::${r.slug}`, Number(r.cnt));
     }
     return result;
   }

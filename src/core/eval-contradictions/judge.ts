@@ -348,7 +348,9 @@ export async function judgeContradiction(input: JudgeInput): Promise<JudgeOutput
   const result = await callFn({
     model: input.model,
     messages: [{ role: 'user', content: prompt }],
-    maxTokens: 200,
+    // Reasoning models consume output tokens for hidden thinking before
+    // emitting the small JSON verdict. Keep bounded headroom for reasoning.
+    maxTokens: 2048,
     abortSignal: input.abortSignal,
   });
   if (isRefusalResponse(result)) {

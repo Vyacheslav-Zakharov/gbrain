@@ -3156,28 +3156,59 @@ export class PGLiteEngine implements BrainEngine {
     }));
   }
 
-  async getBacklinkCounts(slugs: string[]): Promise<Map<string, number>> {
+  async getBacklinkCounts(
+    refs: Array<{ slug: string; source_id?: string | null }>,
+    opts?: { sourceIds?: string[] },
+  ): Promise<Map<string, number>> {
     const result = new Map<string, number>();
-    if (slugs.length === 0) return result;
-    // Initialize all slugs to 0 so callers get a consistent map.
-    for (const s of slugs) result.set(s, 0);
+    if (refs.length === 0) return result;
 
-    // v0.41.18.0 D12: filter mentions OUT of backlink-count for search
-    // ranking — parity with postgres-engine.ts. See that file's comment
-    // for the full rationale. `IS DISTINCT FROM` is NULL-safe so legacy
-    // rows with NULL link_source still count toward backlinks.
-    // PGLite needs explicit cast for array binding (does not auto-serialize JS arrays).
-    const { rows } = await this.db.query(
-      `SELECT p.slug AS slug, COUNT(l.id)::int AS cnt
-       FROM pages p
-       LEFT JOIN links l ON l.to_page_id = p.id
-         AND l.link_source IS DISTINCT FROM 'mentions'
-       WHERE p.slug = ANY($1::text[])
-       GROUP BY p.slug`,
-      [slugs]
+    const normalized = Array.from(
+      new Map(
+        refs.map(r => {
+          const sourceId = r.source_id ?? 'default';
+          return [`${sourceId}::${r.slug}`, { slug: r.slug, source_id: sourceId }];
+        }),
+      ).values(),
     );
-    for (const r of rows as { slug: string; cnt: number }[]) {
-      result.set(r.slug, Number(r.cnt));
+    for (const r of normalized) result.set(`${r.source_id}::${r.slug}`, 0);
+
+    const params: unknown[] = [];
+    const values = normalized.map((r, i) => {
+      params.push(r.slug, r.source_id);
+      const base = i * 2;
+      return `($${base + 1}::text, $${base + 2}::text)`;
+    }).join(', ');
+    let fromScopeSql = '';
+    let targetScopeSql = '';
+    let countExpr = 'COUNT(l.id)';
+    if (opts?.sourceIds && opts.sourceIds.length > 0) {
+      params.push(opts.sourceIds);
+      targetScopeSql = ` AND p.source_id = ANY($${params.length}::text[])`;
+      countExpr = 'COUNT(f.id)';
+      fromScopeSql = `
+          LEFT JOIN pages f ON f.id = l.from_page_id
+            AND f.deleted_at IS NULL
+            AND f.source_id = ANY($${params.length}::text[])`;
+    }
+
+    const { rows } = await this.db.query(
+      `WITH refs(slug, source_id) AS (VALUES ${values}),
+       targets AS (
+         SELECT p.id, p.slug, p.source_id
+         FROM refs v
+         JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
+         WHERE p.deleted_at IS NULL${targetScopeSql}
+       )
+       SELECT t.source_id AS source_id, t.slug AS slug, ${countExpr}::int AS cnt
+       FROM targets t
+       LEFT JOIN links l ON l.to_page_id = t.id
+         AND l.link_source IS DISTINCT FROM 'mentions'${fromScopeSql}
+       GROUP BY t.source_id, t.slug`,
+      params,
+    );
+    for (const r of rows as { source_id: string; slug: string; cnt: number }[]) {
+      result.set(`${r.source_id ?? 'default'}::${r.slug}`, Number(r.cnt));
     }
     return result;
   }

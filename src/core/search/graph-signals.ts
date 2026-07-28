@@ -119,6 +119,11 @@ export interface GraphSignalsOpts {
   onMeta?: (meta: GraphSignalsMeta) => void;
   /** Observability sink — called once per invocation with score stats. */
   onScoreDistribution?: (dist: ScoreDistribution) => void;
+  /**
+   * Trusted-only disclosure gate for exact cross-source hit counts on result
+   * rows. The boost remains safe; the raw count stays hidden for remote callers.
+   */
+  exposeCrossSourceHits?: boolean;
 }
 
 // ===========================================================================
@@ -366,7 +371,7 @@ export async function applyGraphSignals(
     }
     if (row.cross_source_hits >= CROSS_SOURCE_MIN_HITS) {
       r.score *= CROSS_SOURCE_BOOST;
-      r.graph_cross_source_hits = row.cross_source_hits;
+      if (opts.exposeCrossSourceHits) r.graph_cross_source_hits = row.cross_source_hits;
       r.graph_cross_source_boost = CROSS_SOURCE_BOOST;
       meta.cross_source_fires++;
     }

@@ -77,6 +77,9 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   // `gemini-2-flash` kept as an alias for the legacy id spelling.
   'google:gemini-2.0-flash':              { input:  0.10, output:  0.40 },
   'google:gemini-2-flash':                { input:  0.10, output:  0.40 },
+  // Conservative local cap estimate; verify against provider pricing before
+  // treating this value as accounting truth.
+  'google:gemini-2.5-flash':              { input:  1.00, output:  5.00 },
 
   // ── Together / DeepSeek (cross-modal-eval panel) ───────────────────────
   'together:meta-llama/Llama-3.3-70B-Instruct-Turbo': { input: 0.88, output: 0.88 },

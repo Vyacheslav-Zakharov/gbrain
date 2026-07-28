@@ -101,6 +101,15 @@ describe('v0.41 T5: parseAtomsResponse', () => {
     expect(parseAtomsResponse(`[{"title":"a","atom_type":"insight","body":"b","virality_score":-5}]`)[0].virality_score).toBeUndefined();
     expect(parseAtomsResponse(`[{"title":"a","atom_type":"insight","body":"b","virality_score":75}]`)[0].virality_score).toBe(75);
   });
+
+  test('normalizes, deduplicates, and caps reusable concept slugs', () => {
+    const raw = `[{"title":"a","atom_type":"insight","body":"b","concepts":["Privacy_First","privacy-first","AI/Agents","Third Topic","Fourth Topic",42]}]`;
+    expect(parseAtomsResponse(raw)[0].concepts).toEqual([
+      'privacy-first',
+      'ai-agents',
+      'third-topic',
+    ]);
+  });
 });
 
 describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
@@ -258,6 +267,25 @@ describe('v0.41 T6: runPhaseSynthesizeConcepts via stubbed chat', () => {
     ];
     const result = await runPhaseSynthesizeConcepts(engine, { _atoms: atoms });
     expect(result.status).toBe('skipped');
+  });
+
+  test('same concept slug is synthesized independently inside each source', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived)
+       VALUES ('shared', 'Shared concept test', false), ('hidden', 'Hidden concept test', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false`,
+    );
+    const atoms = [
+      { slug: 'a1', title: 'S1', body: 'shared one', concept_refs: ['same-theme'], sourceId: 'shared' },
+      { slug: 'a2', title: 'S2', body: 'shared two', concept_refs: ['same-theme'], sourceId: 'shared' },
+      { slug: 'b1', title: 'H1', body: 'hidden one', concept_refs: ['same-theme'], sourceId: 'hidden' },
+      { slug: 'b2', title: 'H2', body: 'hidden two', concept_refs: ['same-theme'], sourceId: 'hidden' },
+    ];
+    const result = await runPhaseSynthesizeConcepts(engine, { _atoms: atoms });
+    expect(result.details?.concepts_written).toBe(2);
+    expect(await engine.getPage('concepts/same-theme', { sourceId: 'shared' })).not.toBeNull();
+    expect(await engine.getPage('concepts/same-theme', { sourceId: 'hidden' })).not.toBeNull();
+    expect(await engine.getPage('concepts/same-theme', { sourceId: 'default' })).toBeNull();
   });
 
   test('concept count below T3 threshold (2) is filtered out', async () => {

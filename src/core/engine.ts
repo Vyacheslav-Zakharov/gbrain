@@ -1251,11 +1251,18 @@ export interface BrainEngine {
     opts?: RelationalFanoutOpts,
   ): Promise<RelationalFanoutRow[]>;
   /**
-   * For a list of slugs, return how many inbound links each has.
+   * For a list of source-qualified page refs, return how many inbound links each has.
    * Used by hybrid search backlink boost. Single SQL query, not N+1.
-   * Slugs with zero inbound links are present in the map with value 0.
+   * Keys are `${source_id}::${slug}` so same-slug pages in different sources
+   * cannot share backlink boost. When opts.sourceIds is set, only inbound links
+   * whose FROM endpoint is in the caller's accessible sources count; this closes
+   * the cross-source backlink oracle for remote/federated search callers.
+   * Refs with zero inbound links are present in the map with value 0.
    */
-  getBacklinkCounts(slugs: string[]): Promise<Map<string, number>>;
+  getBacklinkCounts(
+    refs: Array<{ slug: string; source_id?: string | null }>,
+    opts?: { sourceIds?: string[] },
+  ): Promise<Map<string, number>>;
   /**
    * v0.40.4 — for a list of page_ids, return adjacency aggregates
    * restricted to the subgraph induced by them. Returns ALL pages with

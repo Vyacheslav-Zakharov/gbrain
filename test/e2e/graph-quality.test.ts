@@ -310,9 +310,13 @@ Mention of [Alice](people/alice).
     await engine.addLink('ref/popular-0', 'topic/medium', '', 'mentions');
 
     // Verify backlink counts.
-    const counts = await engine.getBacklinkCounts(['topic/popular', 'topic/medium', 'topic/obscure']);
-    expect(counts.get('topic/popular')).toBe(5);
-    expect(counts.get('topic/medium')).toBe(1);
-    expect(counts.get('topic/obscure')).toBe(0);
+    const counts = await engine.getBacklinkCounts([
+      { slug: 'topic/popular', source_id: 'default' },
+      { slug: 'topic/medium', source_id: 'default' },
+      { slug: 'topic/obscure', source_id: 'default' },
+    ]);
+    expect(counts.get('default::topic/popular')).toBe(5);
+    expect(counts.get('default::topic/medium')).toBe(1);
+    expect(counts.get('default::topic/obscure')).toBe(0);
   });
 });

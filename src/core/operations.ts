@@ -64,6 +64,7 @@ import {
   sourceConnectorSecretStatus,
 } from './source-ingest/connector-config.ts';
 import { runSourceIngestExecutor } from './source-ingest/executor.ts';
+import { createAttachmentOperations } from './attachments.ts';
 import { buildSourceRevertReport } from './source-ingest/revert.ts';
 import { enqueueDueSourceRefreshJobs, listDueSourceRefreshes } from './source-ingest/freshness.ts';
 import {
@@ -1539,6 +1540,7 @@ const search: Operation = {
       offset,
       expansion: false,
       ...scope,
+      graphSignalsExposeCrossSourceHits: !ctx.remote,
       ...(perCallMode ? { mode: perCallMode } : {}),
       onMeta: (m) => { capturedMeta = m; },
     });
@@ -1721,6 +1723,7 @@ const query: Operation = {
       nearSymbol: (p.near_symbol as string) || undefined,
       walkDepth: typeof p.walk_depth === 'number' ? (p.walk_depth as number) : undefined,
       ...querySourceScope,
+      graphSignalsExposeCrossSourceHits: !ctx.remote,
       // v0.29.1 — agent-explicit recency + salience. Omitted = heuristic defaults.
       salience: p.salience as 'off' | 'on' | 'strong' | undefined,
       recency: p.recency as 'off' | 'on' | 'strong' | undefined,
@@ -6516,6 +6519,8 @@ const run_skillopt: Operation = {
   },
 };
 
+const attachmentOperations = createAttachmentOperations({ OperationError, validatePageSlug });
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -6560,6 +6565,8 @@ export const operations: Operation[] = [
   source_ingest, source_refresh, source_revert,
   // Files
   file_list, file_upload, file_url,
+  // Avers raw attachment tools (Git-backed, source-scoped, MCP-safe)
+  ...attachmentOperations,
   // Jobs (Minions)
   submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,

@@ -32,6 +32,7 @@ import { mkdirSync, appendFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { gbrainPath } from '../config.ts';
 import { ANTHROPIC_PRICING, type ModelPricing } from '../anthropic-pricing.ts';
+import { canonicalLookup } from '../model-pricing.ts';
 import { EMBEDDING_PRICING, lookupEmbeddingPrice } from '../embedding-pricing.ts';
 import { splitProviderModelId } from '../model-id.ts';
 import { isoWeekFilename, resolveAuditDir } from '../audit-week-file.ts';
@@ -193,6 +194,17 @@ function lookupPricing(modelId: string, kind: BudgetKind): ModelPricing | null {
   if (modelTail) {
     const tailHit = ANTHROPIC_PRICING[modelTail];
     if (tailHit) return tailHit;
+  }
+  // Preserve finite-cap enforcement for provider-prefixed chat ids covered by
+  // the canonical multi-provider table rather than ANTHROPIC_PRICING.
+  if (kind === 'chat') {
+    const canonical = canonicalLookup(modelId);
+    if (canonical) return canonical;
+  }
+  // Local cap estimate used by the configured hosted ZeroEntropy reranker.
+  // This is deliberately rerank-only; unknown providers still fail closed.
+  if (kind === 'rerank' && providerId === 'zeroentropyai') {
+    return { input: 0.025, output: 0 };
   }
   // v0.40.6.1: zero-price local-inference rerank providers so the budget
   // tracker's TX2 hard-fail doesn't trip on `llama-server-reranker:<model>`
