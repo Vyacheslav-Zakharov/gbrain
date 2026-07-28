@@ -330,6 +330,11 @@ fi
 __RUN_PHASES__
 EOF
 )
+# Bash 5.2+ can treat '&' in parameter-substitution replacements as the
+# matched text (patsub_replacement). RUN_PHASES_CMD contains redirections such
+# as 2>&1; disable that behavior or stderr is silently redirected to a file
+# named __RUN_PHASES__1 instead of the shard log.
+shopt -u patsub_replacement 2>/dev/null || true
 INNER_CMD="${INNER_CMD/__RUN_PHASES__/$RUN_PHASES_CMD}"
 
 # Conductor / git-worktree support: when `.git` is a file (not a directory),
