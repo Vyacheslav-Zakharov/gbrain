@@ -857,7 +857,7 @@ export async function runSourceIngestExecutor(
       // Physical source-ingest edges are add-only until profile-scoped ownership
       // reconciliation is available. Deleting by from/to/type/source alone can
       // remove an edge still owned by another Article View.
-      const graphCreatedForRecord = await engine.addLinksBatch(currentGraphLinks, { auditSite: 'source-ingest.change-intelligence' });
+      const graphCreatedForRecord = await engine.addLinksBatch(currentGraphLinks, { auditSite: 'source-ingest.change-intelligence' }); // gbrain-allow-direct-insert: Source Ingest apply is the canonical publication path for reviewed change-intelligence graph links.
       const graphRemovedForRecord = 0;
       graphLinksCreated += graphCreatedForRecord;
       graphLinksRemoved += graphRemovedForRecord;
