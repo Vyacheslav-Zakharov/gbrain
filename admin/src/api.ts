@@ -59,6 +59,36 @@ export const api = {
     }
     return apiFetch(`/admin/api/activity/runs?${qs.toString()}`);
   },
+  aiReviewProposals: (params: { status?: string; q?: string; source_id?: string; limit?: number; offset?: number } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== '') qs.set(key, String(value));
+    }
+    return apiFetch(`/admin/api/ai-review/proposals?${qs.toString()}`);
+  },
+  aiReviewProposal: (id: number) => apiFetch(`/admin/api/ai-review/proposals/${id}`),
+  aiReviewManualRevision: (id: number, draft: object) => apiFetch(`/admin/api/ai-review/proposals/${id}/revisions/manual`, {
+    method: 'POST', body: JSON.stringify({ draft }),
+  }),
+  aiReviewLlmRevision: (id: number, comment: string, model?: string) => apiFetch(`/admin/api/ai-review/proposals/${id}/revisions/llm`, {
+    method: 'POST', body: JSON.stringify({ comment, model }),
+  }),
+  aiReviewAccept: (id: number, draft: object, revision_id?: number) => apiFetch(`/admin/api/ai-review/proposals/${id}/accept`, {
+    method: 'POST', body: JSON.stringify({ draft, revision_id }),
+  }),
+  aiReviewReject: (id: number, reason?: string) => apiFetch(`/admin/api/ai-review/proposals/${id}/reject`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  }),
+  aiReviewConcepts: (params: { status?: string; q?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') qs.set(key, String(value));
+    return apiFetch(`/admin/api/ai-review/concepts?${qs.toString()}`);
+  },
+  aiReviewConcept: (id: number) => apiFetch(`/admin/api/ai-review/concepts/${id}`),
+  aiReviewConceptManualRevision: (id: number, proposed_markdown: string) => apiFetch(`/admin/api/ai-review/concepts/${id}/revisions/manual`, { method: 'POST', body: JSON.stringify({ proposed_markdown }) }),
+  aiReviewConceptLlmRevision: (id: number, comment: string) => apiFetch(`/admin/api/ai-review/concepts/${id}/revisions/llm`, { method: 'POST', body: JSON.stringify({ comment }) }),
+  aiReviewConceptAccept: (id: number, proposed_markdown: string, revision_id?: number, allow_overwrite_existing = false) => apiFetch(`/admin/api/ai-review/concepts/${id}/accept`, { method: 'POST', body: JSON.stringify({ proposed_markdown, revision_id, allow_overwrite_existing }) }),
+  aiReviewConceptReject: (id: number, reason?: string) => apiFetch(`/admin/api/ai-review/concepts/${id}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   sourceIngestOverview: () => apiFetch('/admin/api/source-ingest/overview'),
   sourceIngestCatalogTree: () => apiFetch('/admin/api/source-ingest/catalog/tree'),
   sourceIngestSchemaView: () => apiFetch('/admin/api/source-ingest/schema-view'),

@@ -66,6 +66,24 @@ import {
   type PortalSearchRank,
 } from '../portal-usability.ts';
 import { normalizeAlias } from '../core/search/alias-normalize.ts';
+import {
+  acceptTakeProposal,
+  createLlmTakeRevision,
+  createManualTakeRevision,
+  getTakeProposalReview,
+  listTakeProposals,
+  rejectTakeProposal,
+  ReviewConflictError,
+  type TakeProposalStatus,
+} from '../core/ai-review.ts';
+import {
+  acceptConceptProposal,
+  createManualConceptRevision,
+  createLlmConceptRevision,
+  getConceptProposalReview,
+  listConceptProposals,
+  rejectConceptProposal,
+} from '../core/concept-review.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -2361,9 +2379,168 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     res.status(401).json({ error: 'Admin authentication required' });
   }
 
+  function requireAdminSameOrigin(req: express.Request, res: express.Response, next: express.NextFunction) {
+    const fetchSite = req.get('sec-fetch-site');
+    if (fetchSite && fetchSite !== 'same-origin') {
+      res.status(403).json({ error: 'cross_site_admin_mutation_rejected' });
+      return;
+    }
+    const origin = req.get('origin');
+    if (origin) {
+      try {
+        const expectedOrigin = `${req.protocol}://${req.get('host')}`;
+        if (new URL(origin).origin !== expectedOrigin) {
+          res.status(403).json({ error: 'cross_origin_admin_mutation_rejected' });
+          return;
+        }
+      } catch {
+        res.status(403).json({ error: 'invalid_origin' });
+        return;
+      }
+    } else if (fetchSite !== 'same-origin') {
+      res.status(403).json({ error: 'missing_same_origin_evidence' });
+      return;
+    }
+    next();
+  }
+
+  function sendReviewError(res: express.Response, error: unknown): void {
+    if (error instanceof ReviewConflictError) {
+      res.status(error.code === 'not_found' ? 404 : 409).json({ error: error.code, message: error.message });
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: 'review_request_failed', message });
+  }
+
   // ---------------------------------------------------------------------------
   // Admin API endpoints
   // ---------------------------------------------------------------------------
+
+  app.get('/admin/api/ai-review/proposals', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const statusRaw = String(req.query.status ?? 'pending');
+      const status = ['pending', 'accepted', 'rejected', 'superseded'].includes(statusRaw)
+        ? statusRaw as TakeProposalStatus
+        : 'pending';
+      res.json(await listTakeProposals(engine, {
+        status,
+        sourceId: typeof req.query.source_id === 'string' ? req.query.source_id : undefined,
+        query: typeof req.query.q === 'string' ? req.query.q : undefined,
+        limit: Number(req.query.limit ?? 50),
+        offset: Number(req.query.offset ?? 0),
+      }));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/proposals/:id', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      res.json(await getTakeProposalReview(engine, Number(req.params.id)));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await createManualTakeRevision(engine, Number(req.params.id), req.body?.draft, adminActor(req)));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/revisions/llm', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await createLlmTakeRevision(
+        engine,
+        Number(req.params.id),
+        String(req.body?.comment ?? ''),
+        adminActor(req),
+        typeof req.body?.model === 'string' ? req.body.model : undefined,
+      ));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await acceptTakeProposal(
+        engine,
+        Number(req.params.id),
+        req.body?.draft,
+        adminActor(req),
+        typeof req.body?.revision_id === 'number' ? req.body.revision_id : undefined,
+      ));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await rejectTakeProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/concepts', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      res.json(await listConceptProposals(engine, {
+        status: String(req.query.status ?? 'pending'),
+        query: typeof req.query.q === 'string' ? req.query.q : undefined,
+        limit: Number(req.query.limit ?? 50),
+      }));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/concepts/:id', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      res.json(await getConceptProposalReview(engine, Number(req.params.id)));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/concepts/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await createManualConceptRevision(engine, Number(req.params.id), String(req.body?.proposed_markdown ?? ''), adminActor(req)));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/concepts/:id/revisions/llm', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await createLlmConceptRevision(engine, Number(req.params.id), String(req.body?.comment ?? ''), adminActor(req), req.body?.model));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/concepts/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await acceptConceptProposal(engine, Number(req.params.id), req.body?.proposed_markdown, adminActor(req), {
+        revisionId: typeof req.body?.revision_id === 'number' ? req.body.revision_id : undefined,
+        allowOverwriteExisting: req.body?.allow_overwrite_existing === true,
+      }));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/concepts/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await rejectConceptProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
 
   // Sign-out-everywhere: nuke ALL active admin sessions in-memory. Every
   // browser/tab fails its next request, gets 401, redirects to login.

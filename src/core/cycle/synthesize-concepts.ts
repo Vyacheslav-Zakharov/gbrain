@@ -16,7 +16,8 @@
 //   3. For each group with count ≥2: assign tier (T1/T2/T3/T4 by count).
 //   4. For T1/T2 groups: Sonnet call to produce a 1-paragraph narrative.
 //      For T3/T4: deterministic stub narrative.
-//   5. Write concept-typed pages.
+//   5. Write reviewable concept proposals. Canonical pages are created only
+//      after an explicit human accept action in Admin AI Review.
 
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult } from '../cycle.ts';
@@ -24,6 +25,8 @@ import type { ProgressReporter } from '../progress.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { chat as gatewayChat } from '../ai/gateway.ts';
+import { serializeMarkdown } from '../markdown.ts';
+import { contentHash } from './propose-takes.ts';
 
 const DEFAULT_BUDGET_USD = 1.5;
 const TIER_T1_MIN = 10;
@@ -44,12 +47,13 @@ export interface SynthesizeConceptsOpts {
   /** Test seam: alternative chat function. */
   _chat?: typeof gatewayChat;
   /** Test seam: skip DB query; cluster these atoms directly. */
-  _atoms?: Array<{ slug: string; concept_refs: string[]; body: string; title: string; sourceId?: string }>;
+  _atoms?: Array<{ slug: string; concept_refs: string[]; body: string; title: string; sourceId?: string; source_id?: string }>;
 }
 
 interface AtomGroup {
   sourceId: string;
   conceptSlug: string;
+  atomSlugs: string[];
   atomTitles: string[];
   atomBodies: string[];
   tier: 'T1' | 'T2' | 'T3' | 'T4';
@@ -61,6 +65,7 @@ based on multiple atom-shaped insights that reference it.
 Output ONLY the summary paragraph (3-5 sentences). No headers, no JSON,
 no preamble. Write in plain English, present-tense voice. Synthesize what
 the atoms collectively SAY about the concept; don't enumerate the atoms.`;
+export const SYNTHESIZE_CONCEPTS_PROMPT_VERSION = 'synthesize-concepts-review-v1';
 
 export async function runPhaseSynthesizeConcepts(
   engine: BrainEngine,
@@ -73,13 +78,13 @@ export async function runPhaseSynthesizeConcepts(
   if (atoms.length === 0 && opts._atoms === undefined) {
     try {
       const rows = await engine.executeRaw<{
-        source_id: string;
         slug: string;
+        source_id: string;
         title: string;
         compiled_truth: string;
         frontmatter: { concepts?: string[]; imported_from?: string };
       }>(
-        `SELECT source_id, slug, title, compiled_truth, frontmatter
+        `SELECT slug, source_id, title, compiled_truth, frontmatter
            FROM pages
           WHERE type = 'atom'
             AND deleted_at IS NULL
@@ -89,10 +94,10 @@ export async function runPhaseSynthesizeConcepts(
         .filter((r) => Array.isArray(r.frontmatter?.concepts) && r.frontmatter.concepts.length > 0)
         .map((r) => ({
           slug: r.slug,
+          source_id: r.source_id,
           title: r.title,
           body: r.compiled_truth,
           concept_refs: r.frontmatter!.concepts!,
-          sourceId: r.source_id,
         }));
     } catch {
       // No atoms table or query failed — phase no-ops cleanly.
@@ -109,27 +114,17 @@ export async function runPhaseSynthesizeConcepts(
     };
   }
 
-  // 2. Group atoms by source and concept slug. Same-slug concepts in separate
-  // sources must never be merged or written into the default source.
-  const groups = new Map<string, {
-    sourceId: string;
-    conceptSlug: string;
-    titles: string[];
-    bodies: string[];
-  }>();
+  // 2. Group atoms by concept slug
+  const groups = new Map<string, { sourceId: string; conceptSlug: string; slugs: string[]; titles: string[]; bodies: string[] }>();
   for (const atom of atoms) {
-    const sourceId = atom.sourceId ?? 'default';
     for (const conceptSlug of atom.concept_refs) {
-      const groupKey = `${sourceId}\u0000${conceptSlug}`;
-      const existing = groups.get(groupKey) ?? {
-        sourceId,
-        conceptSlug,
-        titles: [],
-        bodies: [],
-      };
+      const sourceId = atom.sourceId ?? atom.source_id ?? 'default';
+      const key = `${sourceId}\u0000${conceptSlug}`;
+      const existing = groups.get(key) ?? { sourceId, conceptSlug, slugs: [], titles: [], bodies: [] };
+      existing.slugs.push(atom.slug);
       existing.titles.push(atom.title);
       existing.bodies.push(atom.body);
-      groups.set(groupKey, existing);
+      groups.set(key, existing);
     }
   }
 
@@ -143,6 +138,7 @@ export async function runPhaseSynthesizeConcepts(
     atomGroups.push({
       sourceId: data.sourceId,
       conceptSlug: data.conceptSlug,
+      atomSlugs: data.slugs,
       atomTitles: data.titles,
       atomBodies: data.bodies,
       tier,
@@ -165,6 +161,7 @@ export async function runPhaseSynthesizeConcepts(
   const budgetCap = DEFAULT_BUDGET_USD;
   const failures: Array<{ concept: string; error: string }> = [];
   const tierCounts = { T1: 0, T2: 0, T3: 0, T4: 0 };
+  const proposalRunId = `concepts-${Date.now().toString(36)}`;
 
   // v0.41.19.0 (T3): throttled yield helper. Fires `opts.yieldDuringPhase`
   // every 30s — cycle.ts threads `buildYieldDuringPhase(lock, outer)` so
@@ -209,8 +206,7 @@ export async function runPhaseSynthesizeConcepts(
                     .join('\n\n')}`,
               },
             ],
-            // Reasoning providers consume output tokens before emitting the narrative.
-            maxTokens: 2048,
+            maxTokens: 500,
           });
           // Post-await yield (T3): the LLM call is the main TTL hazard
           // codex flagged. Throttle inside maybeYield bounds the actual
@@ -232,26 +228,65 @@ export async function runPhaseSynthesizeConcepts(
       narrative = deterministicNarrative(group);
     }
 
+    let proposalInserted = opts.dryRun ? 1 : 0;
     if (!opts.dryRun) {
       const title = group.conceptSlug.split('/').pop() ?? group.conceptSlug;
-      await engine.putPage(`concepts/${title}`, {
-        title: title.replace(/-/g, ' '),
+      const pageSlug = `concepts/${title}`;
+      const currentDestination = await engine.getPage(pageSlug, { sourceId: group.sourceId });
+      let destinationContentHash: string | null = null;
+      if (currentDestination) {
+        const currentTags = await engine.getTags(pageSlug, { sourceId: group.sourceId });
+        destinationContentHash = contentHash(serializeMarkdown(
+          currentDestination.frontmatter ?? {},
+          currentDestination.compiled_truth ?? '',
+          currentDestination.timeline ?? '',
+          { type: currentDestination.type, title: currentDestination.title, tags: currentTags },
+        ));
+      }
+      const sourceAtoms = group.atomSlugs.map((slug, i) => ({
+        source_id: group.sourceId,
+        slug,
+        title: group.atomTitles[i] ?? slug,
+      }));
+      const sourceContentHash = contentHash(JSON.stringify({
+        source_atoms: sourceAtoms,
+        bodies: group.atomBodies,
+      }));
+      const proposedMarkdown = serializeMarkdown({
+        tier: group.tier,
+        mention_count: group.atomTitles.length,
+        composite_score: group.atomTitles.length,
+        synthesized_at: new Date().toISOString(),
+        synthesized_by: SYNTHESIZE_CONCEPTS_PROMPT_VERSION,
+      }, narrative, '', {
         type: 'concept',
-        compiled_truth: narrative,
-        frontmatter: {
-          type: 'concept',
-          tier: group.tier,
-          mention_count: group.atomTitles.length,
-          composite_score: group.atomTitles.length,
-          synthesized_at: new Date().toISOString(),
-          synthesized_by: 'synthesize_concepts-v0.41',
-        },
-        timeline: '',
-      }, { sourceId: group.sourceId });
+        title: title.replace(/-/g, ' '),
+        tags: [],
+      });
+      const inserted = await engine.executeRaw<{ id: number }>(
+        `INSERT INTO concept_proposals
+           (source_id, page_slug, source_content_hash, destination_content_hash, prompt_version, proposal_run_id,
+            proposed_markdown, source_atoms, model_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb, $9)
+         ON CONFLICT (source_id, page_slug, source_content_hash, prompt_version) DO NOTHING
+         RETURNING id`,
+        [
+          group.sourceId,
+          pageSlug,
+          sourceContentHash,
+          destinationContentHash,
+          SYNTHESIZE_CONCEPTS_PROMPT_VERSION,
+          proposalRunId,
+          proposedMarkdown,
+          JSON.stringify(sourceAtoms),
+          group.tier === 'T1' || group.tier === 'T2' ? 'configured:synthesize_concepts' : 'deterministic-template',
+        ],
+      );
+      proposalInserted = inserted.length;
     }
-    conceptsWritten++;
+    conceptsWritten += proposalInserted;
     // v0.41.19.0 (T4): one tick per concept group with running count.
-    opts.progress?.tick(1, `${conceptsWritten} concepts`);
+    opts.progress?.tick(1, `${conceptsWritten} proposals`);
 
     // v0.41.19.0 (T3): replaced bare per-iteration fire with throttled
     // helper. Same hook, same cycle-lock refresh effect, just at the
@@ -264,18 +299,17 @@ export async function runPhaseSynthesizeConcepts(
   // only fires when concepts were actually written; rollup always fires so
   // doctor sees the phase ran.
   if (!opts.dryRun && conceptsWritten > 0) {
-    const runId = `concepts-${Date.now().toString(36)}`;
     try {
       await writeReceipt(engine, {
         kind: 'concepts',
         source_id: 'default',
-        run_id: runId,
+        run_id: proposalRunId,
         round: 'single',
         extracted_at: new Date().toISOString(),
         total_rows: conceptsWritten,
         cost_usd: estimatedSpendUsd,
         summary:
-          `Synthesized ${conceptsWritten} concepts ` +
+          `Proposed ${conceptsWritten} concepts for human review ` +
           `(T1=${tierCounts.T1} T2=${tierCounts.T2} T3=${tierCounts.T3}) ` +
           `from ${atomGroups.length} groups across ${atoms.length} atoms.`,
       });
@@ -298,11 +332,13 @@ export async function runPhaseSynthesizeConcepts(
     status: failures.length > 0 ? 'warn' : 'ok',
     duration_ms: 0,
     summary:
-      `synthesize_concepts: ${conceptsWritten} concepts ` +
+      `synthesize_concepts: ${conceptsWritten} concept proposals ` +
       `(T1=${tierCounts.T1} T2=${tierCounts.T2} T3=${tierCounts.T3})` +
       (failures.length > 0 ? ` (${failures.length} LLM-failed → template fallback)` : ''),
     details: {
       concepts_written: conceptsWritten,
+      concepts_proposed: conceptsWritten,
+      proposal_run_id: proposalRunId,
       tier_counts: tierCounts,
       groups_found: atomGroups.length,
       atoms_seen: atoms.length,

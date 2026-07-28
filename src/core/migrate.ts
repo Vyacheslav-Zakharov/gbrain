@@ -5792,6 +5792,99 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE oauth_tokens ADD COLUMN IF NOT EXISTS user_email TEXT;
     `,
   },
+  {
+    // 130 is occupied by oauth_user_source_grants in the current Avers live
+    // baseline. AI Review must advance the watermark instead of being skipped.
+    version: 131,
+    name: 'ai_review_foundation',
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS take_proposal_scans (
+        id                BIGSERIAL PRIMARY KEY,
+        source_id         TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+        page_slug         TEXT        NOT NULL,
+        content_hash      TEXT        NOT NULL,
+        prompt_version    TEXT        NOT NULL,
+        proposal_run_id   TEXT        NOT NULL,
+        model_id          TEXT        NOT NULL,
+        status            TEXT        NOT NULL DEFAULT 'running'
+                                      CHECK (status IN ('running','completed','failed')),
+        proposal_count    INTEGER     NOT NULL DEFAULT 0,
+        error_text        TEXT,
+        started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        completed_at      TIMESTAMPTZ,
+        UNIQUE (source_id, page_slug, content_hash, prompt_version)
+      );
+
+      ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS scan_id BIGINT REFERENCES take_proposal_scans(id) ON DELETE SET NULL;
+      ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS claim_hash TEXT;
+      UPDATE take_proposals
+         SET claim_hash = md5(concat_ws(E'\\x1f', claim_text, kind, holder, weight::text, COALESCE(domain, '')))
+       WHERE claim_hash IS NULL;
+      ALTER TABLE take_proposals ALTER COLUMN claim_hash SET NOT NULL;
+      DROP INDEX IF EXISTS take_proposals_idempotency_idx;
+      CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx
+        ON take_proposals (source_id, page_slug, content_hash, prompt_version, claim_hash);
+
+      CREATE TABLE IF NOT EXISTS ai_review_revisions (
+        id                BIGSERIAL PRIMARY KEY,
+        target_type       TEXT        NOT NULL CHECK (target_type IN ('take_proposal','concept_proposal')),
+        target_id         BIGINT      NOT NULL,
+        source_kind       TEXT        NOT NULL CHECK (source_kind IN ('manual','llm')),
+        base_version      INTEGER     NOT NULL,
+        original_payload  JSONB       NOT NULL,
+        proposed_payload  JSONB       NOT NULL,
+        reviewer_comment  TEXT,
+        model_id          TEXT,
+        prompt_version    TEXT,
+        status            TEXT        NOT NULL DEFAULT 'draft'
+                                      CHECK (status IN ('draft','applied','discarded')),
+        created_by        TEXT        NOT NULL,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        decided_at        TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS ai_review_revisions_target_idx
+        ON ai_review_revisions (target_type, target_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS ai_review_events (
+        id                BIGSERIAL PRIMARY KEY,
+        target_type       TEXT        NOT NULL CHECK (target_type IN ('take_proposal','concept_proposal')),
+        target_id         BIGINT      NOT NULL,
+        action            TEXT        NOT NULL,
+        actor              TEXT        NOT NULL,
+        expected_version  INTEGER,
+        previous_state    JSONB,
+        new_state         JSONB,
+        details           JSONB       NOT NULL DEFAULT '{}'::jsonb,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS ai_review_events_target_idx
+        ON ai_review_events (target_type, target_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS concept_proposals (
+        id                  BIGSERIAL PRIMARY KEY,
+        source_id           TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+        page_slug           TEXT        NOT NULL,
+        source_content_hash TEXT        NOT NULL,
+        destination_content_hash TEXT,
+        prompt_version      TEXT        NOT NULL,
+        proposal_run_id     TEXT        NOT NULL,
+        status              TEXT        NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN ('pending','accepted','rejected','superseded','deferred')),
+        proposed_markdown   TEXT        NOT NULL,
+        source_atoms        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+        model_id            TEXT        NOT NULL,
+        version             INTEGER     NOT NULL DEFAULT 1,
+        proposed_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        acted_at            TIMESTAMPTZ,
+        acted_by            TEXT,
+        UNIQUE (source_id, page_slug, source_content_hash, prompt_version)
+      );
+      CREATE INDEX IF NOT EXISTS concept_proposals_pending_idx
+        ON concept_proposals (source_id, status, proposed_at DESC)
+        WHERE status = 'pending';
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

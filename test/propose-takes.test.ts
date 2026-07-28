@@ -38,10 +38,10 @@ interface CapturedSql {
 
 function buildMockEngine(opts: {
   pages: Page[];
-  existingProposals?: Set<string>; // composite-key strings already in take_proposals
+  existingProposals?: Set<string>; // page-level scan keys retained for compatibility
 }): { engine: BrainEngine; captured: CapturedSql[] } {
   const captured: CapturedSql[] = [];
-  const existing = opts.existingProposals ?? new Set<string>();
+  const scans = opts.existingProposals ?? new Set<string>();
 
   const engine = {
     kind: 'pglite',
@@ -50,14 +50,16 @@ function buildMockEngine(opts: {
     },
     async executeRaw<T>(sql: string, params?: unknown[]): Promise<T[]> {
       captured.push({ sql, params: params ?? [] });
-      // SELECT idempotency check
-      if (sql.includes('SELECT id FROM take_proposals')) {
+      if (sql.includes('INSERT INTO take_proposal_scans')) {
         const [sourceId, slug, ch, pv] = params ?? [];
         const key = `${sourceId}|${slug}|${ch}|${pv}`;
-        if (existing.has(key)) return [{ id: 1 } as unknown as T];
-        return [];
+        if (scans.has(key)) return [];
+        scans.add(key);
+        return [{ id: scans.size } as unknown as T];
       }
-      // INSERT — return nothing
+      if (sql.includes('INSERT INTO take_proposals')) {
+        return [{ id: captured.length } as unknown as T];
+      }
       return [];
     },
   } as unknown as BrainEngine;
@@ -260,9 +262,9 @@ describe('runPhaseProposeTakes — phase integration', () => {
 
     const inserts = captured.filter(c => c.sql.includes('INSERT INTO take_proposals'));
     expect(inserts).toHaveLength(1);
-    expect(inserts[0]!.params[5]).toBe('Marketplaces with cold-start liquidity win'); // claim_text
-    expect(inserts[0]!.params[6]).toBe('bet'); // kind
-    expect(inserts[0]!.params[9]).toBe('market'); // domain
+    expect(inserts[0]!.params[6]).toBe('Marketplaces with cold-start liquidity win'); // claim_text
+    expect(inserts[0]!.params[8]).toBe('bet'); // kind
+    expect(inserts[0]!.params[11]).toBe('market'); // domain
   });
 
   test('cache hit: page already in take_proposals is skipped', async () => {
@@ -285,6 +287,29 @@ describe('runPhaseProposeTakes — phase integration', () => {
     // v0.42: extract rollup row UPSERTs on every phase invocation (best-
     // effort cache). Filter the assertion to take_proposals INSERTs only.
     expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(0);
+  });
+
+  test('persists every distinct claim returned for one page', async () => {
+    const pages = [buildPage({ slug: 'wiki/multi', body: 'Two gradeable claims.' })];
+    const { engine, captured } = buildMockEngine({ pages });
+    const extractor: ProposeTakesExtractor = async () => [
+      { claim_text: 'Claim A', kind: 'take', holder: 'brain', weight: 0.6 },
+      { claim_text: 'Claim B', kind: 'bet', holder: 'brain', weight: 0.8 },
+    ];
+    const result = await runPhaseProposeTakes(buildCtx(engine), { extractor });
+    expect((result.details as Record<string, unknown>).proposals_inserted).toBe(2);
+    expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(2);
+  });
+
+  test('caches an empty extraction result at page level', async () => {
+    const pages = [buildPage({ slug: 'wiki/empty-result', body: 'No gradeable claims.' })];
+    const { engine } = buildMockEngine({ pages });
+    let calls = 0;
+    const extractor: ProposeTakesExtractor = async () => { calls++; return []; };
+    await runPhaseProposeTakes(buildCtx(engine), { extractor });
+    const second = await runPhaseProposeTakes(buildCtx(engine), { extractor });
+    expect(calls).toBe(1);
+    expect((second.details as Record<string, unknown>).cache_hits).toBe(1);
   });
 
   test('passes existing fence rows to extractor as dedup context (F2 fix)', async () => {
@@ -378,8 +403,8 @@ New prose appended here.`;
     await runPhaseProposeTakes(buildCtx(engine), { extractor });
     const inserts = captured.filter(c => c.sql.includes('INSERT INTO take_proposals'));
     expect(inserts).toHaveLength(2);
-    const runIdA = inserts[0]!.params[4];
-    const runIdB = inserts[1]!.params[4];
+    const runIdA = inserts[0]!.params[5];
+    const runIdB = inserts[1]!.params[5];
     expect(runIdA).toBe(runIdB);
     expect(typeof runIdA).toBe('string');
     expect((runIdA as string).startsWith('propose-')).toBe(true);
