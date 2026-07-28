@@ -32,10 +32,14 @@ d('gbrain recall --today (Postgres)', () => {
       captured += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString();
       return true;
     }) as typeof process.stdout.write;
+    const previousSource = process.env.GBRAIN_SOURCE;
+    process.env.GBRAIN_SOURCE = 'default';
     try {
       await runRecall(engine, ['--today']);
     } finally {
       process.stdout.write = origWrite;
+      if (previousSource === undefined) delete process.env.GBRAIN_SOURCE;
+      else process.env.GBRAIN_SOURCE = previousSource;
     }
 
     expect(captured).toContain('Hot memory — ');

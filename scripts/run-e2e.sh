@@ -74,12 +74,13 @@ mkdir -p "$E2E_TMP_HOME/.gbrain"
 # unreproducible across machines. Drop them before bun starts. This is a
 # DENYLIST of operator-context prefixes (not an allowlist rebuild), so PATH,
 # HOME, TMPDIR, CI, DATABASE_URL, and bun internals survive untouched. We keep
-# GBRAIN_HOME (just set above for HOME isolation); everything else GBRAIN_* is
-# an operator override the suite must not inherit. Adapts GStack's
+# GBRAIN_HOME (just set above for HOME isolation) and GBRAIN_TEST_DB (the
+# schema-drift reset gate still independently requires a test-shaped DB name);
+# everything else GBRAIN_* is an operator override the suite must not inherit. Adapts GStack's
 # buildHermeticEnv() allowlist to gbrain's shell E2E runner.
 for _e2e_var in $(env | grep -oE '^(CONDUCTOR_|MCP_|OPENCLAW_|GBRAIN_)[A-Za-z0-9_]*' | sort -u); do
   case "$_e2e_var" in
-    GBRAIN_HOME) ;;  # required for HOME isolation (set above) — keep
+    GBRAIN_HOME|GBRAIN_TEST_DB) ;;  # hermetic HOME + explicit safe test-DB reset gate
     *) unset "$_e2e_var" || true ;;
   esac
 done

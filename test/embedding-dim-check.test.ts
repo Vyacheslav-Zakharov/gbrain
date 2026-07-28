@@ -71,11 +71,13 @@ describe('readContentChunksEmbeddingDim', () => {
   }, 30000);
 
   test('returns { exists: false, dims: null } on a fresh brain (no initSchema)', async () => {
-    // One-off engine for the fresh-brain case. Never call initSchema so
-    // content_chunks doesn't exist yet. Cleaned up at end of test.
+    // One-off engine for the fresh-brain case. The Tier 3 test harness may
+    // preload a migrated PGLite snapshot, so explicitly remove the table whose
+    // absence this test exercises instead of assuming connect({}) is empty.
     const fresh = new PGLiteEngine();
     await fresh.connect({});
     try {
+      await fresh.executeRaw('DROP TABLE IF EXISTS content_chunks CASCADE');
       const result = await readContentChunksEmbeddingDim(fresh);
       expect(result.exists).toBe(false);
       expect(result.dims).toBeNull();
