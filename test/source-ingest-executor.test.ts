@@ -32,6 +32,7 @@ import { appendCompleted, fingerprint } from '../src/core/op-checkpoint.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { operationsByName } from '../src/core/operations.ts';
+import { upsertSourceBaseView, upsertSourceConnectorView } from '../src/core/source-ingest/catalog.ts';
 
 let engine: PGLiteEngine;
 const tempDirs: string[] = [];
@@ -1272,6 +1273,34 @@ describe('source-ingest Stage 3A executor', () => {
       app_id: 'protocolist-app',
       access_key: 'protocolist-key',
       table_name: 'PeriodicMeetingSeries',
+    });
+  });
+
+  test('saved Base View runtime uses first-class PK/timestamp over legacy discovery metadata', async () => {
+    await upsertSourceConnectorView(engine, { connector_id: 'appsheet-protokolist', kind: 'appsheet', display_name: 'Protocolist' });
+    await upsertSourceBaseView(engine, {
+      base_view_id: 'bv-protocolist-series',
+      connector_id: 'appsheet-protokolist',
+      object_name: 'PeriodicMeetingSeries',
+      selected_fields: ['Id', 'Name', 'updated_at'],
+      row_filter: [],
+      sample_limit: 25,
+      primary_key_field: 'Id',
+      updated_at_field: 'updated_at',
+      discovery_json: { primary_key_field: 'legacy-wrong-id', updated_at_field: 'legacy_wrong_timestamp' },
+    });
+
+    const config = await connectorConfigForSource({
+      engine,
+      defaultConnector: 'appsheet-protokolist',
+      defaultObject: 'PeriodicMeetingSeries',
+    }, 'appsheet-protokolist', 'PeriodicMeetingSeries', 'bv-protocolist-series');
+
+    expect(config).toMatchObject({
+      table_name: 'PeriodicMeetingSeries',
+      primary_key_field: 'Id',
+      updated_at_field: 'updated_at',
+      selected_fields: ['Id', 'Name', 'updated_at'],
     });
   });
 

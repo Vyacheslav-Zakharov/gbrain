@@ -63,6 +63,41 @@ describe('hasPendingMigrations', () => {
   }, 30000);
 });
 
+describe('migrate v129 — source_base_view_identity_fields', () => {
+  const v129 = MIGRATIONS.find(m => m.version === 129);
+
+  test('promotes legacy identity metadata into first-class columns', async () => {
+    expect(v129?.name).toBe('source_base_view_identity_fields');
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    try {
+      await engine.initSchema();
+      await engine.executeRaw(`
+        INSERT INTO source_connectors (connector_id, kind, display_name, config_json, enabled, config_hash)
+        VALUES ('migration-appsheet', 'appsheet', 'Migration test', '{}'::jsonb, true, 'connector-hash')
+      `);
+      await engine.executeRaw(`
+        INSERT INTO source_base_views (
+          base_view_id, connector_id, object_name, display_name, selected_fields,
+          row_filter, sample_limit, primary_key_field, updated_at_field, discovery_json, version_hash
+        ) VALUES (
+          'migration-base', 'migration-appsheet', 'Rows', 'Rows', '["Id","updated_at"]'::jsonb,
+          '[]'::jsonb, 10, NULL, NULL,
+          '{"primary_key_field":"Id","updated_at_field":"updated_at"}'::jsonb, 'base-hash'
+        )
+      `);
+      await engine.setConfig('version', '128');
+      await runMigrations(engine);
+      const rows = await engine.executeRaw<{ primary_key_field: string; updated_at_field: string }>(
+        `SELECT primary_key_field, updated_at_field FROM source_base_views WHERE base_view_id = 'migration-base'`
+      );
+      expect(rows[0]).toEqual({ primary_key_field: 'Id', updated_at_field: 'updated_at' });
+    } finally {
+      await engine.disconnect();
+    }
+  }, 30000);
+});
+
 // ─────────────────────────────────────────────────────────────────
 // v0.18.0 — v16 sources_table_additive (Step 1, Lane A)
 // ─────────────────────────────────────────────────────────────────

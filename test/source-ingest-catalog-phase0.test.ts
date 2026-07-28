@@ -3,6 +3,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { operationsByName } from '../src/core/operations.ts';
 import {
   compileSourceArticleView,
+  baseViewHash,
   listSourceArticleViews,
   listSourceBaseViews,
   listSourceTransformViews,
@@ -168,16 +169,46 @@ describe('source-ingest Phase 0 catalog model', () => {
       selected_fields: ['id', 'code', 'name', 'is_group', 'updated_at'],
       row_filter: [{ field: 'is_group', op: 'eq', value: false }],
       sample_limit: 10,
+      primary_key_field: 'id',
+      updated_at_field: 'updated_at',
+      discovery_json: { primary_key_field: 'legacy-wrong-id', updated_at_field: 'legacy_wrong_timestamp' },
     });
+    const initialHash = baseViewHash({
+      base_view_id: 'bv-vehicles', connector_id: 'fake-source', object_name: 'vehicle',
+      selected_fields: ['id', 'code', 'name', 'is_group', 'updated_at'],
+      row_filter: [{ field: 'is_group', op: 'eq', value: false }], sample_limit: 10,
+      primary_key_field: 'id', updated_at_field: 'updated_at',
+    });
+    expect(initialHash).not.toBe(baseViewHash({
+      base_view_id: 'bv-vehicles', connector_id: 'fake-source', object_name: 'vehicle',
+      selected_fields: ['id', 'code', 'name', 'is_group', 'updated_at'],
+      row_filter: [{ field: 'is_group', op: 'eq', value: false }], sample_limit: 10,
+      primary_key_field: 'other_id', updated_at_field: 'updated_at',
+    }));
     const ctx = { engine, config: {}, logger: console, sourceId: 'default', remote: false, dryRun: true } as any;
 
-    const baseOut = await operationsByName.source_base_view_execute.handler(ctx, { base_view_id: 'bv-vehicles', sample_limit: 10 }) as any;
+    const baseOut = await operationsByName.source_base_view_execute.handler(ctx, { base_view_id: 'bv-vehicles', sample_limit: 10, discover_all_fields: true }) as any;
     expect(baseOut.ok).toBe(true);
     expect(baseOut.filtered).toBe(2);
     expect(baseOut.discovery.sampled).toBe(2);
+    expect(baseOut.discovery.fields.some((field: any) => field.name === 'plate')).toBe(true);
     const [baseAfter] = await listSourceBaseViews(engine, 'bv-vehicles') as any[];
     expect(baseAfter.last_discovered_at).toBeTruthy();
+    expect(baseAfter.primary_key_field).toBe('id');
+    expect(baseAfter.updated_at_field).toBe('updated_at');
+    expect(baseAfter.discovery_json?.primary_key_field).toBeUndefined();
     expect(baseAfter.discovery_json?.samples).toBeUndefined();
+    expect(baseAfter.discovery_json?.fields.some((field: any) => field.name === 'plate')).toBe(false);
+
+    // Legacy callers that omit the new first-class fields preserve reviewer choices.
+    await upsertSourceBaseView(engine, {
+      base_view_id: 'bv-vehicles', connector_id: 'fake-source', object_name: 'vehicle',
+      selected_fields: ['id', 'code', 'name', 'is_group', 'updated_at'],
+      row_filter: [{ field: 'is_group', op: 'eq', value: false }], sample_limit: 10,
+    });
+    const [baseAfterLegacySave] = await listSourceBaseViews(engine, 'bv-vehicles') as any[];
+    expect(baseAfterLegacySave.primary_key_field).toBe('id');
+    expect(baseAfterLegacySave.updated_at_field).toBe('updated_at');
 
     await upsertSourceTransformView(engine, {
       transform_view_id: 'tv-vehicles-clean',

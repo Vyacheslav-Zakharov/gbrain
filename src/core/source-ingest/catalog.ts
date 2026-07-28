@@ -23,6 +23,8 @@ export interface SourceBaseView {
   selected_fields?: string[];
   row_filter?: SourceFilterRule[];
   sample_limit?: number;
+  primary_key_field?: string | null;
+  updated_at_field?: string | null;
   discovery_json?: Record<string, unknown> | null;
 }
 
@@ -99,7 +101,16 @@ export function connectorConfigHash(row: { connector_id: string; kind: string; c
 }
 
 export function baseViewHash(row: SourceBaseView): string {
-  return sha({ base_view_id: row.base_view_id, connector_id: row.connector_id, object_name: row.object_name, selected_fields: row.selected_fields || [], row_filter: row.row_filter || [], sample_limit: row.sample_limit ?? null });
+  return sha({
+    base_view_id: row.base_view_id,
+    connector_id: row.connector_id,
+    object_name: row.object_name,
+    selected_fields: row.selected_fields || [],
+    row_filter: row.row_filter || [],
+    sample_limit: row.sample_limit ?? null,
+    primary_key_field: row.primary_key_field ?? null,
+    updated_at_field: row.updated_at_field ?? null,
+  });
 }
 
 export function transformViewHash(row: SourceTransformView): string {
@@ -200,7 +211,7 @@ export async function sourceCatalogDeleteImpact(engine: BrainEngine, kind: Sourc
 async function listSourceBaseViewsByConnector(engine: BrainEngine, connectorId: string) {
   return engine.executeRaw(
     `SELECT base_view_id, connector_id, object_name, display_name, selected_fields, row_filter, sample_limit,
-            discovery_json, last_discovered_at::text, version_hash, created_at::text, updated_at::text
+            primary_key_field, updated_at_field, discovery_json, last_discovered_at::text, version_hash, created_at::text, updated_at::text
        FROM source_base_views
       WHERE connector_id = $1
       ORDER BY updated_at DESC`,
@@ -267,14 +278,21 @@ export async function recordSourceConnectorTest(engine: BrainEngine, connectorId
 }
 
 export async function upsertSourceBaseView(engine: BrainEngine, input: SourceBaseView) {
+  const [existing] = await listSourceBaseViews(engine, input.base_view_id) as Array<Record<string, unknown>>;
   const selected = input.selected_fields || [];
   const filter = input.row_filter || [];
   const discovery = input.discovery_json || null;
+  const primaryKeyField = input.primary_key_field !== undefined
+    ? input.primary_key_field
+    : typeof existing?.primary_key_field === 'string' ? existing.primary_key_field : null;
+  const updatedAtField = input.updated_at_field !== undefined
+    ? input.updated_at_field
+    : typeof existing?.updated_at_field === 'string' ? existing.updated_at_field : null;
   await executeRawJsonb(
     engine,
     `INSERT INTO source_base_views
-       (base_view_id, connector_id, object_name, display_name, selected_fields, row_filter, sample_limit, discovery_json, last_discovered_at, version_hash, updated_at)
-     VALUES ($1,$2,$3,$4,$7::jsonb->'value',$8::jsonb->'value',$5,$9::jsonb->'value',CASE WHEN ($9::jsonb->'value') IS NULL THEN NULL ELSE now() END,$6,now())
+       (base_view_id, connector_id, object_name, display_name, selected_fields, row_filter, sample_limit, primary_key_field, updated_at_field, discovery_json, last_discovered_at, version_hash, updated_at)
+     VALUES ($1,$2,$3,$4,$9::jsonb->'value',$10::jsonb->'value',$5,$7,$8,$11::jsonb->'value',CASE WHEN ($11::jsonb->'value') IS NULL THEN NULL ELSE now() END,$6,now())
      ON CONFLICT (base_view_id) DO UPDATE SET
        connector_id = EXCLUDED.connector_id,
        object_name = EXCLUDED.object_name,
@@ -282,11 +300,22 @@ export async function upsertSourceBaseView(engine: BrainEngine, input: SourceBas
        selected_fields = EXCLUDED.selected_fields,
        row_filter = EXCLUDED.row_filter,
        sample_limit = EXCLUDED.sample_limit,
+       primary_key_field = EXCLUDED.primary_key_field,
+       updated_at_field = EXCLUDED.updated_at_field,
        discovery_json = EXCLUDED.discovery_json,
        last_discovered_at = CASE WHEN EXCLUDED.discovery_json IS NULL THEN source_base_views.last_discovered_at ELSE COALESCE(source_base_views.last_discovered_at, now()) END,
        version_hash = EXCLUDED.version_hash,
        updated_at = now()`,
-    [input.base_view_id, input.connector_id, input.object_name, input.display_name || input.base_view_id, input.sample_limit ?? 50, baseViewHash({ ...input, selected_fields: selected, row_filter: filter })],
+    [
+      input.base_view_id,
+      input.connector_id,
+      input.object_name,
+      input.display_name || input.base_view_id,
+      input.sample_limit ?? 50,
+      baseViewHash({ ...input, selected_fields: selected, row_filter: filter, primary_key_field: primaryKeyField, updated_at_field: updatedAtField }),
+      primaryKeyField,
+      updatedAtField,
+    ],
     [{ value: selected }, { value: filter }, { value: discovery }],
   );
   await markArticleViewsStaleForBaseView(engine, input.base_view_id, ['base_view_changed']);
@@ -299,7 +328,7 @@ export async function listSourceBaseViews(engine: BrainEngine, baseViewId?: stri
   if (baseViewId) params.push(baseViewId);
   return engine.executeRaw(
     `SELECT base_view_id, connector_id, object_name, display_name, selected_fields, row_filter, sample_limit,
-            discovery_json, last_discovered_at::text, version_hash, created_at::text, updated_at::text
+            primary_key_field, updated_at_field, discovery_json, last_discovered_at::text, version_hash, created_at::text, updated_at::text
        FROM source_base_views
        ${where}
        ORDER BY updated_at DESC`,

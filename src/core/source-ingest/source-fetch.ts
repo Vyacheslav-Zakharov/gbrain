@@ -56,15 +56,14 @@ async function resolveSourceConnectorConfig(ctx: SourceFetchContext, source: Sou
     if (baseView) {
       const connectorId = String(baseView.connector_id || fallbackConnectorId);
       const objectName = String(baseView.object_name || fallbackObjectName);
-      const discovery = (baseView.discovery_json && typeof baseView.discovery_json === 'object') ? baseView.discovery_json as Record<string, unknown> : {};
       const secretConfig = await getSourceConnectorSecretConfig(ctx.engine, connectorId, objectName, connectorSecretConfigId(connectorId));
       return {
         connectorId,
         objectName,
         config: {
           table_name: objectName,
-          primary_key_field: typeof discovery.primary_key_field === 'string' ? discovery.primary_key_field : undefined,
-          updated_at_field: typeof discovery.updated_at_field === 'string' ? discovery.updated_at_field : undefined,
+          primary_key_field: typeof baseView.primary_key_field === 'string' ? baseView.primary_key_field : undefined,
+          updated_at_field: typeof baseView.updated_at_field === 'string' ? baseView.updated_at_field : undefined,
           selected_fields: Array.isArray(baseView.selected_fields) ? baseView.selected_fields : undefined,
           ...secretConfig,
         },

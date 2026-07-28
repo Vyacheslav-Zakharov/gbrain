@@ -5752,6 +5752,27 @@ export const MIGRATIONS: Migration[] = [
         PRIMARY KEY (profile_id, connector_id, source_object, external_id);
     `,
   },
+  {
+    version: 129,
+    name: 'source_base_view_identity_fields',
+    // Promote reviewer-selected source identity metadata out of discovery_json.
+    // Discovery refreshes must never erase the production PK/timestamp contract.
+    idempotent: true,
+    sql: `
+      ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS primary_key_field TEXT;
+      ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS updated_at_field TEXT;
+
+      UPDATE source_base_views
+         SET primary_key_field = NULLIF(discovery_json->>'primary_key_field', '')
+       WHERE primary_key_field IS NULL
+         AND discovery_json ? 'primary_key_field';
+
+      UPDATE source_base_views
+         SET updated_at_field = NULLIF(discovery_json->>'updated_at_field', '')
+       WHERE updated_at_field IS NULL
+         AND discovery_json ? 'updated_at_field';
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

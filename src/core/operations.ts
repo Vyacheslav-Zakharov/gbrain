@@ -3134,9 +3134,18 @@ function normalizeSourceFilterRules(value: unknown): SourceFilterRule[] {
     : [];
 }
 
-function compactDiscoveryProfile(discovery: Record<string, unknown>): Record<string, unknown> {
+function compactDiscoveryProfile(discovery: Record<string, unknown>, selectedFields: string[] = []): Record<string, unknown> {
   const { samples: _samples, ...rest } = discovery;
-  return rest;
+  if (selectedFields.length === 0) return rest;
+  const selected = new Set(selectedFields);
+  return {
+    ...rest,
+    fields: Array.isArray(rest.fields)
+      ? rest.fields.filter(field => field && typeof field === 'object' && selected.has(String((field as Record<string, unknown>).name || '')))
+      : [],
+    idCandidates: Array.isArray(rest.idCandidates) ? rest.idCandidates.map(String).filter(name => selected.has(name)) : [],
+    updatedAtCandidates: Array.isArray(rest.updatedAtCandidates) ? rest.updatedAtCandidates.map(String).filter(name => selected.has(name)) : [],
+  };
 }
 
 async function buildTransformConfigFromCatalog(engine: BrainEngine, transformId: string): Promise<SourceTransformConfig> {
@@ -3219,14 +3228,26 @@ const source_base_view_execute: Operation = {
     const filteredRows = rowFilter.length ? records.filter(record => rowFilter.every(rule => sourceFilterMatches(rule, record.data))) : records;
     const discovery = profileRecords(connectorId, objectName, filteredRows, undefined, {
       fields: discoverAllFields ? [] : selectedFields,
-      primaryKeyField: typeof (src.discovery_json as Record<string, unknown> | undefined)?.primary_key_field === 'string' ? String((src.discovery_json as Record<string, unknown>).primary_key_field) : undefined,
-      updatedAtField: typeof (src.discovery_json as Record<string, unknown> | undefined)?.updated_at_field === 'string' ? String((src.discovery_json as Record<string, unknown>).updated_at_field) : undefined,
+      primaryKeyField: saved
+        ? (typeof saved.primary_key_field === 'string' ? saved.primary_key_field : undefined)
+        : typeof src.primary_key_field === 'string'
+          ? src.primary_key_field
+          : typeof (src.discovery_json as Record<string, unknown> | undefined)?.primary_key_field === 'string'
+            ? String((src.discovery_json as Record<string, unknown>).primary_key_field)
+            : undefined,
+      updatedAtField: saved
+        ? (typeof saved.updated_at_field === 'string' ? saved.updated_at_field : undefined)
+        : typeof src.updated_at_field === 'string'
+          ? src.updated_at_field
+          : typeof (src.discovery_json as Record<string, unknown> | undefined)?.updated_at_field === 'string'
+            ? String((src.discovery_json as Record<string, unknown>).updated_at_field)
+            : undefined,
     }) as unknown as Record<string, unknown>;
     const fieldNames = new Set((Array.isArray(discovery.fields) ? discovery.fields as Array<{ name?: string }> : []).map(f => String(f.name || '')).filter(Boolean));
     const drift = selectedFields.filter(name => !fieldNames.has(name));
     const warnings = [...(Array.isArray(discovery.warnings) ? discovery.warnings.map(String) : []), ...drift.map(name => `field_drift:${name}`)];
     const outDiscovery = { ...discovery, warnings, samples: filteredRows };
-    const updated = saved ? await recordSourceBaseDiscovery(ctx.engine, String(saved.base_view_id), compactDiscoveryProfile(outDiscovery), drift.map(name => `field_drift:${name}`)) : null;
+    const updated = saved ? await recordSourceBaseDiscovery(ctx.engine, String(saved.base_view_id), compactDiscoveryProfile(outDiscovery, selectedFields), drift.map(name => `field_drift:${name}`)) : null;
     return { ok: true, base_view_id: saved?.base_view_id ?? null, sampled: records.length, filtered: filteredRows.length, rows: filteredRows, discovery: outDiscovery, warnings, drift_fields: drift, updated };
   },
 };
@@ -3244,6 +3265,8 @@ const source_base_view_upsert: Operation = {
     selected_fields: { type: 'array', items: { type: 'string' } },
     row_filter: { type: 'array' },
     sample_limit: { type: 'number' },
+    primary_key_field: { type: 'string' },
+    updated_at_field: { type: 'string' },
     discovery_json: { type: 'object' },
   },
   handler: async (ctx, p) => {
@@ -3256,6 +3279,12 @@ const source_base_view_upsert: Operation = {
       selected_fields: Array.isArray(p.selected_fields) ? p.selected_fields.map(String).filter(Boolean) : [],
       row_filter: Array.isArray(p.row_filter) ? p.row_filter as any : [],
       sample_limit: typeof p.sample_limit === 'number' ? p.sample_limit : 50,
+      ...(Object.prototype.hasOwnProperty.call(p, 'primary_key_field') ? {
+        primary_key_field: typeof p.primary_key_field === 'string' && p.primary_key_field.trim() ? p.primary_key_field.trim() : null,
+      } : {}),
+      ...(Object.prototype.hasOwnProperty.call(p, 'updated_at_field') ? {
+        updated_at_field: typeof p.updated_at_field === 'string' && p.updated_at_field.trim() ? p.updated_at_field.trim() : null,
+      } : {}),
       discovery_json: (p.discovery_json && typeof p.discovery_json === 'object' ? p.discovery_json : null) as Record<string, unknown> | null,
     });
     return { ok: true, row };

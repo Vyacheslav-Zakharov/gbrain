@@ -2746,8 +2746,10 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       const selected_fields = Array.isArray(body.selected_fields) ? body.selected_fields.flatMap(v => String(v).split(/\\n|[\n,]/)).map(s => s.trim()).filter(Boolean) : [];
       const row_filter = Array.isArray(body.row_filter) ? body.row_filter : [];
       const sample_limit = Number.isFinite(Number(body.sample_limit)) ? Number(body.sample_limit) : 50;
-      const primary_key_field = typeof body.primary_key_field === 'string' && body.primary_key_field.trim() ? body.primary_key_field.trim() : undefined;
-      const updated_at_field = typeof body.updated_at_field === 'string' && body.updated_at_field.trim() ? body.updated_at_field.trim() : undefined;
+      const has_primary_key_field = Object.prototype.hasOwnProperty.call(body, 'primary_key_field');
+      const has_updated_at_field = Object.prototype.hasOwnProperty.call(body, 'updated_at_field');
+      const primary_key_field = typeof body.primary_key_field === 'string' ? body.primary_key_field.trim() : '';
+      const updated_at_field = typeof body.updated_at_field === 'string' ? body.updated_at_field.trim() : '';
       const discovery_json = body.discovery_json && typeof body.discovery_json === 'object'
         ? { ...(body.discovery_json as Record<string, unknown>), ...(primary_key_field ? { primary_key_field } : {}), ...(updated_at_field ? { updated_at_field } : {}) }
         : (primary_key_field || updated_at_field ? { ...(primary_key_field ? { primary_key_field } : {}), ...(updated_at_field ? { updated_at_field } : {}) } : undefined);
@@ -2759,6 +2761,8 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         selected_fields,
         row_filter,
         sample_limit,
+        ...(has_primary_key_field ? { primary_key_field } : {}),
+        ...(has_updated_at_field ? { updated_at_field } : {}),
         discovery_json,
       });
       res.json(out);

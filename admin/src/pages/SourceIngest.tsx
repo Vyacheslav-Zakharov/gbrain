@@ -1273,8 +1273,12 @@ export function SourceIngestPage() {
       connector_id: String(row.connector_id ?? form.connector_id),
       object_name: String(row.object_name ?? form.source_object),
       display_name: String(row.display_name ?? row.base_view_id ?? ''),
-      primary_key_field: String(asObj(discoveryJson).primary_key_field ?? asArr(asObj(discoveryJson).idCandidates)[0] ?? 'vehicleID'),
-      updated_at_field: String(asObj(discoveryJson).updated_at_field ?? asArr(asObj(discoveryJson).updatedAtCandidates)[0] ?? ''),
+      primary_key_field: String(Object.prototype.hasOwnProperty.call(row, 'primary_key_field')
+        ? row.primary_key_field ?? ''
+        : asObj(discoveryJson).primary_key_field ?? asArr(asObj(discoveryJson).idCandidates)[0] ?? 'vehicleID'),
+      updated_at_field: String(Object.prototype.hasOwnProperty.call(row, 'updated_at_field')
+        ? row.updated_at_field ?? ''
+        : asObj(discoveryJson).updated_at_field ?? asArr(asObj(discoveryJson).updatedAtCandidates)[0] ?? ''),
       selected_fields_text: selected.join('\n'),
       row_filter_text: JSON.stringify(asArr(row.row_filter), null, 2),
       sample_limit: Number(row.sample_limit ?? form.sample_limit ?? 25),

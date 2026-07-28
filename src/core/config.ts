@@ -936,6 +936,8 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // Cross-source edges (feature flag + per-source visibility policy)
   'cross_source_edges',
   'cross_source_edges.enabled',
+  // Source Ingest production connector allowlist (DB-plane).
+  'source_ingest.live_connectors',
   'embed.backfill_cooldown_min',
   'embed.backfill_max_usd_per_source_24h',
   'embed.backfill_max_usd',
