@@ -311,9 +311,13 @@ describe('v0.41 T6: runPhaseSynthesizeConcepts via stubbed chat', () => {
     }));
     const chat = stubChat('Custom synthesized narrative from LLM.');
     await runPhaseSynthesizeConcepts(engine, { _atoms: atoms, _chat: chat });
-    const rows = await engine.executeRaw<{ compiled_truth: string }>(
-      `SELECT compiled_truth FROM pages WHERE slug = 'concepts/theme'`,
+    const rows = await engine.executeRaw<{ proposed_markdown: string }>(
+      `SELECT proposed_markdown FROM concept_proposals WHERE page_slug = 'concepts/theme'`,
     );
-    expect(rows[0].compiled_truth).toContain('Custom synthesized narrative');
+    expect(rows[0].proposed_markdown).toContain('Custom synthesized narrative');
+    const canonical = await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM pages WHERE slug = 'concepts/theme'`,
+    );
+    expect(canonical[0].count).toBe(0);
   });
 });

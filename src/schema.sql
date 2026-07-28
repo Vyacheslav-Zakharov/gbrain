@@ -1463,11 +1463,31 @@ CREATE INDEX IF NOT EXISTS calibration_profiles_published_idx
   ON calibration_profiles (source_id, published, holder)
   WHERE published = true;
 
--- take_proposals: propose_takes phase queue. Idempotency cache via the
--- composite unique index (source_id, page_slug, content_hash, prompt_version)
--- mirrors v0.23 dream_verdicts. proposal_run_id supports --rollback by run.
+-- take_proposal_scans is the page-level idempotency ledger. It records empty
+-- extractor results too, so unchanged pages never re-spend simply because no
+-- claim was found. take_proposals remains the item-level review queue.
+CREATE TABLE IF NOT EXISTS take_proposal_scans (
+  id                BIGSERIAL PRIMARY KEY,
+  source_id         TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  page_slug         TEXT        NOT NULL,
+  content_hash      TEXT        NOT NULL,
+  prompt_version    TEXT        NOT NULL,
+  proposal_run_id   TEXT        NOT NULL,
+  model_id          TEXT        NOT NULL,
+  status            TEXT        NOT NULL DEFAULT 'running'
+                                CHECK (status IN ('running','completed','failed')),
+  proposal_count    INTEGER     NOT NULL DEFAULT 0,
+  error_text        TEXT,
+  started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at      TIMESTAMPTZ,
+  UNIQUE (source_id, page_slug, content_hash, prompt_version)
+);
+
+-- take_proposals: propose_takes phase item queue. Idempotency is per claim,
+-- not per page, so one extractor call can persist every returned claim.
 CREATE TABLE IF NOT EXISTS take_proposals (
   id                          BIGSERIAL PRIMARY KEY,
+  scan_id                     BIGINT       REFERENCES take_proposal_scans(id) ON DELETE SET NULL,
   source_id                   TEXT         NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
   page_slug                   TEXT         NOT NULL,
   content_hash                TEXT         NOT NULL,
@@ -1478,6 +1498,7 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   status                      TEXT         NOT NULL DEFAULT 'pending'
                                            CHECK (status IN ('pending','accepted','rejected','superseded')),
   claim_text                  TEXT         NOT NULL,
+  claim_hash                  TEXT         NOT NULL,
   kind                        TEXT         NOT NULL,
   holder                      TEXT         NOT NULL,
   weight                      REAL         NOT NULL,
@@ -1491,12 +1512,72 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   predicted_brier_bucket_n    INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx
-  ON take_proposals (source_id, page_slug, content_hash, prompt_version);
+  ON take_proposals (source_id, page_slug, content_hash, prompt_version, claim_hash);
 CREATE INDEX IF NOT EXISTS take_proposals_pending_idx
   ON take_proposals (source_id, status, proposed_at DESC)
   WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS take_proposals_run_id_idx
   ON take_proposals (proposal_run_id);
+
+-- Human/LLM review drafts are append-only. Applying a revision is a separate
+-- explicit action; the LLM never writes canonical content directly.
+CREATE TABLE IF NOT EXISTS ai_review_revisions (
+  id                BIGSERIAL PRIMARY KEY,
+  target_type       TEXT        NOT NULL CHECK (target_type IN ('take_proposal','concept_proposal')),
+  target_id         BIGINT      NOT NULL,
+  source_kind       TEXT        NOT NULL CHECK (source_kind IN ('manual','llm')),
+  base_version      INTEGER     NOT NULL,
+  original_payload  JSONB       NOT NULL,
+  proposed_payload  JSONB       NOT NULL,
+  reviewer_comment  TEXT,
+  model_id          TEXT,
+  prompt_version    TEXT,
+  status            TEXT        NOT NULL DEFAULT 'draft'
+                                CHECK (status IN ('draft','applied','discarded')),
+  created_by        TEXT        NOT NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  decided_at        TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ai_review_revisions_target_idx
+  ON ai_review_revisions (target_type, target_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ai_review_events (
+  id                BIGSERIAL PRIMARY KEY,
+  target_type       TEXT        NOT NULL CHECK (target_type IN ('take_proposal','concept_proposal')),
+  target_id         BIGINT      NOT NULL,
+  action            TEXT        NOT NULL,
+  actor              TEXT        NOT NULL,
+  expected_version  INTEGER,
+  previous_state    JSONB,
+  new_state         JSONB,
+  details            JSONB       NOT NULL DEFAULT '{}'::jsonb,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ai_review_events_target_idx
+  ON ai_review_events (target_type, target_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS concept_proposals (
+  id                  BIGSERIAL PRIMARY KEY,
+  source_id           TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  page_slug           TEXT        NOT NULL,
+  source_content_hash TEXT        NOT NULL,
+  destination_content_hash TEXT,
+  prompt_version      TEXT        NOT NULL,
+  proposal_run_id     TEXT        NOT NULL,
+  status              TEXT        NOT NULL DEFAULT 'pending'
+                                  CHECK (status IN ('pending','accepted','rejected','superseded','deferred')),
+  proposed_markdown   TEXT        NOT NULL,
+  source_atoms        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  model_id            TEXT        NOT NULL,
+  version             INTEGER     NOT NULL DEFAULT 1,
+  proposed_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  acted_at            TIMESTAMPTZ,
+  acted_by            TEXT,
+  UNIQUE (source_id, page_slug, source_content_hash, prompt_version)
+);
+CREATE INDEX IF NOT EXISTS concept_proposals_pending_idx
+  ON concept_proposals (source_id, status, proposed_at DESC)
+  WHERE status = 'pending';
 
 -- take_grade_cache: grade_takes verdict cache. Composite PK on
 -- (take_id, prompt_version, judge_model_id, evidence_signature) means
