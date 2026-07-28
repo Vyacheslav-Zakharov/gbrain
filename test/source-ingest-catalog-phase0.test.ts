@@ -198,7 +198,9 @@ describe('source-ingest Phase 0 catalog model', () => {
     expect(baseAfter.updated_at_field).toBe('updated_at');
     expect(baseAfter.discovery_json?.primary_key_field).toBeUndefined();
     expect(baseAfter.discovery_json?.samples).toBeUndefined();
+    expect(baseAfter.discovery_json?.fields.every((field: any) => field.samples === undefined)).toBe(true);
     expect(baseAfter.discovery_json?.fields.some((field: any) => field.name === 'plate')).toBe(false);
+    expect(baseAfter.discovery_json?.parentCandidates).toEqual([]);
 
     // Legacy callers that omit the new first-class fields preserve reviewer choices.
     await upsertSourceBaseView(engine, {

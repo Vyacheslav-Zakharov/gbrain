@@ -3152,15 +3152,22 @@ function normalizeSourceFilterRules(value: unknown): SourceFilterRule[] {
 
 function compactDiscoveryProfile(discovery: Record<string, unknown>, selectedFields: string[] = []): Record<string, unknown> {
   const { samples: _samples, ...rest } = discovery;
-  if (selectedFields.length === 0) return rest;
   const selected = new Set(selectedFields);
+  const fields = Array.isArray(rest.fields)
+    ? rest.fields
+        .filter(field => field && typeof field === 'object' && (selectedFields.length === 0 || selected.has(String((field as Record<string, unknown>).name || ''))))
+        .map(field => {
+          const { samples: _fieldSamples, ...compact } = field as Record<string, unknown>;
+          return compact;
+        })
+    : [];
+  if (selectedFields.length === 0) return { ...rest, fields };
   return {
     ...rest,
-    fields: Array.isArray(rest.fields)
-      ? rest.fields.filter(field => field && typeof field === 'object' && selected.has(String((field as Record<string, unknown>).name || '')))
-      : [],
+    fields,
     idCandidates: Array.isArray(rest.idCandidates) ? rest.idCandidates.map(String).filter(name => selected.has(name)) : [],
     updatedAtCandidates: Array.isArray(rest.updatedAtCandidates) ? rest.updatedAtCandidates.map(String).filter(name => selected.has(name)) : [],
+    parentCandidates: Array.isArray(rest.parentCandidates) ? rest.parentCandidates.map(String).filter(name => selected.has(name)) : [],
   };
 }
 
