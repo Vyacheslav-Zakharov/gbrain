@@ -1511,6 +1511,16 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   predicted_brier             REAL,
   predicted_brier_bucket_n    INTEGER
 );
+-- Existing brains may already have the v69 take_proposals table. Upgrade its
+-- columns before creating the new five-column idempotency index: CREATE TABLE
+-- IF NOT EXISTS does not add columns to an existing table.
+ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS scan_id BIGINT REFERENCES take_proposal_scans(id) ON DELETE SET NULL;
+ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS claim_hash TEXT;
+UPDATE take_proposals
+   SET claim_hash = md5(concat_ws(E'\\x1f', claim_text, kind, holder, weight::text, COALESCE(domain, '')))
+ WHERE claim_hash IS NULL;
+ALTER TABLE take_proposals ALTER COLUMN claim_hash SET NOT NULL;
+DROP INDEX IF EXISTS take_proposals_idempotency_idx;
 CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx
   ON take_proposals (source_id, page_slug, content_hash, prompt_version, claim_hash);
 CREATE INDEX IF NOT EXISTS take_proposals_pending_idx

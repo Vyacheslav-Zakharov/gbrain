@@ -7,6 +7,7 @@ import { acceptTakeProposal, rejectTakeProposal } from '../src/core/ai-review.ts
 import { acceptConceptProposal, createManualConceptRevision } from '../src/core/concept-review.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { contentHash } from '../src/core/cycle/propose-takes.ts';
+import { MIGRATIONS } from '../src/core/migrate.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
@@ -99,5 +100,23 @@ describe('Concept review canonical acceptance', () => {
     await expect(acceptConceptProposal(engine, id, undefined, 'admin-test')).rejects.toMatchObject({ code: 'stale_destination' });
     const page = await engine.getPage('concepts/theme', { sourceId: 'review-test' });
     expect(page?.compiled_truth).toContain('Human canonical content');
+  });
+});
+
+describe('AI Review migration compatibility', () => {
+  test('uses migration 130 above the deployed Source Ingest watermark', () => {
+    const migration = MIGRATIONS.find((entry) => entry.name === 'ai_review_foundation');
+    expect(migration?.version).toBe(130);
+    expect(migration?.sql).toContain('ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS claim_hash TEXT');
+  });
+
+  test('schema bootstrap upgrades existing take_proposals before replacing its index', () => {
+    const schema = readFileSync(join(import.meta.dir, '../src/schema.sql'), 'utf8');
+    const addClaimHash = schema.indexOf('ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS claim_hash TEXT');
+    const dropOldIndex = schema.indexOf('DROP INDEX IF EXISTS take_proposals_idempotency_idx');
+    const createNewIndex = schema.indexOf('CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx');
+    expect(addClaimHash).toBeGreaterThan(-1);
+    expect(dropOldIndex).toBeGreaterThan(addClaimHash);
+    expect(createNewIndex).toBeGreaterThan(dropOldIndex);
   });
 });

@@ -5717,7 +5717,10 @@ export const MIGRATIONS: Migration[] = [
     `,
   },
   {
-    version: 127,
+    // 127-129 are already occupied by the deployed Source Ingest overlay.
+    // Keep this migration above the live schema watermark so production
+    // installations do not silently skip the AI Review tables.
+    version: 130,
     name: 'ai_review_foundation',
     idempotent: true,
     sql: `
