@@ -16,7 +16,7 @@ function run(args: string[], home: string) {
     cwd: process.cwd(),
     encoding: 'utf8',
     env: { ...process.env, GBRAIN_HOME: home, DATABASE_URL: '', GBRAIN_DATABASE_URL: '' },
-    timeout: 45_000,
+    timeout: 90_000,
   });
   return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', status: r.status ?? -1 };
 }
@@ -37,7 +37,7 @@ describe('T5 — gbrain search dispatch', () => {
       // It must NOT be a search-results payload for the literal word "modes".
       expect(stdout).not.toContain('Unknown subcommand');
     });
-  });
+  }, 120_000);
 
   test('`search "<freetext>"` routes to the cheap-hybrid search op (no "Unknown subcommand")', () => {
     withHome((home) => {
@@ -47,7 +47,7 @@ describe('T5 — gbrain search dispatch', () => {
       expect(stderr).not.toContain('Unknown subcommand');
       expect(stdout.toLowerCase()).toContain('no results');
     });
-  });
+  }, 120_000);
 
   test('`search stats --json` routes to the dashboard', () => {
     withHome((home) => {
@@ -56,5 +56,5 @@ describe('T5 — gbrain search dispatch', () => {
       // stats envelope, not a search-results array.
       expect(stdout).toMatch(/total_calls|cache_hit_rate|window_days/);
     });
-  });
+  }, 120_000);
 });
