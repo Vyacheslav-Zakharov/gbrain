@@ -620,7 +620,7 @@ export function createAttachmentOperations(deps: AttachmentOperationDependencies
       await ctx.engine.executeRaw(
         `INSERT INTO files
            (source_id, page_slug, filename, storage_path, mime_type, size_bytes, content_hash, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::jsonb)
          ON CONFLICT (storage_path) DO UPDATE SET
            source_id = EXCLUDED.source_id,
            page_slug = EXCLUDED.page_slug,
