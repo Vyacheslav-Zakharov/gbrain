@@ -310,7 +310,7 @@ export function buildSourceGraphLinks(
   return links;
 }
 
-async function reconcileSourceGraphLinks(
+export async function reconcileSourceGraphLinks(
   engine: BrainEngine,
   profile: SourceIngestProfile,
   fromSlug: string,
@@ -319,11 +319,18 @@ async function reconcileSourceGraphLinks(
 ): Promise<{ created: number; removed: number }> {
   const rules = profile.links || [];
 
-  // One-time adoption of pre-scoping Source Ingest edges. The legacy projection
-  // stored only rule.id in origin_field, so addLinksBatch cannot create a scoped
-  // duplicate because relation uniqueness intentionally ignores provenance.
-  // Claim only this profile's rule ids on the page currently owned by the run;
-  // manual/markdown/mention edges and another profile's scoped edges are untouched.
+  // One-time adoption of pre-scoping Source Ingest edges. When this page has a
+  // single profile projection, every unscoped Source Ingest edge belongs to it,
+  // including a rule that was removed before the migration run. Ambiguous multi-
+  // profile pages claim only rule ids that still exist; all other legacy edges
+  // stay untouched and the overlap check below fails closed when relevant.
+  const projectionOwners = await engine.executeRaw<{ profile_id: string }>(
+    `SELECT DISTINCT profile_id
+       FROM source_sync_state
+      WHERE slug = $1 AND approved_source_id = $2`,
+    [fromSlug, sourceId],
+  );
+  const unambiguousOwner = projectionOwners.length === 1 && projectionOwners[0]?.profile_id === profile.profile_id;
   const legacyRuleIds = rules.map(rule => rule.id);
   await engine.executeRaw(
     `UPDATE links l
@@ -333,21 +340,39 @@ async function reconcileSourceGraphLinks(
       WHERE origin.id = l.from_page_id
         AND origin.slug = $1 AND origin.source_id = $2
         AND l.link_source = 'source-ingest'
-        AND l.origin_field = ANY($4::text[])`,
-    [fromSlug, sourceId, profile.profile_id, legacyRuleIds],
+        AND position(':' in COALESCE(l.origin_field, '')) = 0
+        AND ($4::boolean OR l.origin_field = ANY($5::text[]))`,
+    [fromSlug, sourceId, profile.profile_id, unambiguousOwner, legacyRuleIds],
   );
 
-  const existing = await engine.executeRaw<{ id: number; to_slug: string; to_source_id: string; link_type: string; origin_field: string }>(
+  const graphRows = await engine.executeRaw<{ id: number; to_slug: string; to_source_id: string; link_type: string; origin_field: string }>(
     `SELECT l.id, target.slug AS to_slug, target.source_id AS to_source_id, l.link_type, l.origin_field
        FROM links l
        JOIN pages origin ON origin.id = l.from_page_id
        JOIN pages target ON target.id = l.to_page_id
       WHERE origin.slug = $1 AND origin.source_id = $2
-        AND l.link_source = 'source-ingest'
-        AND left(l.origin_field, char_length($3) + 1) = $3 || ':'`,
-    [fromSlug, sourceId, profile.profile_id],
+        AND l.link_source = 'source-ingest'`,
+    [fromSlug, sourceId],
   );
-  const desired = new Set(current.map(link => `${link.to_source_id || sourceId}\u0000${link.to_slug}\u0000${link.link_type || ''}\u0000${link.origin_field || ''}`));
+  const relationKey = (link: { to_source_id?: string; to_slug: string; link_type?: string }) =>
+    `${link.to_source_id || sourceId}\u0000${link.to_slug}\u0000${link.link_type || ''}`;
+  const desiredOwners = new Map<string, string>();
+  for (const link of current) {
+    const key = relationKey(link);
+    const label = `${link.to_source_id || sourceId}:${link.to_slug} (${link.link_type || 'untyped'})`;
+    const priorOwner = desiredOwners.get(key);
+    if (priorOwner && priorOwner !== link.origin_field) {
+      throw new Error(`source_ingest graph ownership conflict: ${fromSlug} relation ${label} is requested by ${priorOwner} and ${link.origin_field}`);
+    }
+    desiredOwners.set(key, link.origin_field || '');
+    const conflicting = graphRows.find(row => relationKey(row) === key && row.origin_field !== link.origin_field);
+    if (conflicting) {
+      throw new Error(`source_ingest graph ownership conflict: ${fromSlug} relation ${label} is owned by ${conflicting.origin_field || 'legacy'}`);
+    }
+  }
+
+  const existing = graphRows.filter(link => link.origin_field?.startsWith(`${profile.profile_id}:`));
+  const desired = new Set(current.map(link => `${relationKey(link)}\u0000${link.origin_field || ''}`));
   const staleIds = existing
     .filter(link => !desired.has(`${link.to_source_id}\u0000${link.to_slug}\u0000${link.link_type}\u0000${link.origin_field}`))
     .map(link => link.id);

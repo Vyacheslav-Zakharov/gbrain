@@ -5,7 +5,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { putSourceIngestProfile, profileHash } from '../src/core/source-ingest/store.ts';
-import { buildSourceGraphLinks, enrichSourceIngestLinkedCollections, runSourceIngestExecutor, sourceIngestLockId } from '../src/core/source-ingest/executor.ts';
+import { buildSourceGraphLinks, enrichSourceIngestLinkedCollections, reconcileSourceGraphLinks, runSourceIngestExecutor, sourceIngestLockId } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
 import { listDueSourceRefreshes, parseFreshnessPolicyMs, enqueueDueSourceRefreshJobs } from '../src/core/source-ingest/freshness.ts';
@@ -251,6 +251,35 @@ describe('source-ingest Stage 3A executor', () => {
     const first = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-first', no_embed: true });
     expect(first.graph_writes).toEqual({ created: 2, removed: 0 });
 
+    // The links uniqueness key does not include origin_field, so a second Article
+    // View requesting the same relation must fail closed instead of silently
+    // overwriting the first owner's scoped provenance.
+    await engine.executeRaw(
+      `UPDATE links
+          SET origin_field = 'other-article-view:located-at-facility',
+              context = 'source-ingest profile other-article-view rule located-at-facility'
+        WHERE link_source = 'source-ingest' AND link_type = 'located_at'`,
+      [],
+    );
+    const desiredConflictLinks = buildSourceGraphLinks(
+      graphProfile,
+      { location_id: 'facility-almaty-yard' },
+      'source-ingest/vehicles/a-001',
+      'shared',
+    );
+    await expect(reconcileSourceGraphLinks(
+      engine,
+      graphProfile,
+      'source-ingest/vehicles/a-001',
+      'shared',
+      desiredConflictLinks,
+    )).rejects.toThrow('source_ingest graph ownership conflict');
+    const conflictingOwners = await engine.executeRaw<{ origin_field: string }>(
+      `SELECT origin_field FROM links WHERE link_source = 'source-ingest' AND link_type = 'located_at'`,
+      [],
+    );
+    expect(conflictingOwners.every(row => row.origin_field === 'other-article-view:located-at-facility')).toBe(true);
+
     // Pre-profile-scoping releases stored only rule.id. The next run must adopt
     // those exact Source Ingest edges instead of leaving unmanaged legacy rows.
     await engine.executeRaw(
@@ -273,6 +302,16 @@ describe('source-ingest Stage 3A executor', () => {
     links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
     expect(links.some(l => l.to_slug === 'facility-almaty-yard' && l.link_type === 'located_at' && l.link_source === 'source-ingest')).toBe(true);
 
+    // Simulate an upgrade where the rule is deleted before its legacy edge ever
+    // receives profile scoping. The sole page projection may safely claim and
+    // remove that orphaned legacy edge.
+    await engine.executeRaw(
+      `UPDATE links
+          SET origin_field = 'located-at-facility',
+              context = 'source-ingest rule located-at-facility'
+        WHERE link_source = 'source-ingest' AND link_type = 'located_at'`,
+      [],
+    );
     await putSourceIngestProfile(engine, {
       ...graphProfile,
       links: [],
