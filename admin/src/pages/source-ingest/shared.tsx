@@ -10,6 +10,16 @@ export interface SourceIngestCatalogTree {
 
 export type CatalogArea = 'connectors' | 'base_views' | 'transform_views' | 'article_views' | 'schema_view' | 'profiles';
 
+export function DangerZone({ description, children }: { description: string; children: React.ReactNode }) {
+  return <details className="source-ingest-danger-zone">
+    <summary>Опасные действия</summary>
+    <div className="source-ingest-danger-zone__content">
+      <p>{description}</p>
+      <div className="source-ingest-danger-zone__actions">{children}</div>
+    </div>
+  </details>;
+}
+
 export function val(x: unknown): string {
   return x === null || x === undefined || x === '' ? '—' : String(x);
 }

@@ -1,4 +1,5 @@
 import React from 'react';
+import { DangerZone } from './shared';
 
 type Busy = string | null;
 type TransformViewForm = {
@@ -41,9 +42,11 @@ export function TransformViewEditor({ busy, transformViewForm, setTransformViewF
       <button className="btn btn-secondary" disabled={busy !== null || parsedInputsCount === 0} onClick={generateSelectForTransform}>Создать SELECT</button>
       <button className="btn btn-primary source-ingest-context-primary" disabled={busy !== null || !canTransformPreview} onClick={() => void runTransformPreview()}>{busy === 'transform-preview' ? 'Выполняем…' : 'Проверить SQL'}</button>
       <button className="btn btn-secondary" disabled={busy !== null || !transformViewForm.transform_view_id || parsedInputsCount === 0 || !transformViewForm.sql.trim() || !transformViewForm.primary_key_field} onClick={() => void saveTransformView()}>{busy === 'catalog-transform-view' ? 'Сохраняем…' : 'Сохранить преобразование'}</button>
-      <button className="btn btn-danger" disabled={busy !== null || !transformViewForm.transform_view_id} onClick={() => void deleteTransformView()}>{busy === 'catalog-transform-view-delete' ? 'Удаляем…' : 'Удалить преобразование'}</button>
       <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>Входы связывают алиасы с источниками. Автоматический SELECT — только заготовка; JOIN задаётся явно в SQL.</span>
     </div>
+    <DangerZone description="Удаление преобразования может сделать зависимые публикации недействительными. Перед удалением будет показано влияние на каталог.">
+      <button className="btn btn-danger" disabled={busy !== null || !transformViewForm.transform_view_id} onClick={() => void deleteTransformView()}>{busy === 'catalog-transform-view-delete' ? 'Удаляем…' : 'Удалить преобразование'}</button>
+    </DangerZone>
     <div className="source-ingest-form-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
       <label>ID преобразования
         <input value={transformViewForm.transform_view_id} onChange={e => setTransformViewForm(prev => ({ ...prev, transform_view_id: e.target.value }))} placeholder="tv-vehicles-clean" />

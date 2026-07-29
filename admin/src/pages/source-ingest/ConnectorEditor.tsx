@@ -1,4 +1,5 @@
 import React from 'react';
+import { DangerZone } from './shared';
 
 type Busy = string | null;
 type ConnectorForm = { connector_id: string; kind: string; display_name: string };
@@ -69,16 +70,18 @@ export function ConnectorEditor({ busy, catalogConnectorForm, setCatalogConnecto
       </div>}
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
         <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id || (catalogConnectorForm.kind === 'appsheet' ? (!secretForm.app_id || !secretForm.access_key) : !secretForm.connection_string)} onClick={() => void saveCatalogConnectorCredentials()}>{busy === 'catalog-save-secret' ? 'Сохраняем секреты…' : 'Сохранить секреты'}</button>
-        <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void deleteCatalogConnectorCredentials()}>{busy === 'catalog-delete-secret' ? 'Удаляем секреты…' : 'Удалить секреты'}</button>
       </div>
       {catalogConnectorSecretStatus !== null && <details style={{ marginTop: 10 }}><summary>Технические детали</summary><PreviewJson value={catalogConnectorSecretStatus} empty="Статус секретов пока отсутствует." /></details>}
     </div>}
     <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
       <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void listCatalogConnectorObjects()}>{busy === 'catalog-list-objects' ? 'Загружаем объекты…' : 'Показать доступные объекты'}</button>
       <button className="btn btn-secondary" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void testCatalogConnector()}>{busy === 'catalog-test-connector' ? 'Проверяем…' : 'Проверить секреты'}</button>
-      <button className="btn btn-danger" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void deleteCatalogConnector()}>{busy === 'catalog-delete-connector' ? 'Удаляем…' : 'Удалить подключение'}</button>
       <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>Эта проверка не читает таблицу. Таблицы выбираются и проверяются в источниках (Base views).</span>
     </div>
+    <DangerZone description="Удаление секретов отключит доступ к данным. Удаление подключения может затронуть зависимые источники и потребует подтверждения последствий.">
+      {(catalogConnectorForm.kind === 'appsheet' || catalogConnectorForm.kind === 'postgres') && <button className="btn btn-danger" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void deleteCatalogConnectorCredentials()}>{busy === 'catalog-delete-secret' ? 'Удаляем секреты…' : 'Удалить секреты'}</button>}
+      <button className="btn btn-danger" disabled={busy !== null || !catalogConnectorForm.connector_id} onClick={() => void deleteCatalogConnector()}>{busy === 'catalog-delete-connector' ? 'Удаляем…' : 'Удалить подключение'}</button>
+    </DangerZone>
     {catalogConnectorTest !== null && <div style={{ marginTop: 10, padding: '8px 10px', borderRadius: 8, border: `1px solid ${testOk ? 'rgba(34,197,94,.35)' : 'rgba(239,68,68,.35)'}`, color: testOk ? 'var(--success)' : 'var(--danger)', background: testOk ? 'rgba(34,197,94,.08)' : 'rgba(239,68,68,.08)' }}>
       Результат: <b>{testOk ? 'OK' : 'ОШИБКА'}</b>{testStatus ? ` · ${testStatus}` : ''}
     </div>}

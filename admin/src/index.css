@@ -477,6 +477,20 @@ label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
 }
 .source-ingest-lineage > summary:hover,
 .source-ingest-layout details > summary:hover { color: var(--text-primary); }
+.source-ingest-danger-zone {
+  margin: 12px 0;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: rgba(239, 68, 68, 0.035);
+}
+.source-ingest-danger-zone > summary { color: var(--error) !important; }
+.source-ingest-danger-zone__content > p {
+  margin: 10px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.source-ingest-danger-zone__actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .source-ingest-layout pre { max-width: 100%; overflow: auto; }
 .source-ingest-layout main:has(> .source-ingest-wizard--open) .source-ingest-context-primary { display: none; }
 .mobile-nav-toggle,

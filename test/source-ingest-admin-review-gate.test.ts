@@ -199,6 +199,29 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Запустить только изменившиеся');
   });
 
+  test('destructive source-ingest actions live in one collapsed danger-zone contract', () => {
+    const shared = readFileSync(join(root, 'admin/src/pages/source-ingest/shared.tsx'), 'utf8');
+    const css = adminCss();
+    const editors = [
+      ['ConnectorEditor.tsx', 2],
+      ['BaseViewEditor.tsx', 1],
+      ['TransformViewEditor.tsx', 1],
+      ['ArticleViewEditor.tsx', 1],
+    ] as const;
+    const editorSources = editors.map(([name]) => readFileSync(join(root, 'admin/src/pages/source-ingest', name), 'utf8'));
+
+    expect(shared).toContain('export function DangerZone');
+    expect(shared).toContain('<details className="source-ingest-danger-zone">');
+    expect(shared).toContain('<summary>Опасные действия</summary>');
+    expect(shared).not.toContain('<details className="source-ingest-danger-zone" open');
+    expect(css).toContain('.source-ingest-danger-zone');
+    expect(editorSources.reduce((count, editor) => count + (editor.match(/<DangerZone/g)?.length ?? 0), 0)).toBe(4);
+    for (const [index, editor] of editorSources.entries()) {
+      expect(editor).toMatch(/<DangerZone[\s\S]*className="btn btn-danger"[\s\S]*<\/DangerZone>/);
+      expect(editor.match(/className="btn btn-danger"/g)?.length).toBe(editors[index][1]);
+    }
+  });
+
   test('connector registry exposes implemented v1 connector kinds', () => {
     const connectors = sourceIngestConnectorDescriptors();
     expect(connectors.map(c => c.id)).toEqual(['appsheet-vehicles', 'postgres', 'fake-source']);

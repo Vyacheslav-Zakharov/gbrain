@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { ArticleViewStatePanel } from './ArticleViewStatePanel';
 import { ChangeIntelligenceEditor, type ChangeIntelligencePolicy } from './ChangeIntelligenceEditor';
-import { asArr, asObj, val } from './shared';
+import { asArr, asObj, DangerZone, val } from './shared';
 
 type Busy = string | null;
 type ArticleViewForm = {
@@ -92,10 +92,12 @@ export function ArticleViewEditor({ busy, sources, formSampleLimit, articleViewF
       <button className="btn btn-secondary" disabled={busy !== null} onClick={seedArticleViewFromCurrent}>Заполнить из текущего входа</button>
       <button className={`${articleViewCurrentChainHash || tab === 'preview' ? 'btn btn-secondary' : 'btn btn-primary'} source-ingest-context-primary`} disabled={busy !== null || !articleViewForm.input_id || !articleViewForm.slug_template || !articleViewForm.external_id_field} onClick={() => { setTab('preview'); void runArticleViewPreview(); }}>{busy === 'catalog-article-preview' ? 'Собираем превью…' : 'Собрать превью'}</button>
       <button className="btn btn-secondary" disabled={busy !== null || !articleViewForm.article_view_id || !articleViewForm.input_id || !articleViewForm.slug_template || !articleViewForm.external_id_field} onClick={() => void saveArticleView()}>{busy === 'catalog-article-view' ? 'Сохраняем…' : 'Сохранить публикацию'}</button>
-      <button className="btn btn-danger" disabled={busy !== null || !articleViewForm.article_view_id} onClick={() => void deleteArticleView()}>{busy === 'catalog-article-view-delete' ? 'Удаляем…' : 'Удалить публикацию'}</button>
       <button className={`${articleViewCurrentChainHash ? 'btn btn-primary' : 'btn btn-secondary'} source-ingest-context-primary`} disabled={busy !== null || !canApprove} onClick={() => void approveArticleView()}>{busy === 'catalog-article-approve' ? 'Фиксируем…' : 'Зафиксировать snapshot'}</button>
       <span style={{ color: articleViewCurrentChainHash ? 'var(--success)' : 'var(--text-muted)', alignSelf: 'center' }}>{articleViewCurrentChainHash ? `chain ${articleViewCurrentChainHash.slice(0, 12)}…` : 'Для утверждения сначала выполните предпросмотр.'}</span>
     </div>
+    <DangerZone description="Удаление публикации удалит её определение и историю каталога. Созданные ранее страницы автоматически не удаляются.">
+      <button className="btn btn-danger" disabled={busy !== null || !articleViewForm.article_view_id} onClick={() => void deleteArticleView()}>{busy === 'catalog-article-view-delete' ? 'Удаляем…' : 'Удалить публикацию'}</button>
+    </DangerZone>
     <div role="tablist" aria-label="Разделы публикации" style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
       <TabButton tab="definition" active={tab} onClick={setTab}>Определение</TabButton>
       <TabButton tab="changes" active={tab} onClick={setTab}>Изменения</TabButton>

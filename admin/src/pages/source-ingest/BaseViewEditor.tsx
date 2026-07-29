@@ -1,5 +1,5 @@
 import React from 'react';
-import { asObj } from './shared';
+import { asObj, DangerZone } from './shared';
 
 type Busy = string | null;
 type BaseViewForm = {
@@ -58,9 +58,11 @@ export function BaseViewEditor({ busy, formSourceObject, formTableName, baseView
       <button className="btn btn-secondary" disabled={busy !== null} onClick={seedBaseViewFromReview}>Заполнить из прежнего исследования</button>
       <button className="btn btn-primary source-ingest-context-primary" disabled={busy !== null || !baseViewForm.connector_id || !baseViewForm.object_name} onClick={() => void discoverBaseView()}>{busy === 'catalog-base-view-discover' ? 'Изучаем поля…' : 'Изучить поля'}</button>
       <button className="btn btn-secondary" disabled={busy !== null || !effectiveBaseViewId || !baseViewForm.connector_id || !baseViewForm.object_name} onClick={() => void saveBaseView()}>{busy === 'catalog-base-view' ? 'Сохраняем…' : 'Сохранить источник'}</button>
-      <button className="btn btn-danger" disabled={busy !== null || !effectiveBaseViewId} onClick={() => void deleteBaseView()}>{busy === 'catalog-base-view-delete' ? 'Удаляем…' : 'Удалить источник'}</button>
       <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>Следующий безопасный шаг — изучить поля и выбрать стабильный ID.</span>
     </div>
+    <DangerZone description="Удаление источника может сделать зависимые преобразования и публикации недействительными. Перед удалением будет показано влияние на каталог.">
+      <button className="btn btn-danger" disabled={busy !== null || !effectiveBaseViewId} onClick={() => void deleteBaseView()}>{busy === 'catalog-base-view-delete' ? 'Удаляем…' : 'Удалить источник'}</button>
+    </DangerZone>
     <div className="source-ingest-form-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) minmax(220px, 1fr)', gap: 14, alignItems: 'start' }}>
       <label>ID источника <span style={{ color: 'var(--warning)' }}>*</span>
         <input value={baseViewForm.base_view_id} onChange={e => setBaseViewForm(prev => ({ ...prev, base_view_id: e.target.value }))} placeholder={effectiveBaseViewId || 'bv-appsheet-avto-vehicles'} />
