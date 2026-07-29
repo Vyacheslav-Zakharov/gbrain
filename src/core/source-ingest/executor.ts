@@ -310,7 +310,64 @@ export function buildSourceGraphLinks(
   return links;
 }
 
-export async function reconcileSourceGraphLinks(
+type SourceGraphLinks = Parameters<BrainEngine['addLinksBatch']>[0];
+type SourceGraphRow = { id: number; to_slug: string; to_source_id: string; link_type: string; origin_field: string | null };
+
+function sourceGraphRelationKey(sourceId: string, link: { to_source_id?: string; to_slug: string; link_type?: string }): string {
+  return `${link.to_source_id || sourceId}\u0000${link.to_slug}\u0000${link.link_type || ''}`;
+}
+
+async function assertSourceGraphOwnershipAvailable(
+  engine: BrainEngine,
+  profile: SourceIngestProfile,
+  fromSlug: string,
+  sourceId: string,
+  current: SourceGraphLinks,
+): Promise<void> {
+  if (current.length === 0) return;
+  const [projectionOwners, graphRows] = await Promise.all([
+    engine.executeRaw<{ profile_id: string }>(
+      `SELECT DISTINCT profile_id
+         FROM source_sync_state
+        WHERE slug = $1 AND approved_source_id = $2`,
+      [fromSlug, sourceId],
+    ),
+    engine.executeRaw<SourceGraphRow>(
+      `SELECT l.id, target.slug AS to_slug, target.source_id AS to_source_id, l.link_type, l.origin_field
+         FROM links l
+         JOIN pages origin ON origin.id = l.from_page_id
+         JOIN pages target ON target.id = l.to_page_id
+        WHERE origin.slug = $1 AND origin.source_id = $2
+          AND l.link_source = 'source-ingest'`,
+      [fromSlug, sourceId],
+    ),
+  ]);
+  const unambiguousOwner = projectionOwners.length === 1 && projectionOwners[0]?.profile_id === profile.profile_id;
+  const currentRuleIds = new Set((profile.links || []).map(rule => rule.id));
+  const desiredOwners = new Map<string, string>();
+  for (const link of current) {
+    const key = sourceGraphRelationKey(sourceId, link);
+    const label = `${link.to_source_id || sourceId}:${link.to_slug} (${link.link_type || 'untyped'})`;
+    const desiredOwner = link.origin_field || '';
+    const priorOwner = desiredOwners.get(key);
+    if (priorOwner && priorOwner !== desiredOwner) {
+      throw new Error(`source_ingest graph ownership conflict: ${fromSlug} relation ${label} is requested by ${priorOwner} and ${desiredOwner}`);
+    }
+    desiredOwners.set(key, desiredOwner);
+    const conflicting = graphRows.find(row => {
+      if (sourceGraphRelationKey(sourceId, row) !== key || row.origin_field === desiredOwner) return false;
+      if (row.origin_field?.startsWith(`${profile.profile_id}:`)) return false;
+      const legacyOwner = row.origin_field || '';
+      if (!legacyOwner.includes(':') && (unambiguousOwner || currentRuleIds.has(legacyOwner))) return false;
+      return true;
+    });
+    if (conflicting) {
+      throw new Error(`source_ingest graph ownership conflict: ${fromSlug} relation ${label} is owned by ${conflicting.origin_field || 'legacy'}`);
+    }
+  }
+}
+
+async function reconcileSourceGraphLinks(
   engine: BrainEngine,
   profile: SourceIngestProfile,
   fromSlug: string,
@@ -318,6 +375,7 @@ export async function reconcileSourceGraphLinks(
   current: LinkBatchInput[],
 ): Promise<{ created: number; removed: number }> {
   const rules = profile.links || [];
+  await assertSourceGraphOwnershipAvailable(engine, profile, fromSlug, sourceId, current);
 
   // One-time adoption of pre-scoping Source Ingest edges. When this page has a
   // single profile projection, every unscoped Source Ingest edge belongs to it,
@@ -354,25 +412,8 @@ export async function reconcileSourceGraphLinks(
         AND l.link_source = 'source-ingest'`,
     [fromSlug, sourceId],
   );
-  const relationKey = (link: { to_source_id?: string; to_slug: string; link_type?: string }) =>
-    `${link.to_source_id || sourceId}\u0000${link.to_slug}\u0000${link.link_type || ''}`;
-  const desiredOwners = new Map<string, string>();
-  for (const link of current) {
-    const key = relationKey(link);
-    const label = `${link.to_source_id || sourceId}:${link.to_slug} (${link.link_type || 'untyped'})`;
-    const priorOwner = desiredOwners.get(key);
-    if (priorOwner && priorOwner !== link.origin_field) {
-      throw new Error(`source_ingest graph ownership conflict: ${fromSlug} relation ${label} is requested by ${priorOwner} and ${link.origin_field}`);
-    }
-    desiredOwners.set(key, link.origin_field || '');
-    const conflicting = graphRows.find(row => relationKey(row) === key && row.origin_field !== link.origin_field);
-    if (conflicting) {
-      throw new Error(`source_ingest graph ownership conflict: ${fromSlug} relation ${label} is owned by ${conflicting.origin_field || 'legacy'}`);
-    }
-  }
-
   const existing = graphRows.filter(link => link.origin_field?.startsWith(`${profile.profile_id}:`));
-  const desired = new Set(current.map(link => `${relationKey(link)}\u0000${link.origin_field || ''}`));
+  const desired = new Set(current.map(link => `${sourceGraphRelationKey(sourceId, link)}\u0000${link.origin_field || ''}`));
   const staleIds = existing
     .filter(link => !desired.has(`${link.to_source_id}\u0000${link.to_slug}\u0000${link.link_type}\u0000${link.origin_field}`))
     .map(link => link.id);
@@ -923,6 +964,9 @@ export async function runSourceIngestExecutor(
       );
       renderedSlug = rendered.slug;
       renderedPath = `${rendered.slug}.md`;
+      const rawRecord = rawRecordsByExternalId.get(record.external_id) || record;
+      const currentGraphLinks = buildSourceGraphLinks(profile, rawRecord.data, rendered.slug, sourceId, graphTargetResolutions);
+      await assertSourceGraphOwnershipAvailable(engine, profile, rendered.slug, sourceId, currentGraphLinks);
       const existingBlock = existingContent ? existingManagedBlock(existingContent) : null;
       const warnings: string[] = [];
       const oldState = await engine.executeRaw<{ managed_block_hash: string | null; content_fingerprint: string | null; last_source_snapshot: unknown }>(
@@ -967,7 +1011,6 @@ export async function runSourceIngestExecutor(
           warnings.push('change_intelligence_snapshot_invalid');
         }
       }
-      const rawRecord = rawRecordsByExternalId.get(record.external_id) || record;
       const timelineEntries = buildSourceTimelineEntries({
         profile,
         record: rawRecord,
@@ -985,7 +1028,6 @@ export async function runSourceIngestExecutor(
         lastRecordCommit = await commitGitBackedRun(storage.local_path, [writeThrough.path], runId, profile.profile_id);
       }
       pageDurable = true;
-      const currentGraphLinks = buildSourceGraphLinks(profile, rawRecord.data, rendered.slug, sourceId, graphTargetResolutions);
       const graphChange = await reconcileSourceGraphLinks(engine, profile, rendered.slug, sourceId, currentGraphLinks);
       const graphCreatedForRecord = graphChange.created;
       const graphRemovedForRecord = graphChange.removed;
