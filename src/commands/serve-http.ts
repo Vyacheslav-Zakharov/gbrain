@@ -94,6 +94,20 @@ import {
 export const HEALTH_TIMEOUT_MS = 3000;
 
 /**
+ * Express delegates JSON responses to JSON.stringify, which throws on native
+ * bigint values returned by postgres.js for BIGINT columns. Preserve the
+ * numeric API contract for ordinary ids and avoid precision loss for values
+ * outside JavaScript's safe integer range.
+ */
+export function jsonBigIntReplacer(_key: string, value: unknown): unknown {
+  if (typeof value !== 'bigint') return value;
+  if (value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER)) {
+    return Number(value);
+  }
+  return value.toString();
+}
+
+/**
  * v0.36.1.x #1024: bootstrap token resolution.
  *
  * Pure helper (no side effects, no process.exit) so the rule is unit-testable.
@@ -562,6 +576,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   // Express 5 app
   const app = express();
+  app.set('json replacer', jsonBigIntReplacer);
 
   const portalSessionTtlMs = 30 * 24 * 60 * 60 * 1000;
   const portalSessions = new PortalSessionStore(
