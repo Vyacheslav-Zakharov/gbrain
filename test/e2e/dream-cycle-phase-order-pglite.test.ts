@@ -45,7 +45,13 @@ mock.module('../../src/core/embedding.ts', () => ({
   EMBEDDING_MODEL: 'text-embedding-3-large',
   EMBEDDING_DIMENSIONS: 1536,
   EMBEDDING_COST_PER_1K_TOKENS: 0.00013,
+  currentEmbeddingPricePerMTok: () => 0.13,
   estimateEmbeddingCostUsd: (tokens: number) => (tokens / 1000) * 0.00013,
+  willEmbedSynchronously: ({ v2Enabled, serialFlag, noEmbed }: {
+    v2Enabled: boolean; serialFlag: boolean; noEmbed: boolean;
+  }) => (v2Enabled && !serialFlag) || noEmbed ? 'deferred' : 'inline',
+  shouldBlockSync: (costUsd: number, floorUsd: number, mode: string, posture = 'gated') =>
+    posture !== 'tokenmax' && mode === 'inline' && costUsd > floorUsd,
   // v0.41.31: embed phase reads the current signature to stamp provenance.
   currentEmbeddingSignature: () => 'text-embedding-3-large:1536',
 }));
@@ -124,6 +130,7 @@ const EXPECTED_PHASES: CyclePhase[] = [
   'synthesize_concepts',         // v0.41 T9 — concept synthesis (pack-gated)
   'recompute_emotional_weight', // v0.29
   'consolidate',                // v0.31
+  'source_refresh',             // v0.43 — refresh configured external sources
   'propose_takes',              // v0.36.1.0 — hindsight calibration wave
   'grade_takes',                // v0.36.1.0
   'calibration_profile',        // v0.36.1.0
