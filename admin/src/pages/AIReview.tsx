@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
+import { formatChangedDraftFields } from '../review-diff';
 import './AIReview.css';
 
 type Status = 'pending' | 'accepted' | 'rejected' | 'superseded';
@@ -45,7 +46,16 @@ function asDraft(p: Proposal): Draft {
     weight: Number(p.weight),
     domain: p.domain ?? '',
     since_date: '',
-    source: `take-proposal:${p.id}`,
+    source: '',
+  };
+}
+
+function normalizeDraft(draft: Draft): Draft {
+  return {
+    ...draft,
+    domain: draft.domain ?? '',
+    since_date: draft.since_date ?? '',
+    source: draft.source ?? '',
   };
 }
 
@@ -111,6 +121,7 @@ export function AIReviewPage() {
 
   const original = useMemo(() => detail ? asDraft(detail.proposal) : null, [detail]);
   const diff = useMemo(() => original && draft ? changedFields(original, draft) : [], [original, draft]);
+  const diffText = useMemo(() => original && draft ? formatChangedDraftFields(original, draft, diff) : '', [original, draft, diff]);
 
   const select = (id: number) => {
     if (diff.length > 0 && !confirm('Discard unsaved draft changes?')) return;
@@ -139,7 +150,7 @@ export function AIReviewPage() {
     setBusy('llm');
     try {
       const result = await api.aiReviewLlmRevision(detail.proposal.id, llmComment);
-      setDraft({ ...asDraft(detail.proposal), ...result.draft });
+      setDraft(normalizeDraft({ ...asDraft(detail.proposal), ...result.draft }));
       setRevisionId(result.revision_id);
       setError(null);
     } catch (e) {
@@ -239,18 +250,18 @@ export function AIReviewPage() {
                 <label className={diff.includes('weight') ? 'changed' : ''}>Weight<input type="number" min="0" max="1" step="0.05" value={draft.weight} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('weight', Number(e.target.value))} /></label>
                 <label className={diff.includes('domain') ? 'changed' : ''}>Domain<input value={draft.domain} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('domain', e.target.value)} /></label>
                 <label className={diff.includes('since_date') ? 'changed' : ''}>Since<input value={draft.since_date} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('since_date', e.target.value)} placeholder="YYYY-MM-DD" /></label>
-                <label className={diff.includes('source') ? 'changed' : ''}>Evidence/source<input value={draft.source} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('source', e.target.value)} /></label>
+                <label className={diff.includes('source') ? 'changed' : ''}>Additional evidence/source<input value={draft.source} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('source', e.target.value)} placeholder="Optional; proposal provenance is added automatically" /></label>
               </div>
             </div>
 
             {diff.length > 0 && <div className="diff-card">
               <strong>Draft diff</strong><span>{diff.join(', ')}</span>
-              <pre>- {JSON.stringify(original, null, 2)}\n+ {JSON.stringify(draft, null, 2)}</pre>
+              <pre>{diffText}</pre>
             </div>}
 
             {detail.proposal.status === 'pending' && <div className="llm-box">
-              <label>Ask LLM to revise — returns a draft only
-                <textarea value={llmComment} onChange={e => setLlmComment(e.target.value)} rows={3} placeholder="Clarify the claim, preserve evidence, change holder…" />
+              <label>Ask LLM to revise claim text — metadata is preserved
+                <textarea value={llmComment} onChange={e => setLlmComment(e.target.value)} rows={3} placeholder="Translate, clarify, or shorten the claim…" />
               </label>
               <button onClick={llmRevise} disabled={busy !== null || !llmComment.trim()}>{busy === 'llm' ? 'Revising…' : 'Generate revision'}</button>
               {revisionId && <span>Draft revision #{revisionId}; review the diff before accepting.</span>}
