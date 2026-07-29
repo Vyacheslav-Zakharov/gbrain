@@ -318,8 +318,6 @@ async function reconcileSourceGraphLinks(
   current: LinkBatchInput[],
 ): Promise<{ created: number; removed: number }> {
   const rules = profile.links || [];
-  const ownerFields = rules.map(rule => `${profile.profile_id}:${rule.id}`);
-  if (ownerFields.length === 0) return { created: 0, removed: 0 };
 
   // One-time adoption of pre-scoping Source Ingest edges. The legacy projection
   // stored only rule.id in origin_field, so addLinksBatch cannot create a scoped
@@ -346,8 +344,8 @@ async function reconcileSourceGraphLinks(
        JOIN pages target ON target.id = l.to_page_id
       WHERE origin.slug = $1 AND origin.source_id = $2
         AND l.link_source = 'source-ingest'
-        AND l.origin_field = ANY($3::text[])`,
-    [fromSlug, sourceId, ownerFields],
+        AND left(l.origin_field, char_length($3) + 1) = $3 || ':'`,
+    [fromSlug, sourceId, profile.profile_id],
   );
   const desired = new Set(current.map(link => `${link.to_source_id || sourceId}\u0000${link.to_slug}\u0000${link.link_type || ''}\u0000${link.origin_field || ''}`));
   const staleIds = existing

@@ -197,8 +197,16 @@ describe('source-ingest Stage 3A executor', () => {
   test('renders linked collections with canonical identity slugs and fails closed when unresolved', () => {
     const linkedProfile: SourceIngestProfile = {
       ...profile,
+      target: { ...profile.target, gbrain_type: 'person' },
       mapping: {
         ...profile.mapping,
+        source_fields: ['assignments'],
+        article_template: {
+          sections: {
+            title: '{{ assignments_display }}',
+            assignments: '{{ assignments_display }}',
+          },
+        },
         linked_collections: [{
           source_field: 'assignments',
           output_field: 'assignments_display',
@@ -220,6 +228,9 @@ describe('source-ingest Stage 3A executor', () => {
     ]);
     const enriched = enrichSourceIngestLinkedCollections(linkedProfile, record, resolutions);
     expect(enriched.data.assignments_display).toBe('- [[business-architecture/positions/director|Director]] · [[business-architecture/departments/it|IT]]');
+    const rendered = renderArticleTemplate(linkedProfile, enriched);
+    expect(rendered.body).toContain('- [[business-architecture/positions/director|Director]] · [[business-architecture/departments/it|IT]]');
+    expect(rendered.emptySlots).not.toContain('assignments_display (not selected)');
     expect(() => enrichSourceIngestLinkedCollections(linkedProfile, record, new Map())).toThrow('linked collection target unresolved');
   });
 
@@ -264,8 +275,8 @@ describe('source-ingest Stage 3A executor', () => {
 
     await putSourceIngestProfile(engine, {
       ...graphProfile,
-      links: graphProfile.links?.map(rule => ({ ...rule, when: [{ field: 'status', op: 'eq', value: '__never__' }] })),
-    }, { createdBy: 'test', changeNote: 'remove projected relation' });
+      links: [],
+    }, { createdBy: 'test', changeNote: 'remove graph rule entirely' });
     const third = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-remove', no_embed: true });
     expect(third.graph_writes).toEqual({ created: 0, removed: 2 });
     links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
