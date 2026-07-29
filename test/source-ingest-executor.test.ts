@@ -239,9 +239,27 @@ describe('source-ingest Stage 3A executor', () => {
     await putSourceIngestProfile(engine, graphProfile, { createdBy: 'test', changeNote: 'graph projection' });
     const first = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-first', no_embed: true });
     expect(first.graph_writes).toEqual({ created: 2, removed: 0 });
+
+    // Pre-profile-scoping releases stored only rule.id. The next run must adopt
+    // those exact Source Ingest edges instead of leaving unmanaged legacy rows.
+    await engine.executeRaw(
+      `UPDATE links
+          SET origin_field = 'located-at-facility',
+              context = 'source-ingest rule located-at-facility'
+        WHERE link_source = 'source-ingest' AND link_type = 'located_at'`,
+      [],
+    );
+    const migrated = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-legacy-migration', no_embed: true });
+    expect(migrated.graph_writes).toEqual({ created: 0, removed: 0 });
+    let links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    const projected = links.filter(l => l.link_type === 'located_at' && l.link_source === 'source-ingest');
+    expect(projected.length).toBe(1);
+    expect(projected[0]?.origin_field).toBe('fake-source-vehicle-graph-v1:located-at-facility');
+    expect(projected[0]?.context).toBe('source-ingest profile fake-source-vehicle-graph-v1 rule located-at-facility');
+
     const second = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-second', no_embed: true });
     expect(second.graph_writes).toEqual({ created: 0, removed: 0 });
-    let links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
     expect(links.some(l => l.to_slug === 'facility-almaty-yard' && l.link_type === 'located_at' && l.link_source === 'source-ingest')).toBe(true);
 
     await putSourceIngestProfile(engine, {
