@@ -59,7 +59,8 @@ describe('run-serial-tests.sh contract', () => {
 
   it('passes --max-concurrency=1 to bun test', () => {
     const src = readFileSync(SERIAL_SH, 'utf-8');
-    expect(src).toMatch(/bun test\s+--max-concurrency=1/);
+    expect(src).toContain('--max-concurrency=1');
+    expect(src).toContain('GBRAIN_SERIAL_TEST=1 bun test');
   });
 
   it('disjoint from run-unit-shard.sh (a file is never in both passes)', () => {

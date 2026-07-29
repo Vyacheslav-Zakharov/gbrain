@@ -25,7 +25,7 @@ function run(args: string[], home: string) {
   delete env.VOYAGE_API_KEY;
   delete env.ZEROENTROPY_API_KEY;
   delete env.OPENAI_API_KEY;
-  const r = spawnSync('bun', ['run', 'src/cli.ts', ...args], {
+  const r = spawnSync('bun', ['run', 'src/cli.ts', '--timeout=60s', ...args], {
     cwd: process.cwd(),
     encoding: 'utf8',
     env,
