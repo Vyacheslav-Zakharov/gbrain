@@ -113,6 +113,30 @@ describe('source-scoped attachment operations', () => {
     expect(fetched.sha256).toBe(uploaded.sha256);
   });
 
+  test('normalizes Postgres bigint sizes before MCP serialization', async () => {
+    const postgresLikeEngine = {
+      executeRaw: async () => [{
+        source_id: sourceId,
+        page_slug: 'projects/example',
+        filename: 'example.bin',
+        storage_path: `${sourceId}/_attachments/example.bin`,
+        mime_type: 'application/octet-stream',
+        size_bytes: 70n,
+        content_hash: 'abc123',
+        metadata: {},
+        created_at: new Date('2026-01-01T00:00:00Z'),
+      }],
+    } as unknown as OperationContext['engine'];
+
+    const listed = await operationsByName.attachment_list.handler(
+      makeContext({ engine: postgresLikeEngine }),
+      { source_id: sourceId, limit: 10 },
+    ) as Array<Record<string, unknown>>;
+
+    expect(listed[0].size_bytes).toBe(70);
+    expect(() => JSON.stringify(listed)).not.toThrow();
+  });
+
   test('creates a typed searchable index from caller-supplied extracted text', async () => {
     const uploaded = await operationsByName.attachment_upload.handler(makeContext(), {
       source_id: sourceId,

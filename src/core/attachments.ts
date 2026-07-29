@@ -676,8 +676,8 @@ export function createAttachmentOperations(deps: AttachmentOperationDependencies
       if (pageSlug) validatePageSlug(pageSlug);
       const rawLimit = Number(params.limit ?? 50);
       const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(100, Math.floor(rawLimit))) : 50;
-      if (pageSlug) {
-        return ctx.engine.executeRaw<AttachmentRow>(
+      const rows = pageSlug
+        ? await ctx.engine.executeRaw<AttachmentRow>(
           `SELECT source_id, page_slug, filename, storage_path, mime_type, size_bytes,
                   content_hash, metadata, created_at
              FROM files
@@ -685,9 +685,8 @@ export function createAttachmentOperations(deps: AttachmentOperationDependencies
             ORDER BY created_at DESC
             LIMIT $3`,
           [sourceId, pageSlug, limit],
-        );
-      }
-      return ctx.engine.executeRaw<AttachmentRow>(
+        )
+        : await ctx.engine.executeRaw<AttachmentRow>(
         `SELECT source_id, page_slug, filename, storage_path, mime_type, size_bytes,
                 content_hash, metadata, created_at
            FROM files
@@ -696,6 +695,7 @@ export function createAttachmentOperations(deps: AttachmentOperationDependencies
           LIMIT $2`,
         [sourceId, limit],
       );
+      return rows.map(row => ({ ...row, size_bytes: Number(row.size_bytes) }));
     },
   };
 
