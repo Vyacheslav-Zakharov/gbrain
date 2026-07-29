@@ -144,7 +144,15 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
   const emptySlots: string[] = [];
   const renderedFields: Record<string, string> = {};
   const sections = mapping.sections || {};
-  const sourceFields = Array.isArray(profile.mapping?.source_fields) ? new Set(profile.mapping.source_fields.map(String)) : undefined;
+  const configuredSourceFields = Array.isArray(profile.mapping?.source_fields)
+    ? profile.mapping.source_fields.map(String)
+    : null;
+  const derivedCollectionFields = (profile.mapping?.linked_collections || [])
+    .map(collection => String(collection.output_field || '').trim())
+    .filter(Boolean);
+  const sourceFields = configuredSourceFields
+    ? new Set([...configuredSourceFields, ...derivedCollectionFields])
+    : undefined;
   for (const [k, tmpl] of Object.entries(sections)) {
     renderedFields[k] = renderTemplateString(String(tmpl ?? ''), record, emptySlots, sourceFields).trimEnd();
   }
