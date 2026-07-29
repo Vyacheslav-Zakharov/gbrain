@@ -91,7 +91,10 @@ export function diffTimelineFields(
 
 export function buildSourceTimelineEntries(args: {
   profile: SourceIngestProfile;
+  /** Raw source record used for deterministic comparison and snapshot semantics. */
   record: SourceRecord;
+  /** Optional enriched record used only for human-readable summary values. */
+  displayRecord?: SourceRecord;
   slug: string;
   sourceId: string;
   previousSnapshot: Record<string, unknown> | null;
@@ -100,6 +103,12 @@ export function buildSourceTimelineEntries(args: {
   if (!policy?.enabled || policy.mode !== 'hybrid') return [];
   const current = sourceSnapshot(args.profile, args.record);
   if (!current) return [];
+  const displayData = args.displayRecord?.data ?? args.record.data;
+  const fieldLabel = (field: string) => policy.timeline_field_labels?.[field] || field;
+  const displayFieldValue = (field: string, fallback: unknown) => {
+    const displayField = policy.timeline_value_fields?.[field];
+    return displayField ? valueAt(displayData, displayField) : fallback;
+  };
   const effectiveAt = effectiveTimestamp(policy, args.record);
   const date = effectiveAt?.slice(0, 10) ?? null;
   if (!args.previousSnapshot) {
@@ -129,7 +138,7 @@ export function buildSourceTimelineEntries(args: {
   if (!date || !effectiveAt) return [];
   return diffTimelineFields(policy, args.previousSnapshot, current).map(change => {
     const before = cap(displayValue(change.before));
-    const after = cap(displayValue(change.after));
+    const after = cap(displayValue(displayFieldValue(change.field, change.after)));
     const payload = stableJson({
       profile_id: args.profile.profile_id,
       external_id: args.record.external_id,
@@ -145,7 +154,9 @@ export function buildSourceTimelineEntries(args: {
       source_id: args.sourceId,
       date,
       source: `source-ingest:${args.profile.profile_id}:${eventId}`,
-      summary: `Изменено поле «${change.field}»: ${before} → ${after}`,
+      summary: policy.timeline_value_fields?.[change.field]
+        ? `${fieldLabel(change.field)}: ${after}`
+        : `Изменено поле «${fieldLabel(change.field)}»: ${before} → ${after}`,
       detail: `Детерминированное изменение source record ${args.record.external_id}.`,
     };
   });

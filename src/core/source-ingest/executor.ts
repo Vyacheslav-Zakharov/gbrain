@@ -155,6 +155,13 @@ function graphValues(value: unknown): string[] {
     .filter(Boolean))];
 }
 
+function parseCollectionItems(raw: unknown): Array<Record<string, unknown>> {
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch { return []; }
+  }
+  return Array.isArray(raw) ? raw.filter(v => v && typeof v === 'object') as Array<Record<string, unknown>> : [];
+}
+
 interface GraphTargetResolution {
   slug: string;
   sourceId: string;
@@ -199,28 +206,73 @@ async function prefetchGraphTargetResolutions(
   records: SourceRecord[],
 ): Promise<GraphTargetResolutionMap> {
   const out: GraphTargetResolutionMap = new Map();
+  const requirements = new Map<string, Set<string>>();
+  const requireTargets = (profileId: string, externalIds: string[]) => {
+    const ids = requirements.get(profileId) || new Set<string>();
+    externalIds.forEach(id => ids.add(id));
+    requirements.set(profileId, ids);
+  };
   for (const rule of profile.links || []) {
     if (rule.target.lookup !== 'external_id') continue;
     const targetProfileId = rule.target.profile_id;
     const valueField = rule.target.value_field;
     if (!targetProfileId) continue;
     if (!valueField) throw new Error(`external_id graph rule requires target.value_field: ${rule.id}`);
-    const externalIds = [...new Set(records.flatMap(record => graphValues(valueAt(record.data, valueField))))];
+    requireTargets(targetProfileId, records.flatMap(record => graphValues(valueAt(record.data, valueField))));
+  }
+  for (const collection of profile.mapping?.linked_collections || []) {
+    for (const link of Object.values(collection.links)) {
+      requireTargets(link.profile_id, records.flatMap(record =>
+        parseCollectionItems(valueAt(record.data, collection.source_field))
+          .flatMap(item => graphValues(valueAt(item, link.id_field))),
+      ));
+    }
+  }
+  for (const [targetProfileId, externalIdSet] of requirements) {
+    const externalIds = [...externalIdSet];
     if (externalIds.length === 0) continue;
     const rows = await engine.executeRaw<{ external_id: string; slug: string; approved_source_id: string }>(
-      `SELECT external_id, slug, approved_source_id
-         FROM source_sync_state
-        WHERE profile_id = $1
-          AND external_id = ANY($2::text[])
-          AND last_result IN ('success', 'unchanged')`,
+      `SELECT s.external_id, s.slug, s.approved_source_id
+         FROM source_sync_state s
+         JOIN pages p ON p.source_id = s.approved_source_id AND p.slug = s.slug AND p.deleted_at IS NULL
+        WHERE s.profile_id = $1
+          AND s.external_id = ANY($2::text[])
+          AND s.last_result IN ('success', 'unchanged')`,
       [targetProfileId, externalIds],
     );
     for (const row of rows) out.set(graphResolutionKey(targetProfileId, row.external_id), { slug: row.slug, sourceId: row.approved_source_id });
     if (rows.length !== externalIds.length) {
-      throw new Error(`external_id graph target resolution incomplete for rule ${rule.id}: resolved ${rows.length} of ${externalIds.length}`);
+      throw new Error(`external_id target resolution incomplete for profile ${targetProfileId}: resolved ${rows.length} of ${externalIds.length}`);
     }
   }
   return out;
+}
+
+export function enrichSourceIngestLinkedCollections(
+  profile: SourceIngestProfile,
+  record: SourceRecord,
+  resolutions: GraphTargetResolutionMap,
+): SourceRecord {
+  const data = { ...record.data };
+  for (const collection of profile.mapping?.linked_collections || []) {
+    const lines: string[] = [];
+    for (const item of parseCollectionItems(valueAt(data, collection.source_field))) {
+      const values: Record<string, string> = Object.fromEntries(
+        Object.entries(item).map(([key, value]) => [key, value == null ? '' : String(value)]),
+      );
+      for (const [alias, link] of Object.entries(collection.links)) {
+        const externalId = String(valueAt(item, link.id_field) ?? '').trim();
+        const label = String(valueAt(item, link.label_field) ?? '').trim();
+        const target = resolutions.get(graphResolutionKey(link.profile_id, externalId));
+        if (!target && externalId) throw new Error(`linked collection target unresolved for profile ${link.profile_id}: ${externalId}`);
+        const safeLabel = label.replace(/[\r\n]+/g, ' ').replace(/\|/g, '/').replace(/\]/g, '\\]');
+        values[alias] = target && label ? `[[${target.slug}|${safeLabel}]]` : label;
+      }
+      lines.push(collection.item_template.replace(/{{\s*([A-Za-z0-9_.-]+)\s*}}/g, (_match, key: string) => values[key] ?? ''));
+    }
+    data[collection.output_field] = lines.length > 0 ? lines.join('\n') : (collection.empty_text ?? '—');
+  }
+  return { ...record, data };
 }
 
 /** Deterministic graph projection for one source record. Array-valued fields
@@ -245,10 +297,10 @@ export function buildSourceGraphLinks(
         from_slug: fromSlug,
         to_slug: target.slug,
         link_type: rule.type,
-        context: `source-ingest rule ${rule.id}`,
+        context: `source-ingest profile ${profile.profile_id} rule ${rule.id}`,
         link_source: 'source-ingest',
         origin_slug: fromSlug,
-        origin_field: rule.id,
+        origin_field: `${profile.profile_id}:${rule.id}`,
         from_source_id: sourceId,
         to_source_id: target.sourceId,
         origin_source_id: sourceId,
@@ -258,11 +310,128 @@ export function buildSourceGraphLinks(
   return links;
 }
 
+type SourceGraphLinks = Parameters<BrainEngine['addLinksBatch']>[0];
+type SourceGraphRow = { id: number; to_slug: string; to_source_id: string; link_type: string; origin_field: string | null };
+
+function sourceGraphRelationKey(sourceId: string, link: { to_source_id?: string; to_slug: string; link_type?: string }): string {
+  return `${link.to_source_id || sourceId}\u0000${link.to_slug}\u0000${link.link_type || ''}`;
+}
+
+async function assertSourceGraphOwnershipAvailable(
+  engine: BrainEngine,
+  profile: SourceIngestProfile,
+  fromSlug: string,
+  sourceId: string,
+  current: SourceGraphLinks,
+): Promise<void> {
+  if (current.length === 0) return;
+  const [projectionOwners, graphRows] = await Promise.all([
+    engine.executeRaw<{ profile_id: string }>(
+      `SELECT DISTINCT profile_id
+         FROM source_sync_state
+        WHERE slug = $1 AND approved_source_id = $2`,
+      [fromSlug, sourceId],
+    ),
+    engine.executeRaw<SourceGraphRow>(
+      `SELECT l.id, target.slug AS to_slug, target.source_id AS to_source_id, l.link_type, l.origin_field
+         FROM links l
+         JOIN pages origin ON origin.id = l.from_page_id
+         JOIN pages target ON target.id = l.to_page_id
+        WHERE origin.slug = $1 AND origin.source_id = $2
+          AND l.link_source = 'source-ingest'`,
+      [fromSlug, sourceId],
+    ),
+  ]);
+  const unambiguousOwner = projectionOwners.length === 1 && projectionOwners[0]?.profile_id === profile.profile_id;
+  const currentRuleIds = new Set((profile.links || []).map(rule => rule.id));
+  const desiredOwners = new Map<string, string>();
+  for (const link of current) {
+    const key = sourceGraphRelationKey(sourceId, link);
+    const label = `${link.to_source_id || sourceId}:${link.to_slug} (${link.link_type || 'untyped'})`;
+    const desiredOwner = link.origin_field || '';
+    const priorOwner = desiredOwners.get(key);
+    if (priorOwner && priorOwner !== desiredOwner) {
+      throw new Error(`source_ingest graph ownership conflict: ${fromSlug} relation ${label} is requested by ${priorOwner} and ${desiredOwner}`);
+    }
+    desiredOwners.set(key, desiredOwner);
+    const conflicting = graphRows.find(row => {
+      if (sourceGraphRelationKey(sourceId, row) !== key || row.origin_field === desiredOwner) return false;
+      if (row.origin_field?.startsWith(`${profile.profile_id}:`)) return false;
+      const legacyOwner = row.origin_field || '';
+      if (!legacyOwner.includes(':') && (unambiguousOwner || currentRuleIds.has(legacyOwner))) return false;
+      return true;
+    });
+    if (conflicting) {
+      throw new Error(`source_ingest graph ownership conflict: ${fromSlug} relation ${label} is owned by ${conflicting.origin_field || 'legacy'}`);
+    }
+  }
+}
+
+async function reconcileSourceGraphLinks(
+  engine: BrainEngine,
+  profile: SourceIngestProfile,
+  fromSlug: string,
+  sourceId: string,
+  current: LinkBatchInput[],
+): Promise<{ created: number; removed: number }> {
+  const rules = profile.links || [];
+  await assertSourceGraphOwnershipAvailable(engine, profile, fromSlug, sourceId, current);
+
+  // One-time adoption of pre-scoping Source Ingest edges. When this page has a
+  // single profile projection, every unscoped Source Ingest edge belongs to it,
+  // including a rule that was removed before the migration run. Ambiguous multi-
+  // profile pages claim only rule ids that still exist; all other legacy edges
+  // stay untouched and the overlap check below fails closed when relevant.
+  const projectionOwners = await engine.executeRaw<{ profile_id: string }>(
+    `SELECT DISTINCT profile_id
+       FROM source_sync_state
+      WHERE slug = $1 AND approved_source_id = $2`,
+    [fromSlug, sourceId],
+  );
+  const unambiguousOwner = projectionOwners.length === 1 && projectionOwners[0]?.profile_id === profile.profile_id;
+  const legacyRuleIds = rules.map(rule => rule.id);
+  await engine.executeRaw(
+    `UPDATE links l
+        SET context = 'source-ingest profile ' || $3 || ' rule ' || l.origin_field,
+            origin_field = $3 || ':' || l.origin_field
+       FROM pages origin
+      WHERE origin.id = l.from_page_id
+        AND origin.slug = $1 AND origin.source_id = $2
+        AND l.link_source = 'source-ingest'
+        AND position(':' in COALESCE(l.origin_field, '')) = 0
+        AND ($4::boolean OR l.origin_field = ANY($5::text[]))`,
+    [fromSlug, sourceId, profile.profile_id, unambiguousOwner, legacyRuleIds],
+  );
+
+  const graphRows = await engine.executeRaw<{ id: number; to_slug: string; to_source_id: string; link_type: string; origin_field: string }>(
+    `SELECT l.id, target.slug AS to_slug, target.source_id AS to_source_id, l.link_type, l.origin_field
+       FROM links l
+       JOIN pages origin ON origin.id = l.from_page_id
+       JOIN pages target ON target.id = l.to_page_id
+      WHERE origin.slug = $1 AND origin.source_id = $2
+        AND l.link_source = 'source-ingest'`,
+    [fromSlug, sourceId],
+  );
+  const existing = graphRows.filter(link => link.origin_field?.startsWith(`${profile.profile_id}:`));
+  const desired = new Set(current.map(link => `${sourceGraphRelationKey(sourceId, link)}\u0000${link.origin_field || ''}`));
+  const staleIds = existing
+    .filter(link => !desired.has(`${link.to_source_id}\u0000${link.to_slug}\u0000${link.link_type}\u0000${link.origin_field}`))
+    .map(link => link.id);
+  if (staleIds.length > 0) {
+    // Profile/rule-scoped deterministic reconciliation. Never deletes manual,
+    // markdown, frontmatter, mention, or another Article View's projection.
+    await engine.executeRaw(`DELETE FROM links WHERE id = ANY($1::int[]) AND link_source = 'source-ingest'`, [staleIds]);
+  }
+  const created = await engine.addLinksBatch(current, { auditSite: 'source-ingest.change-intelligence' }); // gbrain-allow-direct-insert: reviewed Source Ingest profile is the canonical graph projection contract.
+  return { created, removed: staleIds.length };
+}
+
 function hashText(s: string): string {
   return createHash('sha256').update(s).digest('hex');
 }
 
 function managedBody(profile: SourceIngestProfile, record: SourceRecord): string {
+  if (profile.update_policy.render_source_data === false) return '';
   const title = String(valueAt(record.data, profile.identity.display_name_field) ?? record.external_id);
   const lines = [`## Source data`, ``, `- Name: ${title}`];
   if (profile.update_policy.include_external_id_in_content !== false) lines.push(`- External ID: ${record.external_id}`);
@@ -442,11 +611,11 @@ async function writeSyncState(engine: BrainEngine, args: {
        approved_source_id = EXCLUDED.approved_source_id,
        profile_id = EXCLUDED.profile_id,
        profile_version = EXCLUDED.profile_version,
-       content_fingerprint = EXCLUDED.content_fingerprint,
-       managed_block_hash = EXCLUDED.managed_block_hash,
-       last_source_hash = EXCLUDED.last_source_hash,
-       last_source_snapshot = COALESCE(EXCLUDED.last_source_snapshot, source_sync_state.last_source_snapshot),
-       source_updated_at = EXCLUDED.source_updated_at,
+       content_fingerprint = CASE WHEN EXCLUDED.last_result = 'failed' THEN source_sync_state.content_fingerprint ELSE EXCLUDED.content_fingerprint END,
+       managed_block_hash = CASE WHEN EXCLUDED.last_result = 'failed' THEN source_sync_state.managed_block_hash ELSE EXCLUDED.managed_block_hash END,
+       last_source_hash = CASE WHEN EXCLUDED.last_result = 'failed' THEN source_sync_state.last_source_hash ELSE EXCLUDED.last_source_hash END,
+       last_source_snapshot = CASE WHEN EXCLUDED.last_result = 'failed' THEN source_sync_state.last_source_snapshot ELSE COALESCE(EXCLUDED.last_source_snapshot, source_sync_state.last_source_snapshot) END,
+       source_updated_at = CASE WHEN EXCLUDED.last_result = 'failed' THEN source_sync_state.source_updated_at ELSE EXCLUDED.source_updated_at END,
        last_synced_at = EXCLUDED.last_synced_at,
        stale_after = EXCLUDED.stale_after,
        freshness_policy = EXCLUDED.freshness_policy,
@@ -664,8 +833,10 @@ export async function runSourceIngestExecutor(
       if (opts.limit && records.length >= opts.limit) break;
     }
   }
-  const limited = opts.limit ? records.slice(0, opts.limit) : records;
-  const graphTargetResolutions = await prefetchGraphTargetResolutions(engine, profile, limited);
+  const rawLimited = opts.limit ? records.slice(0, opts.limit) : records;
+  const graphTargetResolutions = await prefetchGraphTargetResolutions(engine, profile, rawLimited);
+  const rawRecordsByExternalId = new Map(rawLimited.map(record => [record.external_id, record]));
+  const limited = rawLimited.map(record => enrichSourceIngestLinkedCollections(profile, record, graphTargetResolutions));
   const resolvedTargets = new Map<string, { identitySlug?: string; adoptionSlug?: string; explicitCreate: boolean; targetSlug: string }>();
   const claimedTargets = new Map<string, string>();
   for (const record of limited) {
@@ -793,6 +964,9 @@ export async function runSourceIngestExecutor(
       );
       renderedSlug = rendered.slug;
       renderedPath = `${rendered.slug}.md`;
+      const rawRecord = rawRecordsByExternalId.get(record.external_id) || record;
+      const currentGraphLinks = buildSourceGraphLinks(profile, rawRecord.data, rendered.slug, sourceId, graphTargetResolutions);
+      await assertSourceGraphOwnershipAvailable(engine, profile, rendered.slug, sourceId, currentGraphLinks);
       const existingBlock = existingContent ? existingManagedBlock(existingContent) : null;
       const warnings: string[] = [];
       const oldState = await engine.executeRaw<{ managed_block_hash: string | null; content_fingerprint: string | null; last_source_snapshot: unknown }>(
@@ -839,7 +1013,8 @@ export async function runSourceIngestExecutor(
       }
       const timelineEntries = buildSourceTimelineEntries({
         profile,
-        record,
+        record: rawRecord,
+        displayRecord: record,
         slug: rendered.slug,
         sourceId,
         previousSnapshot,
@@ -853,12 +1028,9 @@ export async function runSourceIngestExecutor(
         lastRecordCommit = await commitGitBackedRun(storage.local_path, [writeThrough.path], runId, profile.profile_id);
       }
       pageDurable = true;
-      const currentGraphLinks = buildSourceGraphLinks(profile, record.data, rendered.slug, sourceId, graphTargetResolutions);
-      // Physical source-ingest edges are add-only until profile-scoped ownership
-      // reconciliation is available. Deleting by from/to/type/source alone can
-      // remove an edge still owned by another Article View.
-      const graphCreatedForRecord = await engine.addLinksBatch(currentGraphLinks, { auditSite: 'source-ingest.change-intelligence' }); // gbrain-allow-direct-insert: Source Ingest apply is the canonical publication path for reviewed change-intelligence graph links.
-      const graphRemovedForRecord = 0;
+      const graphChange = await reconcileSourceGraphLinks(engine, profile, rendered.slug, sourceId, currentGraphLinks);
+      const graphCreatedForRecord = graphChange.created;
+      const graphRemovedForRecord = graphChange.removed;
       graphLinksCreated += graphCreatedForRecord;
       graphLinksRemoved += graphRemovedForRecord;
       const timelineCreated = await engine.addTimelineEntriesBatch(timelineEntries, { auditSite: 'source-ingest.change-intelligence' });
@@ -869,8 +1041,8 @@ export async function runSourceIngestExecutor(
         slug: rendered.slug,
         runId,
         managedBlockHash: rendered.managedBlockHash,
-        sourceHash: hashText(stableJson(record.data)),
-        sourceSnapshot: sourceSnapshot(profile, record),
+        sourceHash: hashText(stableJson(rawRecord.data)),
+        sourceSnapshot: sourceSnapshot(profile, rawRecord),
         result: status === 'unchanged' ? 'unchanged' : 'success',
       });
       await appendRunItem(engine, {

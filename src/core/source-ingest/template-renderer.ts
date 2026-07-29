@@ -5,6 +5,8 @@ import type { SourceIngestProfile } from './profile-schema.ts';
 export interface ArticleTemplateMapping {
   frontmatter?: Record<string, string | number | boolean | null>;
   sections?: Record<string, string>;
+  section_order?: string[];
+  include_title_heading?: boolean;
 }
 
 export interface RenderedArticleTemplate {
@@ -142,7 +144,15 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
   const emptySlots: string[] = [];
   const renderedFields: Record<string, string> = {};
   const sections = mapping.sections || {};
-  const sourceFields = Array.isArray(profile.mapping?.source_fields) ? new Set(profile.mapping.source_fields.map(String)) : undefined;
+  const configuredSourceFields = Array.isArray(profile.mapping?.source_fields)
+    ? profile.mapping.source_fields.map(String)
+    : null;
+  const derivedCollectionFields = (profile.mapping?.linked_collections || [])
+    .map(collection => String(collection.output_field || '').trim())
+    .filter(Boolean);
+  const sourceFields = configuredSourceFields
+    ? new Set([...configuredSourceFields, ...derivedCollectionFields])
+    : undefined;
   for (const [k, tmpl] of Object.entries(sections)) {
     renderedFields[k] = renderTemplateString(String(tmpl ?? ''), record, emptySlots, sourceFields).trimEnd();
   }
@@ -166,9 +176,13 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
     risks: 'Риски / открытые вопросы', open_questions: 'Открытые вопросы', links: 'Связи', notes: 'Заметки',
     source: 'Источник', ai_loop_review: 'AI-loop review', timeline: 'Timeline',
   };
+  const includeTitleHeading = mapping.include_title_heading ?? true;
+  const headingLines = includeTitleHeading ? [`# ${title}`, ''] : [];
+  const contentSectionKeys = Object.keys(sections).filter(key => key !== 'title' && key !== 'summary');
+  const configuredOrder = (mapping.section_order || []).filter(key => contentSectionKeys.includes(key));
+  const orderedSectionKeys = [...configuredOrder, ...contentSectionKeys.filter(key => !configuredOrder.includes(key)).sort()];
   const lines = equipmentLayout ? [
-    `# ${title}`,
-    '',
+    ...headingLines,
     renderedFields.summary || '',
     '',
     '## Характеристики',
@@ -190,11 +204,9 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
     '',
     renderedFields.timeline || '',
   ] : [
-    `# ${title}`,
-    '',
+    ...headingLines,
     renderedFields.summary || '',
-    ...Object.keys(sections)
-      .filter(key => key !== 'title' && key !== 'summary')
+    ...orderedSectionKeys
       .flatMap(key => [
         '',
         `## ${sectionLabels[key] || key.replace(/_/g, ' ').replace(/^./, ch => ch.toUpperCase())}`,
