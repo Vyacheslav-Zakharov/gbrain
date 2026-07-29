@@ -3108,6 +3108,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       const identity = body.identity && typeof body.identity === 'object' ? body.identity as Record<string, unknown> : {};
       const security = body.security && typeof body.security === 'object' ? body.security as Record<string, unknown> : { classification: 'shared', pii: false };
       const update_policy = body.update_policy && typeof body.update_policy === 'object' ? body.update_policy as Record<string, unknown> : { mode: 'managed_block', preserve_manual_sections: true };
+      const mapping = body.mapping && typeof body.mapping === 'object' ? body.mapping as Record<string, unknown> : undefined;
       const article_template = body.article_template && typeof body.article_template === 'object' ? body.article_template as Record<string, unknown> : undefined;
       const change_intelligence = body.change_intelligence && typeof body.change_intelligence === 'object' ? body.change_intelligence as Record<string, unknown> : undefined;
       const freshness_policy = body.freshness_policy && typeof body.freshness_policy === 'object' ? body.freshness_policy as Record<string, unknown> : undefined;
@@ -3121,6 +3122,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
           target_source_id,
           slug_template,
           identity,
+          mapping,
           article_template,
           change_intelligence,
           link_rules,

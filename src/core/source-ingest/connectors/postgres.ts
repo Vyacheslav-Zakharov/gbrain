@@ -72,10 +72,12 @@ export class PostgresSourceConnector implements SourceConnector {
     let offset = typeof cursorOrOpts === 'string' ? Number(cursorOrOpts) || 0 : 0;
     while (true) {
       const rows = await this.fetchPage(object, { offset, fields: effectiveOpts.fields });
-      const next = rows.length >= this.batchSize ? offset + rows.length : null;
-      yield { records: rows.map(row => this.toSourceRecord(object, row)), cursor: next === null ? null : String(next) };
-      if (next === null || rows.length === 0) break;
-      offset = next;
+      if (rows.length === 0) break;
+      const nextOffset = offset + rows.length;
+      const cursor = rows.length >= this.batchSize ? String(nextOffset) : null;
+      yield { records: rows.map(row => this.toSourceRecord(object, row)), cursor };
+      if (!cursor) break;
+      offset = nextOffset;
     }
   }
 
@@ -92,10 +94,12 @@ export class PostgresSourceConnector implements SourceConnector {
         `SELECT ${fields.map(quoteIdentifier).join(', ')} FROM ${this.qualifiedTable(object)} WHERE ${quoteIdentifier(updatedAt)} > $1 ORDER BY ${quoteIdentifier(updatedAt)} ASC, ${quoteIdentifier(pk)} ASC LIMIT $2 OFFSET $3`,
         [sinceDate.toISOString(), this.batchSize, offset],
       ) as Promise<Array<Record<string, unknown>>>);
-      const next = rows.length >= this.batchSize ? offset + rows.length : null;
-      yield { records: rows.map(row => this.toSourceRecord(object, row)), cursor: next === null ? null : String(next) };
-      if (next === null || rows.length === 0) break;
-      offset = next;
+      if (rows.length === 0) break;
+      const nextOffset = offset + rows.length;
+      const cursor = rows.length >= this.batchSize ? String(nextOffset) : null;
+      yield { records: rows.map(row => this.toSourceRecord(object, row)), cursor };
+      if (!cursor) break;
+      offset = nextOffset;
     }
   }
 
