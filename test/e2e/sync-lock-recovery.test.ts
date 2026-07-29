@@ -71,6 +71,7 @@ beforeEach(async () => {
 function runCli(args: string[], env: Record<string, string | undefined> = {}): { code: number; stdout: string; stderr: string } {
   const fullEnv: Record<string, string | undefined> = {
     ...(process.env as Record<string, string | undefined>),
+    HOME: tmpHome,
     GBRAIN_HOME: tmpHome,
     DATABASE_URL: process.env.DATABASE_URL!,
     ...env,
@@ -83,6 +84,12 @@ function runCli(args: string[], env: Record<string, string | undefined> = {}): {
     timeout: 30_000,
   });
   return { code: res.status ?? -1, stdout: res.stdout, stderr: res.stderr };
+}
+
+async function waitForChildExit(child: ReturnType<typeof spawn>): Promise<void> {
+  // Avoid attaching an exit listener after a fast sync has already exited.
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  await new Promise<void>((resolve) => child.once('exit', () => resolve()));
 }
 
 describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
@@ -115,7 +122,7 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     expect(handle).not.toBeNull();
 
     try {
-      const result = runCli(['sync', '--repo', repoDir, '--full', '--yes']);
+      const result = runCli(['sync', '--source', 'default', '--repo', repoDir, '--full', '--yes', '--no-embed']);
       expect(result.code).not.toBe(0);
       const msg = result.stderr + result.stdout;
       expect(msg).toMatch(new RegExp(`pid ${process.pid}`));
@@ -185,9 +192,10 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     // sync is fast on a 5-file repo, we use a tight polling loop with
     // an early-exit if we see the row.
     const eng = getEngine();
-    const sigtermProc = spawn(CLI[0], [...CLI.slice(1), 'sync', '--repo', repoDir, '--full', '--yes', '--no-embed'], {
+    const sigtermProc = spawn(CLI[0], [...CLI.slice(1), 'sync', '--source', 'default', '--repo', repoDir, '--full', '--yes', '--no-embed'], {
       env: {
         ...process.env,
+        HOME: tmpHome,
         GBRAIN_HOME: tmpHome,
         DATABASE_URL: process.env.DATABASE_URL!,
       } as Record<string, string>,
@@ -204,13 +212,13 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     if (!lockSeen) {
       // Sync may have completed before we caught the lock. That's also fine.
       sigtermProc.kill('SIGTERM');
-      await new Promise(r => sigtermProc.on('exit', r));
+      await waitForChildExit(sigtermProc);
       // Skip the rest of the assertion.
       return;
     }
 
     sigtermProc.kill('SIGTERM');
-    await new Promise(r => sigtermProc.on('exit', r));
+    await waitForChildExit(sigtermProc);
 
     // Within 3s of exit, lock should be gone.
     let lockGone = false;

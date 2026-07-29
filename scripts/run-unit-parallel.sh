@@ -13,8 +13,10 @@
 #
 # Env overrides:
 #   SHARDS=N                     same as --shards
-#   GBRAIN_TEST_SHARD_TIMEOUT    per-shard wallclock cap, seconds (default 600)
+#   GBRAIN_TEST_SHARD_TIMEOUT    per-shard wallclock cap, seconds (default 3600)
 #   GBRAIN_TEST_MAX_CONCURRENCY  passed through to bun test (default 4)
+#   GBRAIN_TEST_BATCH_SIZE       files per Bun process inside a shard (default 1;
+#                               raise explicitly on high-memory runners)
 #
 # Output files (workspace-local; falls back to /tmp if .context/ unwritable):
 #   .context/test-failures.log   failure blocks (cleared at start)
@@ -58,27 +60,20 @@ N="${SHARDS_OVERRIDE:-${SHARDS:-$(detect_cpus)}}"
 if ! printf '%s' "$N" | grep -qE '^[0-9]+$' || [ "$N" -lt 1 ]; then
   echo "ERROR: invalid shard count: $N" >&2; exit 2
 fi
-# v0.40.10 flake-hardening: clamp default to 4 (was 8) to match CI's
-# test-shard.sh fan-out. At 8-shard parallel on Apple Silicon we observed
-# shard 5 SIGKILL during source-health.test.ts's PGLite migration replay —
-# 8 parallel PGLite WASM inits contend severely on the lockfile, and the
-# 92-migration replay × 8 simultaneous can wedge past even 900s. CI uses
-# 4 and is stable. Trade ~2x wallclock for reliability + parity with CI's
-# fan-out. Override via --shards N or SHARDS=N (still capped at 8).
+# Process isolation caps retained WASM memory, but simultaneous PGLite-heavy
+# files still add together. On a 12 GiB host a single heavy file peaks around
+# 2.6 GiB; four such files plus baseline services can still OOM. Default to two
+# parallel shards and allow explicit --shards/SHARDS overrides (capped at 8).
 [ "$N" -gt 8 ] && N=8
-if [ -z "${SHARDS_OVERRIDE:-}" ] && [ -z "${SHARDS:-}" ] && [ "$N" -gt 4 ]; then
-  N=4
+if [ -z "${SHARDS_OVERRIDE:-}" ] && [ -z "${SHARDS:-}" ] && [ "$N" -gt 2 ]; then
+  N=2
 fi
 
 INTRA_CONC="${MAX_CONCURRENCY_OVERRIDE:-${GBRAIN_TEST_MAX_CONCURRENCY:-4}}"
-# v0.40.10 flake-hardening: bump per-shard cap 600 → 1500 (was 900). At
-# 4-shard default each shard runs 159 files / ~2420 tests with internal
-# wallclock 960-1020s. The 900s value (sized for 8-shard's ~80 files /
-# 1100 tests at 620-770s) false-killed shard 1 at 900s even though it
-# had completed in 968s. 1500s cap gives ~55% headroom over observed
-# 4-shard wallclock; real hangs still hit it. Override via
-# GBRAIN_TEST_SHARD_TIMEOUT=N.
-SHARD_TIMEOUT="${GBRAIN_TEST_SHARD_TIMEOUT:-1500}"
+# File-level process isolation trades wallclock for a deterministic memory cap.
+# 3600s leaves headroom for a two-shard local run while still terminating hangs.
+# Override via GBRAIN_TEST_SHARD_TIMEOUT=N.
+SHARD_TIMEOUT="${GBRAIN_TEST_SHARD_TIMEOUT:-3600}"
 
 # ──────────────────────────────────────────────────────────────────────────
 # Output directories. Prefer workspace-local .context/, fall back to /tmp.
@@ -109,7 +104,7 @@ elif command -v timeout >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
 fi
 
 START_TS=$(date +%s)
-echo "[unit-parallel] N=$N shards | --max-concurrency=$INTRA_CONC | timeout=${SHARD_TIMEOUT}s | logs=$LOG_DIR" >&2
+echo "[unit-parallel] N=$N shards | --max-concurrency=$INTRA_CONC | batch-size=${GBRAIN_TEST_BATCH_SIZE:-1} | timeout=${SHARD_TIMEOUT}s | logs=$LOG_DIR" >&2
 
 if [ "$DRY_RUN" = "1" ]; then
   echo "[unit-parallel] dry-run: would spawn $N shards with the above settings."
@@ -167,11 +162,8 @@ grep_count() {
   echo "${n:-0}"
 }
 
-# bun_summary_count: parses Bun's summary lines (one per `bun test` invocation
-# inside a shard — there's only one when we pass an explicit file list).
-# Looks for ` N pass` / ` N fail` / ` N skip` patterns and sums them across
-# all summary blocks the shard emitted. `bun test` prints these near the end
-# of its output. Format: leading whitespace + integer + space + label.
+# bun_summary_count: parses Bun's summary lines (one per process-isolated batch
+# inside a shard). Sums all batch summaries into one shard-level count.
 bun_summary_count() {
   local label="$1"; local file="$2"
   if [ ! -f "$file" ]; then echo 0; return; fi

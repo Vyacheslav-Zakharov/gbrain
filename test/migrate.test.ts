@@ -53,9 +53,10 @@ describe('hasPendingMigrations', () => {
     const engine = new PGLiteEngine();
     await engine.connect({});
     try {
-      // Don't call initSchema. Probe against an empty PGlite — getConfig should
-      // either return null (treated as version=1) or throw on missing config
-      // table; either way the probe must say "yes pending."
+      // A global GBRAIN_PGLITE_SNAPSHOT can pre-seed config even though this
+      // test deliberately skips initSchema. Explicitly recreate the missing
+      // config-table state so the assertion is invariant to snapshot use.
+      await engine.executeRaw('DROP TABLE IF EXISTS config');
       expect(await hasPendingMigrations(engine)).toBe(true);
     } finally {
       await engine.disconnect();

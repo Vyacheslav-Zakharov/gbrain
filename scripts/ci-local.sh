@@ -5,8 +5,8 @@
 # of E2E) inside Docker. See docker-compose.ci.yml.
 #
 # Modes:
-#   bash scripts/ci-local.sh              # full local gate: gitleaks + unit + ALL E2E (4-way sharded)
-#   bash scripts/ci-local.sh --diff       # full local gate: gitleaks + unit + selected E2E (4-way sharded)
+#   bash scripts/ci-local.sh              # full local gate: gitleaks + unit + ALL E2E (4 logical shards, 2 concurrent)
+#   bash scripts/ci-local.sh --diff       # full local gate: gitleaks + unit + selected E2E (4 logical shards, 2 concurrent)
 #   bash scripts/ci-local.sh --no-pull    # skip docker compose pull (offline / debug)
 #   bash scripts/ci-local.sh --clean      # nuke named volumes for cold debug
 #   bash scripts/ci-local.sh --no-shard   # debug: run E2E sequentially against postgres-1 only
@@ -178,8 +178,9 @@ fi
 echo "[ci-local] Smoke OK ($SMOKE_NO_ARGS files no-arg, 1 single-arg, ${SHARD_TOTAL}=4-shard total)."
 
 # Step 4: build the runner-side command.
-# Tier 1: 4-shard parallel UNIT + E2E. Each shard runs ~46 unit files + ~9
-# E2E files against postgres-N. Guards + typecheck run ONCE before fan-out.
+# Tier 1: 4 logical UNIT + E2E shards, with at most 2 active concurrently.
+# Each shard runs its files against postgres-N. Guards + typecheck run ONCE
+# before fan-out.
 # --no-shard runs the legacy unsharded flow (debug aid).
 if [ "$NO_SHARD" = "1" ]; then
   if [ "$DIFF" = "1" ]; then
@@ -191,6 +192,8 @@ bash scripts/check-wasm-embedded.sh
 bun run typecheck
 echo "[runner] unit (unsharded, DATABASE_URL unset)"
 env -u DATABASE_URL bash scripts/run-unit-shard.sh
+echo "[runner] serial unit files (one process per file)"
+env -u DATABASE_URL -u GBRAIN_PGLITE_SNAPSHOT bash scripts/run-serial-tests.sh
 echo "[runner] e2e (unsharded, --diff selected)"
 SELECTED=$(bun run scripts/select-e2e.ts)
 if [ -z "$SELECTED" ]; then
@@ -210,6 +213,8 @@ bash scripts/check-wasm-embedded.sh
 bun run typecheck
 echo "[runner] unit (unsharded, DATABASE_URL unset)"
 env -u DATABASE_URL bash scripts/run-unit-shard.sh
+echo "[runner] serial unit files (one process per file)"
+env -u DATABASE_URL -u GBRAIN_PGLITE_SNAPSHOT bash scripts/run-serial-tests.sh
 echo "[runner] e2e (unsharded)"
 DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
 GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \
@@ -218,7 +223,8 @@ bash scripts/run-e2e.sh'
   fi
 else
   # Tier 1 sharded path. Each shard runs unit+E2E sequentially against its
-  # own postgres-N. Shards run in parallel via xargs -P4.
+  # own postgres-N. Four PGLite-heavy unit processes can exceed 12 GiB, so
+  # xargs admits only two logical shards at a time.
   if [ "$DIFF" = "1" ]; then
     DIFF_E2E_PREP='SELECTED=$(bun run scripts/select-e2e.ts)
 if [ -z "$SELECTED" ]; then
@@ -245,12 +251,15 @@ fi
 export GBRAIN_PGLITE_SNAPSHOT=test/fixtures/pglite-snapshot.tar
 echo \"[runner] resolving E2E file selection (--diff aware)\"
 ${DIFF_E2E_PREP}
-mkdir -p /tmp/shard-logs
-echo \"[runner] Tier 1: 4-shard parallel unit + E2E (xargs -P4)\"
+# Keep full logs on the bind-mounted workspace so they survive runner teardown
+# and remain inspectable after a failed exact-SHA gate.
+mkdir -p .context/ci-local-shards
+rm -f .context/ci-local-shards/shard-*.log
+echo \"[runner] Tier 1: 4 logical unit + E2E shards, 2 concurrent (xargs -P2)\"
 set +e
-printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
+printf '%s\\n' 1 2 3 4 | xargs -P2 -I{} sh -c '
   shard=\$1
-  log=/tmp/shard-logs/shard-\${shard}.log
+  log=.context/ci-local-shards/shard-\${shard}.log
   echo \"[shard \${shard}] start\" > \$log
   echo \"[shard \${shard}] unit phase (SHARD=\${shard}/4, DATABASE_URL unset)\" >> \$log
   env -u DATABASE_URL SHARD=\${shard}/4 bash scripts/run-unit-shard.sh >> \$log 2>&1
@@ -262,12 +271,16 @@ printf '%s\\n' 1 2 3 4 | xargs -P4 -I{} sh -c '
   echo \"[shard \${shard}] e2e phase (SHARD=\${shard}/4, DATABASE_URL=postgres-\${shard})\" >> \$log
   if [ -s /tmp/e2e-selected.txt ]; then
     SHARD=\${shard}/4 \\
+    GBRAIN_TEST_DB=1 \\
+    E2E_FILE_TIMEOUT_SECONDS=300 \\
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
     xargs -a /tmp/e2e-selected.txt bash scripts/run-e2e.sh >> \$log 2>&1
   else
     SHARD=\${shard}/4 \\
+    GBRAIN_TEST_DB=1 \\
+    E2E_FILE_TIMEOUT_SECONDS=300 \\
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
@@ -287,13 +300,13 @@ echo \"=== SHARD LOGS (last 30 lines each + unit/e2e summaries) ===\"
 for s in 1 2 3 4; do
   echo \"\"
   echo \"--- shard \$s ---\"
-  if [ -f /tmp/shard-logs/shard-\$s.log ]; then
+  if [ -f .context/ci-local-shards/shard-\$s.log ]; then
     # Pull the unit + E2E summary lines explicitly so they survive even if
     # the file is huge. Match: bun's '<N> pass / <N> fail' pairs, run-e2e.sh's
     # 'Files: ... / Tests: ...' summary, and our own shard markers.
-    grep -E '^\\[shard|^Files: |^Tests: |Ran [0-9]+ tests|^[[:space:]]+[0-9]+ (pass|fail|skip)\$' /tmp/shard-logs/shard-\$s.log || true
+    grep -E '^\\[shard|^Files: |^Tests: |Ran [0-9]+ tests|^[[:space:]]+[0-9]+ (pass|fail|skip)\$' .context/ci-local-shards/shard-\$s.log || true
     echo \"  (last 30 lines for context)\"
-    tail -30 /tmp/shard-logs/shard-\$s.log
+    tail -30 .context/ci-local-shards/shard-\$s.log
   else
     echo \"(no log file written — shard never started)\"
   fi
@@ -303,17 +316,21 @@ if [ \$shard_xargs_exit -ne 0 ]; then
   echo \"[runner] One or more shards failed (xargs exit=\$shard_xargs_exit). See SHARD LOGS above.\"
   exit \$shard_xargs_exit
 fi
-echo \"[runner] All 4 shards passed.\""
+echo \"[runner] All 4 parallel shards passed.\"
+echo \"[runner] serial unit files (one process per file)\"
+env -u DATABASE_URL -u GBRAIN_PGLITE_SNAPSHOT bash scripts/run-serial-tests.sh
+echo \"[runner] All parallel and serial tests passed.\""
 fi
 
 INNER_CMD=$(cat <<'EOF'
 set -euo pipefail
 echo "[runner] bun version: $(bun --version)"
-# oven/bun:1 omits git; many unit tests use mkdtemp + git init for fixtures.
-if ! command -v git >/dev/null 2>&1; then
-  echo "[runner] Installing git (debian apt)..."
+# oven/bun:1 omits git and procps. Tests use git fixtures, and the worker
+# registry's PID-reuse guard reads process start times through `ps`.
+if ! command -v git >/dev/null 2>&1 || ! command -v ps >/dev/null 2>&1; then
+  echo "[runner] Installing git + procps (debian apt)..."
   apt-get update -qq >/dev/null
-  apt-get install -y -qq git ca-certificates >/dev/null
+  apt-get install -y -qq git ca-certificates procps >/dev/null
 fi
 # Container runs as root (uid 0) against a host-uid bind-mount; mark repo +
 # any worktree gitdir as safe so `git status` etc. don't refuse.
@@ -325,6 +342,11 @@ fi
 __RUN_PHASES__
 EOF
 )
+# Bash 5.2+ can treat '&' in parameter-substitution replacements as the
+# matched text (patsub_replacement). RUN_PHASES_CMD contains redirections such
+# as 2>&1; disable that behavior or stderr is silently redirected to a file
+# named __RUN_PHASES__1 instead of the shard log.
+shopt -u patsub_replacement 2>/dev/null || true
 INNER_CMD="${INNER_CMD/__RUN_PHASES__/$RUN_PHASES_CMD}"
 
 # Conductor / git-worktree support: when `.git` is a file (not a directory),

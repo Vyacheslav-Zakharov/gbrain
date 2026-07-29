@@ -89,7 +89,12 @@ beforeAll(() => {
   // Strip embedding-provider env vars so init doesn't refuse on the
   // multi-provider ambiguity check. We don't need embeddings — sync
   // runs with --no-embed below and search/get are keyword-only paths.
-  runEnv = { ...process.env, GBRAIN_HOME: tmpHome };
+  // Both are required: config.ts resolves through HOME while database paths
+  // honor GBRAIN_HOME. Using only one leaks config from run-e2e.sh's shared
+  // wrapper home across files in the same shard.
+  runEnv = { ...process.env, HOME: tmpHome, GBRAIN_HOME: tmpHome };
+  delete runEnv.DATABASE_URL;
+  delete runEnv.GBRAIN_DATABASE_URL;
   delete runEnv.VOYAGE_API_KEY;
   delete runEnv.ZEROENTROPY_API_KEY;
   delete runEnv.OPENAI_API_KEY;

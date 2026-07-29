@@ -613,7 +613,20 @@ describeBoth('Engine parity — relationalFanout', () => {
     const seeds = ['companies/ep-widget', 'companies/ep-other'];
     const pg = await pgEngine.relationalFanout(seeds, { direction: 'both' });
     const pglite = await pgliteEngine.relationalFanout(seeds, { direction: 'both' });
-    expect(shape(pg)).toEqual(shape(pglite));
+    // inv-a is one hop from both seeds, so either seed is a valid shortest
+    // path root. SQL row order can choose a different tied path per engine;
+    // compare the deterministic fan-out semantics and validate path depth.
+    const semanticShape = (rows: typeof pg) => rows.map(r =>
+      `${r.source_id}:${r.slug}:${r.hop}:${r.edge_count}:${r.via_link_types.join(',')}:${r.canonical_chunk_id == null ? 'null' : 'chunk'}`,
+    );
+    expect(semanticShape(pg)).toEqual(semanticShape(pglite));
+    const hasValidShortestPath = (rows: typeof pg) => rows.every(r =>
+      r.path.length === r.hop + 1
+      && seeds.includes(r.path[0]!)
+      && r.path.at(-1) === r.slug,
+    );
+    expect(hasValidShortestPath(pg)).toBe(true);
+    expect(hasValidShortestPath(pglite)).toBe(true);
   });
 });
 

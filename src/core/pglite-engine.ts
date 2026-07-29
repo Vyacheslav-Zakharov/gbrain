@@ -65,9 +65,9 @@ type PGLiteDB = PGlite;
 
 // Tier 3 snapshot fast-restore. Reads a tar dump produced by
 // `bun run scripts/build-pglite-snapshot.ts`. Snapshot is matched against
-// the current MIGRATIONS hash via a sidecar `.version` file; on mismatch we
-// silently fall through to a normal initSchema (snapshot is just an
-// optimization, never authoritative).
+// the current migrations AND the rendered embedding schema via a sidecar
+// `.version` file; on mismatch we silently fall through to a normal initSchema
+// (snapshot is just an optimization, never authoritative).
 let _snapshotWarnLogged = false;
 function tryLoadSnapshot(snapshotPath: string): Blob | null {
   try {
@@ -76,7 +76,7 @@ function tryLoadSnapshot(snapshotPath: string): Blob | null {
     const fs = require('node:fs') as typeof import('node:fs');
     const crypto = require('node:crypto') as typeof import('node:crypto');
     const { MIGRATIONS } = require('./migrate.ts') as typeof import('./migrate.ts');
-    const { PGLITE_SCHEMA_SQL } = require('./pglite-schema.ts') as typeof import('./pglite-schema.ts');
+    const gateway = require('./ai/gateway.ts') as typeof import('./ai/gateway.ts');
 
     if (!fs.existsSync(snapshotPath)) {
       if (!_snapshotWarnLogged) {
@@ -95,7 +95,14 @@ function tryLoadSnapshot(snapshotPath: string): Blob | null {
       }
       return null;
     }
-    const expectedHash = computeSnapshotSchemaHash(MIGRATIONS, PGLITE_SCHEMA_SQL, crypto);
+    let dims = DEFAULT_EMBEDDING_DIMENSIONS;
+    let model = DEFAULT_EMBEDDING_MODEL;
+    try {
+      dims = gateway.getEmbeddingDimensions();
+      model = gateway.getEmbeddingModel() || model;
+    } catch { /* gateway not configured — same defaults as initSchema() */ }
+    const renderedSchema = getPGLiteSchema(dims, model);
+    const expectedHash = computeSnapshotSchemaHash(MIGRATIONS, renderedSchema, crypto);
     const actualHash = fs.readFileSync(versionPath, 'utf8').trim();
     if (expectedHash !== actualHash) {
       if (!_snapshotWarnLogged) {

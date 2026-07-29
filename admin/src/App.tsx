@@ -6,15 +6,19 @@ import { RequestLogPage } from './pages/RequestLog';
 import { CalibrationPage } from './pages/Calibration';
 import { JobsWatchPage } from './pages/JobsWatch';
 import { SourceIngestPage } from './pages/SourceIngest';
+import { AIReviewPage } from './pages/AIReview';
+import { ConceptReviewPage } from './pages/ConceptReview';
 import { api } from './api';
 
-type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs' | 'source-ingest';
+type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'ai-review' | 'concept-review' | 'jobs' | 'source-ingest';
 
 const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: string }> = [
   { page: 'dashboard', label: 'Dashboard', icon: '▣' },
   { page: 'agents', label: 'Agents', icon: '◉' },
   { page: 'log', label: 'Request Log', icon: '≋' },
   { page: 'calibration', label: 'Calibration', icon: '◌' },
+  { page: 'ai-review', label: 'AI Review', icon: '✓' },
+  { page: 'concept-review', label: 'Concept Review', icon: '◇' },
   { page: 'jobs', label: 'Jobs Watch', icon: '⚙' },
   { page: 'source-ingest', label: 'Source Ingest', icon: '⇄' },
 ];
@@ -22,7 +26,7 @@ const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: stri
 function getPage(): Page {
   const hash = window.location.hash.replace(/^#/, '') || 'dashboard';
   const topLevel = hash.split('/')[0];
-  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'source-ingest'].includes(topLevel)) return topLevel as Page;
+  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'ai-review', 'concept-review', 'jobs', 'source-ingest'].includes(topLevel)) return topLevel as Page;
   return 'dashboard';
 }
 
@@ -103,6 +107,8 @@ export function App() {
         {page === 'agents' && <AgentsPage />}
         {page === 'log' && <RequestLogPage />}
         {page === 'calibration' && <CalibrationPage />}
+        {page === 'ai-review' && <AIReviewPage />}
+        {page === 'concept-review' && <ConceptReviewPage />}
         {page === 'jobs' && <JobsWatchPage />}
         {page === 'source-ingest' && <SourceIngestPage />}
       </main>

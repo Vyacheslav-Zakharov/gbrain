@@ -84,7 +84,7 @@ describe('synthesize_concepts progress wiring (T4)', () => {
     const ticks = events.filter(e => e.kind === 'tick');
     // Two concept groups, each ≥2 atoms → both qualify for synthesis
     expect(ticks.length).toBe(2);
-    expect(ticks[0].note).toMatch(/concepts/);
+    expect(ticks[0].note).toMatch(/proposals/);
   });
 
   test('no progress wiring required — opts.progress is optional', async () => {

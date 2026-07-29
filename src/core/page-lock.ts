@@ -22,7 +22,7 @@
  *   }
  */
 
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gbrainPath } from './config.ts';
@@ -87,13 +87,25 @@ function tryAcquireOnce(slug: string, lockPath: string): PageLockHandle | null {
       if (pidAlive && ageMs < LOCK_TTL_MS) {
         return null; // live holder
       }
-      // Stale — fall through to overwrite.
+      unlinkSync(lockPath); // stale; remove before atomic O_EXCL creation
     } catch {
-      // Any read/stat error → treat as stale.
+      // A concurrent holder may have replaced or removed it. Do not unlink
+      // here: the O_EXCL open below safely decides who acquired the lock.
     }
   }
 
-  writeFileSync(lockPath, `${pid}\n${new Date().toISOString()}\n`);
+  let fd: number;
+  try {
+    fd = openSync(lockPath, 'wx');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') return null;
+    throw error;
+  }
+  try {
+    writeFileSync(fd, `${pid}\n${new Date().toISOString()}\n`);
+  } finally {
+    closeSync(fd);
+  }
 
   return {
     slug,

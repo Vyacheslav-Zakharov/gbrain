@@ -23,7 +23,7 @@ beforeAll(async () => {
   await engine.initSchema();
   worker = new MinionWorker(engine, { queue: 'test' });
   await registerBuiltinHandlers(worker, engine);
-}, 30_000);
+}, 90_000);
 
 afterAll(async () => {
   await engine.disconnect();

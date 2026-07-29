@@ -12,11 +12,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 function run(args: string[], home: string) {
-  const r = spawnSync('bun', ['run', 'src/cli.ts', ...args], {
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    HOME: home,
+    GBRAIN_HOME: home,
+    GBRAIN_SOURCE: 'default',
+    DATABASE_URL: '',
+    GBRAIN_DATABASE_URL: '',
+  };
+  delete env.GBRAIN_BRAIN_ID;
+  delete env.GBRAIN_PGLITE_SNAPSHOT;
+  delete env.VOYAGE_API_KEY;
+  delete env.ZEROENTROPY_API_KEY;
+  delete env.OPENAI_API_KEY;
+  const r = spawnSync('bun', ['run', 'src/cli.ts', '--timeout=60s', ...args], {
     cwd: process.cwd(),
     encoding: 'utf8',
-    env: { ...process.env, GBRAIN_HOME: home, DATABASE_URL: '', GBRAIN_DATABASE_URL: '' },
-    timeout: 45_000,
+    env,
+    timeout: 90_000,
   });
   return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', status: r.status ?? -1 };
 }
@@ -37,7 +50,7 @@ describe('T5 — gbrain search dispatch', () => {
       // It must NOT be a search-results payload for the literal word "modes".
       expect(stdout).not.toContain('Unknown subcommand');
     });
-  });
+  }, 120_000);
 
   test('`search "<freetext>"` routes to the cheap-hybrid search op (no "Unknown subcommand")', () => {
     withHome((home) => {
@@ -47,7 +60,7 @@ describe('T5 — gbrain search dispatch', () => {
       expect(stderr).not.toContain('Unknown subcommand');
       expect(stdout.toLowerCase()).toContain('no results');
     });
-  });
+  }, 120_000);
 
   test('`search stats --json` routes to the dashboard', () => {
     withHome((home) => {
@@ -56,5 +69,5 @@ describe('T5 — gbrain search dispatch', () => {
       // stats envelope, not a search-results array.
       expect(stdout).toMatch(/total_calls|cache_hit_rate|window_days/);
     });
-  });
+  }, 120_000);
 });
