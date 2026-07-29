@@ -9,6 +9,7 @@ import { SourceIngestCatalogPanel } from './source-ingest/SourceIngestCatalogPan
 import { SourceIngestWizard } from './source-ingest/SourceIngestWizard';
 import { TransformViewEditor } from './source-ingest/TransformViewEditor';
 import { asArr, asObj, MiniBadge, shortHash, type CatalogArea, type SourceIngestCatalogTree, val } from './source-ingest/shared';
+import { useAsyncActionRunner } from './source-ingest/useAsyncActionRunner';
 
 type ConnectorChoice = {
   id: string;
@@ -602,7 +603,7 @@ function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; curre
 
 export function SourceIngestPage() {
   const [data, setData] = useState<SourceIngestOverview | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const { busy, error: err, setError: setErr, run: runStep } = useAsyncActionRunner();
   const [selectedProfile, setSelectedProfile] = useState<string>('');
   const [report, setReport] = useState<unknown>(null);
   const [discovery, setDiscovery] = useState<unknown>(null);
@@ -614,7 +615,6 @@ export function SourceIngestPage() {
   const [approveResult, setApproveResult] = useState<unknown>(null);
   const [connectionTest, setConnectionTest] = useState<unknown>(null);
   const [secretAudit, setSecretAudit] = useState<unknown>(null);
-  const [busy, setBusy] = useState<string | null>(null);
   const [secretForm, setSecretForm] = useState({ app_id: '', access_key: '', connection_string: '' });
   const [form, setForm] = useState<ReviewForm>({
     connector_id: 'appsheet-vehicles',
@@ -897,13 +897,6 @@ export function SourceIngestPage() {
     };
   };
 
-  const runStep = async (name: string, fn: () => Promise<void>) => {
-    setBusy(name);
-    setErr(null);
-    try { await fn(); }
-    catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(null); }
-  };
 
   const payload = () => ({
     config_id: configId,
@@ -1178,11 +1171,7 @@ export function SourceIngestPage() {
   });
 
   const createSchemaProposal = async (payload: Record<string, unknown>) => {
-    let result: unknown = null;
-    await runStep('schema-proposal', async () => {
-      result = await api.sourceIngestSchemaProposalCreate(payload);
-    });
-    return result;
+    return (await runStep('schema-proposal', () => api.sourceIngestSchemaProposalCreate(payload))) ?? null;
   };
 
   const saveCatalogConnectorCredentials = async () => runStep('catalog-save-secret', async () => {

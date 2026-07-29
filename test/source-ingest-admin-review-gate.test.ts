@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { sourceIngestConnectorDescriptors } from '../src/core/source-ingest/connector-registry.ts';
 
@@ -220,6 +220,26 @@ describe('source-ingest admin review gates', () => {
       expect(editor).toMatch(/<DangerZone[\s\S]*className="btn btn-danger"[\s\S]*<\/DangerZone>/);
       expect(editor.match(/className="btn btn-danger"/g)?.length).toBe(editors[index][1]);
     }
+  });
+
+  test('source-ingest orchestration uses one typed async action runner', () => {
+    const hookPath = join(root, 'admin/src/pages/source-ingest/useAsyncActionRunner.ts');
+    const coordinator = readFileSync(join(root, 'admin/src/pages/SourceIngest.tsx'), 'utf8');
+
+    expect(existsSync(hookPath)).toBe(true);
+    if (!existsSync(hookPath)) return;
+    const hook = readFileSync(hookPath, 'utf8');
+    expect(hook).toContain('export function useAsyncActionRunner');
+    expect(hook).toContain('Promise<T | undefined>');
+    expect(hook).toContain('setBusy(name)');
+    expect(hook).toContain('setError(toErrorMessage(error))');
+    expect(hook).toContain('finally');
+    expect(coordinator).toContain("import { useAsyncActionRunner } from './source-ingest/useAsyncActionRunner';");
+    expect(coordinator).toContain('const { busy, error: err, setError: setErr, run: runStep } = useAsyncActionRunner();');
+    expect(coordinator).not.toContain('const [busy, setBusy] = useState');
+    expect(coordinator).not.toContain('const [err, setErr] = useState');
+    expect(coordinator).not.toContain('const runStep = async');
+    expect(coordinator).toContain("return (await runStep('schema-proposal'");
   });
 
   test('connector registry exposes implemented v1 connector kinds', () => {
