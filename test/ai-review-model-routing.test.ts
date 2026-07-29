@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import type { BrainEngine } from '../src/core/engine';
-import { resolveAiReviewRevisionModel } from '../src/core/ai-review-model';
+import {
+  AI_REVIEW_CONCEPT_MAX_TOKENS,
+  AI_REVIEW_TAKE_MAX_TOKENS,
+  resolveAiReviewRevisionModel,
+} from '../src/core/ai-review-model';
 
 function configEngine(values: Record<string, string>): BrainEngine {
   return {
@@ -20,5 +24,10 @@ describe('AI Review revision model routing', () => {
   test('keeps an explicit request override above models.chat', async () => {
     const engine = configEngine({ 'models.chat': 'google:gemini-3.1-pro-preview' });
     expect(await resolveAiReviewRevisionModel(engine, 'sonnet')).toBe('anthropic:claude-sonnet-4-6');
+  });
+
+  test('uses bounded ceilings that leave room for reasoning-model output', () => {
+    expect(AI_REVIEW_TAKE_MAX_TOKENS).toBe(2048);
+    expect(AI_REVIEW_CONCEPT_MAX_TOKENS).toBe(4096);
   });
 });

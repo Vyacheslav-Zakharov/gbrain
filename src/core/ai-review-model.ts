@@ -1,6 +1,9 @@
 import type { BrainEngine } from './engine.ts';
 import { resolveModel } from './model-config.ts';
 
+export const AI_REVIEW_TAKE_MAX_TOKENS = 2048;
+export const AI_REVIEW_CONCEPT_MAX_TOKENS = 4096;
+
 /**
  * Runtime model selection for human-requested AI Review revisions.
  *
