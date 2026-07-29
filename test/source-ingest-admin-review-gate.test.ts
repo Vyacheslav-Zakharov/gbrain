@@ -68,9 +68,9 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Студия Source Ingest');
     expect(ui).toContain('Каталог подключений, преобразований и публикаций');
     expect(ui).toContain('Мастер «Новая публикация»');
-    expect(ui).toContain('Embedded flow');
+    expect(ui).toContain('На шаге «Сохранить и дальше»');
     expect(ui).toContain('Сохранить и дальше');
-    expect(ui).toContain('Upsert step');
+    expect(ui).toContain('Операция сохранения:');
     expect(ui).toContain('Lineage / цепочка публикации');
     expect(ui).toContain('lastAppliedHashRoute.current = nextHash');
     expect(ui).toContain('if (window.location.hash === lastAppliedHashRoute.current) return;');
@@ -102,7 +102,7 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Предложить изменение');
     expect(ui).toContain('Создать proposal-страницу');
     expect(ops).toContain('loadSchemaTypeCard');
-    expect(ui).toContain('Catalog connector instance');
+    expect(ui).toContain('Подключение к источнику');
     expect(ui).toContain('Base view / Источник');
     expect(ui).toContain('Transform view / Преобразование');
     expect(ui).toContain('Article view / Публикация');
@@ -116,11 +116,11 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Запуски');
     expect(ui).toContain('Run trial batch (20)');
     expect(ui).toContain('Load runs');
-    expect(ui).toContain('Stale / chain state');
+    expect(ui).toContain('Состояние цепочки');
     expect(ui).toContain('article stale {staleArticleCount}');
-    expect(ui).toContain('frozen hash');
+    expect(ui).toContain('зафиксирован');
     expect(ui).toContain('preview hash');
-    expect(ui).toContain('This Article view must be previewed and approved again before batch run');
+    expect(ui).toContain('Перед пакетным запуском нужен новый preview и повторное утверждение');
     expect(server).toContain('/admin/api/source-ingest/catalog/connector/list-objects');
     expect(server).toContain('/admin/api/source-ingest/catalog/connector/test');
     expect(server).toContain('credentials_stored_unverified');

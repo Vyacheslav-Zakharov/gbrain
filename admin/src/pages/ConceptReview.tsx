@@ -68,19 +68,19 @@ export function ConceptReviewPage() {
   };
 
   return <div className="ai-review-page">
-    <div className="ai-review-toolbar"><h2>Concept Review</h2><select value={status} onChange={e => { setRows([]); setTotal(0); setError(''); setSelected(null); setDetail(null); setMobileDetail(false); setOverwrite(false); setStatus(e.target.value); }}><option>pending</option><option>accepted</option><option>rejected</option></select><input placeholder="Search" value={query} onChange={e => setQuery(e.target.value)} /><span>{rows.length}/{total}</span></div>
+    <div className="ai-review-toolbar"><h2>Проверка концепций</h2><select value={status} onChange={e => { setRows([]); setTotal(0); setError(''); setSelected(null); setDetail(null); setMobileDetail(false); setOverwrite(false); setStatus(e.target.value); }}><option value="pending">Ожидают</option><option value="accepted">Приняты</option><option value="rejected">Отклонены</option></select><input placeholder="Поиск" aria-label="Поиск концепций" value={query} onChange={e => setQuery(e.target.value)} /><span>{rows.length}/{total}</span></div>
     {error && <div className="ai-review-error">{error}</div>}
     <div className={`ai-review-grid ${mobileDetail ? 'show-detail' : ''}`}>
       <div className="proposal-list">{rows.map(row => <button key={row.id} className={selected === row.id ? 'selected' : ''} onClick={() => choose(row.id)}><b>#{row.id} {row.page_slug}</b><small>{row.source_id} · {row.status}</small></button>)}</div>
       <div className="proposal-detail">{detail ? <>
         <button className="mobile-back" onClick={() => setMobileDetail(false)}>← Очередь</button>
         <h3>{detail.proposal.page_slug}</h3>
-        <p>Sources: {detail.proposal.source_atoms?.map(a => a.slug).join(', ') || 'none'} · Revisions: {detail.revisions.length} · Audit: {detail.events.length}</p>
-        {detail.proposal.current_page_body && <details><summary>Current canonical page</summary><pre>{detail.proposal.current_page_body}</pre></details>}
-        <details><summary>Original AI proposal</summary><pre>{detail.proposal.proposed_markdown}</pre></details>
+        <p>Источники: {detail.proposal.source_atoms?.map(a => a.slug).join(', ') || 'нет'} · Revisions: {detail.revisions.length} · Аудит: {detail.events.length}</p>
+        {detail.proposal.current_page_body && <details><summary>Текущая каноническая страница</summary><pre>{detail.proposal.current_page_body}</pre></details>}
+        <details><summary>Исходное AI-предложение</summary><pre>{detail.proposal.proposed_markdown}</pre></details>
         <textarea rows={24} value={markdown} disabled={detail.proposal.status !== 'pending'} onChange={e => { setMarkdown(e.target.value); setRevision(undefined); }} />
-        {detail.proposal.status === 'pending' && <><label><input type="checkbox" checked={overwrite} onChange={e => setOverwrite(e.target.checked)} /> Explicitly allow overwrite if destination is manual or changed since proposal generation</label><div className="review-actions"><button disabled={busy} onClick={askLlm}>LLM revision</button><button disabled={busy} onClick={reject}>Reject</button><button className="primary" disabled={busy} onClick={accept}>Accept & publish</button></div></>}
-      </> : <p>Select a concept proposal</p>}</div>
+        {detail.proposal.status === 'pending' && <><label><input type="checkbox" checked={overwrite} onChange={e => setOverwrite(e.target.checked)} /> Разрешить перезапись, если целевая страница создана вручную или изменилась после генерации предложения</label><div className="review-actions"><button disabled={busy} onClick={askLlm}>Создать LLM revision</button><button disabled={busy} onClick={reject}>Отклонить</button><button className="primary" disabled={busy} onClick={accept}>Принять и опубликовать</button></div></>}
+      </> : <p>Выберите предложение концепции</p>}</div>
     </div>
   </div>;
 }

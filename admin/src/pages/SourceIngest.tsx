@@ -698,6 +698,7 @@ export function SourceIngestPage() {
   const lastAppliedHashRoute = useRef('');
 
   const load = async () => {
+    setErr(null);
     try {
       const out = await api.sourceIngestOverview();
       setData(out);
@@ -1878,8 +1879,12 @@ export function SourceIngestPage() {
     await load();
   });
 
-  if (err && !data) return <div style={{ color: 'var(--error)' }}><h1>Source Ingest</h1><pre>{err}</pre></div>;
-  if (!data) return <div style={{ color: 'var(--text-muted)' }}>Loading source ingest console…</div>;
+  if (err && !data) return <div className="page-error" style={{ margin: 24 }} role="alert">
+    <strong>Не удалось загрузить консоль импорта данных</strong>
+    <span>{err}</span>
+    <button className="btn btn-secondary" onClick={() => void load()}>Повторить</button>
+  </div>;
+  if (!data) return <div className="page-loading" aria-busy="true"><span className="loading-spinner" />Загружаем консоль импорта данных…</div>;
 
   const selectedArticleViewRow = (data.catalog_tree?.article_views ?? []).find(row => String(row.article_view_id ?? '') === articleViewForm.article_view_id.trim()) ?? null;
   const staleArticleCount = (data.catalog_tree?.article_views ?? []).filter(row => row.stale === true).length;
@@ -1891,20 +1896,20 @@ export function SourceIngestPage() {
         background: 'var(--bg-primary)', boxShadow: '0 8px 18px rgba(0,0,0,0.28)', borderBottom: '1px solid var(--border, #333)',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, minHeight: 40, flexWrap: 'wrap' }}>
-          <h1 className="page-title" style={{ margin: 0, fontSize: 18, lineHeight: 1.1 }}>Source Ingest</h1>
+          <h1 className="page-title" style={{ margin: 0, fontSize: 18, lineHeight: 1.1 }}>Импорт данных</h1>
           <span
-            title="Workflow: configure connector → discover fields → draft profile → dry-run preview → approve. Import/refresh remains separate and guarded."
+            title="Процесс: настройте коннектор → откройте поля → подготовьте профиль → проверьте preview → утвердите. Импорт и обновление запускаются отдельно."
             style={{ width: 20, height: 20, borderRadius: '50%', border: '1px solid var(--border, #333)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', cursor: 'help' }}
           >?</span>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginLeft: 'auto' }}>
-            <span className="badge badge-read" title="Rows in source sync state">sync {val(summary.rows ?? data.status.rows.length)}</span>
-            <span className="badge badge-success" title="Fresh sync rows">fresh {val(summary.fresh ?? 0)}</span>
-            <span className="badge badge-write" title="Stale sync rows">stale {val(summary.stale ?? 0)}</span>
-            <span className="badge badge-admin" title="Stale Article views requiring preview/approve">article stale {staleArticleCount}</span>
-            <span className="badge badge-admin" title="Profiles due for refresh">due {data.refresh.count}</span>
+            <span className="badge badge-read" title="Строки в состоянии синхронизации">sync {val(summary.rows ?? data.status.rows.length)}</span>
+            <span className="badge badge-success" title="Актуальные строки">актуально {val(summary.fresh ?? 0)}</span>
+            <span className="badge badge-write" title="Устаревшие строки">устарело {val(summary.stale ?? 0)}</span>
+            <span className="badge badge-admin" title="Article views требуют preview и повторного утверждения">article stale {staleArticleCount}</span>
+            <span className="badge badge-admin" title="Профили ожидают обновления">к обновлению {data.refresh.count}</span>
           </div>
         </div>
-        {err && <div style={{ color: 'var(--error)', marginTop: 6, fontSize: 12 }}><b>Error:</b> {err}</div>}
+        {err && <div style={{ color: 'var(--error)', marginTop: 6, fontSize: 12 }}><b>Ошибка:</b> {err}</div>}
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 18, alignItems: 'start' }}>
@@ -1950,16 +1955,16 @@ export function SourceIngestPage() {
         />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <div>
-            <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>EDIT</div>
-            <h2 className="section-title" style={{ marginBottom: 0 }}>{activeArea === 'connectors' ? 'Connectors' : activeArea === 'base_views' ? 'Base views' : activeArea === 'transform_views' ? 'Transform views' : activeArea === 'article_views' ? 'Article views' : 'Schema view'}</h2>
+            <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>РЕДАКТОР</div>
+            <h2 className="section-title" style={{ marginBottom: 0 }}>{activeArea === 'connectors' ? 'Подключения' : activeArea === 'base_views' ? 'Base views' : activeArea === 'transform_views' ? 'Transform views' : activeArea === 'article_views' ? 'Article views' : 'Схема'}</h2>
           </div>
-          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void load()}>Reload</button>
+          <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void load()}>Обновить</button>
         </div>
 
         {catalogDeleteImpact !== null && <section style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 12, marginBottom: 12, background: 'rgba(127, 29, 29, 0.14)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 8 }}>
-            <b>Delete impact / dependency guard</b>
-            <button className="btn btn-secondary" onClick={() => setCatalogDeleteImpact(null)}>Clear</button>
+            <b>Влияние удаления и защита зависимостей</b>
+            <button className="btn btn-secondary" onClick={() => setCatalogDeleteImpact(null)}>Очистить</button>
           </div>
           <PreviewJson value={catalogDeleteImpact} empty="No delete impact yet." />
         </section>}

@@ -83,8 +83,11 @@ export function CalibrationPage() {
   const [profile, setProfile] = useState<CalibrationProfileSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
+    setLoading(true);
+    setError('');
     api
       .calibrationProfile()
       .then(p => {
@@ -95,24 +98,26 @@ export function CalibrationPage() {
         setError(err.message ?? 'fetch failed');
         setLoading(false);
       });
-  }, []);
+  }, [retryKey]);
 
   if (loading) {
-    return <div style={{ padding: 24, color: 'var(--text-secondary)' }}>Loading calibration profile…</div>;
+    return <div className="page-loading" style={{ padding: 24 }} aria-busy="true"><span className="loading-spinner" />Загружаем профиль калибровки…</div>;
   }
   if (error) {
     return (
-      <div style={{ padding: 24, color: 'var(--error)' }} role="alert">
-        Could not load calibration profile: {error}
+      <div className="page-error" style={{ margin: 24 }} role="alert">
+        <strong>Не удалось загрузить профиль калибровки</strong>
+        <span>{error}</span>
+        <button className="btn btn-secondary" onClick={() => setRetryKey(value => value + 1)}>Повторить</button>
       </div>
     );
   }
   if (!profile) {
     return (
       <div style={{ padding: 24, maxWidth: 700 }}>
-        <h1 style={{ marginBottom: 16 }}>Calibration</h1>
+        <h1 style={{ marginBottom: 16 }}>Калибровка</h1>
         <p style={{ color: 'var(--text-secondary)' }}>
-          No calibration profile yet. Builds after 5+ resolved takes.
+          Профиль калибровки ещё не создан. Он строится после пяти или более оценённых takes.
         </p>
         <pre
           style={{
@@ -135,38 +140,38 @@ export function CalibrationPage() {
 
   return (
     <div style={{ padding: 32, maxWidth: 720 }}>
-      <h1 style={{ marginBottom: 8 }}>Calibration</h1>
+      <h1 style={{ marginBottom: 8 }}>Калибровка</h1>
       <div style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 24 }}>
-        Holder: {profile.holder}
+        Владелец: {profile.holder}
         {' · '}
-        Updated {generatedAgo === 0 ? 'today' : `${generatedAgo}d ago`}
-        {profile.published && ' · published'}
-        {profile.grade_completion < 0.9 && ` · ~${Math.round(profile.grade_completion * 100)}% graded`}
-        {!profile.voice_gate_passed && ' · voice gate fell back to template'}
+        Обновлено {generatedAgo === 0 ? 'сегодня' : `${generatedAgo} дн. назад`}
+        {profile.published && ' · опубликовано'}
+        {profile.grade_completion < 0.9 && ` · оценено ~${Math.round(profile.grade_completion * 100)}%`}
+        {!profile.voice_gate_passed && ' · voice gate использовал шаблон'}
       </div>
 
       <section style={{ marginBottom: 32 }}>
-        <ChartSvg type="brier-trend" ariaLabel="Brier trend" />
+        <ChartSvg type="brier-trend" ariaLabel="Динамика Brier score" />
       </section>
 
       <section style={{ marginBottom: 32 }}>
         <h2 style={{ fontSize: 14, color: 'var(--text-secondary)', marginBottom: 12, fontWeight: 400 }}>
-          Pattern statements
+          Выявленные паттерны
         </h2>
-        <ChartSvg type="pattern-statements" ariaLabel="Pattern statements" />
+        <ChartSvg type="pattern-statements" ariaLabel="Выявленные паттерны" />
       </section>
 
       <section style={{ marginBottom: 32 }}>
-        <ChartSvg type="domain-bars" ariaLabel="Per-domain accuracy" />
+        <ChartSvg type="domain-bars" ariaLabel="Точность по областям" />
       </section>
 
       <section style={{ marginBottom: 32 }}>
-        <ChartSvg type="abandoned-threads" ariaLabel="Abandoned threads" />
+        <ChartSvg type="abandoned-threads" ariaLabel="Заброшенные направления" />
       </section>
 
       {profile.active_bias_tags.length > 0 && (
         <section style={{ marginBottom: 32, color: 'var(--text-muted)', fontSize: 13 }}>
-          Active bias tags: {profile.active_bias_tags.join(', ')}
+          Активные bias tags: {profile.active_bias_tags.join(', ')}
         </section>
       )}
     </div>

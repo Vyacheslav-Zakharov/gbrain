@@ -3,11 +3,11 @@
   --bg-secondary: #14141f;
   --bg-tertiary: #1e1e2e;
   --text-primary: #e0e0e0;
-  --text-secondary: #888;
+  --text-secondary: #a3a3ad;
   /* v0.36.1.0 TD2 — bumped from #555 (contrast 4.0 on #0a0a0f bg, below WCAG AA
      4.5 for body text) to #777 (contrast ~5.5, passes AA). Applies globally
      to Dashboard, Agents, RequestLog, and the new Calibration tab. */
-  --text-muted: #777;
+  --text-muted: #8f96a3;
   --accent: #3b82f6;
   --success: #22c55e;
   --warning: #f59e0b;
@@ -30,7 +30,7 @@ body {
 .app { display: flex; height: 100vh; overflow: hidden; }
 
 .sidebar {
-  width: 200px;
+  width: 230px;
   background: var(--bg-secondary);
   border-right: 1px solid #1e1e2e;
   padding: 10px 0;
@@ -103,9 +103,23 @@ body {
 
 .nav-icon { width: 18px; min-width: 18px; text-align: center; color: var(--accent); }
 .nav-label { overflow: hidden; text-overflow: ellipsis; }
+.nav-badge {
+  margin-left: auto;
+  min-width: 24px;
+  height: 20px;
+  padding: 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+  font: 600 11px/1 var(--font-mono);
+}
 .app.sidebar-collapsed .nav-item { justify-content: center; padding: 10px 0; border-left-width: 0; border-right: 3px solid transparent; }
 .app.sidebar-collapsed .nav-item.active { border-right-color: var(--accent); }
 .app.sidebar-collapsed .nav-label { display: none; }
+.app.sidebar-collapsed .nav-badge { position: absolute; transform: translate(15px, -12px); min-width: 18px; height: 18px; padding: 0 5px; font-size: 9px; }
 
 .nav-item:hover { background: var(--bg-tertiary); color: var(--text-primary); }
 .nav-item.active {
@@ -412,10 +426,100 @@ label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
 /* Monospace data */
 .mono { font-family: var(--font-mono); font-size: 12px; }
 
+.page-loading {
+  min-height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-secondary);
+}
+.loading-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #333;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: admin-spin .8s linear infinite;
+}
+@keyframes admin-spin { to { transform: rotate(360deg); } }
+.page-error {
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 16px;
+  color: #ff938a;
+  background: rgba(239, 68, 68, .09);
+  border: 1px solid rgba(239, 68, 68, .35);
+  border-radius: 8px;
+}
+.action-empty-state {
+  min-height: 260px;
+  padding: 48px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.action-empty-state strong { color: var(--text-primary); font-size: 16px; }
+.action-empty-state > span { max-width: 560px; }
+.empty-state-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; justify-content: center; }
+.mobile-nav-toggle,
+.mobile-nav-backdrop { display: none; }
+
 /* Responsive */
 @media (max-width: 768px) {
-  .sidebar { display: none; }
-  .main { padding: 16px; }
+  .mobile-nav-toggle {
+    display: inline-grid;
+    place-items: center;
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 1002;
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--sidebar-bg);
+    color: var(--text-primary);
+    font-size: 20px;
+    cursor: pointer;
+  }
+  .app.mobile-nav-open .mobile-nav-toggle { left: min(228px, calc(100vw - 106px)); }
+  .mobile-nav-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    border: 0;
+    background: rgba(0, 0, 0, 0.62);
+  }
+  .sidebar,
+  .app.sidebar-collapsed .sidebar {
+    display: flex;
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 1001;
+    width: min(280px, calc(100vw - 54px));
+    transform: translateX(-105%);
+    transition: transform 160ms ease;
+    box-shadow: 16px 0 40px rgba(0, 0, 0, 0.35);
+  }
+  .app.mobile-nav-open .sidebar { transform: translateX(0); }
+  .app.sidebar-collapsed .sidebar-topbar { justify-content: space-between; padding: 18px 12px 14px 18px; flex-wrap: nowrap; }
+  .app.sidebar-collapsed .sidebar-logo { font-size: 18px; width: auto; text-align: left; }
+  .app.sidebar-collapsed .nav-item { justify-content: flex-start; padding: 10px 12px 10px 18px; border-left-width: 3px; border-right: 0; }
+  .app.sidebar-collapsed .nav-item.active { border-left-color: var(--accent); }
+  .app.sidebar-collapsed .nav-label { display: inline; }
+  .app.sidebar-collapsed .nav-badge { position: static; transform: none; min-width: 20px; height: 20px; padding: 0 6px; font-size: 10px; }
+  .app.sidebar-collapsed .sidebar-signout { justify-content: flex-start; padding: 8px 10px; }
+  .sidebar-toggle { display: none; }
+  .main { padding: 68px 16px 16px; }
   .metrics { flex-wrap: wrap; }
   .drawer { width: 100%; }
   .activity-page { padding: 0 !important; }

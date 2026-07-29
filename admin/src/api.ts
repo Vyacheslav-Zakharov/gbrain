@@ -1,4 +1,24 @@
 const BASE = '';
+export const ADMIN_REQUEST_TIMEOUT_MS = 15_000;
+
+async function fetchWithTimeout(path: string, options: RequestInit = {}) {
+  const controller = new AbortController();
+  const upstreamSignal = options.signal;
+  const abortFromUpstream = () => controller.abort();
+  upstreamSignal?.addEventListener('abort', abortFromUpstream, { once: true });
+  const timer = window.setTimeout(() => controller.abort(), ADMIN_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(path, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted && !upstreamSignal?.aborted) {
+      throw new Error('Превышено время ожидания ответа. Проверьте соединение и повторите запрос.');
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    upstreamSignal?.removeEventListener('abort', abortFromUpstream);
+  }
+}
 
 export function adminApiErrorMessage(body: unknown, status: number): string {
   if (body && typeof body === 'object') {
@@ -14,7 +34,7 @@ export function adminApiErrorMessage(body: unknown, status: number): string {
 // no auto-reauth via saved token, no localStorage/sessionStorage read.
 // The HttpOnly cookie set by /admin/login is the only session credential.
 async function apiFetch(path: string, options?: RequestInit) {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
     ...options,
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json', ...options?.headers },
@@ -33,7 +53,7 @@ async function apiFetch(path: string, options?: RequestInit) {
 
 // v0.36.1.0 (T15 / E6) — SVG fetch (text/plain payload, NOT JSON).
 async function apiFetchText(path: string) {
-  const res = await fetch(`${BASE}${path}`, { credentials: 'same-origin' });
+  const res = await fetchWithTimeout(`${BASE}${path}`, { credentials: 'same-origin' });
   if (res.status === 401) {
     window.location.hash = '#login';
     throw new Error('Unauthorized');

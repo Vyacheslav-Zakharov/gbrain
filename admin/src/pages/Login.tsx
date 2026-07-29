@@ -29,7 +29,7 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
       setToken('');
       onLogin();
     } catch (err) {
-      setError('Invalid token.');
+      setError('Недействительный токен.');
     } finally {
       setLoading(false);
     }
@@ -51,9 +51,9 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
           color: 'var(--text-secondary)',
         }}>
           <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: 6 }}>
-            🔒 This is a protected dashboard
+            🔒 Это защищённая панель
           </div>
-          Ask your AI agent for the admin login link:
+          Попросите AI-агента выдать ссылку для входа администратора:
           <div style={{
             background: 'rgba(0,0,0,0.3)',
             borderRadius: 6,
@@ -64,28 +64,28 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
             color: '#88aaff',
             wordBreak: 'break-all',
           }}>
-            "Give me the GBrain admin login link"
+            «Дай ссылку для входа в GBrain Admin»
           </div>
           <div style={{ marginTop: 8, fontSize: 12, color: 'var(--text-muted)' }}>
-            Each link is single-use. Your agent generates a fresh one each time.
+            Каждая ссылка одноразовая. Новая ссылка нужна только при отсутствии действующей сессии.
           </div>
         </div>
 
         <details style={{ marginBottom: 16 }}>
           <summary style={{ cursor: 'pointer', fontSize: 13, color: 'var(--text-muted)' }}>
-            Or paste bootstrap token manually
+            Или вставьте bootstrap token вручную
           </summary>
           <form onSubmit={handleSubmit} style={{ marginTop: 12 }}>
             <div style={{ marginBottom: 12 }}>
               <input
                 type="password"
-                placeholder="Admin Token"
+                placeholder="Токен администратора"
                 value={token}
                 onChange={e => setToken(e.target.value)}
               />
             </div>
             <button className="btn btn-primary" style={{ width: '100%' }} disabled={loading}>
-              {loading ? 'Authenticating...' : 'Submit'}
+              {loading ? 'Проверяем…' : 'Войти'}
             </button>
             {error && <div className="login-error">{error}</div>}
           </form>

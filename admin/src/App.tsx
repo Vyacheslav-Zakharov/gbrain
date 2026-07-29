@@ -14,15 +14,15 @@ import { api } from './api';
 type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'ai-review' | 'concept-review' | 'jobs' | 'activity' | 'source-ingest';
 
 const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: string }> = [
-  { page: 'dashboard', label: 'Dashboard', icon: '▣' },
-  { page: 'agents', label: 'Agents', icon: '◉' },
-  { page: 'log', label: 'Request Log', icon: '≋' },
-  { page: 'calibration', label: 'Calibration', icon: '◌' },
-  { page: 'ai-review', label: 'AI Review', icon: '✓' },
-  { page: 'concept-review', label: 'Concept Review', icon: '◇' },
-  { page: 'jobs', label: 'Jobs Watch', icon: '⚙' },
-  { page: 'activity', label: 'Activity', icon: '◫' },
-  { page: 'source-ingest', label: 'Source Ingest', icon: '⇄' },
+  { page: 'dashboard', label: 'Обзор', icon: '▣' },
+  { page: 'agents', label: 'Агенты', icon: '◉' },
+  { page: 'log', label: 'Журнал запросов', icon: '≋' },
+  { page: 'calibration', label: 'Калибровка', icon: '◌' },
+  { page: 'ai-review', label: 'Проверка AI', icon: '✓' },
+  { page: 'concept-review', label: 'Проверка концепций', icon: '◇' },
+  { page: 'jobs', label: 'Задания', icon: '⚙' },
+  { page: 'activity', label: 'Активность', icon: '◫' },
+  { page: 'source-ingest', label: 'Импорт данных', icon: '⇄' },
 ];
 
 function getPage(): Page {
@@ -35,9 +35,14 @@ function getPage(): Page {
 export function App() {
   const [page, setPage] = useState<Page>(getPage);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('gbrain-admin-sidebar-collapsed') === '1');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [pendingReviewCount, setPendingReviewCount] = useState<number | null>(null);
 
   useEffect(() => {
-    const onHash = () => setPage(getPage());
+    const onHash = () => {
+      setPage(getPage());
+      setMobileNavOpen(false);
+    };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
@@ -46,9 +51,27 @@ export function App() {
     localStorage.setItem('gbrain-admin-sidebar-collapsed', sidebarCollapsed ? '1' : '0');
   }, [sidebarCollapsed]);
 
+  useEffect(() => {
+    let alive = true;
+    const refreshCount = () => {
+      void api.aiReviewProposals({ status: 'pending', limit: 1 })
+        .then(data => { if (alive) setPendingReviewCount(Number(data.total ?? 0)); })
+        .catch(() => { if (alive) setPendingReviewCount(null); });
+    };
+    refreshCount();
+    const timer = window.setInterval(refreshCount, 60_000);
+    window.addEventListener('focus', refreshCount);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshCount);
+    };
+  }, []);
+
   const navigate = (p: Page) => {
     window.location.hash = p;
     setPage(p);
+    setMobileNavOpen(false);
   };
 
   if (page === 'login') {
@@ -56,7 +79,7 @@ export function App() {
   }
 
   const handleSignOutEverywhere = async () => {
-    if (!confirm('Sign out every active admin session, including other browsers and tabs? Each one will need to re-authenticate via a fresh magic link.')) {
+    if (!confirm('Завершить все активные админ-сессии, включая другие браузеры и вкладки? Для повторного входа потребуется новая ссылка.')) {
       return;
     }
     try {
@@ -68,16 +91,27 @@ export function App() {
   };
 
   return (
-    <div className={`app ${sidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
-      <nav className="sidebar" aria-label="Admin navigation">
+    <div className={`app ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${mobileNavOpen ? 'mobile-nav-open' : ''}`}>
+      <button
+        className="mobile-nav-toggle"
+        type="button"
+        onClick={() => setMobileNavOpen(open => !open)}
+        aria-expanded={mobileNavOpen}
+        aria-controls="admin-sidebar"
+        aria-label={mobileNavOpen ? 'Закрыть меню' : 'Открыть меню'}
+      >
+        {mobileNavOpen ? '×' : '☰'}
+      </button>
+      {mobileNavOpen && <button className="mobile-nav-backdrop" type="button" aria-label="Закрыть меню" onClick={() => setMobileNavOpen(false)} />}
+      <nav id="admin-sidebar" className="sidebar" aria-label="Навигация администратора">
         <div className="sidebar-topbar">
           <div className="sidebar-logo" title="GBrain">{sidebarCollapsed ? 'GB' : 'GBrain'}</div>
           <button
             className="sidebar-toggle"
             type="button"
             onClick={() => setSidebarCollapsed(v => !v)}
-            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={sidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню'}
+            title={sidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню'}
           >
             {sidebarCollapsed ? '›' : '‹'}
           </button>
@@ -91,16 +125,19 @@ export function App() {
           >
             <span className="nav-icon" aria-hidden="true">{item.icon}</span>
             <span className="nav-label">{item.label}</span>
+            {item.page === 'ai-review' && pendingReviewCount !== null && pendingReviewCount > 0 && (
+              <span className="nav-badge" aria-label={`${pendingReviewCount} ожидают проверки`}>{pendingReviewCount}</span>
+            )}
           </a>)}
         </div>
         <div className="sidebar-footer">
           <button
             onClick={handleSignOutEverywhere}
             className="sidebar-signout"
-            title="Revoke every active admin session — every browser, every tab"
+            title="Завершить все активные админ-сессии"
           >
             <span className="nav-icon" aria-hidden="true">⎋</span>
-            <span className="nav-label">Sign out everywhere</span>
+            <span className="nav-label">Выйти везде</span>
           </button>
         </div>
       </nav>

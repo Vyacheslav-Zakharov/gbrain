@@ -75,7 +75,7 @@ export function SourceIngestWizard({ busy, counts, onSelectArea, onSelectNode, o
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 10 }}>
       <div>
         <b>Мастер «Новая публикация»</b>
-        <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>Embedded flow: на шаге «Сохранить и дальше» выполняется upsert текущей сущности, затем мастер переводит к следующему узлу. Горячие клавиши: Alt+1…Alt+5.</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>На шаге «Сохранить и дальше» текущая сущность сохраняется, затем мастер открывает следующий узел. Горячие клавиши: Alt+1…Alt+5.</div>
       </div>
       <button className="btn btn-secondary" onClick={() => setOpen(false)}>Закрыть</button>
     </div>
@@ -88,14 +88,14 @@ export function SourceIngestWizard({ busy, counts, onSelectArea, onSelectNode, o
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
       <h3 style={{ margin: 0, fontSize: 15 }}>{current.title}</h3>
       <p style={{ color: 'var(--text-secondary)', marginBottom: 0 }}>{current.body}</p>
-      <p style={{ color: 'var(--text-muted)', marginBottom: 0, fontSize: 12 }}><b>Upsert step:</b> {current.saveLabel ?? 'Сохранить'} — использует значения из формы редактора ниже. Ошибка остаётся в мастере и не переводит на следующий шаг.</p>
+      <p style={{ color: 'var(--text-muted)', marginBottom: 0, fontSize: 12 }}><b>Операция сохранения:</b> {current.saveLabel ?? 'Сохранить'} — использует значения из формы редактора ниже. При ошибке мастер остаётся на текущем шаге.</p>
     </div>
-    {wizardErr && <div style={{ color: 'var(--error)', marginBottom: 10, fontSize: 12 }}><b>Wizard error:</b> {wizardErr}</div>}
+    {wizardErr && <div style={{ color: 'var(--error)', marginBottom: 10, fontSize: 12 }}><b>Ошибка мастера:</b> {wizardErr}</div>}
     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
       <button className="btn btn-secondary" disabled={step === 0 || busy !== null} onClick={() => setStep(Math.max(0, step - 1))}>Назад</button>
       <button className="btn btn-secondary" disabled={busy !== null} onClick={() => go()}>{current.cta}</button>
-      <button className="btn btn-primary" disabled={busy !== null} onClick={() => void saveAndNext()}>{step >= steps.length - 1 ? 'Preview публикации' : 'Сохранить и дальше'}</button>
-      {step === steps.length - 1 && <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void onApproveArticleView?.()}>Freeze snapshot</button>}
+      <button className="btn btn-primary" disabled={busy !== null} onClick={() => void saveAndNext()}>{step >= steps.length - 1 ? 'Предпросмотр публикации' : 'Сохранить и дальше'}</button>
+      {step === steps.length - 1 && <button className="btn btn-secondary" disabled={busy !== null} onClick={() => void onApproveArticleView?.()}>Зафиксировать snapshot</button>}
       <button className="btn btn-secondary" disabled={step >= steps.length - 1 || busy !== null} onClick={() => setStep(Math.min(steps.length - 1, step + 1))}>Пропустить шаг</button>
     </div>
   </section>;
