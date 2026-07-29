@@ -11,11 +11,14 @@ describe('federated put_page write routing', () => {
     },
   } as any;
 
-  test('put_page exposes an explicit source_id parameter', () => {
-    const op = operations.find((candidate) => candidate.name === 'put_page');
-    expect(op).toBeDefined();
-    expect(op!.params.source_id).toMatchObject({ type: 'string', required: false });
-  });
+  test.each(['put_page', 'delete_page', 'add_timeline_entry'])(
+    '%s exposes an explicit source_id parameter',
+    (name) => {
+      const op = operations.find((candidate) => candidate.name === name);
+      expect(op).toBeDefined();
+      expect(op!.params.source_id).toMatchObject({ type: 'string', required: false });
+    },
+  );
 
   test('allows an explicitly granted federated write source', () => {
     expect(resolveFederatedWriteSourceId(remoteCtx, 'internal-example')).toBe('internal-example');
@@ -35,6 +38,19 @@ describe('federated put_page write routing', () => {
     expect(resolveFederatedWriteSourceId({ remote: false, sourceId: 'default' } as any, 'internal-example'))
       .toBe('internal-example');
   });
+
+  test.each(['delete_page', 'add_timeline_entry'])(
+    '%s rejects an ungranted source_id before mutation',
+    async (name) => {
+      const op = operations.find((candidate) => candidate.name === name)!;
+      await expect(op.handler({ ...remoteCtx, dryRun: true } as any, {
+        slug: 'topics/example',
+        source_id: 'restricted-example',
+        date: '2026-07-29',
+        summary: 'not written',
+      })).rejects.toThrow("Permission denied for writing to source_id 'restricted-example'");
+    },
+  );
 });
 
 describe('remote source metadata visibility', () => {

@@ -1360,15 +1360,15 @@ const delete_page: Operation = {
   description: 'Soft-delete a page. The row is hidden from search and from get_page/list_pages, but is recoverable via restore_page within 72h. The autopilot purge phase hard-deletes after the recovery window. Pass include_deleted: true to get_page to verify the soft-delete landed.',
   params: {
     slug: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Target source. Remote callers must have this source in their OAuth write grant.' },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
-    if (ctx.dryRun) return { dry_run: true, action: 'soft_delete_page', slug };
-    // v0.31.8 (D7): thread ctx.sourceId so multi-source brains soft-delete the
-    // intended row instead of always targeting (default, slug).
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
+    const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
+    if (ctx.dryRun) return { dry_run: true, action: 'soft_delete_page', slug, source_id: targetSourceId };
+    const sourceOpts = { sourceId: targetSourceId };
     // v0.26.5: rewired from hard-delete to soft-delete. The hard-delete primitive
     // (engine.deletePage) is now reserved for purgeDeletedPages and explicit
     // tests. softDeletePage returns null when the slug is unknown OR already
@@ -1381,9 +1381,9 @@ const delete_page: Operation = {
       if (!existing) {
         throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug.');
       }
-      return { status: 'already_soft_deleted', slug, deleted_at: existing.deleted_at };
+      return { status: 'already_soft_deleted', slug, source_id: targetSourceId, deleted_at: existing.deleted_at };
     }
-    return { status: 'soft_deleted', slug, recoverable_until: 'now + 72h via restore_page' };
+    return { status: 'soft_deleted', slug, source_id: targetSourceId, recoverable_until: 'now + 72h via restore_page' };
   },
   cliHints: { name: 'delete', positional: ['slug'] },
 };
@@ -2224,6 +2224,7 @@ const add_timeline_entry: Operation = {
   description: 'Add timeline entry to a page',
   params: {
     slug: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Target source. Remote callers must have this source in their OAuth write grant.' },
     date: { type: 'string', required: true },
     summary: { type: 'string', required: true },
     detail: { type: 'string' },
@@ -2232,7 +2233,8 @@ const add_timeline_entry: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
-    if (ctx.dryRun) return { dry_run: true, action: 'add_timeline_entry', slug: p.slug };
+    const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
+    if (ctx.dryRun) return { dry_run: true, action: 'add_timeline_entry', slug: p.slug, source_id: targetSourceId };
     const date = p.date as string;
     // Reject anything that isn't a strict YYYY-MM-DD with year 1900-2199 and
     // a real calendar day. PG DATE accepts year 5874897 silently — that's a
@@ -2249,15 +2251,13 @@ const add_timeline_entry: Operation = {
     if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
       throw new Error(`Invalid calendar date "${date}"`);
     }
-    // v0.31.8 (D7): thread ctx.sourceId.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
     await ctx.engine.addTimelineEntry(p.slug as string, { // gbrain-allow-direct-insert: add_timeline_entry MCP op is the explicit canonical surface for manual timeline entries
       date,
       source: (p.source as string) || '',
       summary: p.summary as string,
       detail: (p.detail as string) || '',
-    }, sourceOpts);
-    return { status: 'ok' };
+    }, { sourceId: targetSourceId });
+    return { status: 'ok', source_id: targetSourceId };
   },
   cliHints: { name: 'timeline-add', positional: ['slug', 'date', 'summary'] },
 };
