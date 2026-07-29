@@ -74,13 +74,14 @@ mkdir -p "$E2E_TMP_HOME/.gbrain"
 # unreproducible across machines. Drop them before bun starts. This is a
 # DENYLIST of operator-context prefixes (not an allowlist rebuild), so PATH,
 # HOME, TMPDIR, CI, DATABASE_URL, and bun internals survive untouched. We keep
-# GBRAIN_HOME (just set above for HOME isolation) and GBRAIN_TEST_DB (the
-# schema-drift reset gate still independently requires a test-shaped DB name);
-# everything else GBRAIN_* is an operator override the suite must not inherit. Adapts GStack's
+# GBRAIN_HOME (just set above for HOME isolation), GBRAIN_TEST_DB (the
+# schema-drift reset gate still independently requires a test-shaped DB name),
+# and the two PgBouncer URLs used by its dedicated regression test. Everything
+# else GBRAIN_* is an operator override the suite must not inherit. Adapts GStack's
 # buildHermeticEnv() allowlist to gbrain's shell E2E runner.
 for _e2e_var in $(env | grep -oE '^(CONDUCTOR_|MCP_|OPENCLAW_|GBRAIN_)[A-Za-z0-9_]*' | sort -u); do
   case "$_e2e_var" in
-    GBRAIN_HOME|GBRAIN_TEST_DB) ;;  # hermetic HOME + explicit safe test-DB reset gate
+    GBRAIN_HOME|GBRAIN_TEST_DB|GBRAIN_PGBOUNCER_URL|GBRAIN_PGBOUNCER_DIRECT_URL) ;;
     *) unset "$_e2e_var" || true ;;
   esac
 done
@@ -163,15 +164,20 @@ for f in "${files[@]}"; do
   if [ -n "${DATABASE_URL:-}" ]; then
     psql "$DATABASE_URL" -At -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid != pg_backend_pid() AND datname = current_database()" >/dev/null 2>&1 || true
   fi
-  # Hard outer timeout (300s per file). bun's --timeout is per-test; if a
+  # Hard outer timeout (180s per file by default). bun's --timeout is per-test;
+  # if a
   # PGLite WASM call hangs in beforeAll/afterAll, --timeout never fires and
   # the file wedges indefinitely. gtimeout/timeout SIGKILLs the file so the
   # suite advances. gtimeout (macOS via coreutils) preferred; timeout (Linux)
   # fallback; bare bun (no outer cap) if neither is installed.
+  E2E_FILE_TIMEOUT_SECONDS="${E2E_FILE_TIMEOUT_SECONDS:-180}"
+  case "$E2E_FILE_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*|0) echo "Invalid E2E_FILE_TIMEOUT_SECONDS: $E2E_FILE_TIMEOUT_SECONDS" >&2; exit 2 ;;
+  esac
   if command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="gtimeout 300"
+    TIMEOUT_CMD="gtimeout $E2E_FILE_TIMEOUT_SECONDS"
   elif command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="timeout 300"
+    TIMEOUT_CMD="timeout $E2E_FILE_TIMEOUT_SECONDS"
   else
     TIMEOUT_CMD=""
   fi

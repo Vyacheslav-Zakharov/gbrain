@@ -54,9 +54,18 @@ async function runCli(
   timeoutMs: number,
 ): Promise<{ exitCode: number; stdout: string; stderr: string; wallMs: number }> {
   const t0 = Date.now();
+  const childEnv: Record<string, string | undefined> = {
+    ...process.env,
+    ...env,
+    GBRAIN_SKIP_STARTUP_HOOKS: '1',
+  };
+  // The parent E2E runner connects to gbrain_test. This subprocess must resolve
+  // the dedicated pooled URL from its hermetic config instead.
+  delete childEnv.DATABASE_URL;
+  delete childEnv.GBRAIN_DATABASE_URL;
   const proc = Bun.spawn(['bun', 'run', join(REPO, 'src', 'cli.ts'), ...args], {
     cwd: REPO,
-    env: { ...process.env, ...env, GBRAIN_SKIP_STARTUP_HOOKS: '1' },
+    env: childEnv,
     stdout: 'pipe',
     stderr: 'pipe',
   });

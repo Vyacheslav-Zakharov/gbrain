@@ -12,24 +12,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 function run(args: string[], home: string) {
-  const invoke = () => spawnSync('bun', ['run', 'src/cli.ts', '--timeout=60s', ...args], {
-      cwd: process.cwd(),
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        GBRAIN_HOME: home,
-        DATABASE_URL: '',
-        GBRAIN_DATABASE_URL: '',
-        // Parallel PGLite shards can make disconnect exceed the normal incident
-        // backstop even though the command completed successfully.
-        GBRAIN_TEARDOWN_DEADLINE_MS: '60000',
-      },
-      timeout: 90_000,
-    });
-  let r = invoke();
-  // The dispatch contract is not a cold-start latency test. Retry the one
-  // explicit CLI timeout code once when a sibling PGLite shard saturates CPU.
-  if (r.status === 124) r = invoke();
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    HOME: home,
+    GBRAIN_HOME: home,
+    GBRAIN_SOURCE: 'default',
+    DATABASE_URL: '',
+    GBRAIN_DATABASE_URL: '',
+  };
+  delete env.GBRAIN_BRAIN_ID;
+  delete env.GBRAIN_PGLITE_SNAPSHOT;
+  delete env.VOYAGE_API_KEY;
+  delete env.ZEROENTROPY_API_KEY;
+  delete env.OPENAI_API_KEY;
+  const r = spawnSync('bun', ['run', 'src/cli.ts', ...args], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env,
+    timeout: 90_000,
+  });
   return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', status: r.status ?? -1 };
 }
 

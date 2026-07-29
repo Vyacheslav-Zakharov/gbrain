@@ -192,6 +192,8 @@ bash scripts/check-wasm-embedded.sh
 bun run typecheck
 echo "[runner] unit (unsharded, DATABASE_URL unset)"
 env -u DATABASE_URL bash scripts/run-unit-shard.sh
+echo "[runner] serial unit files (one process per file)"
+env -u DATABASE_URL -u GBRAIN_PGLITE_SNAPSHOT bash scripts/run-serial-tests.sh
 echo "[runner] e2e (unsharded, --diff selected)"
 SELECTED=$(bun run scripts/select-e2e.ts)
 if [ -z "$SELECTED" ]; then
@@ -211,6 +213,8 @@ bash scripts/check-wasm-embedded.sh
 bun run typecheck
 echo "[runner] unit (unsharded, DATABASE_URL unset)"
 env -u DATABASE_URL bash scripts/run-unit-shard.sh
+echo "[runner] serial unit files (one process per file)"
+env -u DATABASE_URL -u GBRAIN_PGLITE_SNAPSHOT bash scripts/run-serial-tests.sh
 echo "[runner] e2e (unsharded)"
 DATABASE_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \
 GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \
@@ -268,6 +272,7 @@ printf '%s\\n' 1 2 3 4 | xargs -P2 -I{} sh -c '
   if [ -s /tmp/e2e-selected.txt ]; then
     SHARD=\${shard}/4 \\
     GBRAIN_TEST_DB=1 \\
+    E2E_FILE_TIMEOUT_SECONDS=300 \\
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
@@ -275,6 +280,7 @@ printf '%s\\n' 1 2 3 4 | xargs -P2 -I{} sh -c '
   else
     SHARD=\${shard}/4 \\
     GBRAIN_TEST_DB=1 \\
+    E2E_FILE_TIMEOUT_SECONDS=300 \\
     DATABASE_URL=postgresql://postgres:postgres@postgres-\${shard}:5432/gbrain_test \\
     GBRAIN_PGBOUNCER_URL=postgresql://postgres:postgres@pgbouncer:5432/gbrain_pgbouncer \\
     GBRAIN_PGBOUNCER_DIRECT_URL=postgresql://postgres:postgres@postgres-1:5432/gbrain_test \\
@@ -310,7 +316,10 @@ if [ \$shard_xargs_exit -ne 0 ]; then
   echo \"[runner] One or more shards failed (xargs exit=\$shard_xargs_exit). See SHARD LOGS above.\"
   exit \$shard_xargs_exit
 fi
-echo \"[runner] All 4 shards passed.\""
+echo \"[runner] All 4 parallel shards passed.\"
+echo \"[runner] serial unit files (one process per file)\"
+env -u DATABASE_URL -u GBRAIN_PGLITE_SNAPSHOT bash scripts/run-serial-tests.sh
+echo \"[runner] All parallel and serial tests passed.\""
 fi
 
 INNER_CMD=$(cat <<'EOF'

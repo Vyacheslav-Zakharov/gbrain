@@ -620,8 +620,13 @@ describeBoth('Engine parity — relationalFanout', () => {
       `${r.source_id}:${r.slug}:${r.hop}:${r.edge_count}:${r.via_link_types.join(',')}:${r.canonical_chunk_id == null ? 'null' : 'chunk'}`,
     );
     expect(semanticShape(pg)).toEqual(semanticShape(pglite));
-    expect(pg.every(r => r.path.length === r.hop + 1)).toBe(true);
-    expect(pglite.every(r => r.path.length === r.hop + 1)).toBe(true);
+    const hasValidShortestPath = (rows: typeof pg) => rows.every(r =>
+      r.path.length === r.hop + 1
+      && seeds.includes(r.path[0]!)
+      && r.path.at(-1) === r.slug,
+    );
+    expect(hasValidShortestPath(pg)).toBe(true);
+    expect(hasValidShortestPath(pglite)).toBe(true);
   });
 });
 

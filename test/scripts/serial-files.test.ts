@@ -24,6 +24,7 @@ import { resolve } from 'path';
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
 const SERIAL_SH = resolve(REPO_ROOT, 'scripts/run-serial-tests.sh');
 const SHARD_SH = resolve(REPO_ROOT, 'scripts/run-unit-shard.sh');
+const CI_LOCAL_SH = resolve(REPO_ROOT, 'scripts/ci-local.sh');
 
 function dryRunList(scriptPath: string): string[] {
   const out = execFileSync('bash', [scriptPath, '--dry-run-list'], {
@@ -66,5 +67,12 @@ describe('run-serial-tests.sh contract', () => {
     const unitFiles = new Set(dryRunList(SHARD_SH));
     const overlap = [...serialFiles].filter(f => unitFiles.has(f));
     expect(overlap).toEqual([]);
+  });
+
+  it('ci-local runs the serial pass in sharded and unsharded modes', () => {
+    const src = readFileSync(CI_LOCAL_SH, 'utf-8');
+    const invocations = src.match(/env -u DATABASE_URL -u GBRAIN_PGLITE_SNAPSHOT bash scripts\/run-serial-tests\.sh/g) ?? [];
+    // --diff unsharded, full unsharded, and the default sharded path.
+    expect(invocations).toHaveLength(3);
   });
 });
