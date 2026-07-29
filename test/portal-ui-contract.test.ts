@@ -3,6 +3,7 @@ import { PORTAL_ASSET_COUNT, PORTAL_ASSETS, PORTAL_INDEX_HTML } from '../src/por
 
 const serveSource = await Bun.file(new URL('../src/commands/serve-http.ts', import.meta.url)).text();
 const oauthSource = await Bun.file(new URL('../src/core/oauth-provider.ts', import.meta.url)).text();
+const portalAppSource = await Bun.file(new URL('../portal/src/PortalApp.tsx', import.meta.url)).text();
 
 describe('portal SPA contract', () => {
   test('ships an embedded index, JavaScript, and CSS bundle', () => {
@@ -24,7 +25,7 @@ describe('portal SPA contract', () => {
   test('applies the source grant to every content surface', () => {
     expect(serveSource).toContain('engine.searchKeyword(q, {');
     expect(serveSource).toContain('sourceIds: sources.map((source) => source.id)');
-    expect(serveSource).toContain('engine.getBacklinks(slug, { sourceIds: sources.map');
+    expect(serveSource).toContain('engine.getBacklinks(slug, { sourceId: source.id })');
     expect(serveSource).toContain('return res.status(404).json({ error: "Not found" })');
     expect(serveSource).toContain('resolvePortalPath(source.local_path, req.query.path)');
   });
@@ -74,6 +75,18 @@ describe('portal SPA contract', () => {
     expect(searchRoute).toContain('cleanPortalSearchSnippet(');
     expect(searchRoute).toContain('.sort(comparePortalSearchResults)');
     expect(searchRoute).toContain('match: "name"');
+  });
+
+  test('projects ACL-filtered meeting attendance and mentions into a dedicated context section', () => {
+    const contextRoute = serveSource.slice(serveSource.indexOf("app.get('/portal/api/context'"), serveSource.indexOf('app.get("/portal/api/search"'));
+    expect(contextRoute).toContain('engine.getBacklinks(slug, { sourceId: source.id })');
+    expect(contextRoute).toContain('engine.getLinks(slug, { sourceId: source.id })');
+    expect(contextRoute).not.toContain('sourceIds: allowedSourceIds');
+    expect(contextRoute).toContain("link.link_type !== 'attended'");
+    expect(contextRoute).toContain('allowedSources.has(linkSource)');
+    expect(contextRoute).toContain('res.json({ source: source.id, slug, backlinks, meetings })');
+    expect(portalAppSource).toContain('<h2>Встречи');
+    expect(portalAppSource).toContain("link.type === 'attended' ? 'участие'");
   });
 
   test('enforces the Portal file policy at preview, context, resolve, and download boundaries', () => {

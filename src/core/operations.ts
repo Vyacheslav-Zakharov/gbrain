@@ -1202,11 +1202,11 @@ async function runAutoLink(
   // a multi-source-aware handler); when omitted, every read returns the
   // pre-v0.31.8 cross-source view (back-compat for any existing caller).
   const sourceOpts = opts?.sourceId ? { sourceId: opts.sourceId } : {};
-  const linkSourceOpts = opts?.sourceId
-    ? { fromSourceId: opts.sourceId, toSourceId: opts.sourceId, originSourceId: opts.sourceId }
+  const linkSourceOptsFor = (targetSourceId?: string | null) => opts?.sourceId
+    ? { fromSourceId: opts.sourceId, toSourceId: targetSourceId || opts.sourceId, originSourceId: opts.sourceId }
     : {};
-  const removeSourceOpts = opts?.sourceId
-    ? { fromSourceId: opts.sourceId, toSourceId: opts.sourceId }
+  const removeSourceOptsFor = (targetSourceId?: string | null) => opts?.sourceId
+    ? { fromSourceId: opts.sourceId, toSourceId: targetSourceId || opts.sourceId }
     : {};
 
   // Live-mode resolver: per-put throwaway cache, pg_trgm + optional search.
@@ -1225,9 +1225,16 @@ async function runAutoLink(
   // v0.31.8 (D12): scoped to the source when opts.sourceId is set so wikilink
   // resolution doesn't span unrelated sources.
   const allSlugs = await engine.getAllSlugs(sourceOpts);
-  const valid = candidates.filter(c =>
-    allSlugs.has(c.targetSlug) && (!c.fromSlug || allSlugs.has(c.fromSlug))
-  );
+  const qualifiedSlugSets = new Map<string, Set<string>>();
+  await Promise.all(Array.from(new Set(
+    candidates.map(c => c.targetSourceId).filter((sourceId): sourceId is string => Boolean(sourceId)),
+  )).map(async (sourceId) => {
+    qualifiedSlugSets.set(sourceId, await engine.getAllSlugs({ sourceId }));
+  }));
+  const valid = candidates.filter(c => {
+    const targetSlugs = c.targetSourceId ? qualifiedSlugSets.get(c.targetSourceId) : allSlugs;
+    return Boolean(targetSlugs?.has(c.targetSlug) && (!c.fromSlug || allSlugs.has(c.fromSlug)));
+  });
 
   // Split candidates by direction. Outgoing (fromSlug === slug or unset) are
   // this page's own edges, reconciled against getLinks(slug). Incoming
@@ -1279,7 +1286,7 @@ async function runAutoLink(
     );
 
     const outKeys = new Set(out.map(c =>
-      `${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`
+      `${c.targetSourceId || opts?.sourceId || ''}\u0000${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`
     ));
     const incKeys = new Set(inc.map(c =>
       `${c.fromSlug}\u0000${c.linkType}`
@@ -1293,11 +1300,11 @@ async function runAutoLink(
         await tx.addLink(
           slug, c.targetSlug, c.context, c.linkType,
           c.linkSource, c.originSlug, c.originField,
-          linkSourceOpts,
+          linkSourceOptsFor(c.targetSourceId),
         );
-        const existKey = `${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`;
+        const existKey = `${c.targetSourceId || opts?.sourceId || ''}\u0000${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`;
         const exists = reconcilableOut.some(l =>
-          `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}` === existKey
+          `${l.to_source_id || opts?.sourceId || ''}\u0000${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}` === existKey
         );
         if (!exists) created++;
       } catch {
@@ -1311,7 +1318,7 @@ async function runAutoLink(
         await tx.addLink(
           c.fromSlug!, c.targetSlug, c.context, c.linkType,
           'frontmatter', c.originSlug, c.originField,
-          linkSourceOpts,
+          linkSourceOptsFor(c.targetSourceId),
         );
         const existKey = `${c.fromSlug}\u0000${c.linkType}`;
         const exists = existingIn.some(l =>
@@ -1325,10 +1332,10 @@ async function runAutoLink(
 
     // Remove stale outgoing (markdown or our-frontmatter, not in desired set).
     for (const l of reconcilableOut) {
-      const key = `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
+      const key = `${l.to_source_id || opts?.sourceId || ''}\u0000${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
       if (!outKeys.has(key)) {
         try {
-          await tx.removeLink(slug, l.to_slug, l.link_type, l.link_source ?? undefined, removeSourceOpts);
+          await tx.removeLink(slug, l.to_slug, l.link_type, l.link_source ?? undefined, removeSourceOptsFor(l.to_source_id));
           removed++;
         } catch {
           errors++;
@@ -1341,7 +1348,7 @@ async function runAutoLink(
       const key = `${l.from_slug}\u0000${l.link_type}`;
       if (!incKeys.has(key)) {
         try {
-          await tx.removeLink(l.from_slug, slug, l.link_type, 'frontmatter', removeSourceOpts);
+          await tx.removeLink(l.from_slug, slug, l.link_type, 'frontmatter', removeSourceOptsFor(l.to_source_id));
           removed++;
         } catch {
           errors++;

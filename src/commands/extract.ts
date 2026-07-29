@@ -126,7 +126,10 @@ export function resolveCandidateSources(
     : (fromSources.includes('default') ? 'default' : fromSources[0]);
   const targetSources = slugToSources.get(c.targetSlug) ?? [];
   let toSourceId: string;
-  if (targetSources.includes(fromSourceId)) {
+  if (c.targetSourceId) {
+    if (!targetSources.includes(c.targetSourceId)) return null;
+    toSourceId = c.targetSourceId;
+  } else if (targetSources.includes(fromSourceId)) {
     toSourceId = fromSourceId;
   } else if (targetSources.includes('default')) {
     toSourceId = 'default';

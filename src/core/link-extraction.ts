@@ -28,7 +28,7 @@ import { ensureWellFormed } from './text-safe.ts';
  * OR updated_at > links_extracted_at`. It is an ISO-8601 string (NOT a number) —
  * the column is TIMESTAMPTZ and the predicate binds it as `::timestamptz`.
  */
-export const LINK_EXTRACTOR_VERSION_TS = '2026-05-31T00:00:00Z';
+export const LINK_EXTRACTOR_VERSION_TS = '2026-07-30T00:00:00Z';
 
 // ─── Entity references ──────────────────────────────────────────
 
@@ -413,6 +413,11 @@ export interface LinkCandidate {
   fromSlug?: string;
   /** Target page slug (no .md, no ../). */
   targetSlug: string;
+  /**
+   * Source pinned by a qualified wikilink (`[[source-id:slug]]`). When absent,
+   * callers retain the local-first fallback used by unqualified links.
+   */
+  targetSourceId?: string | null;
   /** Inferred relationship type. */
   linkType: string;
   /** Surrounding text (up to ~80 chars) used for inference + storage. */
@@ -514,6 +519,7 @@ export async function extractPageLinks(
     const context = idx >= 0 ? excerpt(content, idx, 240) : ref.name;
     candidates.push({
       targetSlug: ref.slug,
+      targetSourceId: ref.sourceId,
       linkType: inferLinkType(pageType, context, content, ref.slug),
       context,
       linkSource: 'markdown',
@@ -532,7 +538,10 @@ export async function extractPageLinks(
   while ((m = bareRe.exec(strippedContent)) !== null) {
     // Skip matches that are part of a markdown link (already handled above).
     const charBefore = m.index > 0 ? strippedContent[m.index - 1] : '';
-    if (charBefore === '/' || charBefore === '(') continue;
+    // Qualified wikilinks were already handled by extractEntityRefs. Without
+    // the ':' guard, `[[source-id:meetings/weekly]]` also emits an unqualified
+    // local candidate here and creates a same-slug self-edge.
+    if (charBefore === '/' || charBefore === '(' || charBefore === ':') continue;
     const context = excerpt(strippedContent, m.index, 240);
     candidates.push({
       targetSlug: m[1],
@@ -557,7 +566,7 @@ export async function extractPageLinks(
     fmUnresolved = fm.unresolved;
   }
 
-  // Within-page dedup: same (fromSlug, targetSlug, linkType, linkSource)
+  // Within-page dedup: same (fromSlug, targetSourceId, targetSlug, linkType, linkSource)
   // collapses to one entry. First occurrence wins.
   // Issue #972 (codex P2d, decided): a qualified `[[companies/acme]]` (typed
   // markdown edge) and a bare `[[acme]]` (wikilink-resolved edge) to the SAME
@@ -568,7 +577,7 @@ export async function extractPageLinks(
   const seen = new Set<string>();
   const result: LinkCandidate[] = [];
   for (const c of candidates) {
-    const key = `${c.fromSlug ?? ''}\u0000${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? ''}`;
+    const key = `${c.fromSlug ?? ''}\u0000${c.targetSourceId ?? ''}\u0000${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(c);

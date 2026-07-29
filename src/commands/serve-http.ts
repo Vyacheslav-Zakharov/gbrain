@@ -1700,12 +1700,21 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const frontmatter = content.match(/^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/)?.[1] || '';
     const slug = frontmatter.match(/^slug:\s*(.+)$/mi)?.[1]?.trim().replace(/^['"]|['"]$/g, '')
       || String(req.query.path || '').replace(/\.(md|markdown|txt)$/i, '');
-    let backlinks: Array<Record<string, unknown>> = [];
+    let backlinks: Array<{ source: string; slug: string; title: string; type: string; context: string }> = [];
+    let meetings: Array<{ source: string; slug: string; title: string; type: string; context: string }> = [];
     try {
-      const links = await engine.getBacklinks(slug, { sourceIds: sources.map((candidate) => candidate.id) });
+      const allowedSources = new Set(sources.map((candidate) => candidate.id));
+      const [incomingLinks, outgoingLinks] = await Promise.all([
+        // Anchor the NEAR endpoint to the exact page the user opened. Reading
+        // all allowed sources by slug would merge same-slug page identities.
+        // FAR endpoints are filtered against `allowedSources` below before exposure.
+        engine.getBacklinks(slug, { sourceId: source.id }),
+        engine.getLinks(slug, { sourceId: source.id }),
+      ]);
       const seen = new Set<string>();
-      backlinks = links.flatMap((link) => {
+      backlinks = incomingLinks.flatMap((link) => {
         const linkSource = link.from_source_id || source.id;
+        if (!allowedSources.has(linkSource)) return [];
         const key = `${linkSource}:${link.from_slug}:${link.link_type}`;
         if (seen.has(key)) return [];
         seen.add(key);
@@ -1717,10 +1726,48 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
           context: link.context || '',
         }];
       }).slice(0, 30);
+
+      // Meetings are a first-class context projection. Incoming meeting links
+      // cover explicit mentions; outgoing `attended` links cover canonical
+      // attendance edges from person cards. Both endpoint sources are restricted
+      // to the already-authorized Portal source set before titles are hydrated.
+      const meetingCandidates = new Map<string, { source: string; slug: string; type: string; context: string }>();
+      for (const link of incomingLinks) {
+        const linkSource = link.from_source_id || source.id;
+        if (!allowedSources.has(linkSource) || !link.from_slug.startsWith('meetings/')) continue;
+        meetingCandidates.set(`${linkSource}:${link.from_slug}`, {
+          source: linkSource,
+          slug: link.from_slug,
+          type: link.link_type,
+          context: link.context || '',
+        });
+      }
+      for (const link of outgoingLinks) {
+        const linkSource = link.to_source_id || source.id;
+        if (link.link_type !== 'attended' || !allowedSources.has(linkSource) || !link.to_slug.startsWith('meetings/')) continue;
+        meetingCandidates.set(`${linkSource}:${link.to_slug}`, {
+          source: linkSource,
+          slug: link.to_slug,
+          type: 'attended',
+          context: link.context || '',
+        });
+      }
+      meetings = await Promise.all(
+        [...meetingCandidates.values()]
+          .sort((a, b) => b.slug.localeCompare(a.slug))
+          .slice(0, 30)
+          .map(async (candidate) => {
+            const page = await engine.getPage(candidate.slug, { sourceId: candidate.source });
+            return {
+              ...candidate,
+              title: page?.title || candidate.slug.split('/').pop()?.replace(/[-_]/g, ' ') || candidate.slug,
+            };
+          }),
+      );
     } catch (error) {
-      console.warn('[portal] backlinks unavailable:', error instanceof Error ? error.message : error);
+      console.warn('[portal] context unavailable:', error instanceof Error ? error.message : error);
     }
-    res.json({ source: source.id, slug, backlinks });
+    res.json({ source: source.id, slug, backlinks, meetings });
   });
 
   app.get("/portal/api/search", async (req: any, res: any) => {

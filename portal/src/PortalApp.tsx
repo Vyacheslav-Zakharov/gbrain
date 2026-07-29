@@ -390,6 +390,8 @@ export function PortalApp() {
   };
 
   const breadcrumbs = folder ? folder.split('/').filter(Boolean) : [];
+  const meetings = context?.meetings || [];
+  const nonMeetingBacklinks = (context?.backlinks || []).filter((link) => !link.slug.startsWith('meetings/'));
   const pageTitle = document?.title || binary?.name || (folder ? folder.split('/').pop() : selectedSource?.name) || 'Портал знаний';
 
   return (
@@ -501,7 +503,8 @@ export function PortalApp() {
         {document ? <>
           <section><h2>На этой странице</h2>{rendered.outline.length ? <nav className="outline">{rendered.outline.map((item) => <button key={item.id} className={`level-${item.level}`} onClick={() => window.document.getElementById(item.id)?.scrollIntoView({ behavior: 'smooth' })}>{item.text}</button>)}</nav> : <p className="context-muted">В документе нет заголовков.</p>}</section>
           <section><h2>О документе</h2><dl className="metadata-list"><div><dt>Источник</dt><dd>{document.sourceName}</dd></div><div><dt>Путь</dt><dd title={document.path}>{document.path}</dd></div>{document.slug && <div><dt>Slug</dt><dd>{document.slug}</dd></div>}<div><dt>Размер</dt><dd>{humanBytes(document.size)}</dd></div></dl></section>
-          <section><h2>Обратные ссылки <span className="section-count">{context?.backlinks.length || 0}</span></h2>{context?.backlinks.length ? <div className="backlink-list">{context.backlinks.slice(0, 12).map((link) => <button key={`${link.source}:${link.slug}:${link.type}`} onClick={() => void openBacklink(link)}><span>{link.title || link.slug}</span><small>{link.source} · {link.type}</small></button>)}</div> : <p className="context-muted">Другие страницы пока не ссылаются на этот документ.</p>}</section>
+          <section><h2>Встречи <span className="section-count">{meetings.length}</span></h2>{meetings.length ? <div className="backlink-list">{meetings.slice(0, 12).map((link) => <button key={`${link.source}:${link.slug}:${link.type}`} onClick={() => void openBacklink(link)}><span>{link.title || link.slug}</span><small>{link.source} · {link.type === 'attended' ? 'участие' : link.type === 'mentions' ? 'упоминание' : link.type}</small></button>)}</div> : <p className="context-muted">Связанные встречи пока не найдены.</p>}</section>
+          <section><h2>Обратные ссылки <span className="section-count">{nonMeetingBacklinks.length}</span></h2>{nonMeetingBacklinks.length ? <div className="backlink-list">{nonMeetingBacklinks.slice(0, 12).map((link) => <button key={`${link.source}:${link.slug}:${link.type}`} onClick={() => void openBacklink(link)}><span>{link.title || link.slug}</span><small>{link.source} · {link.type}</small></button>)}</div> : <p className="context-muted">Другие страницы пока не ссылаются на этот документ.</p>}</section>
         </> : <div className="context-placeholder"><Icon name="panel" size={28} /><p>Откройте документ, чтобы увидеть оглавление, метаданные и связи.</p></div>}
       </aside>
 

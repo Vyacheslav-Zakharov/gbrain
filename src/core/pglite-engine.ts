@@ -2683,7 +2683,10 @@ export class PGLiteEngine implements BrainEngine {
       const { rows } = await this.db.query(
         `SELECT f.slug as from_slug, t.slug as to_slug,
                 l.link_type, l.context, l.link_source,
-                o.slug as origin_slug, l.origin_field
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
          FROM links l
          JOIN pages f ON f.id = l.from_page_id
          JOIN pages t ON t.id = l.to_page_id
@@ -2701,7 +2704,10 @@ export class PGLiteEngine implements BrainEngine {
       const { rows } = await this.db.query(
         `SELECT f.slug as from_slug, t.slug as to_slug,
                 l.link_type, l.context, l.link_source,
-                o.slug as origin_slug, l.origin_field
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
          FROM links l
          JOIN pages f ON f.id = l.from_page_id
          JOIN pages t ON t.id = l.to_page_id
@@ -2714,7 +2720,10 @@ export class PGLiteEngine implements BrainEngine {
     const { rows } = await this.db.query(
       `SELECT f.slug as from_slug, t.slug as to_slug,
               l.link_type, l.context, l.link_source,
-              o.slug as origin_slug, l.origin_field
+              o.slug as origin_slug, l.origin_field,
+              f.source_id as from_source_id,
+              t.source_id as to_source_id,
+              o.source_id as origin_source_id
        FROM links l
        JOIN pages f ON f.id = l.from_page_id
        JOIN pages t ON t.id = l.to_page_id
@@ -2750,7 +2759,10 @@ export class PGLiteEngine implements BrainEngine {
       const { rows } = await this.db.query(
         `SELECT f.slug as from_slug, t.slug as to_slug,
                 l.link_type, l.context, l.link_source,
-                o.slug as origin_slug, l.origin_field
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
          FROM links l
          JOIN pages f ON f.id = l.from_page_id
          JOIN pages t ON t.id = l.to_page_id
@@ -2765,7 +2777,10 @@ export class PGLiteEngine implements BrainEngine {
       const { rows } = await this.db.query(
         `SELECT f.slug as from_slug, t.slug as to_slug,
                 l.link_type, l.context, l.link_source,
-                o.slug as origin_slug, l.origin_field
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
          FROM links l
          JOIN pages f ON f.id = l.from_page_id
          JOIN pages t ON t.id = l.to_page_id
@@ -2778,7 +2793,10 @@ export class PGLiteEngine implements BrainEngine {
     const { rows } = await this.db.query(
       `SELECT f.slug as from_slug, t.slug as to_slug,
               l.link_type, l.context, l.link_source,
-              o.slug as origin_slug, l.origin_field
+              o.slug as origin_slug, l.origin_field,
+              f.source_id as from_source_id,
+              t.source_id as to_source_id,
+              o.source_id as origin_source_id
        FROM links l
        JOIN pages f ON f.id = l.from_page_id
        JOIN pages t ON t.id = l.to_page_id

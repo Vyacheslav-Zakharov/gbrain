@@ -73,6 +73,8 @@ export interface ContextResponse {
   source: string;
   slug: string;
   backlinks: Backlink[];
+  /** ACL-filtered meeting relations: canonical attendance and explicit mentions. */
+  meetings?: Backlink[];
 }
 
 export interface RecentDocument {
