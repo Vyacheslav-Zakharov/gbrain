@@ -42,6 +42,10 @@ export interface SourceChangeIntelligencePolicy {
   timeline_fields: string[];
   /** Fields that become dated baseline events on the first successful snapshot. */
   baseline_timeline_fields?: string[];
+  /** Human-readable labels used in deterministic Timeline summaries. */
+  timeline_field_labels?: Record<string, string>;
+  /** Optional rendered field used for Timeline display while the raw field remains the comparison key. */
+  timeline_value_fields?: Record<string, string>;
   relationship_rules: SourceChangeRelationshipRule[];
   related_pages: { policy: 'graph_projection' | 'managed_derived_blocks' | 'agent_proposals' };
   agent: {
@@ -55,6 +59,20 @@ export interface SourceChangeIntelligencePolicy {
     agent: 'review' | 'auto_high_confidence';
     cascade: 'review' | 'auto';
   };
+}
+
+export interface SourceLinkedCollectionLink {
+  profile_id: string;
+  id_field: string;
+  label_field: string;
+}
+
+export interface SourceLinkedCollection {
+  source_field: string;
+  output_field: string;
+  item_template: string;
+  links: Record<string, SourceLinkedCollectionLink>;
+  empty_text?: string;
 }
 
 export interface SourceTransformProfileSource {
@@ -100,7 +118,7 @@ export interface SourceIngestProfile {
     require_explicit_resolution?: boolean;
   };
   freshness?: { policy?: string; on_access?: SourceIngestOnAccess; changed_since_field?: string };
-  mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown>; source_fields?: string[]; article_template?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, string> } };
+  mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown>; source_fields?: string[]; linked_collections?: SourceLinkedCollection[]; article_template?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, string>; section_order?: string[]; include_title_heading?: boolean } };
   links?: SourceLinkRule[];
   change_intelligence?: SourceChangeIntelligencePolicy;
   update_policy: {
@@ -112,6 +130,8 @@ export interface SourceIngestProfile {
     manage_adopted_article?: boolean;
     /** Include the stable external ID in the rendered Source data block. Defaults to true for compatibility. */
     include_external_id_in_content?: boolean;
+    /** Keep source ownership markers but suppress the generic visible Source data body. */
+    render_source_data?: boolean;
     field_allowlist?: string[];
     /** Article-frontmatter keys allowed to overwrite an explicitly adopted manual page. */
     frontmatter_allowlist?: string[];
@@ -263,19 +283,41 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
 
   if (p.links !== undefined) {
     if (!Array.isArray(p.links)) issues.push(issue('links', 'invalid_type', 'links must be an array.'));
-    else p.links.forEach((l, i) => {
-      if (!isObject(l)) { issues.push(issue(`links.${i}`, 'invalid_link', 'Link rule must be an object.')); return; }
-      if (typeof l.id !== 'string' || l.id.length === 0) issues.push(issue(`links.${i}.id`, 'required', 'Link rule id is required.'));
-      if (typeof l.type !== 'string' || l.type.length === 0) issues.push(issue(`links.${i}.type`, 'required', 'Link type is required.'));
-      if (!isObject(l.target)) {
-        issues.push(issue(`links.${i}.target`, 'required', 'Link target is required.'));
-      } else {
-        if (typeof l.target.type !== 'string' || !l.target.type) issues.push(issue(`links.${i}.target.type`, 'required', 'Link target type is required.'));
-        if (!['external_id', 'slug', 'field_value'].includes(String(l.target.lookup))) issues.push(issue(`links.${i}.target.lookup`, 'invalid_lookup', 'Unsupported link target lookup.'));
-        if (l.target.value_field !== undefined) validateFieldPath(`links.${i}.target.value_field`, l.target.value_field, issues);
-      }
-      if (Array.isArray(l.when)) l.when.forEach((r, j) => validateFilter(`links.${i}.when.${j}`, r, issues));
-    });
+    else {
+      const linkIds = new Set<string>();
+      p.links.forEach((l, i) => {
+        if (!isObject(l)) { issues.push(issue(`links.${i}`, 'invalid_link', 'Link rule must be an object.')); return; }
+        if (typeof l.id !== 'string' || l.id.length === 0) issues.push(issue(`links.${i}.id`, 'required', 'Link rule id is required.'));
+        else if (linkIds.has(l.id)) issues.push(issue(`links.${i}.id`, 'duplicate', 'Link rule ids must be unique.'));
+        else linkIds.add(l.id);
+        if (typeof l.type !== 'string' || l.type.length === 0) issues.push(issue(`links.${i}.type`, 'required', 'Link type is required.'));
+        if (!isObject(l.target)) {
+          issues.push(issue(`links.${i}.target`, 'required', 'Link target is required.'));
+        } else {
+          if (typeof l.target.type !== 'string' || !l.target.type) issues.push(issue(`links.${i}.target.type`, 'required', 'Link target type is required.'));
+          if (!['external_id', 'slug', 'field_value'].includes(String(l.target.lookup))) issues.push(issue(`links.${i}.target.lookup`, 'invalid_lookup', 'Unsupported link target lookup.'));
+          if (l.target.value_field === undefined) issues.push(issue(`links.${i}.target.value_field`, 'required', 'value_field is required.'));
+          else validateFieldPath(`links.${i}.target.value_field`, l.target.value_field, issues);
+        }
+        if (Array.isArray(l.when)) l.when.forEach((r, j) => validateFilter(`links.${i}.when.${j}`, r, issues));
+      });
+    }
+  }
+
+  if (p.mapping !== undefined) {
+    if (!isObject(p.mapping)) issues.push(issue('mapping', 'invalid_type', 'mapping must be an object.'));
+    else {
+      const article = p.mapping.article_template;
+      if (isObject(article) && article.include_title_heading !== undefined && typeof article.include_title_heading !== 'boolean') issues.push(issue('mapping.article_template.include_title_heading', 'invalid_type', 'include_title_heading must be boolean.'));
+      if (isObject(article) && article.section_order !== undefined && !Array.isArray(article.section_order)) issues.push(issue('mapping.article_template.section_order', 'invalid_type', 'section_order must be an array.'));
+      const collections = p.mapping.linked_collections;
+      if (collections !== undefined && !Array.isArray(collections)) issues.push(issue('mapping.linked_collections', 'invalid_type', 'linked_collections must be an array.'));
+      else if (Array.isArray(collections)) collections.forEach((collection, i) => {
+        if (!isObject(collection)) { issues.push(issue(`mapping.linked_collections.${i}`, 'invalid_collection', 'Linked collection must be an object.')); return; }
+        for (const key of ['source_field', 'output_field', 'item_template']) if (typeof collection[key] !== 'string' || !collection[key]) issues.push(issue(`mapping.linked_collections.${i}.${key}`, 'required', `${key} is required.`));
+        if (!isObject(collection.links)) issues.push(issue(`mapping.linked_collections.${i}.links`, 'required', 'links object is required.'));
+      });
+    }
   }
 
   if (p.change_intelligence !== undefined) {
@@ -292,6 +334,14 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
         if (!Array.isArray(fields)) issues.push(issue(`change_intelligence.${key}`, 'invalid_type', `${key} must be an array.`));
         else fields.forEach((field, i) => validateFieldPath(`change_intelligence.${key}.${i}`, field, issues));
       }
+      if (c.baseline_timeline_fields !== undefined) {
+        if (!Array.isArray(c.baseline_timeline_fields)) issues.push(issue('change_intelligence.baseline_timeline_fields', 'invalid_type', 'baseline_timeline_fields must be an array.'));
+        else c.baseline_timeline_fields.forEach((field, i) => validateFieldPath(`change_intelligence.baseline_timeline_fields.${i}`, field, issues));
+      }
+      for (const key of ['timeline_field_labels', 'timeline_value_fields'] as const) {
+        const values = c[key];
+        if (values !== undefined && (!isObject(values) || Object.values(values).some(value => typeof value !== 'string'))) issues.push(issue(`change_intelligence.${key}`, 'invalid_type', `${key} must be a string map.`));
+      }
       if (!Array.isArray(c.relationship_rules)) issues.push(issue('change_intelligence.relationship_rules', 'invalid_type', 'relationship_rules must be an array.'));
       if (isObject(c.agent)) {
         const threshold = Number(c.agent.confidence_threshold);
@@ -305,8 +355,8 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
   } else {
     if (p.update_policy.mode !== 'managed_block') issues.push(issue('update_policy.mode', 'invalid_mode', 'Only managed_block is supported in Stage 1.'));
     if (p.update_policy.preserve_manual_sections !== true) issues.push(issue('update_policy.preserve_manual_sections', 'required', 'Must explicitly preserve manual sections.'));
-    if (p.update_policy.manage_generated_article !== undefined && typeof p.update_policy.manage_generated_article !== 'boolean') {
-      issues.push(issue('update_policy.manage_generated_article', 'invalid_type', 'manage_generated_article must be boolean.'));
+    for (const key of ['manage_generated_article', 'manage_adopted_article', 'include_external_id_in_content', 'render_source_data'] as const) {
+      if (p.update_policy[key] !== undefined && typeof p.update_policy[key] !== 'boolean') issues.push(issue(`update_policy.${key}`, 'invalid_type', `${key} must be boolean.`));
     }
     const allow = p.update_policy.field_allowlist;
     if (Array.isArray(allow) && allow.some(v => typeof v === 'string' && v.startsWith('source_sync'))) issues.push(issue('update_policy.field_allowlist', 'sync_metadata_in_frontmatter', 'Mutable source_sync fields must not be written to frontmatter.'));
