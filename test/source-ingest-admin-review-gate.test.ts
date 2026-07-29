@@ -31,7 +31,7 @@ describe('source-ingest admin review gates', () => {
     const api = adminApi();
 
     expect(ui).toContain('articleViewCurrentChainHash');
-    expect(ui).toContain('Preview required before approval');
+    expect(ui).toContain('Для утверждения сначала выполните предпросмотр');
     expect(ui).toContain('Зафиксировать snapshot');
     expect(api).toContain('sourceIngestApproveArticleView');
     expect(server).toContain('current_chain_hash_required');
@@ -59,7 +59,7 @@ describe('source-ingest admin review gates', () => {
     expect(ops).toContain('_templates/${type}');
     expect(ops).toContain('required_frontmatter');
     expect(ops).toContain('validateArticleTemplateRequired');
-    expect(ui).toContain('Schema-template article sections');
+    expect(ui).toContain('Разделы статьи из schema-template');
     expect(ui).toContain('requiredFrontmatter');
     expect(ui).toContain('articleTemplate');
     expect(ui).toContain('sourceIngestArticleTemplate');
@@ -104,24 +104,24 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('Создать proposal-страницу');
     expect(ops).toContain('loadSchemaTypeCard');
     expect(ui).toContain('Подключение к источнику');
-    expect(ui).toContain('Base view / Источник');
-    expect(ui).toContain('Transform view / Преобразование');
-    expect(ui).toContain('Article view / Публикация');
+    expect(ui).toContain('Источник (Base view)');
+    expect(ui).toContain('Преобразование (Transform view)');
+    expect(ui).toContain('Публикация (Article view)');
     expect(ui).toContain('Определение');
     expect(ui).toContain('Изменения');
-    expect(ui).toContain('Change Intelligence / История изменений');
-    expect(ui).toContain('Apply recommended preset');
-    expect(ui).toContain('Agent interprets semantic text fields');
-    expect(ui).toContain('Persisted contract preview');
+    expect(ui).toContain('История изменений (Change Intelligence)');
+    expect(ui).toContain('Применить рекомендуемый шаблон');
+    expect(ui).toContain('Агент анализирует смысловые текстовые поля');
+    expect(ui).toContain('Сохранённый контракт');
     expect(ui).toContain('Превью');
     expect(ui).toContain('Запуски');
-    expect(ui).toContain('Run trial batch (20)');
-    expect(ui).toContain('Load runs');
+    expect(ui).toContain('Пробный запуск (20)');
+    expect(ui).toContain('Загрузить запуски');
     expect(ui).toContain('Состояние цепочки');
     expect(ui).toContain('article stale {staleArticleCount}');
     expect(ui).toContain('зафиксирован');
-    expect(ui).toContain('preview hash');
-    expect(ui).toContain('Перед пакетным запуском нужен новый preview и повторное утверждение');
+    expect(ui).toContain('хэш предпросмотра');
+    expect(ui).toContain('Перед пакетным запуском нужен новый предпросмотр и повторное утверждение');
     expect(server).toContain('/admin/api/source-ingest/catalog/connector/list-objects');
     expect(server).toContain('/admin/api/source-ingest/catalog/connector/test');
     expect(server).toContain('credentials_stored_unverified');
@@ -163,6 +163,40 @@ describe('source-ingest admin review gates', () => {
     expect(css).toContain('.source-ingest-layout { grid-template-columns: minmax(0, 1fr) !important; }');
     expect(css).toContain('.source-ingest-form-grid { grid-template-columns: minmax(0, 1fr) !important; }');
     expect(css).toContain('main:has(> .source-ingest-wizard--open) .source-ingest-context-primary { display: none; }');
+  });
+
+  test('source-ingest editors use Russian actions and non-primary tabs', () => {
+    const ui = sourceIngestUi();
+    const forbiddenVisibleCopy = [
+      'Seed from legacy discovery',
+      'Save base view',
+      'Seed from selected base view',
+      'Generate SELECT',
+      'Save transform view',
+      'Seed from current transform/base',
+      'Save article view',
+      'Preview required before approval.',
+      'Required fields not filled:',
+      'No article preview yet.',
+      'Load runs',
+      'Run trial batch (20)',
+      'Run changed_since',
+      'Apply recommended preset',
+      'Policy needs attention',
+      'Persisted contract preview',
+    ];
+    for (const copy of forbiddenVisibleCopy) expect(ui).not.toContain(copy);
+
+    expect(ui).toContain('role="tablist"');
+    expect(ui).toContain('role="tab"');
+    expect(ui).toContain('aria-selected={active === tab}');
+    expect(ui).toContain('className="btn btn-secondary source-ingest-tab"');
+    expect(ui).toContain('return <button className="btn btn-secondary" disabled={busy !== null} onClick={() => { setOpen(true)');
+    expect(ui).toContain('Сохранить источник');
+    expect(ui).toContain('Создать SELECT');
+    expect(ui).toContain('Сохранить преобразование');
+    expect(ui).toContain('Сохранить публикацию');
+    expect(ui).toContain('Запустить только изменившиеся');
   });
 
   test('connector registry exposes implemented v1 connector kinds', () => {

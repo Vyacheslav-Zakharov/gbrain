@@ -205,48 +205,48 @@ export function ChangeIntelligenceEditor({ policy, setPolicy, availableFields, g
   let relationshipsValid = true;
   try { relationshipsValid = Array.isArray(JSON.parse(policy.relationship_rules_text || '[]')); } catch { relationshipsValid = false; }
   const readiness = [
-    policy.enabled ? null : 'tracking disabled',
-    policy.enabled && !policy.effective_at_field ? 'effective date falls back to source updated_at / detection time' : null,
-    policy.enabled && lines(policy.current_state_fields_text).length === 0 ? 'no current-state fields selected' : null,
-    policy.enabled && policy.mode === 'hybrid' && lines(policy.timeline_fields_text).length === 0 ? 'no Timeline fields selected' : null,
-    relationshipsValid ? null : 'relationship rules JSON is invalid',
+    policy.enabled ? null : 'отслеживание выключено',
+    policy.enabled && !policy.effective_at_field ? 'дата изменения берётся из updated_at источника или времени обнаружения' : null,
+    policy.enabled && lines(policy.current_state_fields_text).length === 0 ? 'не выбраны поля текущего состояния' : null,
+    policy.enabled && policy.mode === 'hybrid' && lines(policy.timeline_fields_text).length === 0 ? 'не выбраны поля Timeline' : null,
+    relationshipsValid ? null : 'некорректный JSON правил связей',
   ].filter(Boolean) as string[];
 
   return <section style={{ marginTop: 14, border: '1px solid var(--border)', borderRadius: 10, padding: 14, background: 'rgba(15,23,42,0.34)' }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
       <div>
-        <h3 style={{ margin: 0, fontSize: 15 }}>Change Intelligence / История изменений</h3>
+        <h3 style={{ margin: 0, fontSize: 15 }}>История изменений (Change Intelligence)</h3>
         <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 4, maxWidth: 820 }}>
-          Contract for source snapshots → deterministic field diff → current state / Timeline / graph → optional agent proposals. Saving this definition does not yet activate runtime mutations; it freezes the intended policy for the next executor stage.
+          Контракт: снимки источника → детерминированное сравнение полей → текущее состояние, Timeline и граф → необязательные предложения агента. Сохранение фиксирует политику для следующего этапа executor, но само не включает изменения данных.
         </div>
       </div>
-      <button type="button" className="btn btn-secondary" onClick={() => update(preset(gbrainType, availableFields))}>Apply recommended preset for {gbrainType || 'type'}</button>
+      <button type="button" className="btn btn-secondary" onClick={() => update(preset(gbrainType, availableFields))}>Применить рекомендуемый шаблон для {gbrainType || 'типа'}</button>
     </div>
 
     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 14 }}>
-      <label style={{ gridColumn: '1 / -1' }}><input type="checkbox" checked={policy.enabled} onChange={e => update({ enabled: e.target.checked })} style={{ marginRight: 8 }} />Enable Change Intelligence definition</label>
-      <label>Mode<select value={policy.mode} onChange={e => update({ mode: e.target.value === 'current_state' ? 'current_state' : 'hybrid' })}><option value="hybrid">hybrid: current state + history</option><option value="current_state">current state only</option></select></label>
-      <label>Effective-at source field<select value={policy.effective_at_field} onChange={e => update({ effective_at_field: e.target.value })}><option value="">Fallback to source updated_at / detected_at</option>{availableFields.map(field => <option key={field} value={field}>{field}</option>)}</select></label>
-      <label>Current-state fields<textarea rows={7} value={policy.current_state_fields_text} onChange={e => update({ current_state_fields_text: e.target.value })} placeholder={'status\nposition_id\ndepartment_id'} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} /><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Latest values replace only the source-managed projection.</span></label>
-      <label>Timeline fields<textarea rows={7} value={policy.timeline_fields_text} onChange={e => update({ timeline_fields_text: e.target.value })} placeholder={'position_id\ndepartment_id\nstatus'} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} /><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>A value change becomes an append-only business event.</span></label>
-      <label style={{ gridColumn: '1 / -1' }}>Relationship rules JSON<textarea rows={8} value={policy.relationship_rules_text} onChange={e => update({ relationship_rules_text: e.target.value })} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12, borderColor: relationshipsValid ? undefined : 'var(--error)' }} /><span style={{ color: relationshipsValid ? 'var(--text-muted)' : 'var(--error)', fontSize: 11 }}>{relationshipsValid ? 'Current graph is a projection; history remains in events/snapshots.' : 'Invalid JSON array.'}</span></label>
-      <label>Related pages<select value={policy.related_page_policy} onChange={e => update({ related_page_policy: e.target.value as ChangeIntelligencePolicy['related_page_policy'] })}><option value="graph_projection">Graph projection only (recommended)</option><option value="managed_derived_blocks">Refresh managed derived blocks</option><option value="agent_proposals">Agent proposals only</option></select></label>
-      <label>Deterministic changes<select value={policy.deterministic_approval} onChange={e => update({ deterministic_approval: e.target.value === 'review' ? 'review' : 'auto' })}><option value="auto">Apply automatically</option><option value="review">Require review</option></select></label>
+      <label style={{ gridColumn: '1 / -1' }}><input type="checkbox" checked={policy.enabled} onChange={e => update({ enabled: e.target.checked })} style={{ marginRight: 8 }} />Включить отслеживание изменений</label>
+      <label>Режим<select value={policy.mode} onChange={e => update({ mode: e.target.value === 'current_state' ? 'current_state' : 'hybrid' })}><option value="hybrid">гибрид: текущее состояние + история</option><option value="current_state">только текущее состояние</option></select></label>
+      <label>Поле даты изменения<select value={policy.effective_at_field} onChange={e => update({ effective_at_field: e.target.value })}><option value="">Использовать updated_at источника или detected_at</option>{availableFields.map(field => <option key={field} value={field}>{field}</option>)}</select></label>
+      <label>Поля текущего состояния<textarea rows={7} value={policy.current_state_fields_text} onChange={e => update({ current_state_fields_text: e.target.value })} placeholder={'status\nposition_id\ndepartment_id'} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} /><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Новые значения заменяют только проекцию, управляемую источником.</span></label>
+      <label>Поля Timeline<textarea rows={7} value={policy.timeline_fields_text} onChange={e => update({ timeline_fields_text: e.target.value })} placeholder={'position_id\ndepartment_id\nstatus'} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} /><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Изменение значения становится неизменяемым бизнес-событием.</span></label>
+      <label style={{ gridColumn: '1 / -1' }}>JSON правил связей<textarea rows={8} value={policy.relationship_rules_text} onChange={e => update({ relationship_rules_text: e.target.value })} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12, borderColor: relationshipsValid ? undefined : 'var(--error)' }} /><span style={{ color: relationshipsValid ? 'var(--text-muted)' : 'var(--error)', fontSize: 11 }}>{relationshipsValid ? 'Текущий граф — проекция; история сохраняется в событиях и снимках.' : 'Некорректный JSON-массив.'}</span></label>
+      <label>Связанные страницы<select value={policy.related_page_policy} onChange={e => update({ related_page_policy: e.target.value as ChangeIntelligencePolicy['related_page_policy'] })}><option value="graph_projection">Только проекция графа (рекомендуется)</option><option value="managed_derived_blocks">Обновлять управляемые производные блоки</option><option value="agent_proposals">Только предложения агента</option></select></label>
+      <label>Детерминированные изменения<select value={policy.deterministic_approval} onChange={e => update({ deterministic_approval: e.target.value === 'review' ? 'review' : 'auto' })}><option value="auto">Применять автоматически</option><option value="review">Требовать проверки</option></select></label>
     </div>
 
     <div style={{ marginTop: 14, border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
-      <label><input type="checkbox" checked={policy.agent_enabled} onChange={e => update({ agent_enabled: e.target.checked })} style={{ marginRight: 8 }} />Agent interprets semantic text fields</label>
-      <div style={{ color: 'var(--text-muted)', fontSize: 12, margin: '5px 0 10px' }}>Agent may propose summary, Timeline and related-page changes, but never edits Markdown directly.</div>
+      <label><input type="checkbox" checked={policy.agent_enabled} onChange={e => update({ agent_enabled: e.target.checked })} style={{ marginRight: 8 }} />Агент анализирует смысловые текстовые поля</label>
+      <div style={{ color: 'var(--text-muted)', fontSize: 12, margin: '5px 0 10px' }}>Агент может предлагать изменения сводки, Timeline и связанных страниц, но не редактирует Markdown напрямую.</div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-        <label>Semantic fields<textarea rows={5} value={policy.agent_semantic_fields_text} onChange={e => update({ agent_semantic_fields_text: e.target.value })} placeholder={'comment\nmanager_note\ndescription'} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} /></label>
-        <label>Confidence threshold<input type="number" min="0" max="1" step="0.05" value={policy.agent_confidence_threshold} onChange={e => update({ agent_confidence_threshold: Number(e.target.value) })} /><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Below threshold → review or no proposal.</span></label>
-        <label>Agent proposals<select value={policy.agent_approval} onChange={e => update({ agent_approval: e.target.value === 'auto_high_confidence' ? 'auto_high_confidence' : 'review' })}><option value="review">Always require review</option><option value="auto_high_confidence">Auto only above threshold</option></select><label style={{ marginTop: 10 }}><input type="checkbox" checked={policy.cascade_approval === 'review'} onChange={e => update({ cascade_approval: e.target.checked ? 'review' : 'auto' })} style={{ marginRight: 8 }} />Review neighboring-page mutations</label></label>
+        <label>Смысловые поля<textarea rows={5} value={policy.agent_semantic_fields_text} onChange={e => update({ agent_semantic_fields_text: e.target.value })} placeholder={'comment\nmanager_note\ndescription'} style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }} /></label>
+        <label>Порог уверенности<input type="number" min="0" max="1" step="0.05" value={policy.agent_confidence_threshold} onChange={e => update({ agent_confidence_threshold: Number(e.target.value) })} /><span style={{ color: 'var(--text-muted)', fontSize: 11 }}>Ниже порога — ручная проверка или отсутствие предложения.</span></label>
+        <label>Предложения агента<select value={policy.agent_approval} onChange={e => update({ agent_approval: e.target.value === 'auto_high_confidence' ? 'auto_high_confidence' : 'review' })}><option value="review">Всегда требовать проверки</option><option value="auto_high_confidence">Автоматически только выше порога</option></select><label style={{ marginTop: 10 }}><input type="checkbox" checked={policy.cascade_approval === 'review'} onChange={e => update({ cascade_approval: e.target.checked ? 'review' : 'auto' })} style={{ marginRight: 8 }} />Проверять изменения соседних страниц</label></label>
       </div>
     </div>
 
     <div style={{ marginTop: 14, padding: 10, borderRadius: 8, background: readiness.length ? 'rgba(245,158,11,0.10)' : 'rgba(34,197,94,0.10)', color: readiness.length ? 'var(--warning)' : 'var(--success)' }}>
-      <strong>{readiness.length ? 'Policy needs attention' : 'Policy definition ready'}</strong>{readiness.length > 0 && <ul style={{ margin: '6px 0 0 18px' }}>{readiness.map(item => <li key={item}>{item}</li>)}</ul>}
+      <strong>{readiness.length ? 'Политика требует внимания' : 'Политика готова'}</strong>{readiness.length > 0 && <ul style={{ margin: '6px 0 0 18px' }}>{readiness.map(item => <li key={item}>{item}</li>)}</ul>}
     </div>
-    <details style={{ marginTop: 12 }}><summary style={{ cursor: 'pointer' }}>Persisted contract preview</summary><pre style={{ maxHeight: 360, overflow: 'auto', fontSize: 11 }}>{JSON.stringify(serialized, null, 2)}</pre></details>
+    <details style={{ marginTop: 12 }}><summary style={{ cursor: 'pointer' }}>Сохранённый контракт</summary><pre style={{ maxHeight: 360, overflow: 'auto', fontSize: 11 }}>{JSON.stringify(serialized, null, 2)}</pre></details>
   </section>;
 }

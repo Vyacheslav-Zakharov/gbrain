@@ -32,11 +32,11 @@ export function SourceIngestWizard({ busy, counts, onSelectArea, onSelectNode, o
   const [step, setStep] = useState(0);
   const [wizardErr, setWizardErr] = useState<string | null>(null);
   const steps: Step[] = useMemo(() => [
-    { area: 'connectors', node: 'connector:new', title: '1. Подключение', short: 'Подключение', cta: 'Открыть подключение', saveLabel: 'Сохранить подключение', body: 'Создай или выбери connector. Credentials сохраняются отдельно от article/base/transform definition; проверка credentials не выбирает таблицу.' },
-    { area: 'base_views', node: 'base_view:new', title: '2. Таблица источника', short: 'Таблица', cta: 'Открыть Base view', saveLabel: 'Сохранить источник', body: 'Создай Base view для конкретной AppSheet table/object, выполни Execute / Discover fields и выбери stable id, updated-at и carry-forward поля.' },
-    { area: 'transform_views', node: 'transform_view:new', title: '3. SQL-преобразование (опционально)', short: 'SQL', cta: 'Открыть Transform view', saveLabel: 'Сохранить преобразование', body: 'Если нужен join/filter/aggregate — создай Transform view. SQL read-only, preview должен показать строки до публикации. Если преобразование не нужно — переходи дальше.' },
-    { area: 'article_views', node: 'article_view:new', title: '4. Публикация', short: 'Статья', cta: 'Открыть Article view', saveLabel: 'Сохранить публикацию', body: 'Создай Article view: тип GBrain, target source, slug, identity и schema-template sections. Preview вернёт chain hash.' },
-    { area: 'article_views', node: 'section:article_views', title: '5. Preview → Approve → Trial batch', short: 'Проверка', cta: 'Проверить публикации', saveLabel: 'Preview и freeze', body: 'Сначала preview, затем approve/freeze snapshot, потом trial batch 20. Stale article views требуют повторного preview/approve.' },
+    { area: 'connectors', node: 'connector:new', title: '1. Подключение', short: 'Подключение', cta: 'Открыть подключение', saveLabel: 'Сохранить подключение', body: 'Создайте или выберите подключение. Секреты хранятся отдельно от определений источников, преобразований и публикаций; проверка секретов не выбирает таблицу.' },
+    { area: 'base_views', node: 'base_view:new', title: '2. Таблица источника', short: 'Таблица', cta: 'Открыть источник', saveLabel: 'Сохранить источник', body: 'Создайте источник для конкретной таблицы или объекта AppSheet, исследуйте поля и выберите стабильный ID, поле времени обновления и переносимые поля.' },
+    { area: 'transform_views', node: 'transform_view:new', title: '3. SQL-преобразование (опционально)', short: 'SQL', cta: 'Открыть преобразование', saveLabel: 'Сохранить преобразование', body: 'Если нужны JOIN, фильтрация или агрегация — создайте преобразование. SQL работает только для чтения; предпросмотр должен показать строки до публикации. Если преобразование не нужно — переходите дальше.' },
+    { area: 'article_views', node: 'article_view:new', title: '4. Публикация', short: 'Статья', cta: 'Открыть публикацию', saveLabel: 'Сохранить публикацию', body: 'Создайте публикацию: укажите тип GBrain, целевой источник, slug, правила идентификации и разделы schema-template. Предпросмотр вернёт chain hash.' },
+    { area: 'article_views', node: 'section:article_views', title: '5. Предпросмотр → утверждение → пробный запуск', short: 'Проверка', cta: 'Проверить публикации', saveLabel: 'Предпросмотр и фиксация', body: 'Сначала выполните предпросмотр, затем зафиксируйте snapshot и запустите пробный пакет из 20 записей. Устаревшие публикации требуют повторного предпросмотра и утверждения.' },
   ], [counts]);
   const current = steps[step] ?? steps[0];
   const go = (target = current) => {
@@ -70,7 +70,7 @@ export function SourceIngestWizard({ busy, counts, onSelectArea, onSelectNode, o
     navigateToStep(step + 1);
   };
   if (!open) {
-    return <button className="btn btn-primary" disabled={busy !== null} onClick={() => { setOpen(true); setWizardErr(null); navigateToStep(0); }}>+ Новая публикация</button>;
+    return <button className="btn btn-secondary" disabled={busy !== null} onClick={() => { setOpen(true); setWizardErr(null); navigateToStep(0); }}>+ Новая публикация</button>;
   }
   return <section className="source-ingest-wizard--open" style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 12, marginBottom: 14, background: 'rgba(15,23,42,0.52)' }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 10 }}>
@@ -83,7 +83,7 @@ export function SourceIngestWizard({ busy, counts, onSelectArea, onSelectNode, o
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 6, marginBottom: 10 }}>
       {steps.map((s, i) => <button key={s.title} className="btn btn-secondary" aria-current={i === step ? 'step' : undefined} onClick={() => navigateToStep(i)} style={{ textAlign: 'left', borderColor: i === step ? 'var(--accent)' : undefined }}>
         <span style={{ display: 'block' }}>{i < step ? '✓' : i === step ? '•' : '○'} {s.short}</span>
-        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 11 }}>{i === 0 ? `${counts.connectors} подключ.` : i === 1 ? `${counts.baseViews} источн.` : i === 2 ? `${counts.transformViews} преобр.` : i === 3 ? `${counts.articleViews} публ.` : `${counts.staleArticleViews} stale`}</span>
+        <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 11 }}>{i === 0 ? `${counts.connectors} подключ.` : i === 1 ? `${counts.baseViews} источн.` : i === 2 ? `${counts.transformViews} преобр.` : i === 3 ? `${counts.articleViews} публ.` : `${counts.staleArticleViews} устар.`}</span>
       </button>)}
     </div>
     <div style={{ borderLeft: '3px solid var(--accent)', padding: '2px 10px', marginBottom: 10 }}>

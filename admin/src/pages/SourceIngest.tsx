@@ -407,13 +407,13 @@ function quoteSqlIdentifier(value: string): string {
 
 function TransformResultPreview({ value }: { value: unknown }) {
   const v = asObj(value);
-  if (!value) return <div style={{ color: 'var(--text-muted)' }}>No transform preview yet.</div>;
+  if (!value) return <div style={{ color: 'var(--text-muted)' }}>Предпросмотр преобразования ещё не выполнен.</div>;
   const records = asArr<Record<string, unknown>>(v.records);
   if (v.error) return <div style={{ color: 'var(--error)' }}>{String(v.error)}</div>;
   const keys = Array.from(new Set(records.flatMap(r => Object.keys(asObj(r.data))))).slice(0, 12);
   return <div style={{ color: 'var(--text-secondary)' }}>
-    <div style={{ marginBottom: 8 }}><b>Transform result rows</b>: {val(v.count)}</div>
-    {records.length === 0 ? <div style={{ color: 'var(--warning)' }}>SQL returned no rows.</div> : <table><thead><tr><th>external_id</th>{keys.map(k => <th key={k}>{k}</th>)}</tr></thead><tbody>
+    <div style={{ marginBottom: 8 }}><b>Строки результата преобразования</b>: {val(v.count)}</div>
+    {records.length === 0 ? <div style={{ color: 'var(--warning)' }}>SQL не вернул строк.</div> : <table><thead><tr><th>external_id</th>{keys.map(k => <th key={k}>{k}</th>)}</tr></thead><tbody>
       {records.slice(0, 10).map((r, i) => {
         const data = asObj(r.data);
         return <tr key={i}><td className="mono">{val(r.external_id)}</td>{keys.map(k => <td key={k} className="mono">{val(data[k])}</td>)}</tr>;
@@ -424,13 +424,13 @@ function TransformResultPreview({ value }: { value: unknown }) {
 
 function DiscoveryPreview({ value }: { value: unknown }) {
   const d = asObj(value);
-  if (!value) return <div style={{ color: 'var(--text-muted)' }}>No discovery yet.</div>;
+  if (!value) return <div style={{ color: 'var(--text-muted)' }}>Исследование ещё не выполнено.</div>;
   const fields = asArr<Record<string, unknown>>(d.fields);
   return <div style={{ color: 'var(--text-secondary)' }}>
-    <div style={{ marginBottom: 8 }}><b>{val(d.connectorId)}</b> / {val(d.objectName)} · sampled {val(d.sampled)} · fields {fields.length}</div>
+    <div style={{ marginBottom: 8 }}><b>{val(d.connectorId)}</b> / {val(d.objectName)} · выборка {val(d.sampled)} · полей {fields.length}</div>
     <div style={{ marginBottom: 8 }}>IDs: {asArr(d.idCandidates).map(String).join(', ') || '—'} · Updated: {asArr(d.updatedAtCandidates).map(String).join(', ') || '—'}</div>
-    {asArr(d.warnings).length > 0 && <div style={{ color: 'var(--warning)', marginBottom: 8 }}>Warnings: {asArr(d.warnings).map(String).join(', ')}</div>}
-    <table><thead><tr><th>field</th><th>types</th><th>null</th><th>samples</th></tr></thead><tbody>
+    {asArr(d.warnings).length > 0 && <div style={{ color: 'var(--warning)', marginBottom: 8 }}>Предупреждения: {asArr(d.warnings).map(String).join(', ')}</div>}
+    <table><thead><tr><th>поле</th><th>типы</th><th>null</th><th>примеры</th></tr></thead><tbody>
       {fields.slice(0, 12).map((f, i) => <tr key={i}><td className="mono">{val(f.name)}</td><td>{asArr(f.observedTypes).join(', ')}</td><td>{typeof f.nullRatio === 'number' ? `${Math.round(f.nullRatio * 100)}%` : '—'}</td><td className="mono">{asArr(f.samples).slice(0, 3).map(val).join(' · ')}</td></tr>)}
     </tbody></table>
   </div>;
@@ -449,8 +449,8 @@ function SourceSampleRowsTable({ discovery, selected }: { discovery: unknown; se
   if (rows.length === 0 || fields.length === 0) return null;
   return <div style={{ gridColumn: '1 / -1', marginTop: 12 }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
-      <b>Sample rows</b>
-      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{rows.length} rows × {fields.length} selected columns</span>
+      <b>Строки выборки</b>
+      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{rows.length} строк × {fields.length} выбранных столбцов</span>
     </div>
     <div style={{ border: '1px solid var(--border)', borderRadius: 8, overflow: 'auto', maxHeight: 520, background: 'rgba(255,255,255,0.03)' }}>
       <table style={{ margin: 0, width: 'max-content', minWidth: '100%', borderCollapse: 'collapse' }}>
@@ -475,7 +475,7 @@ function FieldSelectionPanel({ discovery, selected, onChange }: { discovery: unk
   const d = asObj(discovery);
   const fields = asArr<Record<string, unknown>>(d.fields);
   if (fields.length === 0) {
-    return <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>Run Execute / Discover fields to show selectable source fields.</div>;
+    return <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>Выполните исследование, чтобы увидеть доступные поля источника.</div>;
   }
   const selectedSet = new Set(selected);
   const allNames = fields.map(f => String(f.name ?? '')).filter(Boolean);
@@ -503,12 +503,12 @@ function FieldSelectionPanel({ discovery, selected, onChange }: { discovery: unk
       <table style={{ margin: 0, width: '100%', borderCollapse: 'collapse' }}>
         <thead style={{ position: 'sticky', top: 0, zIndex: 1, background: 'var(--bg-secondary)' }}>
           <tr>
-            <th style={{ width: 48, textAlign: 'center' }}>Use</th>
+            <th style={{ width: 48, textAlign: 'center' }}>Выбор</th>
             <th style={{ width: 42, textAlign: 'center' }}>PK</th>
-            <th>Field name</th>
-            <th style={{ width: 150 }}>Field type</th>
-            <th>Samples</th>
-            <th style={{ width: 130 }}>Description</th>
+            <th>Имя поля</th>
+            <th style={{ width: 150 }}>Тип поля</th>
+            <th>Примеры</th>
+            <th style={{ width: 130 }}>Описание</th>
           </tr>
         </thead>
         <tbody>
@@ -541,7 +541,7 @@ function CatalogCount({ label, rows }: { label: string; rows: Array<Record<strin
 function CatalogSection({ title, rows, idKey, subtitle }: { title: string; rows: Array<Record<string, unknown>>; idKey: string; subtitle: (row: Record<string, unknown>) => string }) {
   return <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
     <h3 style={{ fontSize: 13, marginBottom: 8 }}>{title}</h3>
-    {rows.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>No catalog objects yet.</div>}
+    {rows.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>Объектов каталога пока нет.</div>}
     {rows.map(row => {
       const stale = row.stale === true;
       const enabled = row.enabled !== false;
@@ -557,7 +557,7 @@ function CatalogSection({ title, rows, idKey, subtitle }: { title: string; rows:
 function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; currentTargetSourceId: string }) {
   const raw = asObj(value);
   const d = Object.keys(asObj(raw.dry_run)).length > 0 ? asObj(raw.dry_run) : raw;
-  if (!value) return <div style={{ color: 'var(--text-muted)' }}>No dry-run yet.</div>;
+  if (!value) return <div style={{ color: 'var(--text-muted)' }}>Dry-run ещё не выполнен.</div>;
   const counts = asObj(d.counts);
   const stratifiedSamples = asObj(d.stratified_samples);
   const samplePages = asArr<Record<string, unknown>>(d.sample_pages).length > 0
@@ -1964,7 +1964,7 @@ export function SourceIngestPage() {
             <b>Влияние удаления и защита зависимостей</b>
             <button className="btn btn-secondary" onClick={() => setCatalogDeleteImpact(null)}>Очистить</button>
           </div>
-          <PreviewJson value={catalogDeleteImpact} empty="No delete impact yet." />
+          <PreviewJson value={catalogDeleteImpact} empty="Оценка последствий удаления ещё не выполнена." />
         </section>}
 
       <ConnectorEditor
