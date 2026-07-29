@@ -1,4 +1,5 @@
 import { chat as gatewayChat } from './ai/gateway.ts';
+import { resolveAiReviewRevisionModel } from './ai-review-model.ts';
 import type { BrainEngine } from './engine.ts';
 import { importFromContent } from './import-file.ts';
 import { serializeMarkdown } from './markdown.ts';
@@ -222,7 +223,7 @@ export async function createLlmTakeRevision(
   if (proposal.status !== 'pending') throw new ReviewConflictError('proposal is no longer pending', 'stale_status');
   const cleanComment = comment.trim();
   if (!cleanComment || cleanComment.length > 4000) throw new Error('comment must be 1..4000 characters');
-  const modelId = model || proposal.model_id;
+  const modelId = await resolveAiReviewRevisionModel(engine, model);
   const current = proposalToDraft(proposal);
   const cached = await engine.executeRaw<{ id: number; proposed_payload: TakeDraft; model_id: string }>(
     `SELECT id, proposed_payload, model_id FROM ai_review_revisions

@@ -1,4 +1,5 @@
 import { chat as gatewayChat } from './ai/gateway.ts';
+import { resolveAiReviewRevisionModel } from './ai-review-model.ts';
 import type { BrainEngine } from './engine.ts';
 import { ReviewConflictError } from './ai-review.ts';
 import { importFromContent } from './import-file.ts';
@@ -58,7 +59,7 @@ export async function createLlmConceptRevision(engine: BrainEngine, id: number, 
   if (proposal.status !== 'pending') throw new ReviewConflictError('concept proposal is no longer pending', 'stale_status');
   const clean = comment.trim();
   if (!clean || clean.length > 4000) throw new Error('comment must be 1..4000 characters');
-  const modelId = model || proposal.model_id;
+  const modelId = await resolveAiReviewRevisionModel(engine, model);
   const cached = await engine.executeRaw<{ id: number; proposed_payload: { proposed_markdown: string }; model_id: string }>(
     `SELECT id, proposed_payload, model_id FROM ai_review_revisions
       WHERE target_type='concept_proposal' AND target_id=$1 AND source_kind='llm'
