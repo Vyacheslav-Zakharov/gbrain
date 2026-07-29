@@ -56,12 +56,12 @@ export function BaseViewEditor({ busy, formSourceObject, formTableName, baseView
     </p>
     <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
       <button className="btn btn-secondary" disabled={busy !== null} onClick={seedBaseViewFromReview}>Seed from legacy discovery</button>
-      <button className="btn btn-secondary" disabled={busy !== null || !baseViewForm.connector_id || !baseViewForm.object_name} onClick={() => void discoverBaseView()}>{busy === 'catalog-base-view-discover' ? 'Discovering…' : 'Execute / Discover fields'}</button>
+      <button className="btn btn-primary source-ingest-context-primary" disabled={busy !== null || !baseViewForm.connector_id || !baseViewForm.object_name} onClick={() => void discoverBaseView()}>{busy === 'catalog-base-view-discover' ? 'Изучаем поля…' : 'Изучить поля'}</button>
       <button className="btn btn-secondary" disabled={busy !== null || !effectiveBaseViewId || !baseViewForm.connector_id || !baseViewForm.object_name} onClick={() => void saveBaseView()}>{busy === 'catalog-base-view' ? 'Saving…' : 'Save base view'}</button>
-      <button className="btn btn-secondary" disabled={busy !== null || !effectiveBaseViewId} onClick={() => void deleteBaseView()}>{busy === 'catalog-base-view-delete' ? 'Deleting…' : 'Delete base view'}</button>
-      <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>Next step: Execute/Discover will sample rows and fill field profile here.</span>
+      <button className="btn btn-danger" disabled={busy !== null || !effectiveBaseViewId} onClick={() => void deleteBaseView()}>{busy === 'catalog-base-view-delete' ? 'Удаляем…' : 'Удалить источник'}</button>
+      <span style={{ color: 'var(--text-muted)', alignSelf: 'center' }}>Следующий безопасный шаг — изучить поля и выбрать стабильный ID.</span>
     </div>
-    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) minmax(220px, 1fr)', gap: 14, alignItems: 'start' }}>
+    <div className="source-ingest-form-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) minmax(220px, 1fr)', gap: 14, alignItems: 'start' }}>
       <label>Base view id <span style={{ color: 'var(--warning)' }}>*</span>
         <input value={baseViewForm.base_view_id} onChange={e => setBaseViewForm(prev => ({ ...prev, base_view_id: e.target.value }))} placeholder={effectiveBaseViewId || 'bv-appsheet-avto-vehicles'} />
         <span style={{ display: 'block', color: 'var(--text-muted)', fontSize: 12 }}>Required. If empty, it will be generated as <code>{effectiveBaseViewId || 'bv-connector-object'}</code>.</span>
@@ -116,7 +116,9 @@ export function BaseViewEditor({ busy, formSourceObject, formTableName, baseView
       </label>
       {fieldSelectionPanel}
       {baseViewDiscovery !== null && asObj(baseViewDiscovery).ok !== false && sampleRowsPanel}
-      <label style={{ gridColumn: '1 / -1' }}>Row filter JSON <span title="Filter rules are ANDed. Supported ops: exists, not_exists, eq, neq, in, not_in, lt, lte, gt, gte." style={{ cursor: 'help', color: 'var(--accent)' }}>?</span>
+      <details style={{ gridColumn: '1 / -1', border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
+        <summary>Дополнительные настройки</summary>
+        <label style={{ display: 'block', marginTop: 10 }}>Row filter JSON <span title="Правила объединяются через AND. Поддерживаются: exists, not_exists, eq, neq, in, not_in, lt, lte, gt, gte." style={{ cursor: 'help', color: 'var(--accent)' }}>?</span>
         <details style={{ margin: '6px 0', color: 'var(--text-muted)', fontSize: 12 }}>
           <summary>How to write row filters</summary>
           <div style={{ marginTop: 6 }}>
@@ -128,13 +130,14 @@ export function BaseViewEditor({ busy, formSourceObject, formTableName, baseView
             Empty filter: <code>[]</code>.
           </div>
         </details>
-        <textarea rows={4} value={baseViewForm.row_filter_text} onChange={e => setBaseViewForm(prev => ({ ...prev, row_filter_text: e.target.value }))} placeholder='[{"field":"is_active","op":"eq","value":true}]' style={{ width: '100%' }} />
-      </label>
+          <textarea rows={4} value={baseViewForm.row_filter_text} onChange={e => setBaseViewForm(prev => ({ ...prev, row_filter_text: e.target.value }))} placeholder='[{"field":"is_active","op":"eq","value":true}]' style={{ width: '100%' }} />
+        </label>
+      </details>
     </div>
     {baseViewDiscovery !== null && asObj(baseViewDiscovery).ok === false && <div style={{ marginTop: 12, border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
       <h3 style={{ fontSize: 13, marginBottom: 8 }}>Discovery error</h3>
       <PreviewJson value={baseViewDiscovery} empty="No discovery result." />
     </div>}
-    {baseViewSaveResult !== null && <div style={{ marginTop: 12 }}><h3 style={{ fontSize: 13 }}>Saved base view</h3><PreviewJson value={baseViewSaveResult} empty="No save result." /></div>}
+    {baseViewSaveResult !== null && <details style={{ marginTop: 12 }}><summary>Технические детали</summary><PreviewJson value={baseViewSaveResult} empty="Нет результата сохранения." /></details>}
   </section>;
 }

@@ -251,11 +251,9 @@ function SourceIngestLineagePanel({
     { key: 'transform', label: 'Transform', id: transformId || (articleInputKind === 'transform_view' ? articleInputId : ''), node: (transformId || articleInputKind === 'transform_view') ? `transform_view:${transformId || articleInputId}` : 'section:transform_views', tone: (transformId || articleInputKind === 'transform_view') ? 'info' : 'muted' as const },
     { key: 'article', label: 'Article view', id: articleId, node: articleId ? `article_view:${articleId}` : 'section:article_views', tone: articleId ? (articleRow?.stale === true ? 'warn' : 'ok') : 'muted' as const },
   ];
-  return <section style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 10, marginBottom: 12, background: 'rgba(15,23,42,0.34)' }}>
-    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', marginBottom: 8 }}>
-      <b>Lineage / цепочка публикации</b>
-      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Активно: <code>{activeArea}</code> · <code>{activeNode}</code></span>
-    </div>
+  return <details className="source-ingest-lineage" style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 10, marginBottom: 12, background: 'rgba(15,23,42,0.34)' }}>
+    <summary>Цепочка публикации</summary>
+    <div style={{ color: 'var(--text-muted)', fontSize: 12, margin: '8px 0' }}>Активно: <code>{activeArea}</code> · <code>{activeNode}</code></div>
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
       {nodes.map((n, i) => <button key={n.key} type="button" className="btn btn-secondary" onClick={() => onSelectNode(n.node)} style={{ textAlign: 'left' }}>
         <span style={{ display: 'block' }}><MiniBadge tone={n.tone}>{i + 1}</MiniBadge>{n.label}</span>
@@ -265,7 +263,7 @@ function SourceIngestLineagePanel({
     {articleRow && <div style={{ marginTop: 8, color: 'var(--text-muted)', fontSize: 12 }}>
       input: <code>{val(articleRow.input_kind)}:{val(articleRow.input_id)}</code> · target: <code>{val(articleRow.target_source_id)}</code> · chain: <code>{shortHash(articleRow.current_chain_hash)}</code>
     </div>}
-  </section>;
+  </details>;
 }
 
 function parseJsonArray(text: string): unknown[] {
@@ -1912,7 +1910,7 @@ export function SourceIngestPage() {
         {err && <div style={{ color: 'var(--error)', marginTop: 6, fontSize: 12 }}><b>Ошибка:</b> {err}</div>}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 18, alignItems: 'start' }}>
+      <div className="source-ingest-layout" style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 18, alignItems: 'start' }}>
         <SourceIngestCatalogPanel
           tree={data.catalog_tree ?? { connectors: [], base_views: [], transform_views: [], article_views: [], schema: { read_only: true } }}
           activeArea={activeArea}

@@ -21,6 +21,7 @@ const sourceIngestUi = () => [
 const serveHttp = () => readFileSync(join(root, 'src/commands/serve-http.ts'), 'utf8');
 const operations = () => readFileSync(join(root, 'src/core/operations.ts'), 'utf8');
 const adminApi = () => readFileSync(join(root, 'admin/src/api.ts'), 'utf8');
+const adminCss = () => readFileSync(join(root, 'admin/src/index.css'), 'utf8');
 
 describe('source-ingest admin review gates', () => {
   test('article approval is pinned to dry-run current_chain_hash', () => {
@@ -31,7 +32,7 @@ describe('source-ingest admin review gates', () => {
 
     expect(ui).toContain('articleViewCurrentChainHash');
     expect(ui).toContain('Preview required before approval');
-    expect(ui).toContain('Approve / freeze snapshot');
+    expect(ui).toContain('Зафиксировать snapshot');
     expect(api).toContain('sourceIngestApproveArticleView');
     expect(server).toContain('current_chain_hash_required');
     expect(server).toContain('/admin/api/source-ingest/catalog/article-view/approve');
@@ -71,7 +72,7 @@ describe('source-ingest admin review gates', () => {
     expect(ui).toContain('На шаге «Сохранить и дальше»');
     expect(ui).toContain('Сохранить и дальше');
     expect(ui).toContain('Операция сохранения:');
-    expect(ui).toContain('Lineage / цепочка публикации');
+    expect(ui).toContain('<summary>Цепочка публикации</summary>');
     expect(ui).toContain('lastAppliedHashRoute.current = nextHash');
     expect(ui).toContain('if (window.location.hash === lastAppliedHashRoute.current) return;');
     expect(ui).toContain('const preserveExistingSections = opts.resetEmpty === true && articleDirty;');
@@ -136,6 +137,32 @@ describe('source-ingest admin review gates', () => {
     expect(server).toContain('change_intelligence');
     expect(server).toContain('source_article_view_approve');
     expect(server).toContain('source_ingest_tree');
+  });
+
+  test('source-ingest guided workflow reduces competing navigation and advanced noise', () => {
+    const ui = sourceIngestUi();
+    const css = adminCss();
+
+    expect(ui).toContain('navigateToStep');
+    expect(ui).toContain('onClick={() => navigateToStep(step - 1)}');
+    expect(ui).toContain('onClick={() => navigateToStep(step + 1)}');
+    expect(ui).not.toContain('onClick={() => setStep(Math.max(0, step - 1))}');
+    expect(ui).not.toContain('onClick={() => setStep(Math.min(steps.length - 1, step + 1))}');
+
+    expect(ui).toContain('<details className="source-ingest-lineage"');
+    expect(ui).toContain('<summary>Цепочка публикации</summary>');
+    expect(ui).toContain('<summary>Дополнительные настройки</summary>');
+    expect(ui).toContain('<summary>Технические детали</summary>');
+
+    expect(ui).toContain('btn btn-primary source-ingest-context-primary');
+    expect(ui).toContain("articleViewCurrentChainHash || tab === 'preview'");
+    expect(ui).not.toContain('done: counts.');
+    expect(ui).toContain('btn btn-danger');
+    expect(ui).toContain('source-ingest-layout');
+    expect(ui).toContain('source-ingest-article-definition');
+    expect(css).toContain('.source-ingest-layout { grid-template-columns: minmax(0, 1fr) !important; }');
+    expect(css).toContain('.source-ingest-form-grid { grid-template-columns: minmax(0, 1fr) !important; }');
+    expect(css).toContain('main:has(> .source-ingest-wizard--open) .source-ingest-context-primary { display: none; }');
   });
 
   test('connector registry exposes implemented v1 connector kinds', () => {
