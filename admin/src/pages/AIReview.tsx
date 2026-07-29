@@ -79,6 +79,11 @@ export function AIReviewPage() {
       setError(null);
       if (!data.rows?.some((r: Proposal) => r.id === selectedId)) setSelectedId(null);
     } catch (e) {
+      setRows([]);
+      setTotal(0);
+      setSelectedId(null);
+      setDetail(null);
+      setDraft(null);
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
@@ -115,6 +120,7 @@ export function AIReviewPage() {
 
   const changeStatus = (value: Status) => {
     if (diff.length > 0 && !confirm('Discard unsaved draft changes?')) return;
+    setRows([]); setTotal(0); setError(null);
     setSelectedId(null); setMobileDetail(false); setStatus(value);
   };
 

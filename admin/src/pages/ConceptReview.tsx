@@ -25,10 +25,16 @@ export function ConceptReviewPage() {
   const detailRequest = useRef(0);
 
   const load = async () => {
-    const result = await api.aiReviewConcepts({ status, q: query, limit: 200 });
-    setRows(result.rows || []); setTotal(result.total || 0);
+    try {
+      const result = await api.aiReviewConcepts({ status, q: query, limit: 200 });
+      setRows(result.rows || []); setTotal(result.total || 0); setError('');
+    } catch (e: any) {
+      setRows([]); setTotal(0); setSelected(null); setDetail(null);
+      setError(e instanceof Error ? e.message : String(e));
+      throw e;
+    }
   };
-  useEffect(() => { load().catch(e => setError(e.message)); }, [status, query]);
+  useEffect(() => { load().catch(() => undefined); }, [status, query]);
   useEffect(() => {
     if (selected == null) { setDetail(null); return; }
     const request = ++detailRequest.current;
@@ -62,7 +68,7 @@ export function ConceptReviewPage() {
   };
 
   return <div className="ai-review-page">
-    <div className="ai-review-toolbar"><h2>Concept Review</h2><select value={status} onChange={e => { setSelected(null); setDetail(null); setMobileDetail(false); setOverwrite(false); setStatus(e.target.value); }}><option>pending</option><option>accepted</option><option>rejected</option></select><input placeholder="Search" value={query} onChange={e => setQuery(e.target.value)} /><span>{rows.length}/{total}</span></div>
+    <div className="ai-review-toolbar"><h2>Concept Review</h2><select value={status} onChange={e => { setRows([]); setTotal(0); setError(''); setSelected(null); setDetail(null); setMobileDetail(false); setOverwrite(false); setStatus(e.target.value); }}><option>pending</option><option>accepted</option><option>rejected</option></select><input placeholder="Search" value={query} onChange={e => setQuery(e.target.value)} /><span>{rows.length}/{total}</span></div>
     {error && <div className="ai-review-error">{error}</div>}
     <div className={`ai-review-grid ${mobileDetail ? 'show-detail' : ''}`}>
       <div className="proposal-list">{rows.map(row => <button key={row.id} className={selected === row.id ? 'selected' : ''} onClick={() => choose(row.id)}><b>#{row.id} {row.page_slug}</b><small>{row.source_id} · {row.status}</small></button>)}</div>

@@ -1,5 +1,14 @@
 const BASE = '';
 
+export function adminApiErrorMessage(body: unknown, status: number): string {
+  if (body && typeof body === 'object') {
+    const payload = body as { message?: unknown; error?: unknown };
+    if (typeof payload.message === 'string' && payload.message.trim()) return payload.message;
+    if (typeof payload.error === 'string' && payload.error.trim()) return payload.error;
+  }
+  return `HTTP ${status}`;
+}
+
 // v0.26.3 trust model (D11 + D12): the admin UI does NOT cache the
 // bootstrap token in browser JS state. On 401, redirect to login —
 // no auto-reauth via saved token, no localStorage/sessionStorage read.
@@ -17,7 +26,7 @@ async function apiFetch(path: string, options?: RequestInit) {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `HTTP ${res.status}`);
+    throw new Error(adminApiErrorMessage(body, res.status));
   }
   return res.json();
 }
