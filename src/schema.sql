@@ -1521,8 +1521,11 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   predicted_brier             REAL,
   predicted_brier_bucket_n    INTEGER
 );
+-- Upgrade-safe bootstrap index: existing pre-131 tables do not yet have
+-- claim_hash. Migration 131 adds/backfills that column and atomically replaces
+-- this index with the per-claim five-column form.
 CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx
-  ON take_proposals (source_id, page_slug, content_hash, prompt_version, claim_hash);
+  ON take_proposals (source_id, page_slug, content_hash, prompt_version);
 CREATE INDEX IF NOT EXISTS take_proposals_pending_idx
   ON take_proposals (source_id, status, proposed_at DESC)
   WHERE status = 'pending';
