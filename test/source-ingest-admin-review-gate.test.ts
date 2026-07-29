@@ -242,6 +242,30 @@ describe('source-ingest admin review gates', () => {
     expect(coordinator).toContain("return (await runStep('schema-proposal'");
   });
 
+  test('source-ingest bootstrap isolates overview/schema loading and preserves primary errors', () => {
+    const hookPath = join(root, 'admin/src/pages/source-ingest/useSourceIngestBootstrap.ts');
+    const orchestrationPath = join(root, 'admin/src/pages/source-ingest/sourceIngestBootstrap.ts');
+    const coordinator = readFileSync(join(root, 'admin/src/pages/SourceIngest.tsx'), 'utf8');
+
+    expect(existsSync(hookPath)).toBe(true);
+    expect(existsSync(orchestrationPath)).toBe(true);
+    if (!existsSync(hookPath) || !existsSync(orchestrationPath)) return;
+    const hook = readFileSync(hookPath, 'utf8');
+    const orchestration = readFileSync(orchestrationPath, 'utf8');
+    expect(orchestration).toContain('export async function loadBootstrapSources');
+    expect(orchestration).toContain('let primaryError: string | null = null');
+    expect(orchestration).toContain("schema_view_unavailable: ${toErrorMessage(error)}");
+    expect(orchestration).toContain('if (primaryError === null)');
+    expect(hook).toContain('export function useSourceIngestBootstrap');
+    expect(hook).toContain("import { loadBootstrapSources } from './sourceIngestBootstrap';");
+    expect(coordinator).toContain("import { useSourceIngestBootstrap } from './source-ingest/useSourceIngestBootstrap';");
+    expect(coordinator).toContain('const { data, schemaWorkbench, load, refreshCatalogTree } = useSourceIngestBootstrap({');
+    expect(coordinator).not.toContain('const [data, setData] = useState');
+    expect(coordinator).not.toContain('const [schemaWorkbench, setSchemaWorkbench] = useState');
+    expect(coordinator).not.toContain('const load = async');
+    expect(coordinator).not.toContain('const refreshCatalogTree = async');
+  });
+
   test('connector registry exposes implemented v1 connector kinds', () => {
     const connectors = sourceIngestConnectorDescriptors();
     expect(connectors.map(c => c.id)).toEqual(['appsheet-vehicles', 'postgres', 'fake-source']);

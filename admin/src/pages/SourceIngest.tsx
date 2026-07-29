@@ -8,8 +8,9 @@ import { SchemaWorkbench } from './source-ingest/SchemaWorkbench';
 import { SourceIngestCatalogPanel } from './source-ingest/SourceIngestCatalogPanel';
 import { SourceIngestWizard } from './source-ingest/SourceIngestWizard';
 import { TransformViewEditor } from './source-ingest/TransformViewEditor';
-import { asArr, asObj, MiniBadge, shortHash, type CatalogArea, type SourceIngestCatalogTree, val } from './source-ingest/shared';
+import { asArr, asObj, MiniBadge, shortHash, type CatalogArea, val } from './source-ingest/shared';
 import { useAsyncActionRunner } from './source-ingest/useAsyncActionRunner';
+import { useSourceIngestBootstrap } from './source-ingest/useSourceIngestBootstrap';
 
 type ConnectorChoice = {
   id: string;
@@ -25,28 +26,6 @@ type ConnectorChoice = {
   safety?: string[];
 };
 
-interface SourceIngestOverview {
-  connectors: Array<{
-    id: string;
-    kind?: string;
-    displayName: string;
-    object: string;
-    supportsChangedSince: boolean;
-    credentialMode: string;
-    status?: string;
-    requiredKeys?: string[];
-    requiredEnv?: string[];
-    fields?: Array<{ key: string; label: string; defaultValue: string }>;
-    safety?: string[];
-  }>;
-  profiles: { rows: Array<{ profile_id: string; status: string; current_version: number; profile_json: unknown }>; count: number };
-  status: { rows: Array<Record<string, unknown>>; summary?: Record<string, unknown> };
-  refresh: { count: number; due?: Array<Record<string, unknown>> };
-  connector_configs?: { rows: Array<Record<string, unknown>>; count: number };
-  source_tables?: Array<Record<string, unknown>>;
-  catalog_tree?: SourceIngestCatalogTree;
-  sources: Array<{ id: string; name: string; path?: string; federated?: boolean }>;
-}
 
 interface ReviewForm {
   connector_id: string;
@@ -602,9 +581,12 @@ function DryRunPreview({ value, currentTargetSourceId }: { value: unknown; curre
 }
 
 export function SourceIngestPage() {
-  const [data, setData] = useState<SourceIngestOverview | null>(null);
   const { busy, error: err, setError: setErr, run: runStep } = useAsyncActionRunner();
   const [selectedProfile, setSelectedProfile] = useState<string>('');
+  const { data, schemaWorkbench, load, refreshCatalogTree } = useSourceIngestBootstrap({
+    setError: setErr,
+    setSelectedProfile,
+  });
   const [report, setReport] = useState<unknown>(null);
   const [discovery, setDiscovery] = useState<unknown>(null);
   const [draft, setDraft] = useState<unknown>(null);
@@ -687,7 +669,6 @@ export function SourceIngestPage() {
   const [articleViewRuns, setArticleViewRuns] = useState<unknown>(null);
   const [articleViewRunResult, setArticleViewRunResult] = useState<unknown>(null);
   const [articleTemplate, setArticleTemplate] = useState<unknown>(null);
-  const [schemaWorkbench, setSchemaWorkbench] = useState<unknown>(null);
   const [schemaType, setSchemaType] = useState('');
   const [schemaTypeExplain, setSchemaTypeExplain] = useState<unknown>(null);
   const [schemaTypeCard, setSchemaTypeCard] = useState<unknown>(null);
@@ -695,31 +676,7 @@ export function SourceIngestPage() {
   const [activeNode, setActiveNode] = useState('section:connectors');
   const lastAppliedHashRoute = useRef('');
 
-  const load = async () => {
-    setErr(null);
-    try {
-      const out = await api.sourceIngestOverview();
-      setData(out);
-      setErr(null);
-      const firstProfile = out?.profiles?.rows?.[0]?.profile_id;
-      if (!selectedProfile && firstProfile) setSelectedProfile(firstProfile);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    }
-    try {
-      setSchemaWorkbench(await api.sourceIngestSchemaView());
-    } catch (e) {
-      setErr(prev => prev ?? `schema_view_unavailable: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
-  const refreshCatalogTree = async () => {
-    const tree = await api.sourceIngestCatalogTree();
-    setData(prev => prev ? { ...prev, catalog_tree: tree } : prev);
-    return tree;
-  };
-
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); }, [load]);
 
   const loadArticleTemplate = async (type: string, opts: { resetEmpty?: boolean } = {}) => {
     if (!type.trim()) return;
