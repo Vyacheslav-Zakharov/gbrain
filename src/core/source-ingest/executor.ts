@@ -317,8 +317,28 @@ async function reconcileSourceGraphLinks(
   sourceId: string,
   current: LinkBatchInput[],
 ): Promise<{ created: number; removed: number }> {
-  const ownerFields = (profile.links || []).map(rule => `${profile.profile_id}:${rule.id}`);
+  const rules = profile.links || [];
+  const ownerFields = rules.map(rule => `${profile.profile_id}:${rule.id}`);
   if (ownerFields.length === 0) return { created: 0, removed: 0 };
+
+  // One-time adoption of pre-scoping Source Ingest edges. The legacy projection
+  // stored only rule.id in origin_field, so addLinksBatch cannot create a scoped
+  // duplicate because relation uniqueness intentionally ignores provenance.
+  // Claim only this profile's rule ids on the page currently owned by the run;
+  // manual/markdown/mention edges and another profile's scoped edges are untouched.
+  const legacyRuleIds = rules.map(rule => rule.id);
+  await engine.executeRaw(
+    `UPDATE links l
+        SET context = 'source-ingest profile ' || $3 || ' rule ' || l.origin_field,
+            origin_field = $3 || ':' || l.origin_field
+       FROM pages origin
+      WHERE origin.id = l.from_page_id
+        AND origin.slug = $1 AND origin.source_id = $2
+        AND l.link_source = 'source-ingest'
+        AND l.origin_field = ANY($4::text[])`,
+    [fromSlug, sourceId, profile.profile_id, legacyRuleIds],
+  );
+
   const existing = await engine.executeRaw<{ id: number; to_slug: string; to_source_id: string; link_type: string; origin_field: string }>(
     `SELECT l.id, target.slug AS to_slug, target.source_id AS to_source_id, l.link_type, l.origin_field
        FROM links l
