@@ -157,7 +157,8 @@ export function applyBacklinkBoost(
   for (const r of results) {
     if (!Number.isFinite(r.score)) continue;
     if (floorThreshold !== undefined && r.score < floorThreshold) continue;
-    const count = counts.get(r.slug) ?? 0;
+    const key = `${r.source_id ?? 'default'}::${r.slug}`;
+    const count = counts.get(key) ?? 0;
     if (count > 0) {
       const factor = 1.0 + BACKLINK_BOOST_COEF * Math.log(1 + count);
       r.score *= factor;
@@ -345,6 +346,8 @@ export const DEFAULT_TITLE_BOOST = 1.25;
  */
 export interface PostFusionOpts {
   applyBacklinks: boolean;
+  /** Accessible source IDs for backlink FROM-side scoping. Undefined means trusted/local all-source access. */
+  accessibleSources?: string[];
   salience: 'off' | 'on' | 'strong';
   recency: 'off' | 'on' | 'strong';
   decayMap?: import('./recency-decay.ts').RecencyDecayMap;
@@ -390,6 +393,8 @@ export interface PostFusionOpts {
    * wave via search-stats.
    */
   onScoreDistribution?: (dist: import('./graph-signals.ts').ScoreDistribution) => void;
+  /** Trusted-only disclosure gate for exact cross-source graph hit counts. */
+  graphSignalsExposeCrossSourceHits?: boolean;
   /**
    * T2 — the raw query string, needed by the title-phrase boost stage.
    * Undefined disables the stage (e.g. image-only queries).
@@ -430,8 +435,18 @@ export async function runPostFusionStages(
   // Backlink stage (existing behavior, preserved).
   if (opts.applyBacklinks) {
     try {
-      const slugs = Array.from(new Set(results.map(r => r.slug)));
-      const counts = await engine.getBacklinkCounts(slugs);
+      const refs = Array.from(
+        new Map(
+          results.map(r => [
+            `${r.source_id ?? 'default'}::${r.slug}`,
+            { slug: r.slug, source_id: r.source_id ?? 'default' },
+          ]),
+        ).values(),
+      );
+      const counts = await engine.getBacklinkCounts(
+        refs,
+        opts.accessibleSources ? { sourceIds: opts.accessibleSources } : undefined,
+      );
       applyBacklinkBoost(results, counts, floorThreshold);
     } catch {
       // Non-fatal; preserves the existing pre-v0.29.1 contract.
@@ -499,6 +514,7 @@ export async function runPostFusionStages(
         floorThreshold,
         onMeta: opts.onGraphMeta,
         onScoreDistribution: opts.onScoreDistribution,
+        exposeCrossSourceHits: opts.graphSignalsExposeCrossSourceHits === true,
       });
     } catch {
       // Non-fatal; preserves the per-stage contract.
@@ -968,6 +984,7 @@ export async function hybridSearch(
         : (intentRecency ?? suggestions.suggestedRecency));
   const postFusionOpts: PostFusionOpts = {
     applyBacklinks: true,
+    accessibleSources: opts?.sourceIds ?? (opts?.sourceId ? [opts.sourceId] : undefined),
     salience: salienceMode,
     recency: recencyMode,
     // v0.35.6.0 — floor-ratio gate threaded from resolved mode. Default
@@ -980,6 +997,7 @@ export async function hybridSearch(
     // Without this thread, the entire graph-signals wave is dead code —
     // codex outside-voice caught the missing wire pre-merge.
     graphSignalsEnabled: resolvedMode.graph_signals,
+    graphSignalsExposeCrossSourceHits: opts?.graphSignalsExposeCrossSourceHits === true,
     // T2 — title-phrase boost threaded from resolved mode (`title_boost`).
     // The raw query drives the matcher; default factor when the knob is unset.
     query,

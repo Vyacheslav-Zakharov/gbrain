@@ -5,28 +5,73 @@ import { AgentsPage } from './pages/Agents';
 import { RequestLogPage } from './pages/RequestLog';
 import { CalibrationPage } from './pages/Calibration';
 import { JobsWatchPage } from './pages/JobsWatch';
+import { ActivityPage } from './pages/Activity';
+import { SourceIngestPage } from './pages/SourceIngest';
+import { AIReviewPage } from './pages/AIReview';
+import { ConceptReviewPage } from './pages/ConceptReview';
 import { api } from './api';
 
-type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs';
+type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'ai-review' | 'concept-review' | 'jobs' | 'activity' | 'source-ingest';
+
+const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: string }> = [
+  { page: 'dashboard', label: 'Обзор', icon: '▣' },
+  { page: 'agents', label: 'Агенты', icon: '◉' },
+  { page: 'log', label: 'Журнал запросов', icon: '≋' },
+  { page: 'calibration', label: 'Калибровка', icon: '◌' },
+  { page: 'ai-review', label: 'Проверка AI', icon: '✓' },
+  { page: 'concept-review', label: 'Проверка концепций', icon: '◇' },
+  { page: 'jobs', label: 'Задания', icon: '⚙' },
+  { page: 'activity', label: 'Активность', icon: '◫' },
+  { page: 'source-ingest', label: 'Импорт данных', icon: '⇄' },
+];
 
 function getPage(): Page {
-  const hash = window.location.hash.replace('#', '') || 'dashboard';
-  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs'].includes(hash)) return hash as Page;
+  const hash = window.location.hash.replace(/^#/, '') || 'dashboard';
+  const topLevel = hash.split('/')[0];
+  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'ai-review', 'concept-review', 'jobs', 'activity', 'source-ingest'].includes(topLevel)) return topLevel as Page;
   return 'dashboard';
 }
 
 export function App() {
   const [page, setPage] = useState<Page>(getPage);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('gbrain-admin-sidebar-collapsed') === '1');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [pendingReviewCount, setPendingReviewCount] = useState<number | null>(null);
 
   useEffect(() => {
-    const onHash = () => setPage(getPage());
+    const onHash = () => {
+      setPage(getPage());
+      setMobileNavOpen(false);
+    };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('gbrain-admin-sidebar-collapsed', sidebarCollapsed ? '1' : '0');
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    let alive = true;
+    const refreshCount = () => {
+      void api.aiReviewProposals({ status: 'pending', limit: 1 })
+        .then(data => { if (alive) setPendingReviewCount(Number(data.total ?? 0)); })
+        .catch(() => { if (alive) setPendingReviewCount(null); });
+    };
+    refreshCount();
+    const timer = window.setInterval(refreshCount, 60_000);
+    window.addEventListener('focus', refreshCount);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', refreshCount);
+    };
   }, []);
 
   const navigate = (p: Page) => {
     window.location.hash = p;
     setPage(p);
+    setMobileNavOpen(false);
   };
 
   if (page === 'login') {
@@ -34,7 +79,7 @@ export function App() {
   }
 
   const handleSignOutEverywhere = async () => {
-    if (!confirm('Sign out every active admin session, including other browsers and tabs? Each one will need to re-authenticate via a fresh magic link.')) {
+    if (!confirm('Завершить все активные админ-сессии, включая другие браузеры и вкладки? Для повторного входа потребуется новая ссылка.')) {
       return;
     }
     try {
@@ -46,37 +91,53 @@ export function App() {
   };
 
   return (
-    <div className="app">
-      <nav className="sidebar">
-        <div className="sidebar-logo">GBrain</div>
-        <div className="sidebar-nav">
-          <a className={`nav-item ${page === 'dashboard' ? 'active' : ''}`}
-             onClick={() => navigate('dashboard')}>Dashboard</a>
-          <a className={`nav-item ${page === 'agents' ? 'active' : ''}`}
-             onClick={() => navigate('agents')}>Agents</a>
-          <a className={`nav-item ${page === 'log' ? 'active' : ''}`}
-             onClick={() => navigate('log')}>Request Log</a>
-          <a className={`nav-item ${page === 'calibration' ? 'active' : ''}`}
-             onClick={() => navigate('calibration')}>Calibration</a>
-          <a className={`nav-item ${page === 'jobs' ? 'active' : ''}`}
-             onClick={() => navigate('jobs')}>Jobs Watch</a>
+    <div className={`app ${sidebarCollapsed ? 'sidebar-collapsed' : ''} ${mobileNavOpen ? 'mobile-nav-open' : ''}`}>
+      <button
+        className="mobile-nav-toggle"
+        type="button"
+        onClick={() => setMobileNavOpen(open => !open)}
+        aria-expanded={mobileNavOpen}
+        aria-controls="admin-sidebar"
+        aria-label={mobileNavOpen ? 'Закрыть меню' : 'Открыть меню'}
+      >
+        {mobileNavOpen ? '×' : '☰'}
+      </button>
+      {mobileNavOpen && <button className="mobile-nav-backdrop" type="button" aria-label="Закрыть меню" onClick={() => setMobileNavOpen(false)} />}
+      <nav id="admin-sidebar" className="sidebar" aria-label="Навигация администратора">
+        <div className="sidebar-topbar">
+          <div className="sidebar-logo" title="GBrain">{sidebarCollapsed ? 'GB' : 'GBrain'}</div>
+          <button
+            className="sidebar-toggle"
+            type="button"
+            onClick={() => setSidebarCollapsed(v => !v)}
+            aria-label={sidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню'}
+            title={sidebarCollapsed ? 'Развернуть меню' : 'Свернуть меню'}
+          >
+            {sidebarCollapsed ? '›' : '‹'}
+          </button>
         </div>
-        <div style={{ marginTop: 'auto', padding: '16px 12px', borderTop: '1px solid var(--border)' }}>
+        <div className="sidebar-nav">
+          {NAV_ITEMS.map(item => <a
+            key={item.page}
+            className={`nav-item ${page === item.page ? 'active' : ''}`}
+            onClick={() => navigate(item.page)}
+            title={item.label}
+          >
+            <span className="nav-icon" aria-hidden="true">{item.icon}</span>
+            <span className="nav-label">{item.label}</span>
+            {item.page === 'ai-review' && pendingReviewCount !== null && pendingReviewCount > 0 && (
+              <span className="nav-badge" aria-label={`${pendingReviewCount} ожидают проверки`}>{pendingReviewCount}</span>
+            )}
+          </a>)}
+        </div>
+        <div className="sidebar-footer">
           <button
             onClick={handleSignOutEverywhere}
-            style={{
-              background: 'transparent',
-              border: '1px solid var(--border)',
-              color: 'var(--text-secondary)',
-              padding: '6px 10px',
-              borderRadius: 6,
-              fontSize: 12,
-              cursor: 'pointer',
-              width: '100%',
-            }}
-            title="Revoke every active admin session — every browser, every tab"
+            className="sidebar-signout"
+            title="Завершить все активные админ-сессии"
           >
-            Sign out everywhere
+            <span className="nav-icon" aria-hidden="true">⎋</span>
+            <span className="nav-label">Выйти везде</span>
           </button>
         </div>
       </nav>
@@ -85,7 +146,11 @@ export function App() {
         {page === 'agents' && <AgentsPage />}
         {page === 'log' && <RequestLogPage />}
         {page === 'calibration' && <CalibrationPage />}
+        {page === 'ai-review' && <AIReviewPage />}
+        {page === 'concept-review' && <ConceptReviewPage />}
         {page === 'jobs' && <JobsWatchPage />}
+        {page === 'activity' && <ActivityPage />}
+        {page === 'source-ingest' && <SourceIngestPage />}
       </main>
     </div>
   );

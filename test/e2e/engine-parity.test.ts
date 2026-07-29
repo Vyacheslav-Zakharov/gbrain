@@ -588,7 +588,11 @@ describeBoth('Engine parity — relationalFanout', () => {
   }, 30_000);
 
   const shape = (rows: Awaited<ReturnType<BrainEngine['relationalFanout']>>) =>
-    rows.map(r => `${r.source_id}:${r.slug}:${r.hop}:${r.edge_count}:${r.via_link_types.join(',')}:${r.path.join('>')}:${r.canonical_chunk_id ?? 'null'}`);
+    // canonical_chunk_id is a DB-local surrogate key. Postgres setupDB() truncates
+    // tables between describe blocks without resetting sequences, while the fresh
+    // PGLite engine starts ids at 1. Parity here is whether a canonical chunk is
+    // attached, not whether two independent engines allocate the same numeric id.
+    rows.map(r => `${r.source_id}:${r.slug}:${r.hop}:${r.edge_count}:${r.via_link_types.join(',')}:${r.path.join('>')}:${r.canonical_chunk_id == null ? 'null' : 'chunk'}`);
 
   test('typed-edge fan-out is identical across engines', async () => {
     const opts = { direction: 'in' as const, linkTypes: ['invested_in'] };
@@ -673,11 +677,74 @@ describeBoth('Engine parity — federated sourceIds[] secondary reads (#2200)', 
     expect(pgOrigins).not.toContain('fed/outside');
   });
 
+  test('getLinks cross-source locked-stub redacts far endpoint and provenance', async () => {
+    const opts = {
+      sourceIds: ['beta'],
+      crossSourceEdges: { enabled: true, policy: { bySource: { default: 'locked-stub' as const } } },
+    };
+    const pg = await pgEngine.getLinks('fed/doc', opts);
+    const pglite = await pgliteEngine.getLinks('fed/doc', opts);
+    expect(pg).toEqual(pglite);
+    const locked = pg.find(l => l.locked);
+    expect(locked).toBeTruthy();
+    expect(locked!.from_slug).toBe('fed/doc');
+    expect(locked!.to_slug).toBeNull();
+    expect(locked!.context).toBeNull();
+    expect(locked!.link_source).toBeNull();
+    expect(locked!.origin_slug).toBeNull();
+    expect(locked!.origin_field).toBeNull();
+    expect(pg.some(l => l.to_slug === 'fed/target')).toBe(true);
+  });
+
+  test('getLinks cross-source hidden policy drops far endpoint rows', async () => {
+    const opts = {
+      sourceIds: ['beta'],
+      crossSourceEdges: { enabled: true, policy: { defaultPolicy: 'hidden' as const } },
+    };
+    const pg = await pgEngine.getLinks('fed/doc', opts);
+    const pglite = await pgliteEngine.getLinks('fed/doc', opts);
+    expect(pg).toEqual(pglite);
+    expect(pg.some(l => l.locked)).toBe(false);
+    expect(pg.map(l => l.to_slug).sort()).toEqual(['fed/target', 'fed/target']);
+  });
+
+  test('getLinks cross-source mode clears inaccessible origin provenance only', async () => {
+    const opts = {
+      sourceIds: ['beta'],
+      crossSourceEdges: { enabled: true, policy: { defaultPolicy: 'hidden' as const } },
+    };
+    const pg = await pgEngine.getLinks('fed/doc', opts);
+    const pglite = await pgliteEngine.getLinks('fed/doc', opts);
+    expect(pg).toEqual(pglite);
+    const originRedacted = pg.find(l => l.context === 'originleak');
+    expect(originRedacted).toBeTruthy();
+    expect(originRedacted!.to_slug).toBe('fed/target');
+    expect(originRedacted!.link_source).toBeNull();
+    expect(originRedacted!.origin_slug).toBeNull();
+    expect(originRedacted!.origin_field).toBeNull();
+  });
+
   test('getBacklinks identical under sourceIds[] (both endpoints scoped)', async () => {
     const pg = (await pgEngine.getBacklinks('fed/doc', grant)).map(l => l.from_slug).sort();
     const pglite = (await pgliteEngine.getBacklinks('fed/doc', grant)).map(l => l.from_slug).sort();
     expect(pg).toEqual(pglite);
     expect(pg).toEqual(['fed/target']);
+  });
+
+  test('getBacklinks cross-source locked-stub redacts far referrer', async () => {
+    const opts = {
+      sourceIds: ['beta'],
+      crossSourceEdges: { enabled: true, policy: { bySource: { default: 'locked-stub' as const } } },
+    };
+    const pg = await pgEngine.getBacklinks('fed/doc', opts);
+    const pglite = await pgliteEngine.getBacklinks('fed/doc', opts);
+    expect(pg).toEqual(pglite);
+    const locked = pg.find(l => l.locked);
+    expect(locked).toBeTruthy();
+    expect(locked!.from_slug).toBeNull();
+    expect(locked!.to_slug).toBe('fed/doc');
+    expect(locked!.context).toBeNull();
+    expect(pg.some(l => l.from_slug === 'fed/target')).toBe(true);
   });
 
   test('getTimeline identical under sourceIds[]', async () => {

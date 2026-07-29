@@ -30,9 +30,9 @@ export function RequestLogPage() {
 
   const timeAgo = (ts: string) => {
     const diff = Date.now() - new Date(ts).getTime();
-    if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`;
-    if (diff < 3600000) return `${Math.floor(diff / 60000)} min ago`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    if (diff < 60000) return `${Math.floor(diff / 1000)} сек. назад`;
+    if (diff < 3600000) return `${Math.floor(diff / 60000)} мин. назад`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)} ч. назад`;
     return new Date(ts).toLocaleDateString();
   };
 
@@ -40,13 +40,21 @@ export function RequestLogPage() {
 
   const formatParams = (params: Record<string, unknown> | null) => {
     if (!params) return null;
-    const { query, slug, partial, limit, ...rest } = params as any;
+    const { query, slug, partial, limit, declared_keys, unknown_key_count, approx_bytes, redacted, ...rest } = params as any;
     const parts: string[] = [];
     if (query) parts.push(`"${query}"`);
     if (slug) parts.push(slug);
     if (partial) parts.push(`~${partial}`);
     if (limit) parts.push(`limit=${limit}`);
-    if (Object.keys(rest).length > 0) parts.push(`+${Object.keys(rest).length} params`);
+    if (Array.isArray(declared_keys) && declared_keys.length > 0) {
+      parts.push(`keys=${declared_keys.join(',')}`);
+    } else if (redacted) {
+      parts.push('keys=none');
+    }
+    if (unknown_key_count) parts.push(`+${unknown_key_count} unknown`);
+    if (approx_bytes) parts.push(`~${approx_bytes}B`);
+    const restCount = Object.keys(rest).length;
+    if (!redacted && restCount > 0) parts.push(`+${restCount} params`);
     return parts.join(' ');
   };
 
@@ -57,29 +65,29 @@ export function RequestLogPage() {
   return (
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <h1 className="page-title" style={{ marginBottom: 0 }}>Request Log</h1>
+        <h1 className="page-title" style={{ marginBottom: 0 }}>Журнал запросов</h1>
         <select value={agentFilter} onChange={e => { setAgentFilter(e.target.value); setPage(1); }}
           style={{ background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)', borderRadius: 6, padding: '4px 8px', fontSize: 13 }}>
-          <option value="all">All agents</option>
+          <option value="all">Все агенты</option>
           {[...agentMap.entries()].map(([id, name]) => <option key={id} value={id}>{name}</option>)}
         </select>
       </div>
 
       {data.rows.length === 0 ? (
         <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-muted)' }}>
-          No requests yet.
+          Запросов пока нет.
         </div>
       ) : (
         <>
           <table>
             <thead>
               <tr>
-                <th>Time</th>
-                <th>Agent</th>
-                <th>Operation</th>
-                <th>Params</th>
-                <th>Latency</th>
-                <th>Status</th>
+                <th>Время</th>
+                <th>Агент</th>
+                <th>Операция</th>
+                <th>Параметры</th>
+                <th>Задержка</th>
+                <th>Статус</th>
               </tr>
             </thead>
             <tbody>
@@ -105,17 +113,17 @@ export function RequestLogPage() {
                     <tr>
                       <td colSpan={6} style={{ background: 'var(--bg-secondary, #0f0f1a)', padding: 16 }}>
                         <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: '6px 12px', fontSize: 13 }}>
-                          <span style={{ color: 'var(--text-muted)' }}>Time</span>
+                          <span style={{ color: 'var(--text-muted)' }}>Время</span>
                           <span>{new Date(r.created_at).toLocaleString()}</span>
-                          <span style={{ color: 'var(--text-muted)' }}>Agent</span>
+                          <span style={{ color: 'var(--text-muted)' }}>Агент</span>
                           <span className="mono">{r.token_name}</span>
-                          <span style={{ color: 'var(--text-muted)' }}>Operation</span>
+                          <span style={{ color: 'var(--text-muted)' }}>Операция</span>
                           <span className="mono">{r.operation}</span>
-                          <span style={{ color: 'var(--text-muted)' }}>Latency</span>
+                          <span style={{ color: 'var(--text-muted)' }}>Задержка</span>
                           <span>{r.latency_ms}ms</span>
                           {r.params && (
                             <>
-                              <span style={{ color: 'var(--text-muted)' }}>Params</span>
+                              <span style={{ color: 'var(--text-muted)' }}>Параметры</span>
                               <pre className="mono" style={{ margin: 0, whiteSpace: 'pre-wrap', fontSize: 12 }}>
                                 {JSON.stringify(r.params, null, 2)}
                               </pre>
@@ -123,7 +131,7 @@ export function RequestLogPage() {
                           )}
                           {r.error_message && (
                             <>
-                              <span style={{ color: 'var(--error, #ff6b6b)' }}>Error</span>
+                              <span style={{ color: 'var(--error, #ff6b6b)' }}>Ошибка</span>
                               <span style={{ color: 'var(--error, #ff6b6b)' }}>{r.error_message}</span>
                             </>
                           )}
@@ -137,10 +145,10 @@ export function RequestLogPage() {
           </table>
 
           <div className="pagination">
-            <span>Page {data.page} of {data.pages} ({data.total} total)</span>
+            <span>Страница {data.page} из {data.pages} · всего {data.total}</span>
             <div style={{ display: 'flex', gap: 8 }}>
-              <button disabled={data.page <= 1} onClick={() => setPage(p => p - 1)}>Previous</button>
-              <button disabled={data.page >= data.pages} onClick={() => setPage(p => p + 1)}>Next</button>
+              <button disabled={data.page <= 1} onClick={() => setPage(p => p - 1)}>Назад</button>
+              <button disabled={data.page >= data.pages} onClick={() => setPage(p => p + 1)}>Далее</button>
             </div>
           </div>
         </>

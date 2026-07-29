@@ -15,7 +15,7 @@ import type { Request, Response, NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
-import { randomBytes, createHash } from 'crypto';
+import { randomBytes, randomInt, createHash } from 'crypto';
 import { safeHexEqual } from '../core/timing-safe.ts';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -23,7 +23,7 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprot
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import type { BrainEngine } from '../core/engine.ts';
-import { operations, OperationError } from '../core/operations.ts';
+import { operations, operationsByName, OperationError } from '../core/operations.ts';
 import type { OperationContext, AuthInfo } from '../core/operations.ts';
 import { GBrainOAuthProvider, validateTokenEndpointAuthMethod } from '../core/oauth-provider.ts';
 import type { SqlQuery } from '../core/oauth-provider.ts';
@@ -43,6 +43,47 @@ import {
   type IngestionContentType,
   type IngestionEvent,
 } from '../core/ingestion/types.ts';
+import { connectorSecretConfigId, defaultSourceConnectorConfigId, getSourceConnectorSecretConfig, sourceConnectorSecretStatus, sourceTableSummariesFromConfigs } from '../core/source-ingest/connector-config.ts';
+import { buildProfileSampleRecords } from '../core/source-ingest/source-fetch.ts';
+import { profileHash } from '../core/source-ingest/store.ts';
+import { validateSourceIngestProfile } from '../core/source-ingest/profile-schema.ts';
+import { sourceIngestConnectorDescriptors } from '../core/source-ingest/connector-registry.ts';
+import { getSourceConnector } from '../core/source-ingest/connectors/fake.ts';
+import { recordSourceConnectorTest } from '../core/source-ingest/catalog.ts';
+import {
+  PortalSessionStore,
+  isPortalFileAllowed,
+  portalSessionCookieName,
+  resolvePortalPathSecure,
+} from '../core/portal-security.ts';
+import {
+  classifyPortalSearchMatch,
+  cleanPortalSearchSnippet,
+  comparePortalSearchResults,
+  isPortalCountedDocument,
+  isPortalTitlePrefixMatch,
+  isPortalVisibleDirectory,
+  type PortalSearchRank,
+} from '../portal-usability.ts';
+import { normalizeAlias } from '../core/search/alias-normalize.ts';
+import {
+  acceptTakeProposal,
+  createLlmTakeRevision,
+  createManualTakeRevision,
+  getTakeProposalReview,
+  listTakeProposals,
+  rejectTakeProposal,
+  ReviewConflictError,
+  type TakeProposalStatus,
+} from '../core/ai-review.ts';
+import {
+  acceptConceptProposal,
+  createManualConceptRevision,
+  createLlmConceptRevision,
+  getConceptProposalReview,
+  listConceptProposals,
+  rejectConceptProposal,
+} from '../core/concept-review.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -51,6 +92,20 @@ import {
  * 3s leaves 2s of headroom for TCP, response framing, and clock skew.
  */
 export const HEALTH_TIMEOUT_MS = 3000;
+
+/**
+ * Express delegates JSON responses to JSON.stringify, which throws on native
+ * bigint values returned by postgres.js for BIGINT columns. Preserve the
+ * numeric API contract for ordinary ids and avoid precision loss for values
+ * outside JavaScript's safe integer range.
+ */
+export function jsonBigIntReplacer(_key: string, value: unknown): unknown {
+  if (typeof value !== 'bigint') return value;
+  if (value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER)) {
+    return Number(value);
+  }
+  return value.toString();
+}
 
 /**
  * v0.36.1.x #1024: bootstrap token resolution.
@@ -521,6 +576,457 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   // Express 5 app
   const app = express();
+  app.set('json replacer', jsonBigIntReplacer);
+
+  const portalSessionTtlMs = 30 * 24 * 60 * 60 * 1000;
+  const portalSessions = new PortalSessionStore(
+    process.env.GBRAIN_PORTAL_SESSION_FILE || require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'portal_sessions.json'),
+    portalSessionTtlMs,
+  );
+  const isSecurePortalRequest = (req: express.Request): boolean => req.secure || issuerUrl.protocol === 'https:';
+  const portalCookieOptions = (req: express.Request, maxAge = portalSessionTtlMs) => ({
+    httpOnly: true,
+    secure: isSecurePortalRequest(req),
+    sameSite: 'lax' as const,
+    maxAge,
+    path: '/',
+  });
+  const portalSessionToken = (req: express.Request): string => {
+    const cookies = (req.cookies as Record<string, string> | undefined) || {};
+    return cookies.__Host_gbrain_portal || cookies['__Host-gbrain_portal'] || cookies.gbrain_portal || '';
+  };
+  const clearPortalSessionCookies = (req: express.Request, res: express.Response): void => {
+    res.clearCookie('__Host-gbrain_portal', { httpOnly: true, secure: true, sameSite: 'lax', path: '/' });
+    res.clearCookie('gbrain_portal', { httpOnly: true, secure: false, sameSite: 'lax', path: '/' });
+    // Remove the legacy unsigned identity cookie during the migration release.
+    res.clearCookie('session_user', { httpOnly: true, secure: isSecurePortalRequest(req), sameSite: 'lax', path: '/' });
+  };
+  const resolvePortalUser = (req: express.Request, res?: express.Response): string | null => {
+    const token = portalSessionToken(req);
+    const email = portalSessions.resolve(token);
+    if (!email && res && (token || (req.cookies as Record<string, string> | undefined)?.session_user)) {
+      clearPortalSessionCookies(req, res);
+    }
+    return email;
+  };
+  const issuePortalSession = (req: express.Request, res: express.Response, email: string): void => {
+    const oldToken = portalSessionToken(req);
+    if (oldToken) portalSessions.revoke(oldToken);
+    clearPortalSessionCookies(req, res);
+    const token = portalSessions.issue(email);
+    res.cookie(portalSessionCookieName(isSecurePortalRequest(req)), token, portalCookieOptions(req));
+  };
+
+// === CUSTOM PORTAL AND LOGIN WORKFLOWS ===
+
+const adminEmails = (() => {
+  const envStr = process.env.GBRAIN_ADMIN_EMAILS;
+  if (!envStr) return new Set<string>();
+  return new Set(String(envStr).toLowerCase().split(',').map(x => x.trim()).filter(Boolean));
+})();
+function isAdminEmail(email: string | undefined): boolean {
+  if (!email) return false;
+  return adminEmails.has(String(email).toLowerCase().trim());
+}
+
+const otpPepper = randomBytes(32).toString('hex');
+const pendingOtps = new Map<string, { codeHash: string; expiresAt: number; attempts: number }>();
+const hashPortalOtp = (email: string, code: string) => createHash('sha256').update(otpPepper).update('\0').update(email).update('\0').update(code).digest('hex');
+
+const userPermissionsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
+const accessRequestsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'access_requests.json');
+const onboardingSeenPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'portal_onboarding_seen.json');
+const readOnboardingSeen = () => {
+  const fs = require('fs');
+  try {
+    const p = onboardingSeenPath();
+    if (!fs.existsSync(p)) return {};
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (e3) {
+    console.error('[Portal] Failed to read portal_onboarding_seen.json:', e3);
+    return {};
+  }
+};
+const hasSeenPortalOnboarding = (email: string) => !!readOnboardingSeen()[String(email || '').trim().toLowerCase()];
+const markPortalOnboardingSeen = (email: string) => {
+  const seen = readOnboardingSeen();
+  seen[String(email || '').trim().toLowerCase()] = new Date().toISOString();
+  const fs = require('fs');
+  fs.writeFileSync(onboardingSeenPath(), JSON.stringify(seen, null, 2), 'utf8');
+};
+
+const sharedAccessArea = { id: "shared", sourceId: "shared", label: "Shared / Общая база", hint: "общие справочники, инструкции и корпоративная архитектура" };
+const internalAccessAreas = [
+  { id: "бухгалтерия", sourceId: "internal-accounting", label: "Бухгалтерия и финансы", hint: "финансы, сверки, платежи, налоги, управленческий учет" },
+  { id: "юридическая-служба", sourceId: "internal-legal", label: "Юридическая служба", hint: "договоры, претензии, суды, корпоративные документы" },
+  { id: "производство", sourceId: "internal-production", label: "Производство", hint: "внутренние показатели, сменные регламенты, технологические карты" },
+  { id: "ит", sourceId: "internal-it", label: "ИТ", hint: "интеграции, API, схемы данных, эксплуатация систем" },
+  { id: "кадры", sourceId: "internal-hr", label: "Кадры и HR", hint: "адаптация, роли, должностные требования, HR-процессы" },
+  { id: "снабжение-и-закупки", sourceId: "internal-procurement", label: "Снабжение и закупки", hint: "поставщики, условия закупок, заявки, контроль остатков" },
+  { id: "продажи-и-маркетинг", sourceId: "internal-sales-marketing", label: "Продажи и маркетинг", hint: "коммерческие правила, каналы спроса, аналитика продаж" },
+  { id: "охрана-труда-и-безопасность", sourceId: "internal-safety", label: "Охрана труда и безопасность", hint: "ОТиТБ, инциденты, инструктажи, чек-листы" },
+  { id: "руководство", sourceId: "internal-management", label: "Руководство и стратегия", hint: "закрытые планы, стратегические инициативы, протоколы" }
+];
+const managedAccessAreas = [sharedAccessArea, ...internalAccessAreas];
+const getUserPermissions = async (email: string) => {
+  const configPath = require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
+  try {
+    let data: any = {};
+    if (require('fs').existsSync(configPath)) {
+      data = JSON.parse(require('fs').readFileSync(configPath, 'utf8'));
+    }
+    if (data[email]) {
+      return {
+        source_id: data[email].source_id || 'shared',
+        federated_read: data[email].federated_read || ['shared'],
+        federated_write: data[email].federated_write || [data[email].source_id].filter(Boolean)
+      };
+    } else {
+      const emailPrefix = email.split('@')[0].trim().toLowerCase();
+      const sourceId = emailPrefix.replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-+|-+$/g, '');
+      return {
+        source_id: sourceId,
+        federated_read: ['shared'],
+        federated_write: [sourceId].filter(Boolean)
+      };
+    }
+  } catch (err) {
+    console.error(`[GBrain] Failed to read ${configPath}:`, err);
+    return {
+      source_id: 'shared',
+      federated_read: ['shared'],
+      federated_write: []
+    };
+  }
+};
+const managedAreaById = (areaId: string) => managedAccessAreas.find((a) => a.id === areaId);
+const managedSourceIdForArea = (areaId: string) => managedAreaById(areaId)?.sourceId || null;
+
+const escapeHtmlLocal = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;"
+}[ch] || ch));
+
+const requirePortalUser = (req: express.Request, res: express.Response): string | null => {
+    const userEmail = resolvePortalUser(req, res);
+    if (!userEmail) {
+      res.status(401).json({ error: "Unauthorized: login through GBrain first" });
+      return null;
+    }
+    return userEmail;
+  }
+
+const resolvePortalPath = (root: string, relativePathRaw: unknown, allowRoot = false): string | null =>
+  resolvePortalPathSecure(root, relativePathRaw, allowRoot);
+type PortalSourceRow = { id: string; name: string; local_path: string };
+type PortalAccessRow = {
+  area: string;
+  source_id: string;
+  read: boolean;
+  write: boolean;
+  requested_read?: boolean;
+  requested_write?: boolean;
+};
+type PortalAccessRequest = {
+  id: string;
+  email: string;
+  requested_at: string;
+  requests: PortalAccessRow[];
+  reason: string;
+  status: string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  decided_by?: string;
+  decided_at?: string;
+  approved_requests?: PortalAccessRow[];
+  denied_requests?: PortalAccessRow[];
+  rejection_reason?: string;
+};
+type PortalUserPermissions = {
+  source_id?: string;
+  federated_read?: string[];
+  federated_write?: string[];
+};
+
+const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, reasonRaw: unknown): Promise<void> => {
+    const selected = normalizeAccessRequestValues(rawValues);
+    if (selected.length === 0)
+      return;
+    const perms = await getUserPermissions(userEmail);
+    const existingRead = new Set(Array.isArray(perms.federated_read) ? perms.federated_read : []);
+    const existingWrite = new Set(Array.isArray(perms.federated_write) ? perms.federated_write : []);
+    if (perms.source_id) {
+      existingRead.add(perms.source_id);
+      existingWrite.add(perms.source_id);
+    }
+    const byArea = new Map<string, PortalAccessRow>();
+    for (const item of selected) {
+      const [area, level] = item.split(":");
+      if (!managedAccessAreas.some((a) => a.id === area))
+        continue;
+      const sourceId = managedSourceIdForArea(area);
+      if (!sourceId)
+        continue;
+      const current = byArea.get(area) || { area, source_id: sourceId, read: false, write: false };
+      if (level === "read")
+        current.read = true;
+      if (level === "write") {
+        current.write = true;
+        current.read = true;
+      }
+      byArea.set(area, current);
+    }
+    const requests = Array.from(byArea.values()).map((r4): PortalAccessRow | null => {
+      const sourceId = r4.source_id || managedSourceIdForArea(r4.area);
+      if (!sourceId)
+        return null;
+      const missingWrite = !!r4.write && !existingWrite.has(sourceId);
+      const missingRead = (!!r4.read || !!r4.write) && !existingRead.has(sourceId) && !missingWrite;
+      if (!missingRead && !missingWrite)
+        return null;
+      return { ...r4, source_id: sourceId, read: missingRead || missingWrite, write: missingWrite };
+    }).filter((row): row is PortalAccessRow => row !== null);
+    if (requests.length === 0)
+      return;
+    const fs = require("fs");
+    const path = require("path");
+    const requestPath = path.join(process.env.HOME || "/home/avers", ".gbrain", "access_requests.json");
+    let data: PortalAccessRequest[] = [];
+    try {
+      if (fs.existsSync(requestPath)) {
+        const parsed = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+        if (Array.isArray(parsed))
+          data = parsed;
+      }
+    } catch (e3) {
+      console.error("[Auth] Error reading access_requests.json:", e3);
+    }
+    const request2 = {
+      id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      email: userEmail,
+      requested_at: new Date().toISOString(),
+      requests,
+      reason: String(reasonRaw || "").trim().slice(0, 2000),
+      status: "pending",
+      approved_by: null,
+      approved_at: null
+    };
+    data.push(request2);
+    fs.writeFileSync(requestPath, JSON.stringify(data, null, 2), "utf8");
+    console.log(`[Auth] Saved access request ${request2.id} for ${userEmail}`);
+    try {
+      const body2 = [
+        `Новая заявка GBrain на доступ`,
+        ``,
+        `Сотрудник: ${userEmail}`,
+        `ID заявки: ${request2.id}`,
+        `Время: ${request2.requested_at}`,
+        ``,
+        `Запрошенные области:`,
+        ...requests.map((r4) => `- ${r4.area} (${r4.source_id}): ${r4.write ? "чтение + запись" : "чтение"}`),
+        ``,
+        `Причина:`,
+        request2.reason || "(не указана)",
+        ``,
+        `Админка заявок: ${publicUrl || "http://127.0.0.1:" + port}/admin/access-requests`,
+        ``,
+        `Файл заявок: ${requestPath}`
+      ].join(`
+`);
+      const { spawn: spawn5 } = require("child_process");
+      const proc = spawn5("/home/avers/.gbrain/send_access_request.py", [userEmail, body2], { detached: true, stdio: "ignore" });
+      proc.unref();
+    } catch (e3) {
+      console.error("[Auth] Failed to send access request notification:", e3);
+    }
+  }
+
+const normalizeAccessRequestValues = (raw: unknown): string[] => {
+    if (!raw)
+      return [];
+    const values2: unknown[] = Array.isArray(raw) ? raw : [raw];
+    return values2.map((v7) => String(v7)).filter(Boolean);
+  }
+
+const getAllowedSourceIdsForUser = async (email: string): Promise<string[]> => {
+    const perms = await getUserPermissions(email);
+    const ids = new Set<string>();
+    if (perms.source_id)
+      ids.add(perms.source_id);
+    for (const id of perms.federated_read || [])
+      ids.add(id);
+    return Array.from(ids).filter(Boolean);
+  }
+
+const getSourceRowsForUser = async (email: string): Promise<PortalSourceRow[]> => {
+    const allowed = await getAllowedSourceIdsForUser(email);
+    const rows: PortalSourceRow[] = [];
+    for (const id of allowed) {
+      try {
+        const found = await sql`SELECT id, name, local_path FROM sources WHERE id = ${id} LIMIT 1`;
+        if (found[0]?.local_path)
+          rows.push(found[0] as unknown as PortalSourceRow);
+      } catch (e3) {
+        console.error(`[Portal] Failed to read source ${id}:`, e3);
+      }
+    }
+    return rows;
+  }
+
+const loadJsonFileLocal = <T>(filePath: string, fallback: T): T => {
+    const fs = require("fs");
+    try {
+      if (!fs.existsSync(filePath))
+        return fallback;
+      return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+    } catch (e3) {
+      console.error(`[GBrain] Failed to read ${filePath}:`, e3);
+      return fallback;
+    }
+  }
+
+const writeJsonFileLocal = (filePath: string, value: unknown): void => {
+    const fs = require("fs");
+    fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+  }
+
+const personalSourceIdFromEmail = (email: string): string => {
+    const prefix = String(email || "").split("@")[0].trim().toLowerCase();
+    return prefix.replace(/[^a-z0-9]/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "") || "user";
+  }
+
+const personalDirNameFromEmail = (email: string): string => {
+    const prefix = String(email || "").split("@")[0].trim().toLowerCase();
+    return prefix.replace(/[^a-z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "") || "user";
+  }
+
+const writeIfMissingLocal = (filePath: string, content: string) => {
+    const fs = require("fs");
+    const path = require("path");
+    if (fs.existsSync(filePath))
+      return false;
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content, "utf8");
+    return true;
+  }
+
+const createPersonalSourceSkeleton = (root: string) => {
+    const fs = require("fs");
+    const path = require("path");
+    fs.mkdirSync(root, { recursive: true });
+    writeIfMissingLocal(path.join(root, "README.md"), `# Добро пожаловать в вашу личную базу знаний GBrain!\n\nЭто ваше персональное цифровое рабочее пространство. Всё, что вы здесь запишете, будет известно вашему ИИ-ассистенту и поможет ему эффективнее отвечать на ваши вопросы, писать отчеты и автоматизировать задачи.\n\n## Как этим пользоваться\n\n1. Ведите заметки в Obsidian или любом другом markdown-редакторе.\n2. Просите ИИ-ассистента добавлять заметки, проекты и ежедневные отчеты.\n3. Личные данные хранятся в вашей персональной области и не публикуются в общую базу без явного решения.\n`);
+    writeIfMissingLocal(path.join(root, "AGENTS.md"), `# AGENTS.md — правила ведения личной базы знаний\n\n## Структура\n\n- \`notes/\` — личные заметки, идеи, шпаргалки, профессиональные знания.\n- \`projects/\` — проекты, задачи, планы и вехи.\n- \`daily/\` — ежедневные отчеты и планы.\n- \`_templates/\` — шаблоны заметок.\n- \`_attachments/\` — документы и медиа-файлы.\n\n## Правила\n\n1. Перед созданием новой заметки проверь, нет ли похожей.\n2. Перекрестные ссылки оформляй в стиле Obsidian: \`[[имя-заметки]]\`.\n3. Личные заметки не записывай в \`shared\` или \`internal-*\` без явного указания пользователя.\n4. Если пользователь явно просит записать документ в закрытую область ИТ, используй \`source_id: internal-it\` и \`access_area: ит\`.\n`);
+    writeIfMissingLocal(path.join(root, "index.md"), `# Навигация по Базе Знаний\n\nДобро пожаловать в ваш личный навигатор знаний.\n\n## Разделы\n\n- [[notes/index|Личные заметки]] — профессиональные знания, памятки и шпаргалки.\n- [[projects/index|Проекты]] — рабочие задачи и вехи.\n- [[daily/index|Ежедневный лог]] — хронология работы, планы и отчеты.\n`);
+    writeIfMissingLocal(path.join(root, "notes", "index.md"), `---\ntitle: Личные заметки\nstatus: active\ntags: [личная-база, заметки]\n---\n\n# Личные заметки\n\nЗдесь хранятся личные рабочие заметки и справочные материалы.\n`);
+    writeIfMissingLocal(path.join(root, "projects", "index.md"), `---\ntitle: Проекты\nstatus: active\ntags: [личная-база, проекты]\n---\n\n# Проекты\n\nЗдесь хранятся проекты, задачи, планы и вехи.\n`);
+    writeIfMissingLocal(path.join(root, "daily", "index.md"), `---\ntitle: Ежедневный лог\nstatus: active\ntags: [личная-база, daily]\n---\n\n# Ежедневный лог\n\nЗдесь можно вести ежедневные отчеты и планы.\n`);
+    writeIfMissingLocal(path.join(root, "_templates", "note.md"), `---\ntitle: <Название заметки>\ncreated: YYYY-MM-DD\nupdated: YYYY-MM-DD\ntags: [личная-база]\nstatus: draft\n---\n\n# <Название заметки>\n`);
+    writeIfMissingLocal(path.join(root, "_templates", "project.md"), `---\ntitle: <Название проекта>\ncreated: YYYY-MM-DD\nupdated: YYYY-MM-DD\ntags: [личная-база, проект]\nstatus: draft\n---\n\n# <Название проекта>\n`);
+    writeIfMissingLocal(path.join(root, "_templates", "daily.md"), `---\ntitle: Ежедневный отчет YYYY-MM-DD\ncreated: YYYY-MM-DD\nupdated: YYYY-MM-DD\ntags: [личная-база, daily]\nstatus: draft\n---\n\n# Ежедневный отчет YYYY-MM-DD\n`);
+  }
+
+const ensurePersonalGitRepo = (root: string) => {
+    const fs = require("fs");
+    const { spawnSync } = require("child_process");
+    if (!fs.existsSync(`${root}/.git`)) {
+      spawnSync("git", ["init", "-q"], { cwd: root });
+    }
+    const status = spawnSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
+    if (String(status.stdout || "").trim()) {
+      spawnSync("git", ["add", "."], { cwd: root });
+      spawnSync("git", ["-c", "user.name=GBrain Admin", "-c", "user.email=vyacheslav.zakharov@avers.kz", "commit", "-q", "-m", "Initialize personal GBrain source"], { cwd: root });
+    }
+  }
+
+const schedulePersonalSourceSync = (sourceId: string) => {
+    try {
+      const { spawn } = require("child_process");
+      const script = `set -e; source "$HOME/.gbrain/env.sh" 2>/dev/null || true; source "$HOME/.gbrain/pg.sh" 2>/dev/null || true; export PATH="$HOME/.bun/bin:$PATH"; gbrain sync --source ${JSON.stringify(sourceId)} --no-pull --yes; gbrain extract --stale --source-id ${JSON.stringify(sourceId)} --yes`;
+      const proc = spawn("bash", ["-lc", script], { detached: true, stdio: "ignore" });
+      proc.unref();
+    } catch (e3) {
+      console.error(`[Provision] Failed to schedule sync for ${sourceId}:`, e3);
+    }
+  }
+
+const ensurePortalUserProvisioned = async (emailRaw: string) => {
+    const fs = require("fs");
+    const path = require("path");
+    const email = String(emailRaw || "").trim().toLowerCase();
+    if (!email.endsWith("@avers.kz"))
+      throw new Error("Only @avers.kz users can be provisioned");
+    const sourceId = personalSourceIdFromEmail(email);
+    const dirName = personalDirNameFromEmail(email);
+    const personalRoot = path.join(process.env.HOME || "/home/avers", "brain-repos", "personal", dirName);
+    const displayName = `Личная база (${dirName})`;
+    let shouldSync = false;
+
+    if (!fs.existsSync(personalRoot)) {
+      createPersonalSourceSkeleton(personalRoot);
+      ensurePersonalGitRepo(personalRoot);
+      shouldSync = true;
+      console.log(`[Provision] Created personal source directory for ${email}: ${personalRoot}`);
+    } else {
+      ensurePersonalGitRepo(personalRoot);
+    }
+
+    const existingSource = await sql`SELECT id FROM sources WHERE id = ${sourceId} LIMIT 1`;
+    if (!existingSource[0]) {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, local_path, config)
+         VALUES ($1, $2, $3, $4::text::jsonb)
+         ON CONFLICT (id) DO NOTHING`,
+        [sourceId, displayName, personalRoot, JSON.stringify({ federated: false, contextual_retrieval_mode: "balanced" })],
+      );
+      shouldSync = true;
+      console.log(`[Provision] Registered personal source ${sourceId} for ${email}`);
+    }
+
+    const permsPath = userPermissionsPath();
+    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(permsPath, {});
+    const existing = perms[email] || { source_id: sourceId, federated_read: [], federated_write: [] };
+    existing.source_id = existing.source_id || sourceId;
+    const read = new Set(Array.isArray(existing.federated_read) ? existing.federated_read : []);
+    const write = new Set(Array.isArray(existing.federated_write) ? existing.federated_write : []);
+    read.add(sourceId);
+    read.add("shared");
+    write.add(sourceId);
+    existing.federated_read = Array.from(read).filter(Boolean);
+    existing.federated_write = Array.from(write).filter(Boolean);
+    if (JSON.stringify(perms[email]) !== JSON.stringify(existing)) {
+      perms[email] = existing;
+      writeJsonFileLocal(permsPath, perms);
+      console.log(`[Provision] Updated permissions for ${email}`);
+    }
+
+    if (shouldSync)
+      schedulePersonalSourceSync(sourceId);
+  }
+
+const readAccessRequests = (): PortalAccessRequest[] => {
+    const data = loadJsonFileLocal<PortalAccessRequest[]>(accessRequestsPath(), []);
+    return Array.isArray(data) ? data : [];
+  }
+
+const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFileLocal(accessRequestsPath(), items);
+
+
+
+
+  // v0.41.3 (T8): configurable trust-proxy via GBRAIN_HTTP_TRUST_PROXY env.
+  // Default 'loopback' (trust Caddy/Tailscale on the same host) preserves
+  // pre-v0.41.3 behavior. Operators behind Fly.io / Render / Vercel / nginx
+  // set GBRAIN_HTTP_TRUST_PROXY=1 (one hop) so X-Forwarded-For lands as the
+  // real client IP for rate-limiting and req.secure detection. The legacy
+  // transport already reads this env var (src/mcp/http-transport.ts:111)
+  // for the same purpose; T8 makes the Express path agree.
+  app.set('trust proxy', resolveTrustProxy(process.env.GBRAIN_HTTP_TRUST_PROXY));
+
+
   // v0.41.3 (T8): configurable trust-proxy via GBRAIN_HTTP_TRUST_PROXY env.
   // Default 'loopback' (trust Caddy/Tailscale on the same host) preserves
   // pre-v0.41.3 behavior. Operators behind Fly.io / Render / Vercel / nginx
@@ -591,6 +1097,29 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     standardHeaders: true,
     legacyHeaders: false,
     message: 'Too many magic-link attempts. Wait a minute before trying again.',
+  });
+
+  const portalOtpSendRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Слишком много запросов кода. Повторите позже.',
+  });
+  const portalOtpVerifyRateLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: 'Слишком много попыток входа. Повторите позже.',
+  });
+
+  const mcpRateLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { jsonrpc: '2.0', error: { code: -32000, message: 'Too many MCP requests. Try again in a minute.' }, id: null },
   });
 
   app.post('/token', ccRateLimiter, express.urlencoded({ extended: false }), async (req, res, next) => {
@@ -741,6 +1270,997 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         return origJson(body);
       };
     }
+    next();
+  });
+
+const escapePortalHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch] || ch));
+const portalLoginHtml = (title: string, body: string) => `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapePortalHtml(title)}</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(420px,calc(100vw - 32px));padding:28px;background:#242424;border:1px solid #3b3b3b;border-radius:12px}h1{font-size:22px;margin:0 0 10px}.muted{color:#aaa;font-size:14px;line-height:1.45}label{display:block;margin:18px 0 7px}input{width:100%;padding:12px;background:#181818;color:#fff;border:1px solid #555;border-radius:7px;font-size:16px}button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:7px;background:#1677ff;color:#fff;font-weight:700;cursor:pointer}</style></head><body><main class="card">${body}</main></body></html>`;
+
+app.get("/login", (req: any, res: any) => {
+    if (resolvePortalUser(req, res)) return res.redirect("/portal");
+    const oauthQuery = new URLSearchParams(req.query as Record<string, string>).toString();
+    res.type("html").send(portalLoginHtml("Вход в GBrain", `<h1>Вход в GBrain</h1><p class="muted">Введите корпоративный email. Одноразовый код действует 10 минут.</p><form action="/login/send-code" method="POST"><input type="hidden" name="oauth_query" value="${escapePortalHtml(oauthQuery)}"><label for="email">Рабочий email</label><input type="email" id="email" name="email" placeholder="user@avers.kz" autocomplete="email" required><button type="submit">Получить код</button></form>`));
+  });
+
+  app.post("/login/send-code", portalOtpSendRateLimiter, express.urlencoded({ extended: false }), async (req: any, res: any) => {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const oauthQuery = String(req.body?.oauth_query || "");
+    if (!/^[^@\s]+@avers\.kz$/.test(email)) return res.status(400).send("Допускаются только корпоративные адреса @avers.kz");
+    const code = randomInt(100000, 1000000).toString();
+    pendingOtps.set(email, { codeHash: hashPortalOtp(email, code), expiresAt: Date.now() + 10 * 60 * 1000, attempts: 0 });
+    const { spawnSync } = require("child_process");
+    const sent = spawnSync("/home/avers/.gbrain/send_otp.py", [email, code], { encoding: "utf8", timeout: 15000 });
+    if (sent.error || sent.status !== 0) {
+      pendingOtps.delete(email);
+      console.error(`[OTP] Delivery failed for ${email}:`, sent.error?.message || String(sent.stderr || "sender failed").trim());
+      return res.status(500).send("Ошибка при отправке письма с кодом подтверждения.");
+    }
+    res.type("html").send(portalLoginHtml("Подтверждение входа", `<h1>Введите код</h1><p class="muted">Код отправлен на ${escapePortalHtml(email)}.</p><form action="/login/verify-code" method="POST"><input type="hidden" name="email" value="${escapePortalHtml(email)}"><input type="hidden" name="oauth_query" value="${escapePortalHtml(oauthQuery)}"><label for="code">6-значный код</label><input type="text" id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus><button type="submit">Войти</button></form>`));
+  });
+
+  app.post("/login/verify-code", portalOtpVerifyRateLimiter, express.urlencoded({ extended: false }), async (req: any, res: any) => {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const code = String(req.body?.code || "").trim();
+    const oauthQuery = String(req.body?.oauth_query || "");
+    const saved = pendingOtps.get(email);
+    if (!saved || saved.expiresAt < Date.now()) {
+      pendingOtps.delete(email);
+      return res.status(400).send("Код истёк или не запрашивался. Запросите новый код.");
+    }
+    saved.attempts += 1;
+    if (saved.attempts > 5) {
+      pendingOtps.delete(email);
+      return res.status(429).send("Превышено число попыток. Запросите новый код.");
+    }
+    if (!/^\d{6}$/.test(code) || !safeHexEqual(saved.codeHash, hashPortalOtp(email, code))) {
+      return res.status(400).send("Неверный код подтверждения.");
+    }
+    pendingOtps.delete(email);
+    try {
+      await ensurePortalUserProvisioned(email);
+    } catch (e) {
+      console.error(`[Provision] Failed to provision ${email}:`, e);
+      return res.status(500).send("Не удалось подготовить личную базу GBrain. Обратитесь к администратору.");
+    }
+    issuePortalSession(req, res, email);
+    const oauthParams = new URLSearchParams(oauthQuery);
+    return res.redirect(oauthParams.get("client_id") ? `/authorize?${oauthParams.toString()}` : "/portal");
+  });
+
+  app.post('/logout', (req: Request, res: Response) => {
+    portalSessions.revoke(portalSessionToken(req));
+    clearPortalSessionCookies(req, res);
+    res.status(204).end();
+  });
+
+app.get("/portal/welcome", async (req: any, res: any) => {
+    const userEmail = resolvePortalUser(req, res);
+    if (!userEmail)
+      return res.redirect("/login");
+    try {
+      await ensurePortalUserProvisioned(String(userEmail));
+    } catch (e3) {
+      console.error(`[Provision] Failed to provision ${userEmail} from welcome:`, e3);
+      return res.status(500).send("Не удалось подготовить личную базу GBrain. Обратитесь к администратору.");
+    }
+    const areas = managedAccessAreas.map((a) => `
+      <div class="area">
+        <div><b>${escapeHtmlLocal(a.label)}</b><small>${escapeHtmlLocal(a.hint)}</small></div>
+        <label><input type="checkbox" name="access" value="${escapeHtmlLocal(a.id)}:read"> чтение</label>
+        <label><input type="checkbox" name="access" value="${escapeHtmlLocal(a.id)}:write"> запись</label>
+      </div>`).join("\n");
+    res.set("Content-Type", "text/html");
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Добро пожаловать в GBrain</title><style>
+body{margin:0;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;line-height:1.55}.wrap{max-width:920px;margin:0 auto;padding:32px}.card{background:#202028;border:1px solid #333;border-radius:12px;padding:22px;margin:16px 0}.muted{color:#aaa}.btn{display:inline-block;background:#007acc;color:white;border:0;border-radius:7px;padding:10px 14px;text-decoration:none;cursor:pointer;font-weight:600}.btn.gray{background:#444}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.area{display:flex;gap:10px;border:1px solid #333;border-radius:8px;padding:10px;background:#191919}.area small{display:block;color:#aaa;margin-top:3px}.reason{width:100%;min-height:80px;background:#151515;color:#fff;border:1px solid #444;border-radius:8px;padding:10px}.actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}@media(max-width:720px){.grid{grid-template-columns:1fr}}
+</style></head><body><div class="wrap">
+  <h1>GBrain: первый вход</h1>
+  <div class="muted">Вы вошли как ${escapeHtmlLocal(userEmail)}. Личная база уже подготовлена автоматически.</div>
+  <div class="card"><h2>Что здесь есть</h2><ol>
+    <li><b>Личная база</b> — ваши заметки, проекты и ежедневные записи. По умолчанию запись идёт туда.</li>
+    <li><b>Shared / Общая база</b> — корпоративные справочники и общие инструкции, доступна на чтение.</li>
+    <li><b>Закрытые разделы</b> — ИТ, производство, кадры и другие internal-области выдаются по заявке администратора.</li>
+  </ol></div>
+  <div class="card"><h2>Запросить доступ</h2><p class="muted">Отметьте разделы, которые нужны для работы. Заявка уйдет администратору на почту и появится в админке.</p>
+    <form method="POST" action="/portal/welcome">
+      <div class="grid">${areas}</div>
+      <p><label>Зачем нужен доступ</label><textarea class="reason" name="reason" placeholder="Например: нужен доступ к разделу ИТ для работы с интеграциями"></textarea></p>
+      <div class="actions"><button class="btn" type="submit">Отправить заявку и открыть портал</button><button class="btn gray" type="submit" name="skip" value="1">Открыть портал без заявки</button></div>
+    </form>
+  </div>
+  <div class="card"><h2>Ссылка на портал</h2><p><a class="btn" href="/portal/welcome/skip">Открыть портал знаний</a></p><p class="muted">Если вы уже вошли на этом компьютере, GBrain может использовать cookie и не спрашивать почту повторно.</p></div>
+</div></body></html>`);
+  });
+
+app.get("/portal/welcome/skip", (req: any, res: any) => {
+    const userEmail = resolvePortalUser(req, res);
+    if (!userEmail)
+      return res.redirect("/login");
+    markPortalOnboardingSeen(String(userEmail));
+    res.redirect("/portal");
+  });
+
+app.post("/portal/welcome", express.urlencoded({ extended: false }), async (req: any, res: any) => {
+    const userEmail = resolvePortalUser(req, res);
+    if (!userEmail)
+      return res.redirect("/login");
+    try {
+      await ensurePortalUserProvisioned(String(userEmail));
+      if (!req.body?.skip)
+        await saveInternalAccessRequest(String(userEmail), req.body?.access, req.body?.reason);
+      markPortalOnboardingSeen(String(userEmail));
+      res.redirect("/portal");
+    } catch (e3) {
+      console.error(`[Portal] Failed to handle welcome for ${userEmail}:`, e3);
+      res.status(500).send("Не удалось сохранить заявку. Обратитесь к администратору.");
+    }
+  });
+
+// Temporary rollback surface retained for one release. The production route below
+// serves the componentized Portal SPA; remove this legacy handler after acceptance.
+app.get("/portal-legacy", (req, res) => {
+    return res.status(410).type('text').send('Legacy Portal disabled after SPA migration');
+    /* c8 ignore start */ // retained temporarily only as rollback source text
+    const userEmail = resolvePortalUser(req, res);
+    if (!userEmail)
+      return res.redirect("/login");
+    if (!hasSeenPortalOnboarding(String(userEmail)))
+      return res.redirect("/portal/welcome");
+    res.set("Content-Type", "text/html");
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>GBrain Portal</title><style>
+*{box-sizing:border-box}body{margin:0;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;height:100vh;display:grid;grid-template-columns:360px 1fr}.sidebar{border-right:1px solid #333;background:#202020;overflow:auto;padding:16px}.main{overflow:auto;padding:24px}.top{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:16px}.muted{color:#aaa;font-size:13px}.source-select{width:100%;background:#1d1d1d;color:#e5e5e5;border:1px solid #3a3a3a;border-radius:8px;padding:10px;margin-bottom:12px;font:inherit}.source-select:focus{outline:0;border-color:#007acc;box-shadow:0 0 0 2px rgba(0,122,204,.25)}.entry{padding:8px 10px;border-radius:6px;cursor:pointer;display:flex;justify-content:space-between;gap:8px;align-items:center}.entry:hover{background:#2b2b2b}.entry-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.crumb{color:#8cc8ff;cursor:pointer}.viewer{background:#1d1d1d;border:1px solid #333;border-radius:8px;padding:22px;min-height:260px}.markdown{line-height:1.65;max-width:980px}.markdown h1,.markdown h2,.markdown h3{color:#fff;margin:1.2em 0 .5em}.markdown h1{border-bottom:1px solid #444;padding-bottom:.25em}.markdown code{background:#2b2b2b;border:1px solid #3c3c3c;border-radius:4px;padding:1px 5px}.markdown pre{background:#111;border:1px solid #333;border-radius:8px;padding:14px;overflow:auto}.markdown pre code{background:transparent;border:0;padding:0}.markdown blockquote{border-left:3px solid #007acc;margin:1em 0;padding:.2em 1em;color:#cfcfcf;background:#202a33}.markdown a{color:#8cc8ff}.markdown .table-wrap{overflow:auto;margin:1em 0;border:1px solid #3a3a3a;border-radius:8px}.markdown table{width:100%;border-collapse:collapse;background:#191919}.markdown th,.markdown td{border:1px solid #3a3a3a;padding:8px 10px;vertical-align:top;text-align:left}.markdown th{background:#242424;color:#fff;font-weight:700}.markdown tr:nth-child(even) td{background:#202020}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;display:inline-block}.error{color:#ff9c9c}.search{margin:14px 0}.search input{width:100%;padding:10px;border-radius:6px;border:1px solid #444;background:#171717;color:#fff}.search-results{margin-top:8px;border-top:1px solid #333}.badge{font-size:11px;color:#bbb;background:#333;border-radius:999px;padding:2px 7px}</style></head><body>
+<aside class="sidebar"><h2>GBrain</h2><div class="muted">${escapeHtmlLocal(userEmail)} \xB7 просмотр без редактирования</div><div id="adminBtnSection" style="display:none;gap:8px;flex-wrap:wrap;margin:12px 0"><a class="btn" href="/admin/access-requests">Заявки на доступ <span id="accessReqBadge" class="badge" style="display:none;background:#ffd479;color:#111;margin-left:6px"></span></a></div><div class="search"><input id="searchBox" type="search" placeholder="Поиск по доступным файлам..."><div id="searchResults" class="search-results"></div></div><h3>Источники</h3><div id="sources"></div><h3>Папки и файлы</h3><div id="tree" class="muted">Выберите источник</div></aside>
+<main class="main"><div class="top"><div><h2 id="title">Портал знаний</h2><div id="breadcrumbs" class="muted"></div></div><a class="btn" href="/authorize" onclick="history.back();return false">Назад</a></div><div id="viewer" class="viewer muted">Выберите markdown-файл для просмотра или другой файл для скачивания.</div></main>
+<script>
+let currentSource=null,currentPath='',searchTimer=null;const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));async function api(url){const r=await fetch(url);if(!r.ok)throw new Error(await r.text());return r.json()}
+function fileIcon(name,type,isText){if(type==='dir')return '\u{1F4C1}';const n=String(name||'').toLowerCase();if(n.endsWith('.md')||n.endsWith('.markdown'))return '\u{1F4DD}';if(n.endsWith('.txt'))return '\u{1F4C4}';if(n.endsWith('.pdf'))return '\u{1F4D5}';if(['.png','.jpg','.jpeg','.gif','.webp','.svg'].some(ext=>n.endsWith(ext)))return '\u{1F5BC}\uFE0F';if(['.xlsx','.xls','.csv'].some(ext=>n.endsWith(ext)))return '\u{1F4CA}';if(['.docx','.doc','.odt'].some(ext=>n.endsWith(ext)))return '\u{1F4D8}';if(['.pptx','.ppt'].some(ext=>n.endsWith(ext)))return '\u{1F4FD}\uFE0F';if(['.zip','.7z','.rar','.tar','.gz'].some(ext=>n.endsWith(ext)))return '\u{1F5DC}\uFE0F';return isText?'\u{1F4C4}':'\u2B07\uFE0F'}
+function renderWikilinks(s){if(!s.includes('[['))return esc(s);const parts=s.split('[[');let html=esc(parts[0]);for(let i=1;i<parts.length;i++){const end=parts[i].indexOf(']]');if(end<0){html+='[['+esc(parts[i]);continue}const content=parts[i].slice(0,end);const rest=parts[i].slice(end+2);const bar=content.indexOf('|');const target=bar>=0?content.slice(0,bar).trim():content.trim();const label=bar>=0?content.slice(bar+1).trim():target;html+='<a href="#" class="wikilink" style="color:#ffd479;text-decoration:underline" data-target="'+esc(target)+'" onclick="clickWiki(this);return false;">'+esc(label)+'</a>'+esc(rest)}return html}
+async function clickWiki(el){const target=el.dataset.target;try{const data=await api('/portal/api/resolve-link?link='+encodeURIComponent(target)+'&currentSource='+encodeURIComponent(currentSource||''));if(data.found){await selectSource(data.source);await loadTree(data.path.split('/').slice(0,-1).join('/'));openFile(data.path,true)}else{alert('Файл "'+target+'" не найден в доступных вам источниках.')}}catch(e){alert('Ошибка перехода по ссылке: '+e.message)}}
+function renderInline(s){const bs=String.fromCharCode(92),tick=String.fromCharCode(96);return renderWikilinks(s).replace(new RegExp(bs+'*'+bs+'*'+'([^*]+)'+bs+'*'+bs+'*','g'),'<strong>$1</strong>').replace(new RegExp(tick+'([^'+tick+']+)'+tick,'g'),'<code>$1</code>').replace(new RegExp(bs+'[([^'+bs+']+)'+bs+']'+bs+'(([^)]+)'+bs+')','g'),(m,t,u)=>'<a href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(t)+'</a>')}
+function resetMainScroll(){const m=document.querySelector('.main');if(m)m.scrollTop=0;window.scrollTo(0,0)}
+function splitTableRow(line){let t=String(line||'').trim();if(t.startsWith('|'))t=t.slice(1);if(t.endsWith('|'))t=t.slice(0,-1);const cells=[];let cur='',escNext=false;for(const ch of t){if(escNext){cur+=ch;escNext=false;continue}if(ch===String.fromCharCode(92)){escNext=true;continue}if(ch==='|'){cells.push(cur.trim());cur='';continue}cur+=ch}cells.push(cur.trim());return cells}
+function isTableSeparator(line){const cells=splitTableRow(line);return cells.length>0&&cells.every(c=>{const x=c.trim();return /^:?-{3,}:?$/.test(x)})}
+function isTableStart(lines,i){if(i+1>=lines.length)return false;const a=String(lines[i]||'').trim(),b=String(lines[i+1]||'').trim();return a.includes('|')&&b.includes('|')&&isTableSeparator(b)}
+function renderTable(rows){const header=splitTableRow(rows[0]);const aligns=splitTableRow(rows[1]).map(c=>{const x=c.trim();if(x.startsWith(':')&&x.endsWith(':'))return 'center';if(x.endsWith(':'))return 'right';return 'left'});let html='<div class="table-wrap"><table><thead><tr>'+header.map((c,i)=>'<th style="text-align:'+esc(aligns[i]||'left')+'">'+renderInline(c)+'</th>').join('')+'</tr></thead><tbody>';for(let r=2;r<rows.length;r++){const cells=splitTableRow(rows[r]);html+='<tr>'+header.map((_,i)=>'<td style="text-align:'+esc(aligns[i]||'left')+'">'+renderInline(cells[i]||'')+'</td>').join('')+'</tr>'}return html+'</tbody></table></div>'}
+function renderMarkdown(md){const fence=String.fromCharCode(96).repeat(3),nl=String.fromCharCode(10);let lines=String(md||'').split(nl).map(x=>x.endsWith(String.fromCharCode(13))?x.slice(0,-1):x);if(lines[0]&&lines[0].trim()==='---'){const end=lines.slice(1).findIndex(x=>x.trim()==='---');if(end>=0)lines=lines.slice(end+2)}let html='',inList=false,inCode=false,code=[];const close=()=>{if(inList){html+='</ul>';inList=false}};for(let i=0;i<lines.length;i++){const line=lines[i],t=line.trim();if(t.startsWith(fence)){if(inCode){html+='<pre><code>'+esc(code.join(nl))+'</code></pre>';code=[];inCode=false}else{close();inCode=true}continue}if(inCode){code.push(line);continue}if(isTableStart(lines,i)){close();const rows=[lines[i],lines[i+1]];i+=2;while(i<lines.length&&String(lines[i]||'').trim().includes('|')&&String(lines[i]||'').trim()!==''){rows.push(lines[i]);i++}i--;html+=renderTable(rows);continue}if(line.startsWith('### ')){close();html+='<h3>'+renderInline(line.slice(4))+'</h3>';continue}if(line.startsWith('## ')){close();html+='<h2>'+renderInline(line.slice(3))+'</h2>';continue}if(line.startsWith('# ')){close();html+='<h1>'+renderInline(line.slice(2))+'</h1>';continue}if(line.startsWith('>')){close();html+='<blockquote>'+renderInline(line.slice(line.startsWith('> ')?2:1))+'</blockquote>';continue}if(line.startsWith('- ')||line.startsWith('* ')){if(!inList){html+='<ul>';inList=true}html+='<li>'+renderInline(line.slice(2))+'</li>';continue}if(!t){close();continue}close();html+='<p>'+renderInline(line)+'</p>'}close();if(inCode)html+='<pre><code>'+esc(code.join(nl))+'</code></pre>';return '<div class="markdown">'+html+'</div>'}
+async function loadSources(){try{const data=await api('/portal/api/sources');const box=document.getElementById('sources');if(!data.sources.length){box.innerHTML='<div class="muted">Нет доступных источников</div>';return}box.innerHTML='<select id="sourceSelect" class="source-select" aria-label="Источник">'+data.sources.map(s=>'<option value="'+esc(s.id)+'">'+esc(s.name||s.id)+' · '+esc(s.id)+'</option>').join('')+'</select>';const sel=document.getElementById('sourceSelect');sel.onchange=()=>selectSource(sel.value);selectSource(data.sources[0].id)}catch(e){document.getElementById('sources').innerHTML='<div class="error">'+esc(e.message)+'</div>'}}
+async function selectSource(id){currentSource=id;currentPath='';const sel=document.getElementById('sourceSelect');if(sel&&sel.value!==id)sel.value=id;await loadTree('')}
+function breadcrumbs(){const parts=currentPath?currentPath.split('/').filter(Boolean):[];let html='<span class="crumb" data-path="">'+esc(currentSource||'')+'</span>',acc='';for(const p of parts){acc+=(acc?'/':'')+p;html+=' / <span class="crumb" data-path="'+esc(acc)+'">'+esc(p)+'</span>'}document.getElementById('breadcrumbs').innerHTML=html;document.querySelectorAll('.crumb').forEach(e=>e.onclick=()=>loadTree(e.dataset.path||''))}
+async function loadTree(path){currentPath=path||'';breadcrumbs();const data=await api('/portal/api/tree?source='+encodeURIComponent(currentSource)+'&path='+encodeURIComponent(currentPath));document.getElementById('title').textContent=currentPath||currentSource;const rows=[];if(currentPath){const parent=currentPath.split('/').slice(0,-1).join('/');rows.push('<div class="entry" data-dir="'+esc(parent)+'"><span class="entry-name">↩ ..</span></div>')}for(const d of data.entries.filter(e=>e.type==='dir'))rows.push('<div class="entry" data-dir="'+esc(d.path)+'"><span class="entry-name">'+fileIcon(d.name,'dir')+' '+esc(d.name)+'</span></div>');for(const f of data.entries.filter(e=>e.type==='file'))rows.push('<div class="entry" data-file="'+esc(f.path)+'" data-md="'+(f.markdown?'1':'0')+'"><span class="entry-name">'+fileIcon(f.name,'file',f.markdown)+' '+esc(f.name)+'</span><span class="badge">'+esc(f.size)+' байт</span></div>');document.getElementById('tree').innerHTML=rows.join('')||'<div class="muted">Папка пуста</div>';document.querySelectorAll('[data-dir]').forEach(e=>e.onclick=()=>loadTree(e.dataset.dir||''));document.querySelectorAll('[data-file]').forEach(e=>e.onclick=()=>openFile(e.dataset.file,e.dataset.md==='1'))}
+async function openFile(path,isMd){const viewer=document.getElementById('viewer');if(!isMd){viewer.innerHTML='<p>Этот файл не markdown. Его можно скачать.</p><a class="btn" href="/portal/download?source='+encodeURIComponent(currentSource)+'&path='+encodeURIComponent(path)+'">Скачать файл</a>';resetMainScroll();return}const data=await api('/portal/api/file?source='+encodeURIComponent(currentSource)+'&path='+encodeURIComponent(path));document.getElementById('title').textContent=data.path;viewer.innerHTML=renderMarkdown(data.content);resetMainScroll()}
+async function runSearch(q){const box=document.getElementById('searchResults');if(!q.trim()){box.innerHTML='';return}box.innerHTML='<div class="muted">Поиск...</div>';try{const data=await api('/portal/api/search?q='+encodeURIComponent(q.trim()));box.innerHTML=data.results.map(r=>'<div class="entry" data-src="'+esc(r.source)+'" data-path="'+esc(r.path)+'" data-md="'+(r.markdown?'1':'0')+'"><span class="entry-name">'+fileIcon(r.name,'file',r.markdown)+' '+esc(r.source)+' / '+esc(r.path)+'</span></div>').join('')||'<div class="muted">Ничего не найдено</div>';box.querySelectorAll('[data-src]').forEach(e=>e.onclick=async()=>{await selectSource(e.dataset.src);await loadTree(e.dataset.path.split('/').slice(0,-1).join('/'));openFile(e.dataset.path,e.dataset.md==='1')})}catch(e){box.innerHTML='<div class="error">'+esc(e.message)+'</div>'}}
+async function loadAccessRequestBadge(){try{const data=await api('/admin/api/access-requests');const count=(data.requests||[]).filter(r=>r.status==='pending').length;const btn=document.getElementById('adminBtnSection');if(btn)btn.style.display='flex';const b=document.getElementById('accessReqBadge');if(b&&count>0){b.textContent=String(count);b.style.display='inline-block'}}catch(e){}}
+document.getElementById('searchBox').addEventListener('input',e=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>runSearch(e.target.value),250)});loadSources();loadAccessRequestBadge();
+</script></body></html>`);
+  });
+/* c8 ignore stop */
+
+// Portal SPA static files. The server remains the authorization boundary;
+// the browser bundle never receives a source that /portal/api/sources did not grant.
+const portalPathModule = await import('path');
+const portalFsModule = await import('fs');
+const portalDistPath = portalPathModule.join(process.cwd(), 'portal', 'dist');
+const portalDevAssets = portalFsModule.existsSync(portalDistPath);
+const portalEmbedded = portalDevAssets ? null : await import('../portal-embedded.ts');
+const portalAssetCache = new Map<string, Buffer>();
+
+const setPortalDocumentHeaders = (res: Response): void => {
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cache-Control', 'private, no-store');
+};
+
+const requirePortalPage = (req: Request, res: Response, next: NextFunction) => {
+  const userEmail = resolvePortalUser(req, res);
+  if (!userEmail) return res.redirect('/login');
+  if (!hasSeenPortalOnboarding(String(userEmail))) return res.redirect('/portal/welcome');
+  next();
+};
+
+const sendPortalIndex = (_req: Request, res: Response) => {
+  setPortalDocumentHeaders(res);
+  if (portalDevAssets) return res.sendFile(portalPathModule.join(portalDistPath, 'index.html'));
+  const asset = portalEmbedded?.PORTAL_INDEX_HTML;
+  if (!asset) return res.status(404).send('portal SPA not available');
+  let body = portalAssetCache.get(asset.path);
+  if (!body) {
+    body = portalFsModule.readFileSync(asset.path);
+    portalAssetCache.set(asset.path, body);
+  }
+  res.setHeader('Content-Type', asset.mime);
+  res.send(body);
+};
+
+if (portalDevAssets) {
+  app.use('/portal/assets', requirePortalPage, express.static(portalPathModule.join(portalDistPath, 'assets'), {
+    immutable: true,
+    maxAge: '1y',
+    setHeaders: (res) => res.setHeader('X-Content-Type-Options', 'nosniff'),
+  }));
+} else {
+  app.get('/portal/assets/{*path}', requirePortalPage, (req: Request, res: Response) => {
+    const asset = portalEmbedded?.PORTAL_ASSETS[req.path];
+    if (!asset) return res.status(404).send('portal asset not found');
+    let body = portalAssetCache.get(asset.path);
+    if (!body) {
+      body = portalFsModule.readFileSync(asset.path);
+      portalAssetCache.set(asset.path, body);
+    }
+    res.setHeader('Content-Type', asset.mime);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.send(body);
+  });
+}
+app.get(['/portal', '/portal/'], requirePortalPage, sendPortalIndex);
+
+app.use('/portal/api', (_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
+app.use('/portal/download', (_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
+
+app.get('/portal/api/session', (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  res.json({
+    email: userEmail,
+    isAdmin: adminEmails.has(String(userEmail).trim().toLowerCase()),
+    readOnly: true,
+  });
+});
+
+app.get("/portal/api/sources", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const sources = await getSourceRowsForUser(userEmail);
+    res.json({ sources: sources.map((source) => ({ id: source.id, name: source.name })) });
+  });
+  type PortalCachedPage = { slug: string; title: string };
+  const portalPageCache = new Map<string, { expiresAt: number; pages: PortalCachedPage[]; complete: boolean }>();
+  const getPortalPages = async (sourceId: string): Promise<{ pages: PortalCachedPage[]; complete: boolean }> => {
+    const cached = portalPageCache.get(sourceId);
+    if (cached && cached.expiresAt > Date.now()) return cached;
+    const pages: PortalCachedPage[] = [];
+    const pageSize = 500;
+    let offset = 0;
+    let complete = true;
+    while (pages.length < 50_000) {
+      const batch = await engine.listPages({ sourceId, limit: pageSize, offset, sort: 'slug' });
+      for (const page of batch) {
+        const slug = String(page.slug || '').replace(/^\/+|\/+$/g, '');
+        if (slug) pages.push({ slug, title: String(page.title || slug) });
+      }
+      if (batch.length < pageSize) break;
+      offset += batch.length;
+    }
+    if (pages.length >= 50_000) complete = false;
+    const next = { expiresAt: Date.now() + 30_000, pages, complete };
+    portalPageCache.set(sourceId, next);
+    return next;
+  };
+  const getPortalCountedSlugs = async (sourceId: string): Promise<{ slugs: string[]; complete: boolean }> => {
+    const cached = await getPortalPages(sourceId);
+    return {
+      slugs: cached.pages.map((page) => page.slug).filter((slug) => isPortalCountedDocument(`${slug}.md`)),
+      complete: cached.complete,
+    };
+  };
+
+  app.get("/portal/api/tree", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const fs = require("fs");
+    const path = require("path");
+    const sourceId = String(req.query.source || "");
+    const sources = await getSourceRowsForUser(userEmail);
+    const source = sources.find((source) => source.id === sourceId);
+    if (!source)
+      return res.status(404).json({ error: "Not found" });
+    const requestedFolder = String(req.query.path || '').replace(/^\/+|\/+$/g, '');
+    const target = resolvePortalPath(source.local_path, requestedFolder, true);
+    if (!target)
+      return res.status(404).json({ error: "Not found" });
+    let stat;
+    try {
+      stat = fs.statSync(target);
+    } catch {
+      return res.status(404).json({ error: "Path not found" });
+    }
+    if (!stat.isDirectory())
+      return res.status(400).json({ error: "Path is not a directory" });
+
+    const counted = await getPortalCountedSlugs(source.id);
+    const folderPrefix = requestedFolder ? `${requestedFolder}/` : '';
+    const entries = fs.readdirSync(target, { withFileTypes: true }).filter((entry: any) =>
+      entry.name !== ".git" &&
+      !entry.name.startsWith(".") &&
+      !entry.isSymbolicLink() &&
+      ((entry.isDirectory() && isPortalVisibleDirectory(entry.name)) || (entry.isFile() && isPortalFileAllowed(entry.name)))
+    ).map((entry: any) => {
+      const full = path.join(target, entry.name);
+      const rel = path.relative(source.local_path, full).split(path.sep).join("/");
+      const st = fs.statSync(full);
+      const childPrefix = `${rel}/`;
+      return {
+        name: entry.name,
+        path: rel,
+        type: entry.isDirectory() ? "dir" : "file",
+        markdown: entry.isFile() && /\.(md|markdown|txt)$/i.test(entry.name),
+        size: st.size,
+        updatedAt: st.mtime.toISOString(),
+        documentCount: entry.isDirectory()
+          ? counted.slugs.filter((slug) => slug.startsWith(childPrefix)).length
+          : undefined,
+      };
+    }).sort((a: any, b: any) => a.type === b.type ? a.name.localeCompare(b.name, "ru") : a.type === "dir" ? -1 : 1);
+
+    const sourceSections = new Set(
+      counted.slugs
+        .filter((slug) => slug.includes('/'))
+        .map((slug) => slug.split('/')[0])
+        .filter((section) => isPortalVisibleDirectory(section)),
+    );
+    const summary = {
+      sections: entries.filter((entry: any) => entry.type === 'dir').length,
+      documents: counted.slugs.filter((slug) => !folderPrefix || slug.startsWith(folderPrefix)).length,
+      complete: counted.complete,
+    };
+    const sourceSummary = {
+      sections: sourceSections.size,
+      documents: counted.slugs.length,
+      complete: counted.complete,
+    };
+    res.json({ source: source.id, path: requestedFolder, entries, summary, sourceSummary });
+  });
+  app.get("/portal/api/file", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const fs = require("fs");
+    const sourceId = String(req.query.source || "");
+    const sources = await getSourceRowsForUser(userEmail);
+    const source = sources.find((source) => source.id === sourceId);
+    if (!source)
+      return res.status(404).json({ error: "Not found" });
+    if (!isPortalFileAllowed(req.query.path))
+      return res.status(404).json({ error: "Not found" });
+    const target = resolvePortalPath(source.local_path, req.query.path);
+    if (!target)
+      return res.status(404).json({ error: "Not found" });
+    if (!/\.(md|markdown|txt)$/i.test(String(req.query.path || "")))
+      return res.status(400).json({ error: "Only markdown/text preview is allowed here" });
+    let stat;
+    try {
+      stat = fs.statSync(target);
+    } catch {
+      return res.status(404).json({ error: "File not found" });
+    }
+    if (!stat.isFile())
+      return res.status(400).json({ error: "Path is not a file" });
+    if (stat.size > 1024 * 1024)
+      return res.status(413).json({ error: "File is too large for preview; download it instead" });
+    const content = fs.readFileSync(target, "utf8");
+    const frontmatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/);
+    const frontmatter = frontmatterMatch?.[1] || '';
+    const readField = (field: string) => {
+      const match = frontmatter.match(new RegExp(`^${field}:\\s*(.+)$`, 'mi'));
+      return match ? match[1].trim().replace(/^['"]|['"]$/g, '') : '';
+    };
+    const rawTags = readField('tags');
+    const tags = rawTags
+      ? rawTags.replace(/^\[|\]$/g, '').split(',').map((tag: string) => tag.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+      : [];
+    const requestedPath = String(req.query.path || '');
+    const slug = readField('slug') || requestedPath.replace(/\.(md|markdown|txt)$/i, '');
+    const firstHeading = content.replace(/^---\s*\n[\s\S]*?\n---(?:\s*\n|$)/, '').match(/^#\s+(.+)$/m)?.[1]?.trim() || '';
+    const title = readField('title') || firstHeading || path.basename(requestedPath).replace(/\.(md|markdown|txt)$/i, '').replace(/[-_]/g, ' ');
+    res.json({
+      source: source.id,
+      sourceName: source.name,
+      path: requestedPath,
+      name: path.basename(requestedPath),
+      content,
+      size: stat.size,
+      updatedAt: stat.mtime.toISOString(),
+      slug,
+      title,
+      type: readField('type'),
+      status: readField('status'),
+      tags,
+    });
+  });
+
+  app.get('/portal/api/context', async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail) return;
+    const fs = require('fs');
+    const sourceId = String(req.query.source || '');
+    const sources = await getSourceRowsForUser(userEmail);
+    const source = sources.find((candidate) => candidate.id === sourceId);
+    if (!source) return res.status(404).json({ error: 'Not found' });
+    if (!isPortalFileAllowed(req.query.path)) return res.status(404).json({ error: 'Not found' });
+    const target = resolvePortalPath(source.local_path, req.query.path);
+    if (!target) return res.status(404).json({ error: 'Not found' });
+    let content = '';
+    try {
+      const stat = fs.statSync(target);
+      if (!stat.isFile()) return res.status(400).json({ error: 'Path is not a file' });
+      content = fs.readFileSync(target, 'utf8');
+    } catch {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    const frontmatter = content.match(/^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/)?.[1] || '';
+    const slug = frontmatter.match(/^slug:\s*(.+)$/mi)?.[1]?.trim().replace(/^['"]|['"]$/g, '')
+      || String(req.query.path || '').replace(/\.(md|markdown|txt)$/i, '');
+    let backlinks: Array<{ source: string; slug: string; title: string; type: string; context: string }> = [];
+    let meetings: Array<{ source: string; slug: string; title: string; type: string; context: string }> = [];
+    try {
+      const allowedSources = new Set(sources.map((candidate) => candidate.id));
+      const [incomingLinks, outgoingLinks] = await Promise.all([
+        // Anchor the NEAR endpoint to the exact page the user opened. Reading
+        // all allowed sources by slug would merge same-slug page identities.
+        // FAR endpoints are filtered against `allowedSources` below before exposure.
+        engine.getBacklinks(slug, { sourceId: source.id }),
+        engine.getLinks(slug, { sourceId: source.id }),
+      ]);
+      const seen = new Set<string>();
+      backlinks = incomingLinks.flatMap((link) => {
+        const linkSource = link.from_source_id || source.id;
+        if (!allowedSources.has(linkSource)) return [];
+        const key = `${linkSource}:${link.from_slug}:${link.link_type}`;
+        if (seen.has(key)) return [];
+        seen.add(key);
+        return [{
+          source: linkSource,
+          slug: link.from_slug,
+          title: link.from_slug.split('/').pop()?.replace(/[-_]/g, ' ') || link.from_slug,
+          type: link.link_type,
+          context: link.context || '',
+        }];
+      }).slice(0, 30);
+
+      // Meetings are a first-class context projection. Incoming meeting links
+      // cover explicit mentions; outgoing `attended` links cover canonical
+      // attendance edges from person cards. Both endpoint sources are restricted
+      // to the already-authorized Portal source set before titles are hydrated.
+      const meetingCandidates = new Map<string, { source: string; slug: string; type: string; context: string }>();
+      for (const link of incomingLinks) {
+        const linkSource = link.from_source_id || source.id;
+        if (!allowedSources.has(linkSource) || !link.from_slug.startsWith('meetings/')) continue;
+        meetingCandidates.set(`${linkSource}:${link.from_slug}`, {
+          source: linkSource,
+          slug: link.from_slug,
+          type: link.link_type,
+          context: link.context || '',
+        });
+      }
+      for (const link of outgoingLinks) {
+        const linkSource = link.to_source_id || source.id;
+        if (link.link_type !== 'attended' || !allowedSources.has(linkSource) || !link.to_slug.startsWith('meetings/')) continue;
+        meetingCandidates.set(`${linkSource}:${link.to_slug}`, {
+          source: linkSource,
+          slug: link.to_slug,
+          type: 'attended',
+          context: link.context || '',
+        });
+      }
+      meetings = await Promise.all(
+        [...meetingCandidates.values()]
+          .sort((a, b) => b.slug.localeCompare(a.slug))
+          .slice(0, 30)
+          .map(async (candidate) => {
+            const page = await engine.getPage(candidate.slug, { sourceId: candidate.source });
+            return {
+              ...candidate,
+              title: page?.title || candidate.slug.split('/').pop()?.replace(/[-_]/g, ' ') || candidate.slug,
+            };
+          }),
+      );
+    } catch (error) {
+      console.warn('[portal] context unavailable:', error instanceof Error ? error.message : error);
+    }
+    res.json({ source: source.id, slug, backlinks, meetings });
+  });
+
+  app.get("/portal/api/search", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const fs = require("fs");
+    const path = require("path");
+    const q = String(req.query.q || "").trim().toLowerCase();
+    if (q.length < 2)
+      return res.json({ results: [] });
+    const sources = await getSourceRowsForUser(userEmail);
+    const results: Array<Record<string, any> & PortalSearchRank> = [];
+    const seenResults = new Set<string>();
+    const maxResults = 50;
+    const candidatePathForSlug = (source: PortalSourceRow, slug: string): string | null => {
+      for (const candidate of [`${slug}.md`, `${slug}.markdown`, `${slug}.txt`]) {
+        if (!isPortalFileAllowed(candidate)) continue;
+        const resolved = resolvePortalPath(source.local_path, candidate);
+        try {
+          if (resolved && fs.statSync(resolved).isFile()) return candidate;
+        } catch {}
+      }
+      return null;
+    };
+
+    // Title/slug/alias candidates are retrieved separately from body chunks so
+    // an exact title cannot disappear merely because its body does not repeat it.
+    try {
+      const normalizedAlias = normalizeAlias(q);
+      for (const source of sources) {
+        const cached = await getPortalPages(source.id);
+        const pagesBySlug = new Map(cached.pages.map((page) => [page.slug, page]));
+        const slugs = new Set(await engine.resolveSlugs(q, { sourceId: source.id }));
+        const titlePrefixMatches = cached.pages
+          .filter((page) => isPortalTitlePrefixMatch(q, page.title))
+          .map((page) => ({
+            page,
+            ranking: classifyPortalSearchMatch({ query: q, title: page.title, slug: page.slug }),
+          }))
+          .sort((a, b) => comparePortalSearchResults(a.ranking, b.ranking))
+          .slice(0, 100);
+        for (const { page } of titlePrefixMatches) slugs.add(page.slug);
+        if (normalizedAlias) {
+          const aliases = await engine.resolveAliases([normalizedAlias], { sourceId: source.id });
+          for (const ref of aliases.get(normalizedAlias) || []) slugs.add(ref.slug);
+        }
+        for (const slug of slugs) {
+          const candidatePath = candidatePathForSlug(source, slug);
+          if (!candidatePath) continue;
+          const key = `${source.id}:${candidatePath}`;
+          if (seenResults.has(key)) continue;
+          const indexedPage = pagesBySlug.get(slug);
+          const storedPage = await engine.getPage(slug, { sourceId: source.id });
+          if (!indexedPage && !storedPage) continue;
+          const title = indexedPage?.title || storedPage?.title || slug;
+          const candidateText = String(storedPage?.compiled_truth || '');
+          const classification = classifyPortalSearchMatch({
+            query: q,
+            title,
+            slug,
+            path: candidatePath,
+            chunkText: candidateText,
+          });
+          seenResults.add(key);
+          results.push({
+            source: source.id,
+            sourceName: source.name,
+            name: path.basename(candidatePath),
+            path: candidatePath,
+            markdown: true,
+            size: 0,
+            match: classification.match,
+            title,
+            snippet: cleanPortalSearchSnippet(candidateText, q),
+            score: 0,
+            rank: classification.rank,
+          });
+        }
+      }
+    } catch (error) {
+      console.warn('[portal] title/alias candidate search unavailable:', error instanceof Error ? error.message : error);
+    }
+
+    // Indexed content search keeps request latency independent of repository size.
+    // Source IDs come from the same ACL projection used by every portal route.
+    try {
+      const indexed = await engine.searchKeyword(q, {
+        limit: 100,
+        sourceIds: sources.map((source) => source.id),
+      });
+      for (const hit of indexed) {
+        const source = sources.find((candidate) => candidate.id === (hit.source_id || 'default'));
+        if (!source) continue;
+        const fsCandidates = [`${hit.slug}.md`, `${hit.slug}.markdown`, `${hit.slug}.txt`];
+        const candidatePath = fsCandidates.find((candidate) => {
+          const resolved = resolvePortalPath(source.local_path, candidate);
+          try { return Boolean(resolved && fs.statSync(resolved).isFile()); } catch { return false; }
+        });
+        if (!candidatePath) continue;
+        const key = `${source.id}:${candidatePath}`;
+        if (seenResults.has(key)) continue;
+        seenResults.add(key);
+        const classification = classifyPortalSearchMatch({
+          query: q,
+          title: hit.title || hit.slug,
+          slug: hit.slug,
+          path: candidatePath,
+          chunkText: String(hit.chunk_text || ''),
+          score: hit.score,
+        });
+        results.push({
+          source: source.id,
+          sourceName: source.name,
+          name: path.basename(candidatePath),
+          path: candidatePath,
+          markdown: true,
+          size: 0,
+          match: classification.match,
+          title: hit.title || hit.slug,
+          snippet: cleanPortalSearchSnippet(String(hit.chunk_text || ''), q),
+          score: hit.score,
+          rank: classification.rank,
+        });
+
+      }
+    } catch (error) {
+      console.warn('[portal] indexed search unavailable, using filename fallback:', error instanceof Error ? error.message : error);
+    }
+
+    // Bounded filename fallback also finds attachments that are not indexed pages.
+    let scannedEntries = 0;
+    const walk = (source: PortalSourceRow, dir: string): void => {
+      if (scannedEntries >= 10_000)
+        return;
+      let entries: any[] = [];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        scannedEntries += 1;
+        if (scannedEntries >= 10_000)
+          return;
+        if (entry.name === ".git" || entry.name.startsWith("."))
+          continue;
+        const full = path.join(dir, entry.name);
+        const rel = path.relative(source.local_path, full).split(path.sep).join("/");
+        if (entry.isDirectory()) {
+          walk(source, full);
+          continue;
+        }
+        if (!entry.isFile())
+          continue;
+        if (!isPortalFileAllowed(rel))
+          continue;
+        const nameMatch = entry.name.toLowerCase().includes(q) || rel.toLowerCase().includes(q);
+        const markdown = /\.(md|markdown|txt)$/i.test(entry.name);
+        const key = `${source.id}:${rel}`;
+        if (nameMatch && !seenResults.has(key)) {
+          let size = 0;
+          try {
+            size = fs.statSync(full).size;
+          } catch {}
+          seenResults.add(key);
+          const classification = classifyPortalSearchMatch({ query: q, title: entry.name, path: rel });
+          results.push({
+            source: source.id,
+            sourceName: source.name,
+            name: entry.name,
+            path: rel,
+            markdown,
+            size,
+            match: "name",
+            title: entry.name,
+            rank: Math.max(350, classification.rank - 50),
+          });
+        }
+      }
+    };
+    for (const source of sources)
+      walk(source, source.local_path);
+    const ordered = results
+      .sort(comparePortalSearchResults)
+      .slice(0, maxResults)
+      .map(({ rank: _rank, ...result }) => result);
+    res.json({ query: q, results: ordered });
+  });
+  app.get("/portal/api/resolve-link", async (req: any, res: any) => {
+    const userEmail = requirePortalUser(req, res);
+    if (!userEmail)
+      return;
+    const fs = require("fs");
+    const path = require("path");
+    const link = String(req.query.link || "").trim().replace(/\\/g, "/");
+    const currentSourceId = String(req.query.currentSource || "");
+    if (!link)
+      return res.status(400).json({ error: "Link is required" });
+    const sources = await getSourceRowsForUser(userEmail);
+    let targetLink = link;
+    let requestedSourceId: string | null = null;
+    const qualified = link.match(/^([a-z0-9-]{1,32}):(.*)$/);
+    if (qualified) {
+      requestedSourceId = qualified[1];
+      targetLink = qualified[2];
+      if (!sources.some((source) => source.id === requestedSourceId)) {
+        return res.json({ found: false });
+      }
+    }
+    const orderedSources = requestedSourceId ? sources.filter((source) => source.id === requestedSourceId) : [...sources].sort((a, b) => {
+      if (a.id === currentSourceId)
+        return -1;
+      if (b.id === currentSourceId)
+        return 1;
+      if (a.id === "shared")
+        return -1;
+      if (b.id === "shared")
+        return 1;
+      return 0;
+    });
+    const extensions = [".md", ".markdown", ".txt", ""];
+    const findFile = (localPath: string, targetLink: string): string | null => {
+      const linkParts = targetLink.split("/");
+      const basename = linkParts[linkParts.length - 1].toLowerCase();
+      let scanned = 0;
+      const walk = (dir: string): string | null => {
+        if (scanned >= 5_000) return null;
+        let entries: any[];
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return null;
+        }
+        for (const entry of entries) {
+          scanned += 1;
+          if (scanned >= 5_000) return null;
+          if (entry.name === ".git" || entry.name.startsWith(".") || entry.isSymbolicLink())
+            continue;
+          const fullPath = path.join(dir, entry.name);
+          const relPath = path.relative(localPath, fullPath).split(path.sep).join("/");
+          if (entry.isDirectory()) {
+            const found: string | null = walk(fullPath);
+            if (found)
+              return found;
+          } else if (entry.isFile()) {
+            const relLower = relPath.toLowerCase();
+            const nameLower = entry.name.toLowerCase();
+            for (const ext of extensions) {
+              const targetWithExt = targetLink.toLowerCase() + ext;
+              const basenameWithExt = basename + ext;
+              if (isPortalFileAllowed(relPath) && (relLower === targetWithExt || relLower.endsWith("/" + targetWithExt) || nameLower === basenameWithExt)) {
+                return relPath;
+              }
+            }
+          }
+        }
+        return null;
+      };
+      return walk(localPath);
+    };
+    for (const source of orderedSources) {
+      const normalizedTarget = targetLink.replace(/\.(md|markdown|txt)$/i, '');
+      const candidateSlugs = new Set([normalizedTarget]);
+      try {
+        candidateSlugs.add(await engine.resolveSlugWithAlias(normalizedTarget, source.id));
+        const aliasNorm = normalizeAlias(normalizedTarget);
+        if (aliasNorm) {
+          const aliases = await engine.resolveAliases([aliasNorm], { sourceId: source.id });
+          for (const ref of aliases.get(aliasNorm) || []) candidateSlugs.add(ref.slug);
+        }
+      } catch (error) {
+        console.warn('[portal] indexed alias resolution unavailable:', error instanceof Error ? error.message : error);
+      }
+      for (const candidateSlug of candidateSlugs) {
+        for (const ext of extensions) {
+          const testPath = candidateSlug + ext;
+          if (!isPortalFileAllowed(testPath)) continue;
+          const target = resolvePortalPath(source.local_path, testPath);
+          if (target) {
+            try {
+              const st = fs.statSync(target);
+              if (st.isFile()) {
+                return res.json({ found: true, source: source.id, sourceName: source.name, path: testPath });
+              }
+            } catch {}
+          }
+        }
+      }
+      const relPath = findFile(source.local_path, targetLink);
+      if (relPath) {
+        return res.json({ found: true, source: source.id, sourceName: source.name, path: relPath });
+      }
+    }
+    res.json({ found: false });
+  });
+  app.get("/portal/download", async (req: any, res: any) => {
+    const userEmail = resolvePortalUser(req, res);
+    if (!userEmail)
+      return res.status(401).send("Unauthorized");
+    const fs = require("fs");
+    const path = require("path");
+    const sourceId = String(req.query.source || "");
+    const sources = await getSourceRowsForUser(String(userEmail));
+    const source = sources.find((source) => source.id === sourceId);
+    if (!source)
+      return res.status(404).send("Not found");
+    const requestedPath = String(req.query.path || '');
+    if (!isPortalFileAllowed(requestedPath))
+      return res.status(404).send("Not found");
+    const target = resolvePortalPath(source.local_path, requestedPath);
+    if (!target)
+      return res.status(404).send("Not found");
+    let stat;
+    try {
+      stat = fs.statSync(target);
+    } catch {
+      return res.status(404).send("File not found");
+    }
+    if (!stat.isFile())
+      return res.status(400).send("Path is not a file");
+    res.download(target, path.basename(target));
+  });
+
+
+app.get("/admin/access-requests", requireAdmin, (_req: any, res: any) => {
+    res.set("Content-Type", "text/html");
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>GBrain Access Requests</title><style>
+body{margin:0;background:#101014;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}.wrap{max-width:1180px;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;cursor:pointer}.btn.gray{background:#444}.btn.red{background:#8b2f2f}.btn:disabled{opacity:.55;cursor:not-allowed}.card{background:#1d1d24;border:1px solid #333;border-radius:10px;padding:16px;margin:14px 0}.muted{color:#aaa;font-size:13px}.actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}pre{white-space:pre-wrap;background:#15151a;border-radius:8px;padding:10px}.status-pending{color:#ffd479}.status-approved,.status-approved_partial{color:#91e091}.status-rejected{color:#ff9c9c}.grant-table{width:100%;border-collapse:collapse;margin-top:12px}.grant-table th,.grant-table td{border-bottom:1px solid #333;padding:8px;text-align:left}.grant-table th{color:#aaa;font-weight:500}.grant-table input{transform:scale(1.1)}.denied{color:#ffb7b7}.approved-list{color:#b7f0b7}
+</style></head><body><div class="wrap"><div class="top"><div><h1>Заявки доступа GBrain</h1><div class="muted">Можно утвердить заявку целиком или скорректировать галочками, какие права выдать.</div></div><div><a class="btn gray" href="/admin/permissions">Права пользователей</a> <a class="btn gray" href="/admin/">Админ-панель</a></div></div><div id="list">Загрузка...</div></div><script>
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()}
+function requestedLabel(a){return a.write?'чтение+запись':(a.read?'чтение':'нет')}
+function renderPendingRows(r){return '<table class="grant-table"><thead><tr><th>Область</th><th>Source</th><th>Запрошено</th><th>Дать чтение</th><th>Дать запись</th></tr></thead><tbody>'+((r.requests||[]).map((a,i)=>'<tr><td>'+esc(a.area)+'</td><td><code>'+esc(a.source_id||'')+'</code></td><td>'+esc(requestedLabel(a))+'</td><td><input class="grant-read" type="checkbox" data-index="'+i+'" '+((a.read||a.write)?'checked':'')+'></td><td><input class="grant-write" type="checkbox" data-index="'+i+'" '+(a.write?'checked':'')+'></td></tr>').join(''))+'</tbody></table>'}
+function renderDecidedRows(r){const approved=(r.approved_requests||[]).map(a=>'<div class="approved-list">✓ '+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</div>').join('');const denied=(r.denied_requests||[]).map(a=>'<div class="denied">\xD7 '+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</div>').join('');if(approved||denied)return '<div style="margin-top:10px">'+approved+denied+'</div>';return '<div style="margin-top:10px">'+((r.requests||[]).map(a=>'<span>'+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</span>').join('<br>'))+'</div>'}
+function collectGrants(card){const grants=[];card.querySelectorAll('tbody tr').forEach(row=>{const idx=Number(row.querySelector('input').dataset.index);const read=row.querySelector('.grant-read').checked;const write=row.querySelector('.grant-write').checked;grants.push({index:idx,read:read||write,write})});return grants}
+function renderReq(r){const pending=r.status==='pending';const rows=pending?renderPendingRows(r):renderDecidedRows(r);const actions=pending?'<div class="actions"><button class="btn js-decision" data-id="'+esc(r.id)+'" data-action="approve">Утвердить выбранные права</button><button class="btn gray js-check-all" type="button">Отметить всё как запрошено</button><button class="btn gray js-clear" type="button">Снять все галочки</button><button class="btn red js-decision" data-id="'+esc(r.id)+'" data-action="reject">Отклонить всё</button></div>':'';return '<div class="card" data-request-id="'+esc(r.id)+'"><h3>'+esc(r.email)+' <span class="status-'+esc(r.status)+'">'+esc(r.status)+'</span></h3><div class="muted">'+esc(r.id)+' \xB7 '+esc(r.requested_at||'')+'</div>'+rows+'<pre>'+esc(r.reason||'(причина не указана)')+'</pre>'+actions+(r.decided_at?'<div class="muted">Решение: '+esc(r.decided_at)+' \xB7 '+esc(r.decided_by||'')+'</div>':'')+'</div>'}
+function bindCard(card){card.querySelectorAll('.grant-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=card.querySelector('.grant-read[data-index="'+w.dataset.index+'"]');if(r)r.checked=true}});card.querySelectorAll('.grant-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=card.querySelector('.grant-write[data-index="'+r.dataset.index+'"]');if(w)w.checked=false}});const all=card.querySelector('.js-check-all');if(all)all.onclick=()=>{card.querySelectorAll('tbody tr').forEach(row=>{const read=row.querySelector('.grant-read');const write=row.querySelector('.grant-write');read.checked=true;write.checked=row.children[2].textContent.includes('запись')})};const clear=card.querySelector('.js-clear');if(clear)clear.onclick=()=>{card.querySelectorAll('input[type="checkbox"]').forEach(i=>i.checked=false)}}
+async function load(){try{const data=await api('/admin/api/access-requests');document.getElementById('list').innerHTML=data.requests.map(renderReq).join('')||'<div class="card muted">Заявок нет</div>';document.querySelectorAll('.card').forEach(bindCard);document.querySelectorAll('.js-decision').forEach(b=>b.onclick=()=>decide(b))}catch(e){document.getElementById('list').innerHTML='<div class="card">Ошибка: '+esc(e.message)+'</div>'}}
+async function decide(button){const id=button.dataset.id,action=button.dataset.action;const card=button.closest('.card');if(action==='approve'){const grants=collectGrants(card);const selected=grants.filter(g=>g.read||g.write).length;if(!selected){alert('Не выбрано ни одного права. Если нужно отказать полностью, нажмите \xABОтклонить всё\xBB.');return}if(!confirm('Утвердить выбранные права? Неотмеченные пункты будут записаны как невыданные.'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants})})}else{if(!confirm('Отклонить заявку полностью?'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})}await load()}
+load();
+</script></body></html>`);
+  });
+  app.get("/admin/api/access-requests", requireAdmin, (_req: any, res: any) => {
+    const requests = readAccessRequests().sort((a, b) => String(b.requested_at || "").localeCompare(String(a.requested_at || "")));
+    res.json({ requests });
+  });
+  app.post("/admin/api/access-requests/:id/approve", requireAdmin, express.json(), (req: any, res: any) => {
+    const id = String(req.params.id || "");
+    const requests = readAccessRequests();
+    const item = requests.find((r4) => r4.id === id);
+    if (!item) {
+      res.status(404).json({ error: "Request not found" });
+      return;
+    }
+    if (item.status !== "pending") {
+      res.status(400).json({ error: "Request is not pending" });
+      return;
+    }
+    const requestedRows = Array.isArray(item.requests) ? item.requests : [];
+    const rawGrants: Array<{ index?: unknown; read?: unknown; write?: unknown }> | null = Array.isArray(req.body?.grants) ? req.body.grants : null;
+    const selectedRows = requestedRows.map((row, index): PortalAccessRow | null => {
+      const grant = rawGrants ? rawGrants.find((g8) => Number(g8?.index) === index) : row;
+      const write2 = !!grant?.write && !!row.write;
+      const read2 = (!!grant?.read || write2) && (!!row.read || !!row.write);
+      const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
+      if (!sourceId) return null;
+      return { area: row.area, source_id: sourceId, read: read2, write: write2, requested_read: !!row.read, requested_write: !!row.write };
+    }).filter((row): row is PortalAccessRow => row !== null && (row.read || row.write));
+    if (selectedRows.length === 0) {
+      res.status(400).json({ error: "No permissions selected. Reject the request if nothing should be granted." });
+      return;
+    }
+    const permsPath = userPermissionsPath();
+    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(permsPath, {});
+    const defaultSource = String(item.email || "").split("@")[0].replace(/[^a-z0-9]/g, "-");
+    const user = perms[item.email] || { source_id: defaultSource, federated_read: [defaultSource, "shared"], federated_write: [defaultSource] };
+    const read = new Set(Array.isArray(user.federated_read) ? user.federated_read : []);
+    const write = new Set(Array.isArray(user.federated_write) ? user.federated_write : []);
+    if (user.source_id)
+      read.add(user.source_id);
+    for (const row of selectedRows) {
+      if (!row.source_id)
+        continue;
+      if (row.read || row.write)
+        read.add(row.source_id);
+      if (row.write)
+        write.add(row.source_id);
+    }
+    user.federated_read = Array.from(read).filter(Boolean);
+    user.federated_write = Array.from(write).filter(Boolean);
+    perms[item.email] = user;
+    writeJsonFileLocal(permsPath, perms);
+    const selectedBySource = new Map(selectedRows.map((row) => [row.source_id, row]));
+    const deniedRows = requestedRows.map((row): PortalAccessRow | null => {
+      const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
+      if (!sourceId) return null;
+      const selected = selectedBySource.get(sourceId);
+      const deniedRead = (!!row.read || !!row.write) && !selected?.read;
+      const deniedWrite = !!row.write && !selected?.write;
+      if (!deniedRead && !deniedWrite)
+        return null;
+      return { area: row.area, source_id: sourceId, read: deniedRead, write: deniedWrite };
+    }).filter((row): row is PortalAccessRow => row !== null);
+    const fullyApproved = deniedRows.length === 0 && selectedRows.length === requestedRows.length;
+    item.status = fullyApproved ? "approved" : "approved_partial";
+    item.decided_at = new Date().toISOString();
+    item.decided_by = resolvePortalUser(req) || "admin";
+    item.approved_at = item.decided_at;
+    item.approved_by = item.decided_by;
+    item.approved_requests = selectedRows.map((row) => ({ area: row.area, source_id: row.source_id, read: row.read, write: row.write }));
+    item.denied_requests = deniedRows;
+    writeAccessRequests(requests);
+    res.json({ approved: true, partial: item.status === "approved_partial", permissions: user, approved_requests: item.approved_requests, denied_requests: item.denied_requests });
+  });
+  app.post("/admin/api/access-requests/:id/reject", requireAdmin, express.json(), (req: any, res: any) => {
+    const id = String(req.params.id || "");
+    const requests = readAccessRequests();
+    const item = requests.find((r4) => r4.id === id);
+    if (!item) {
+      res.status(404).json({ error: "Request not found" });
+      return;
+    }
+    if (item.status !== "pending") {
+      res.status(400).json({ error: "Request is not pending" });
+      return;
+    }
+    item.status = "rejected";
+    item.decided_at = new Date().toISOString();
+    item.decided_by = "admin";
+    item.rejection_reason = String(req.body?.reason || "").slice(0, 1000);
+    writeAccessRequests(requests);
+    res.json({ rejected: true });
+  });
+
+
+
+  app.get('/admin/permissions', requireAdmin, (_req: Request, res: Response) => {
+    res.set('Content-Type', 'text/html');
+    res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>GBrain User Permissions</title><style>
+body{margin:0;background:#101014;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}.wrap{max-width:1320px;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;cursor:pointer}.btn.gray{background:#444}.muted{color:#aaa;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:18px;background:#1d1d24;border:1px solid #333;border-radius:10px;overflow:hidden}th,td{border-bottom:1px solid #333;padding:8px;text-align:center;vertical-align:middle}th{color:#bbb;font-weight:600;background:#181820;position:sticky;top:0}td.email{text-align:left;white-space:nowrap}td.source{text-align:left;color:#aaa;font-size:12px}input[type=checkbox]{transform:scale(1.1)}.cell{display:flex;gap:6px;justify-content:center;align-items:center}.r{color:#8cc8ff}.w{color:#ffd479}.saved{color:#91e091;margin-left:10px}.err{color:#ff9c9c;margin-left:10px}</style></head><body><div class="wrap"><div class="top"><div><h1>Права пользователей GBrain</h1><div class="muted">Таблица читает и меняет <code>~/.gbrain/user_permissions.json</code>. R = чтение, W = запись.</div></div><div><a class="btn gray" href="/admin/access-requests">Заявки</a> <a class="btn gray" href="/admin/">Админ-панель</a></div></div><div id="msg" class="muted"></div><div id="root">Загрузка...</div></div><script>
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()}
+function render(data){const areas=data.areas||[];const users=data.users||[];let html='<table><thead><tr><th>Пользователь</th><th>Личная область</th>'+areas.map(a=>'<th>'+esc(a.label)+'<br><span class="muted">'+esc(a.sourceId)+'</span></th>').join('')+'<th></th></tr></thead><tbody>';for(const u of users){html+='<tr data-email="'+esc(u.email)+'"><td class="email">'+esc(u.email)+'</td><td class="source"><code>'+esc(u.source_id||'')+'</code></td>'+areas.map(a=>{const r=(u.federated_read||[]).includes(a.sourceId);const w=(u.federated_write||[]).includes(a.sourceId);return '<td><div class="cell"><label class="r">R <input class="p-read" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(r?'checked':'')+'></label><label class="w">W <input class="p-write" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(w?'checked':'')+'></label></div></td>'}).join('')+'<td><button class="btn save">Сохранить</button></td></tr>'}html+='</tbody></table>';document.getElementById('root').innerHTML=html;document.querySelectorAll('tr[data-email]').forEach(bindRow)}
+function bindRow(row){row.querySelectorAll('.p-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=row.querySelector('.p-read[data-source="'+w.dataset.source+'"]');if(r)r.checked=true}});row.querySelectorAll('.p-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');if(w)w.checked=false}});row.querySelector('.save').onclick=async()=>{const email=row.dataset.email;const grants=[];row.querySelectorAll('.p-read').forEach(r=>{const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');grants.push({source_id:r.dataset.source,read:r.checked||w.checked,write:w.checked})});const msg=document.getElementById('msg');msg.className='muted';msg.textContent='Сохранение...';try{await api('/admin/api/permissions/'+encodeURIComponent(email),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants})});msg.className='saved';msg.textContent='Сохранено: '+email}catch(e){msg.className='err';msg.textContent='Ошибка: '+e.message}}}
+async function load(){try{render(await api('/admin/api/permissions'))}catch(e){document.getElementById('root').innerHTML='<div class="err">'+esc(e.message)+'</div>'}}load();
+</script></body></html>`);
+  });
+
+  app.get('/admin/api/permissions', requireAdmin, (_req: Request, res: Response) => {
+    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(userPermissionsPath(), {});
+    const users = Object.entries(perms).sort(([a], [b]) => a.localeCompare(b)).map(([email, p]: any) => ({
+      email,
+      source_id: p?.source_id || '',
+      federated_read: Array.isArray(p?.federated_read) ? p.federated_read : [],
+      federated_write: Array.isArray(p?.federated_write) ? p.federated_write : [],
+    }));
+    res.json({ areas: managedAccessAreas, users });
+  });
+
+  app.post('/admin/api/permissions/:email', requireAdmin, express.json(), (req: Request, res: Response) => {
+    const email = String(req.params.email || '').toLowerCase();
+    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(userPermissionsPath(), {});
+    const user = perms[email];
+    if (!user) { res.status(404).json({ error: 'User not found' }); return; }
+    const allowedManaged = new Set(managedAccessAreas.map(a => a.sourceId));
+    const grants = Array.isArray(req.body?.grants) ? req.body.grants : [];
+    const read = new Set<string>(Array.isArray(user.federated_read) ? user.federated_read.filter((x: string) => !allowedManaged.has(x)) : []);
+    const write = new Set<string>(Array.isArray(user.federated_write) ? user.federated_write.filter((x: string) => !allowedManaged.has(x)) : []);
+    if (user.source_id) { read.add(user.source_id); write.add(user.source_id); }
+    for (const grant of grants) {
+      const sourceId = String(grant?.source_id || '');
+      if (!allowedManaged.has(sourceId)) continue;
+      const canWrite = !!grant.write;
+      const canRead = !!grant.read || canWrite;
+      if (canRead) read.add(sourceId);
+      if (canWrite) write.add(sourceId);
+    }
+    user.federated_read = Array.from(read).filter(Boolean);
+    user.federated_write = Array.from(write).filter(Boolean);
+    perms[email] = user;
+    writeJsonFileLocal(userPermissionsPath(), perms);
+    res.json({ ok: true, user });
+  });
+  // OAuth authorization must be bound to the same opaque, server-side Portal
+  // session used by the rest of the application. Never let the SDK issue an
+  // authorization code without a verified resource owner.
+  app.use('/authorize', (req: Request, res: Response, next: NextFunction) => {
+    const portalEmail = resolvePortalUser(req, res);
+    if (!portalEmail) {
+      return res.redirect(`/login?${req.originalUrl.split('?')[1] || ''}`);
+    }
+    res.locals.gbrainPortalUser = portalEmail;
     next();
   });
 
@@ -895,23 +2415,194 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   // Admin auth middleware
   function requireAdmin(req: express.Request, res: express.Response, next: express.NextFunction) {
-    const sessionId = (req.cookies as Record<string, string>)?.gbrain_admin;
-    if (!sessionId || !adminSessions.has(sessionId)) {
-      res.status(401).json({ error: 'Admin authentication required' });
+    const cookies = (req.cookies as Record<string, string>) || {};
+    const sessionId = cookies.gbrain_admin;
+    if (sessionId && adminSessions.has(sessionId)) {
+      const expiresAt = adminSessions.get(sessionId)!;
+      if (Date.now() <= expiresAt) {
+        next();
+        return;
+      }
+      adminSessions.delete(sessionId);
+    }
+
+    // Bridge only a server-resolved opaque Portal session into an admin session.
+    // The legacy unsigned session_user cookie is intentionally ignored.
+    const portalEmail = resolvePortalUser(req, res) || '';
+    if (isAdminEmail(portalEmail)) {
+      const bridgedSessionId = randomBytes(32).toString('hex');
+      const bridgedTtlMs = 30 * 24 * 60 * 60 * 1000;
+      adminSessions.set(bridgedSessionId, Date.now() + bridgedTtlMs);
+      res.cookie('gbrain_admin', bridgedSessionId, adminCookie(req, bridgedTtlMs));
+      next();
       return;
     }
-    const expiresAt = adminSessions.get(sessionId)!;
-    if (Date.now() > expiresAt) {
-      adminSessions.delete(sessionId);
-      res.status(401).json({ error: 'Session expired' });
+
+    res.status(401).json({ error: 'Admin authentication required' });
+  }
+
+  function requireAdminSameOrigin(req: express.Request, res: express.Response, next: express.NextFunction) {
+    const fetchSite = req.get('sec-fetch-site');
+    if (fetchSite && fetchSite !== 'same-origin') {
+      res.status(403).json({ error: 'cross_site_admin_mutation_rejected' });
+      return;
+    }
+    const origin = req.get('origin');
+    if (origin) {
+      try {
+        const expectedOrigin = `${req.protocol}://${req.get('host')}`;
+        if (new URL(origin).origin !== expectedOrigin) {
+          res.status(403).json({ error: 'cross_origin_admin_mutation_rejected' });
+          return;
+        }
+      } catch {
+        res.status(403).json({ error: 'invalid_origin' });
+        return;
+      }
+    } else if (fetchSite !== 'same-origin') {
+      res.status(403).json({ error: 'missing_same_origin_evidence' });
       return;
     }
     next();
   }
 
+  function sendReviewError(res: express.Response, error: unknown): void {
+    if (error instanceof ReviewConflictError) {
+      res.status(error.code === 'not_found' ? 404 : 409).json({ error: error.code, message: error.message });
+      return;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: 'review_request_failed', message });
+  }
+
   // ---------------------------------------------------------------------------
   // Admin API endpoints
   // ---------------------------------------------------------------------------
+
+  app.get('/admin/api/ai-review/proposals', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const statusRaw = String(req.query.status ?? 'pending');
+      const status = ['pending', 'accepted', 'rejected', 'superseded'].includes(statusRaw)
+        ? statusRaw as TakeProposalStatus
+        : 'pending';
+      res.json(await listTakeProposals(engine, {
+        status,
+        sourceId: typeof req.query.source_id === 'string' ? req.query.source_id : undefined,
+        query: typeof req.query.q === 'string' ? req.query.q : undefined,
+        limit: Number(req.query.limit ?? 50),
+        offset: Number(req.query.offset ?? 0),
+      }));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/proposals/:id', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      res.json(await getTakeProposalReview(engine, Number(req.params.id)));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await createManualTakeRevision(engine, Number(req.params.id), req.body?.draft, adminActor(req)));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/revisions/llm', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await createLlmTakeRevision(
+        engine,
+        Number(req.params.id),
+        String(req.body?.comment ?? ''),
+        adminActor(req),
+        typeof req.body?.model === 'string' ? req.body.model : undefined,
+      ));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await acceptTakeProposal(
+        engine,
+        Number(req.params.id),
+        req.body?.draft,
+        adminActor(req),
+        typeof req.body?.revision_id === 'number' ? req.body.revision_id : undefined,
+      ));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await rejectTakeProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/concepts', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      res.json(await listConceptProposals(engine, {
+        status: String(req.query.status ?? 'pending'),
+        query: typeof req.query.q === 'string' ? req.query.q : undefined,
+        limit: Number(req.query.limit ?? 50),
+      }));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/concepts/:id', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      res.json(await getConceptProposalReview(engine, Number(req.params.id)));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/concepts/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await createManualConceptRevision(engine, Number(req.params.id), String(req.body?.proposed_markdown ?? ''), adminActor(req)));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/concepts/:id/revisions/llm', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await createLlmConceptRevision(engine, Number(req.params.id), String(req.body?.comment ?? ''), adminActor(req), req.body?.model));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/concepts/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await acceptConceptProposal(engine, Number(req.params.id), req.body?.proposed_markdown, adminActor(req), {
+        revisionId: typeof req.body?.revision_id === 'number' ? req.body.revision_id : undefined,
+        allowOverwriteExisting: req.body?.allow_overwrite_existing === true,
+      }));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/concepts/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await rejectConceptProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
 
   // Sign-out-everywhere: nuke ALL active admin sessions in-memory. Every
   // browser/tab fails its next request, gets 401, redirects to login.
@@ -1019,6 +2710,924 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       res.status(500).json({ error: msg });
+    }
+  });
+
+  // Historical Minion/autopilot activity. Admin-only and intentionally
+  // returns a curated report shape rather than raw job data (which may contain
+  // repo paths or handler-specific parameters).
+  app.get('/admin/api/activity/runs', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const first = (value: unknown): string | undefined => {
+        if (typeof value === 'string') return value;
+        if (Array.isArray(value) && typeof value[0] === 'string') return value[0];
+        return undefined;
+      };
+      const integer = (value: unknown): number | undefined => {
+        const raw = first(value);
+        if (raw === undefined) return undefined;
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isFinite(parsed) ? parsed : undefined;
+      };
+      const { readActivitySnapshot } = await import('./activity-runs.ts');
+      const report = await readActivitySnapshot(engine, {
+        period: first(req.query.period),
+        since: first(req.query.since),
+        until: first(req.query.until),
+        status: first(req.query.status),
+        name: first(req.query.name),
+        source: first(req.query.source),
+        limit: integer(req.query.limit),
+        offset: integer(req.query.offset),
+        exportAll: first(req.query.export) === 'true' || first(req.query.export) === '1',
+      });
+      res.json(report);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const invalid = /Invalid |must be earlier|cannot exceed/.test(msg);
+      res.status(invalid ? 400 : 500).json({ error: msg });
+    }
+  });
+
+  // Source Ingest admin review/config console. Admin-authenticated and local/trusted:
+  // this is the human UI for configuring connectors and profiles before any write job.
+  app.get('/admin/api/source-ingest/overview', requireAdmin, async (_req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const [profiles, status, refresh, sources, connectorConfigs, catalogTree] = await Promise.all([
+        operationsByName.source_profile_get.handler(ctx, {}),
+        operationsByName.source_sync_status.handler(ctx, { limit: 200 }),
+        operationsByName.source_refresh.handler(ctx, {}),
+        engine.executeRaw(`SELECT id, name, local_path AS path, (config->>'federated')::boolean AS federated FROM sources ORDER BY id`),
+        operationsByName.source_connector_config_get.handler(ctx, {}),
+        operationsByName.source_ingest_tree.handler(ctx, {}),
+      ]);
+      const connectorConfigRows = Array.isArray((connectorConfigs as any)?.rows) ? (connectorConfigs as any).rows : [];
+      res.json({
+        connectors: sourceIngestConnectorDescriptors(),
+        profiles,
+        status,
+        refresh,
+        sources,
+        connector_configs: connectorConfigs,
+        source_tables: sourceTableSummariesFromConfigs(connectorConfigRows as any),
+        catalog_tree: catalogTree,
+      });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/catalog/tree', requireAdmin, async (_req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      res.json(await operationsByName.source_ingest_tree.handler(ctx, {}));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/schema-view', requireAdmin, async (_req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const [active_pack, stats, graph] = await Promise.all([
+        operationsByName.get_active_schema_pack.handler(ctx, {}),
+        operationsByName.schema_stats.handler(ctx, {}),
+        operationsByName.schema_graph.handler(ctx, {}),
+      ]);
+      res.json({ ok: true, active_pack, stats, graph });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/schema-view/type/:type', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      res.json(await operationsByName.schema_explain_type.handler(ctx, { type: req.params.type }));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/schema-view/type-card/:type', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      res.json(await operationsByName.schema_type_card.handler(ctx, { type: req.params.type }));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/schema-view/proposal', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'shared', remote: false, dryRun: false };
+    try {
+      res.json(await operationsByName.schema_proposal_create.handler(ctx, req.body || {}));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/article-template/:type', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      res.json(await operationsByName.source_article_template.handler(ctx, { gbrain_type: req.params.type }));
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/connector', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const connector_id = typeof body.connector_id === 'string' ? body.connector_id.trim() : '';
+      const kind = typeof body.kind === 'string' ? body.kind.trim() : '';
+      const display_name = typeof body.display_name === 'string' ? body.display_name.trim() : connector_id;
+      if (!connector_id || !kind) {
+        res.status(400).json({ error: 'connector_id_and_kind_required' });
+        return;
+      }
+      const out = await operationsByName.source_connector_upsert.handler(ctx, {
+        connector_id,
+        kind,
+        display_name,
+        config_json: body.config_json && typeof body.config_json === 'object' ? body.config_json : {},
+        enabled: typeof body.enabled === 'boolean' ? body.enabled : true,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/connector/delete', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id.trim() : '';
+      if (!connector_id) {
+        res.status(400).json({ error: 'connector_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_connector_delete.handler(ctx, {
+        connector_id,
+        confirm_token: typeof req.body?.confirm_token === 'string' ? req.body.confirm_token : undefined,
+        force: req.body?.force === true,
+      }));
+    } catch (e) {
+      res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/delete-impact', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const kind = typeof req.body?.kind === 'string' ? req.body.kind.trim() : '';
+      const id = typeof req.body?.id === 'string' ? req.body.id.trim() : '';
+      if (!kind || !id) {
+        res.status(400).json({ error: 'kind_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_catalog_delete_impact.handler(ctx, { kind, id }));
+    } catch (e) {
+      res.status(400).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  async function sourceConnectorRuntimeConfig(body: Record<string, unknown>): Promise<{ connectorId: string; objectName?: string; config: Record<string, unknown>; credentialStatus: Record<string, unknown> }> {
+    const connectorId = typeof body.connector_id === 'string' ? body.connector_id.trim() : 'appsheet-vehicles';
+    const objectName = typeof body.source_object === 'string' && body.source_object.trim() ? body.source_object.trim() : undefined;
+    const tableName = typeof body.table_name === 'string' ? body.table_name.trim() : undefined;
+    const configId = typeof body.config_id === 'string' ? body.config_id : (objectName ? defaultSourceConnectorConfigId(connectorId, objectName, tableName) : `connector:${connectorId}`);
+    const saved = await operationsByName.source_connector_list.handler(
+      { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true },
+      { connector_id: connectorId },
+    ) as { rows?: Array<Record<string, unknown>> };
+    const row = saved.rows?.[0];
+    const rowConfig = row?.config_json && typeof row.config_json === 'object' ? row.config_json as Record<string, unknown> : {};
+    const objectSecretConfig = objectName ? await getSourceConnectorSecretConfig(engine, connectorId, objectName, configId) : {};
+    const connectorSecretConfig = await getSourceConnectorSecretConfig(engine, connectorId, '__connection__', `connector:${connectorId}`);
+    const credentialStatus = await sourceConnectorSecretStatus(engine, connectorId, `connector:${connectorId}`, '__connection__') as unknown as Record<string, unknown>;
+    const isAppSheet = connectorId === 'appsheet' || connectorId === 'appsheet-vehicles' || connectorId.startsWith('appsheet-');
+    return {
+      connectorId,
+      objectName,
+      credentialStatus,
+      config: {
+        ...rowConfig,
+        ...nonSecretConnectorConfigFromBody(body),
+        ...(isAppSheet && objectName ? { table_name: tableName || objectName } : {}),
+        ...connectorSecretConfig,
+        ...objectSecretConfig,
+      },
+    };
+  }
+
+  app.post('/admin/api/source-ingest/catalog/connector/list-objects', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    try {
+      const { connectorId, objectName, config: runtimeConfig } = await sourceConnectorRuntimeConfig((req.body || {}) as Record<string, unknown>);
+      if (!objectName && (connectorId === 'appsheet' || connectorId === 'appsheet-vehicles' || connectorId.startsWith('appsheet-'))) {
+        res.json({ ok: true, connector_id: connectorId, objects: [], note: 'No table/object was requested. AppSheet does not expose reliable table discovery here; enter the table name in Base view and run Execute/Discover there.' });
+        return;
+      }
+      const connector = getSourceConnector(connectorId, runtimeConfig);
+      if (!connector) {
+        res.status(400).json({ ok: false, error: `unsupported_connector: ${connectorId}` });
+        return;
+      }
+      const objects = await connector.listObjects();
+      res.json({ ok: true, connector_id: connectorId, objects });
+    } catch (e) {
+      res.status(200).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/connector/test', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const started = Date.now();
+    try {
+      const { connectorId, objectName, config: runtimeConfig, credentialStatus } = await sourceConnectorRuntimeConfig((req.body || {}) as Record<string, unknown>);
+      const connector = getSourceConnector(connectorId, runtimeConfig);
+      if (!connector) {
+        res.status(400).json({ ok: false, status: 'unsupported_connector', connector_id: connectorId });
+        return;
+      }
+      const credentialsConfigured = (credentialStatus.configured !== false);
+      const isAppSheet = connectorId === 'appsheet' || connectorId === 'appsheet-vehicles' || connectorId.startsWith('appsheet-');
+      const shouldProbeObjects = credentialsConfigured && (!!objectName || connectorId === 'postgres' || connectorId.startsWith('postgres-'));
+      if (shouldProbeObjects && isAppSheet && objectName) await connector.sample(objectName, 1);
+      const objects = shouldProbeObjects ? await connector.listObjects() : [];
+      if (!credentialsConfigured) {
+        await recordSourceConnectorTest(engine, connectorId, false);
+        res.json({ ok: false, status: 'credentials_missing', connector_id: connectorId, elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: 'Connector-level test does not require a table. Add credentials here; table-specific extraction is tested from Base view.' });
+        return;
+      }
+      await recordSourceConnectorTest(engine, connectorId, true);
+      res.json({ ok: true, status: shouldProbeObjects ? 'connection_ok' : 'credentials_stored_unverified', connector_id: connectorId, ...(objectName ? { source_object: objectName } : {}), elapsed_ms: Date.now() - started, credential_status: credentialStatus, objects, note: shouldProbeObjects ? 'Connector credentials are valid; object discovery succeeded.' : 'Credentials are stored but were not verified against a concrete AppSheet table. Create or open a Base view to run a remote read probe.' });
+    } catch (e) {
+      const connectorId = typeof req.body?.connector_id === 'string' ? req.body.connector_id : '';
+      if (connectorId) await recordSourceConnectorTest(engine, connectorId, false).catch(() => undefined);
+      res.status(200).json({ ok: false, status: 'connection_failed', elapsed_ms: Date.now() - started, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/base-view/discover', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const connector_id = typeof body.connector_id === 'string' ? body.connector_id.trim() : '';
+      const object_name = typeof body.object_name === 'string' ? body.object_name.trim() : '';
+      if (!connector_id || !object_name) {
+        res.status(400).json({ error: 'connector_id_object_name_required' });
+        return;
+      }
+      const selected_fields = Array.isArray(body.selected_fields) ? body.selected_fields.flatMap(v => String(v).split(/\\n|[\n,]/)).map(s => s.trim()).filter(Boolean) : [];
+      const primary_key_field = typeof body.primary_key_field === 'string' && body.primary_key_field.trim() ? body.primary_key_field.trim() : undefined;
+      const updated_at_field = typeof body.updated_at_field === 'string' && body.updated_at_field.trim() ? body.updated_at_field.trim() : undefined;
+      const sample_limit = Number.isFinite(Number(body.sample_limit)) ? Number(body.sample_limit) : 25;
+      const { config: runtimeConfig } = await sourceConnectorRuntimeConfig({ ...body, connector_id, source_object: object_name, table_name: object_name, config_id: `connector:${connector_id}` });
+      const out = await operationsByName.source_discover.handler(ctx, {
+        connector_id,
+        source_object: object_name,
+        sample_limit,
+        connector_config: runtimeConfig,
+        ...(selected_fields.length ? { selected_fields } : {}),
+        ...(primary_key_field ? { primary_key_field } : {}),
+        ...(updated_at_field ? { updated_at_field } : {}),
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(200).json({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/base-view/execute', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const out = await operationsByName.source_base_view_execute.handler(ctx, {
+        base_view_id: typeof req.body?.base_view_id === 'string' ? req.body.base_view_id : undefined,
+        draft: req.body?.draft && typeof req.body.draft === 'object' ? req.body.draft : undefined,
+        sample_limit: Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : undefined,
+        connector_config: req.body?.connector_config && typeof req.body.connector_config === 'object' ? req.body.connector_config : undefined,
+        discover_all_fields: req.body?.discover_all_fields === true,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/base-view', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const base_view_id = typeof body.base_view_id === 'string' ? body.base_view_id.trim() : '';
+      const connector_id = typeof body.connector_id === 'string' ? body.connector_id.trim() : '';
+      const object_name = typeof body.object_name === 'string' ? body.object_name.trim() : '';
+      if (!base_view_id || !connector_id || !object_name) {
+        res.status(400).json({ error: 'base_view_id_connector_id_object_name_required' });
+        return;
+      }
+      const selected_fields = Array.isArray(body.selected_fields) ? body.selected_fields.flatMap(v => String(v).split(/\\n|[\n,]/)).map(s => s.trim()).filter(Boolean) : [];
+      const row_filter = Array.isArray(body.row_filter) ? body.row_filter : [];
+      const sample_limit = Number.isFinite(Number(body.sample_limit)) ? Number(body.sample_limit) : 50;
+      const has_primary_key_field = Object.prototype.hasOwnProperty.call(body, 'primary_key_field');
+      const has_updated_at_field = Object.prototype.hasOwnProperty.call(body, 'updated_at_field');
+      const primary_key_field = typeof body.primary_key_field === 'string' ? body.primary_key_field.trim() : '';
+      const updated_at_field = typeof body.updated_at_field === 'string' ? body.updated_at_field.trim() : '';
+      const discovery_json = body.discovery_json && typeof body.discovery_json === 'object'
+        ? { ...(body.discovery_json as Record<string, unknown>), ...(primary_key_field ? { primary_key_field } : {}), ...(updated_at_field ? { updated_at_field } : {}) }
+        : (primary_key_field || updated_at_field ? { ...(primary_key_field ? { primary_key_field } : {}), ...(updated_at_field ? { updated_at_field } : {}) } : undefined);
+      const out = await operationsByName.source_base_view_upsert.handler(ctx, {
+        base_view_id,
+        connector_id,
+        object_name,
+        display_name: typeof body.display_name === 'string' ? body.display_name.trim() : base_view_id,
+        selected_fields,
+        row_filter,
+        sample_limit,
+        ...(has_primary_key_field ? { primary_key_field } : {}),
+        ...(has_updated_at_field ? { updated_at_field } : {}),
+        discovery_json,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/base-view/delete', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const base_view_id = typeof req.body?.base_view_id === 'string' ? req.body.base_view_id.trim() : '';
+      if (!base_view_id) {
+        res.status(400).json({ error: 'base_view_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_base_view_delete.handler(ctx, {
+        base_view_id,
+        confirm_token: typeof req.body?.confirm_token === 'string' ? req.body.confirm_token : undefined,
+        force: req.body?.force === true,
+      }));
+    } catch (e) {
+      res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/transform-view', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const transform_view_id = typeof body.transform_view_id === 'string' ? body.transform_view_id.trim() : '';
+      const sql = typeof body.sql === 'string' ? body.sql : '';
+      const primary_key_field = typeof body.primary_key_field === 'string' ? body.primary_key_field.trim() : '';
+      if (!transform_view_id || !sql.trim() || !primary_key_field) {
+        res.status(400).json({ error: 'transform_view_id_sql_primary_key_required' });
+        return;
+      }
+      const inputs = Array.isArray(body.inputs) ? body.inputs.map((input: unknown) => {
+        const raw = input && typeof input === 'object' ? input as Record<string, unknown> : {};
+        return { alias: String(raw.alias ?? '').trim(), base_view_id: String(raw.base_view_id ?? '').trim() };
+      }).filter(input => input.alias && input.base_view_id) : [];
+      if (inputs.length === 0) {
+        res.status(400).json({ error: 'transform_inputs_required' });
+        return;
+      }
+      const out = await operationsByName.source_transform_view_upsert.handler(ctx, {
+        transform_view_id,
+        display_name: typeof body.display_name === 'string' ? body.display_name.trim() : transform_view_id,
+        inputs,
+        sql,
+        primary_key_field,
+        updated_at_field: typeof body.updated_at_field === 'string' && body.updated_at_field.trim() ? body.updated_at_field.trim() : undefined,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/transform-view/execute', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const out = await operationsByName.source_transform_view_execute.handler(ctx, {
+        transform_view_id: typeof req.body?.transform_view_id === 'string' ? req.body.transform_view_id : undefined,
+        draft: req.body?.draft && typeof req.body.draft === 'object' ? req.body.draft : undefined,
+        sample_limit: Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : undefined,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/transform-view/delete', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const transform_view_id = typeof req.body?.transform_view_id === 'string' ? req.body.transform_view_id.trim() : '';
+      if (!transform_view_id) {
+        res.status(400).json({ error: 'transform_view_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_transform_view_delete.handler(ctx, {
+        transform_view_id,
+        confirm_token: typeof req.body?.confirm_token === 'string' ? req.body.confirm_token : undefined,
+        force: req.body?.force === true,
+      }));
+    } catch (e) {
+      res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/article-view', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const article_view_id = typeof body.article_view_id === 'string' ? body.article_view_id.trim() : '';
+      const input_kind = body.input_kind === 'transform_view' ? 'transform_view' : 'base_view';
+      const input_id = typeof body.input_id === 'string' ? body.input_id.trim() : '';
+      const gbrain_type = typeof body.gbrain_type === 'string' ? body.gbrain_type.trim() : '';
+      const target_source_id = typeof body.target_source_id === 'string' ? body.target_source_id.trim() : '';
+      const slug_template = typeof body.slug_template === 'string' ? body.slug_template.trim() : '';
+      if (!article_view_id || !input_id || !gbrain_type || !target_source_id || !slug_template) {
+        res.status(400).json({ error: 'article_view_id_input_type_target_slug_required' });
+        return;
+      }
+      const identity = body.identity && typeof body.identity === 'object' ? body.identity as Record<string, unknown> : {};
+      const security = body.security && typeof body.security === 'object' ? body.security as Record<string, unknown> : { classification: 'shared', pii: false };
+      const update_policy = body.update_policy && typeof body.update_policy === 'object' ? body.update_policy as Record<string, unknown> : { mode: 'managed_block', preserve_manual_sections: true };
+      const mapping = body.mapping && typeof body.mapping === 'object' ? body.mapping as Record<string, unknown> : undefined;
+      const article_template = body.article_template && typeof body.article_template === 'object' ? body.article_template as Record<string, unknown> : undefined;
+      const change_intelligence = body.change_intelligence && typeof body.change_intelligence === 'object' ? body.change_intelligence as Record<string, unknown> : undefined;
+      const freshness_policy = body.freshness_policy && typeof body.freshness_policy === 'object' ? body.freshness_policy as Record<string, unknown> : undefined;
+      const link_rules = Array.isArray(body.link_rules) ? body.link_rules : [];
+      const out = await operationsByName.source_article_view_upsert.handler(ctx, {
+        article_view: {
+          article_view_id,
+          display_name: typeof body.display_name === 'string' ? body.display_name.trim() : article_view_id,
+          input: { kind: input_kind, id: input_id },
+          gbrain_type,
+          target_source_id,
+          slug_template,
+          identity,
+          mapping,
+          article_template,
+          change_intelligence,
+          link_rules,
+          freshness_policy,
+          update_policy,
+          security,
+          status: typeof body.status === 'string' ? body.status : 'draft',
+        },
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/article-view/delete', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const article_view_id = typeof req.body?.article_view_id === 'string' ? req.body.article_view_id.trim() : '';
+      if (!article_view_id) {
+        res.status(400).json({ error: 'article_view_id_required' });
+        return;
+      }
+      res.json(await operationsByName.source_article_view_delete.handler(ctx, { article_view_id }));
+    } catch (e) {
+      res.status(409).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/article-view/dry-run', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const article_view_id = typeof req.body?.article_view_id === 'string' ? req.body.article_view_id.trim() : '';
+      if (!article_view_id) {
+        res.status(400).json({ error: 'article_view_id_required' });
+        return;
+      }
+      const out = await operationsByName.source_article_view_dry_run.handler(ctx, {
+        article_view_id,
+        sample_limit: Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25,
+        connector_config: req.body?.connector_config && typeof req.body.connector_config === 'object' ? req.body.connector_config : undefined,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/article-view/approve', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const article_view_id = typeof req.body?.article_view_id === 'string' ? req.body.article_view_id.trim() : '';
+      if (!article_view_id) {
+        res.status(400).json({ error: 'article_view_id_required' });
+        return;
+      }
+      const current_chain_hash = typeof req.body?.current_chain_hash === 'string' ? req.body.current_chain_hash.trim() : undefined;
+      if (!current_chain_hash) {
+        res.status(400).json({ error: 'current_chain_hash_required' });
+        return;
+      }
+      const out = await operationsByName.source_article_view_approve.handler(ctx, { article_view_id, approved_by: 'admin-ui', current_chain_hash });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/catalog/article-view/run', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const article_view_id = typeof req.body?.article_view_id === 'string' ? req.body.article_view_id.trim() : '';
+      if (!article_view_id) {
+        res.status(400).json({ error: 'article_view_id_required' });
+        return;
+      }
+      const out = await operationsByName.source_article_view_run.handler(ctx, {
+        article_view_id,
+        limit: Number.isFinite(Number(req.body?.limit)) ? Number(req.body.limit) : undefined,
+        changed_since: req.body?.changed_since === true,
+        require_clean_git: req.body?.require_clean_git !== false,
+        no_embed: req.body?.no_embed === true,
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/catalog/article-view/:article_view_id/runs', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const article_view_id = String(req.params.article_view_id || '').trim();
+      const limit = Number.isFinite(Number(req.query?.limit)) ? Number(req.query.limit) : 20;
+      const out = await operationsByName.source_article_view_runs.handler(ctx, { article_view_id, limit });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/refresh-report', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const profile_id = typeof req.body?.profile_id === 'string' ? req.body.profile_id : undefined;
+      const out = await operationsByName.source_refresh.handler(ctx, { ...(profile_id ? { profile_id } : {}) });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  function adminActor(req: Request): string {
+    const sessionId = (req.cookies as Record<string, string>)?.gbrain_admin || 'unknown';
+    return `admin-ui:${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}`;
+  }
+
+  app.post('/admin/api/source-ingest/save-config', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      if (!req.body?.config || typeof req.body.config !== 'object') {
+        res.status(400).json({ error: 'config_required' });
+        return;
+      }
+      const out = await operationsByName.source_connector_config_put.handler(ctx, { config: req.body.config, actor: adminActor(req) });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/save-secret', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id : 'appsheet-vehicles';
+      const source_object = typeof req.body?.source_object === 'string' ? req.body.source_object : 'vehicle';
+      if (!req.body?.secrets || typeof req.body.secrets !== 'object') {
+        res.status(400).json({ error: 'secrets_required' });
+        return;
+      }
+      const out = await operationsByName.source_connector_secret_put.handler(ctx, {
+        config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : connectorSecretConfigId(connector_id),
+        connector_id,
+        source_object,
+        secrets: req.body.secrets,
+        actor: adminActor(req),
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/delete-secret', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      const connector_id = typeof req.body?.connector_id === 'string' ? req.body.connector_id : 'appsheet-vehicles';
+      const source_object = typeof req.body?.source_object === 'string' ? req.body.source_object : 'vehicle';
+      const out = await operationsByName.source_connector_secret_delete.handler(ctx, {
+        config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : connectorSecretConfigId(connector_id),
+        connector_id,
+        source_object,
+        actor: adminActor(req),
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.get('/admin/api/source-ingest/secret-audit', requireAdmin, async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const config_id = typeof req.query?.config_id === 'string' ? req.query.config_id : undefined;
+      const limit = typeof req.query?.limit === 'string' ? Number(req.query.limit) : undefined;
+      const out = await operationsByName.source_connector_secret_audit.handler(ctx, { config_id, limit });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  function nonSecretConnectorConfigFromBody(body: Record<string, unknown>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (typeof body.table_name === 'string' && body.table_name.trim()) out.table_name = body.table_name.trim();
+    if (typeof body.primary_key_field === 'string' && body.primary_key_field.trim()) out.primary_key_field = body.primary_key_field.trim();
+    if (typeof body.updated_at_field === 'string' && body.updated_at_field.trim()) out.updated_at_field = body.updated_at_field.trim();
+    if (typeof body.base_url === 'string' && body.base_url.trim()) out.base_url = body.base_url.trim();
+    if (typeof body.schema === 'string' && body.schema.trim()) out.schema = body.schema.trim();
+    if (Array.isArray(body.allowed_objects)) out.allowed_objects = body.allowed_objects.map(String).filter(Boolean);
+    if (body.connector_config && typeof body.connector_config === 'object') {
+      const raw = body.connector_config as Record<string, unknown>;
+      if (typeof raw.table_name === 'string' && raw.table_name.trim()) out.table_name = raw.table_name.trim();
+      if (typeof raw.primary_key_field === 'string' && raw.primary_key_field.trim()) out.primary_key_field = raw.primary_key_field.trim();
+      if (typeof raw.updated_at_field === 'string' && raw.updated_at_field.trim()) out.updated_at_field = raw.updated_at_field.trim();
+      if (typeof raw.base_url === 'string' && raw.base_url.trim()) out.base_url = raw.base_url.trim();
+      if (typeof raw.schema === 'string' && raw.schema.trim()) out.schema = raw.schema.trim();
+      if (Array.isArray(raw.allowed_objects)) out.allowed_objects = raw.allowed_objects.map(String).filter(Boolean);
+    }
+    return out;
+  }
+
+  async function sourceIngestUiConfig(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const connector_id = typeof body.connector_id === 'string' ? body.connector_id : 'appsheet-vehicles';
+    const source_object = typeof body.source_object === 'string' ? body.source_object : 'vehicle';
+    const config_id = typeof body.config_id === 'string' ? body.config_id : defaultSourceConnectorConfigId(connector_id, source_object, typeof body.table_name === 'string' ? body.table_name : undefined);
+    const secret_config_id = connectorSecretConfigId(connector_id);
+    const saved = await operationsByName.source_connector_config_get.handler(
+      { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true },
+      { config_id },
+    ) as { rows?: Array<Record<string, unknown>> };
+    const row = saved.rows?.[0];
+    const nonSecretConfig = { ...(row?.config_json && typeof row.config_json === 'object' ? row.config_json as Record<string, unknown> : {}), ...nonSecretConnectorConfigFromBody(body) };
+    const secretConfig = await getSourceConnectorSecretConfig(engine, connector_id, source_object, secret_config_id);
+    return {
+      connector_id,
+      source_object,
+      target_source_id: typeof body.target_source_id === 'string' ? body.target_source_id : (typeof row?.target_source_id === 'string' ? row.target_source_id : 'shared'),
+      slug_prefix: typeof body.slug_prefix === 'string' ? body.slug_prefix : (typeof row?.slug_prefix === 'string' ? row.slug_prefix : 'source-ingest/vehicles'),
+      freshness_policy: typeof body.freshness_policy === 'string' ? body.freshness_policy : (typeof row?.freshness_policy === 'string' ? row.freshness_policy : 'P30D'),
+      table_name: typeof body.table_name === 'string' ? body.table_name : (typeof row?.table_name === 'string' ? row.table_name : 'vehicles'),
+      primary_key_field: typeof body.primary_key_field === 'string' ? body.primary_key_field : (typeof nonSecretConfig.primary_key_field === 'string' ? nonSecretConfig.primary_key_field : 'vehicleID'),
+      updated_at_field: typeof body.updated_at_field === 'string' ? body.updated_at_field : (typeof nonSecretConfig.updated_at_field === 'string' ? nonSecretConfig.updated_at_field : ''),
+      source_table_id: config_id,
+      secret_config_id,
+      connector_config: { ...nonSecretConfig, ...secretConfig },
+    };
+  }
+
+  app.post('/admin/api/source-ingest/discover', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
+      const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
+      const out = await operationsByName.source_discover.handler(ctx, { connector_id: ui.connector_id, source_object: ui.source_object, sample_limit, connector_config: ui.connector_config });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/test-connection', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    const started = Date.now();
+    try {
+      const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
+      const out = await operationsByName.source_discover.handler(ctx, {
+        connector_id: ui.connector_id,
+        source_object: ui.source_object,
+        sample_limit: 1,
+        connector_config: ui.connector_config,
+      }) as Record<string, unknown>;
+      res.json({
+        ok: true,
+        status: 'connection_ok',
+        connector_id: ui.connector_id,
+        source_object: ui.source_object,
+        table_name: ui.table_name,
+        elapsed_ms: Date.now() - started,
+        sampled: out.sampled ?? 0,
+        fields_count: Array.isArray(out.fields) ? out.fields.length : 0,
+        id_candidates: out.idCandidates ?? [],
+        updated_at_candidates: out.updatedAtCandidates ?? [],
+      });
+    } catch (e) {
+      res.status(200).json({
+        ok: false,
+        status: 'connection_failed',
+        elapsed_ms: Date.now() - started,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  });
+
+  function applySourceIngestUiOverrides(profile: unknown, body: Record<string, unknown>): Record<string, unknown> {
+    const raw = { ...((profile as Record<string, unknown>) || {}) };
+    const target = { ...((raw.target as Record<string, unknown>) || {}) };
+    const freshness = { ...((raw.freshness as Record<string, unknown>) || {}) };
+    if (typeof body.slug_prefix === 'string' && body.slug_prefix.trim()) {
+      const keyField = typeof body.primary_key_field === 'string' && body.primary_key_field.trim() ? body.primary_key_field.trim() : 'id';
+      target.slug_template = `${body.slug_prefix.trim().replace(/\/+$/g, '')}/{{ ${keyField} | slugify }}`;
+    }
+    if (typeof body.target_source_id === 'string' && body.target_source_id.trim()) {
+      target.suggested_source_id = body.target_source_id.trim();
+    }
+    if (typeof body.freshness_policy === 'string' && body.freshness_policy.trim()) {
+      freshness.policy = body.freshness_policy.trim();
+    }
+    raw.target = target;
+    raw.freshness = freshness;
+    return raw;
+  }
+
+  app.post('/admin/api/source-ingest/draft', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      const ui = await sourceIngestUiConfig((req.body || {}) as Record<string, unknown>);
+      const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
+      const selected_fields = Array.isArray(req.body?.selected_fields) ? req.body.selected_fields.map(String).filter(Boolean) : undefined;
+      const drafted = await operationsByName.source_profile_draft.handler(ctx, {
+        connector_id: ui.connector_id,
+        source_object: ui.source_object,
+        target_source_id: ui.target_source_id,
+        sample_limit,
+        connector_config: ui.connector_config,
+        selected_fields,
+        primary_key_field: ui.primary_key_field,
+        updated_at_field: ui.updated_at_field,
+      });
+      const profile = applySourceIngestUiOverrides((drafted as any).profile, ui);
+      res.json({ ...(drafted as Record<string, unknown>), profile });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  const sourceIngestDryRunApprovals = new Map<string, { profile_hash: string; approved_source_id: string; ack: boolean; requires_ack: boolean; at: number }>();
+  const sourceIngestDryRunKey = (req: Request) => String(req.cookies?.gbrain_admin || req.ip || 'admin-local');
+
+  app.post('/admin/api/source-ingest/dry-run', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: true };
+    try {
+      if (!req.body?.profile || typeof req.body.profile !== 'object') {
+        res.status(400).json({ error: 'profile_required' });
+        return;
+      }
+      const sample_limit = Number.isFinite(Number(req.body?.sample_limit)) ? Number(req.body.sample_limit) : 25;
+      const profile = req.body.profile as Record<string, unknown>;
+      const connector = typeof profile.source_connector === 'string' ? profile.source_connector : 'appsheet-vehicles';
+      const object = typeof profile.source_object === 'string' ? profile.source_object : 'vehicle';
+      const ui = await sourceIngestUiConfig({ ...(req.body || {}) as Record<string, unknown>, connector_id: connector, source_object: object });
+      const out = await operationsByName.source_dry_run.handler(ctx, { profile: req.body.profile, sample_limit, connector_config: ui.connector_config });
+      const outObj = out as Record<string, unknown>;
+      if (typeof outObj.profile_hash === 'string' && outObj.ok !== false) {
+        const sensitivity = (outObj.routing_sensitivity && typeof outObj.routing_sensitivity === 'object') ? outObj.routing_sensitivity as Record<string, unknown> : {};
+        const piiFields = Array.isArray(sensitivity.pii_fields) ? sensitivity.pii_fields : [];
+        const approvedSourceId = String(ui.target_source_id);
+        const routedSource = typeof sensitivity.approved_source_id === 'string' ? sensitivity.approved_source_id : approvedSourceId;
+        const requiresAck = sensitivity.pii === true || piiFields.length > 0 || routedSource !== approvedSourceId;
+        sourceIngestDryRunApprovals.set(sourceIngestDryRunKey(req), {
+          profile_hash: outObj.profile_hash,
+          approved_source_id: approvedSourceId,
+          ack: req.body?.sensitivity_ack === true,
+          requires_ack: requiresAck,
+          at: Date.now(),
+        });
+      }
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  function clampSourceIngestPreviewLimit(raw: unknown, fallback = 25, max = 100): number {
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(1, Math.floor(n)));
+  }
+
+  function capSourceIngestPreviewPayload(records: Array<{ external_id: string; source_updated_at: string | null; data: Record<string, unknown> }>, maxBytes = 262_144) {
+    const capped: typeof records = [];
+    let truncated = false;
+    for (const record of records) {
+      const next = [...capped, record];
+      if (Buffer.byteLength(JSON.stringify(next), 'utf8') > maxBytes) {
+        truncated = true;
+        break;
+      }
+      capped.push(record);
+    }
+    return { records: capped, truncated };
+  }
+
+  app.post('/admin/api/source-ingest/transform-preview', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    try {
+      if (!req.body?.profile || typeof req.body.profile !== 'object') {
+        res.status(400).json({ error: 'profile_required' });
+        return;
+      }
+      const sample_limit = clampSourceIngestPreviewLimit(req.body?.sample_limit);
+      const validation = validateSourceIngestProfile(req.body.profile);
+      if (!validation.ok || !validation.profile) {
+        res.status(400).json({ ok: false, error: 'invalid_profile', validation });
+        return;
+      }
+      const profile = validation.profile as unknown as Record<string, unknown>;
+      const connector = typeof profile.source_connector === 'string' ? profile.source_connector : 'appsheet-vehicles';
+      const object = typeof profile.source_object === 'string' ? profile.source_object : 'vehicle';
+      const ui = await sourceIngestUiConfig({ ...(req.body || {}) as Record<string, unknown>, connector_id: connector, source_object: object });
+      const records = await buildProfileSampleRecords(validation.profile, sample_limit, {
+        engine,
+        connectorConfigOverride: ui.connector_config as Record<string, unknown>,
+        defaultConnector: connector,
+        defaultObject: object,
+      });
+      const previewRecords = records.map(r => ({ external_id: r.external_id, source_updated_at: r.source_updated_at ?? null, data: r.data }));
+      const capped = capSourceIngestPreviewPayload(previewRecords);
+      res.json({ ok: true, count: records.length, returned: capped.records.length, truncated: capped.truncated || capped.records.length < records.length, records: capped.records });
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  app.post('/admin/api/source-ingest/approve-profile', requireAdmin, express.json(), async (req: Request, res: Response) => {
+    const ctx: OperationContext = { engine, config, logger: console, sourceId: 'default', remote: false, dryRun: false };
+    try {
+      if (!req.body?.profile || typeof req.body.profile !== 'object') {
+        res.status(400).json({ error: 'profile_required' });
+        return;
+      }
+      const approved_source_id = typeof req.body?.approved_source_id === 'string' ? req.body.approved_source_id : undefined;
+      if (!approved_source_id) {
+        res.status(400).json({ error: 'approved_source_id_required' });
+        return;
+      }
+      const dry_run_profile_hash = typeof req.body?.profile_hash === 'string' ? req.body.profile_hash : undefined;
+      if (!dry_run_profile_hash) {
+        res.status(400).json({ error: 'profile_hash_required' });
+        return;
+      }
+      const actualProfileHash = profileHash(req.body.profile as any);
+      if (dry_run_profile_hash !== actualProfileHash) {
+        res.status(409).json({ error: 'profile_hash_mismatch', profile_hash: dry_run_profile_hash, actual_profile_hash: actualProfileHash });
+        return;
+      }
+      const lastDryRun = sourceIngestDryRunApprovals.get(sourceIngestDryRunKey(req));
+      if (!lastDryRun || lastDryRun.profile_hash !== dry_run_profile_hash) {
+        res.status(409).json({ error: 'dry_run_profile_hash_mismatch', profile_hash: dry_run_profile_hash, last_profile_hash: lastDryRun?.profile_hash ?? null });
+        return;
+      }
+      if (lastDryRun.approved_source_id !== approved_source_id) {
+        res.status(409).json({ error: 'dry_run_source_mismatch', dry_run_target_source_id: lastDryRun.approved_source_id, approved_source_id });
+        return;
+      }
+      if (req.body?.sensitivity_ack === true) {
+        lastDryRun.ack = true;
+        sourceIngestDryRunApprovals.set(sourceIngestDryRunKey(req), lastDryRun);
+      }
+      if (lastDryRun.requires_ack && !lastDryRun.ack) {
+        res.status(409).json({ error: 'sensitivity_ack_required' });
+        return;
+      }
+      const dry_run_target_source_id = typeof req.body?.dry_run_target_source_id === 'string' ? req.body.dry_run_target_source_id : undefined;
+      if (dry_run_target_source_id && dry_run_target_source_id !== approved_source_id) {
+        res.status(409).json({ error: 'dry_run_source_mismatch', dry_run_target_source_id, approved_source_id });
+        return;
+      }
+      const out = await operationsByName.source_profile_put.handler(ctx, {
+        profile: req.body.profile,
+        approve: true,
+        approved_source_id,
+        profile_hash: dry_run_profile_hash,
+        approved_by: 'admin-ui',
+        change_note: typeof req.body?.change_note === 'string' ? req.body.change_note : 'approved from admin source-ingest UI',
+      });
+      res.json(out);
+    } catch (e) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
     }
   });
 
@@ -1434,7 +4043,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     res.status(405).json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
   });
 
-  app.post('/mcp', requireBearerAuth({ verifier: oauthProvider }), async (req: Request, res: Response) => {
+  app.post('/mcp', mcpRateLimiter, requireBearerAuth({ verifier: oauthProvider }), async (req: Request, res: Response) => {
     const startTime = Date.now();
     const authInfo = (req as any).auth as AuthInfo;
 

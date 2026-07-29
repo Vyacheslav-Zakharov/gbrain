@@ -90,6 +90,8 @@ export const BATCH_AUDIT_SITES = [
   'extract.stale',
   // operations.ts MCP put_page auto-link path.
   'mcp.put_page.autolink',
+  // source-ingest deterministic Change Intelligence timeline writes.
+  'source-ingest.change-intelligence',
   // sync.ts/reindex.ts orchestrator labels.
   'sync.import_file',
   'reindex.markdown',

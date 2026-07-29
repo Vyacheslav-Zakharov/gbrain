@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { parseOpArgs } from '../src/cli.ts';
+import { parseOpArgs, formatResult } from '../src/cli.ts';
 import { operationsByName } from '../src/core/operations.ts';
 
 describe('parseOpArgs', () => {
@@ -19,6 +19,108 @@ describe('parseOpArgs', () => {
       expand: false,
       source_id: 'gstack-code-repo-0e4763c9',
     });
+  });
+
+  test('source-ingest operator CLI parses positional profile and flags', () => {
+    const op = operationsByName.source_ingest;
+    expect(op.cliHints?.name).toBe('source-ingest-run');
+    expect(op.cliHints?.aliases).toContain('source-ingest');
+    const params = parseOpArgs(op, [
+      'fake-source-vehicle-v1',
+      '--run-id',
+      'run-cli',
+      '--limit',
+      '2',
+      '--no-require-clean-git',
+      '--no-embed',
+      '--job',
+      '--queue',
+      'ingest',
+    ]);
+    expect(params).toEqual({
+      profile_id: 'fake-source-vehicle-v1',
+      run_id: 'run-cli',
+      limit: 2,
+      require_clean_git: false,
+      no_embed: true,
+      job: true,
+      queue: 'ingest',
+    });
+  });
+
+  test('source-ingest CLI format is operator-readable', () => {
+    const text = formatResult('source_ingest', {
+      ok: true,
+      run_id: 'run-cli',
+      profile_id: 'fake-source-vehicle-v1',
+      source_id: 'shared',
+      storage: { mode: 'git-backed', local_path: '/tmp/shared', git_clean: false, dirty_paths: ['?? companies/'] },
+      counts: { sampled: 3, written: 2, unchanged: 0, skipped: 1, failed: 0 },
+      git_commit: { committed: false, reason: 'no_changes' },
+      graph_writes: 'deferred',
+      results: [{ external_id: 'veh-001', status: 'written', slug: 'source-ingest/vehicles/a-001' }],
+    });
+    expect(text).toContain('source_ingest ok run_id=run-cli');
+    expect(text).toContain('dirty_paths=?? companies/');
+    expect(text).toContain('counts sampled=3 written=2 unchanged=0 skipped=1 failed=0');
+    expect(text).toContain('veh-001: written source-ingest/vehicles/a-001');
+    const submitted = formatResult('source_ingest', {
+      submitted: true,
+      job_id: 123,
+      status: 'waiting',
+      queue: 'default',
+      data: { run_id: 'run-job', profile_id: 'fake-source-vehicle-v1' },
+    });
+    expect(submitted).toContain('source_ingest job submitted id=123 status=waiting queue=default');
+    expect(submitted).toContain('watch: gbrain jobs get 123');
+  });
+
+  test('source-revert operator CLI parses run id and formats report-only output', () => {
+    const op = operationsByName.source_revert;
+    expect(op.cliHints?.name).toBe('source-ingest-revert');
+    expect(parseOpArgs(op, ['run-1'])).toEqual({ run_id: 'run-1' });
+    const text = formatResult('source_revert', {
+      mode: 'report-only',
+      run_id: 'run-1',
+      counts: { affected: 2, success_or_unchanged: 2, failed: 0 },
+      pages: [{ slug: 'source-ingest/vehicles/a-001', source_id: 'shared', external_id: 'fake-source:vehicle:veh-001', revert_action: 'would-review' }],
+      warnings: ['report_only_stage3b_no_mutation'],
+    });
+    expect(text).toContain('source_revert report-only run_id=run-1');
+    expect(text).toContain('source-ingest/vehicles/a-001 source=shared');
+    expect(text).toContain('warnings=report_only_stage3b_no_mutation');
+  });
+
+  test('source-refresh operator CLI parses and formats due profiles', () => {
+    const op = operationsByName.source_refresh;
+    expect(op.cliHints?.name).toBe('source-ingest-refresh');
+    expect(parseOpArgs(op, ['fake-source-vehicle-v1', '--enqueue', '--queue', 'ingest', '--no-require-clean-git'])).toEqual({
+      profile_id: 'fake-source-vehicle-v1',
+      enqueue: true,
+      queue: 'ingest',
+      require_clean_git: false,
+    });
+    const text = formatResult('source_refresh', {
+      mode: 'enqueue',
+      count: 1,
+      due: [{ profile_id: 'fake-source-vehicle-v1', approved_source_id: 'shared', total_rows: 2, due_rows: 2, reason: 'stale', oldest_stale_after: '2026-01-01T00:00:00Z' }],
+      jobs: [{ profile_id: 'fake-source-vehicle-v1', job_id: 20, status: 'waiting', queue: 'default', run_id: 'source-refresh-fake-source-vehicle-v1-x' }],
+    });
+    expect(text).toContain('source_refresh enqueue count=1');
+    expect(text).toContain('fake-source-vehicle-v1 source=shared rows=2 due=2 reason=stale');
+    expect(text).toContain('job=20 status=waiting');
+  });
+
+  test('source-sync-status CLI parses and formats summary', () => {
+    const op = operationsByName.source_sync_status;
+    expect(op.cliHints?.name).toBe('source-sync-status');
+    expect(parseOpArgs(op, ['fake-source-vehicle-v1'])).toEqual({ profile_id: 'fake-source-vehicle-v1' });
+    const text = formatResult('source_sync_status', {
+      summary: { rows: 2, fresh: 2, stale: 0, unknown: 0, failed: 0, next_due_at: '2026-08-01', last_run_id: 'run-1' },
+      rows: [{ profile_id: 'fake-source-vehicle-v1', external_id: 'veh-001', freshness: 'fresh', last_result: 'success', slug: 'source-ingest/vehicles/a-001' }],
+    });
+    expect(text).toContain('source_sync_status rows=2 fresh=2 stale=0 unknown=0 failed=0');
+    expect(text).toContain('fake-source-vehicle-v1/veh-001 fresh result=success');
   });
 });
 

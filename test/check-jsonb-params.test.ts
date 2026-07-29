@@ -40,6 +40,11 @@ beforeAll(() => {
     join(badDir, 'bad_generic.ts'),
     "await engine.executeRaw<{ id: string }>(`UPDATE t SET a = $2::jsonb WHERE id = $1`, [id, JSON.stringify(x)]);\n",
   );
+  // BAD: custom stable JSON helper has the same double-encode behavior as JSON.stringify.
+  writeFileSync(
+    join(badDir, 'bad_stable_json.ts'),
+    "await engine.executeRaw(`INSERT INTO t (a) VALUES ($1::jsonb)`, [stableJson(x)]);\n",
+  );
 
   // GOOD: the fix — $1::text::jsonb.
   writeFileSync(
@@ -73,6 +78,7 @@ describe('check-jsonb-params guard', () => {
     expect(code).toBe(1);
     expect(err).toContain('bad.ts');
     expect(err).toContain('bad_generic.ts');
+    expect(err).toContain('bad_stable_json.ts');
   });
 
   test('passes the sanctioned forms (::text::jsonb, ::text[], executeRawJsonb, opt-out)', () => {

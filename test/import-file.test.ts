@@ -707,4 +707,48 @@ body unchanged
     shortCircuited = r2.status === 'skipped';
     expect(shortCircuited).toBe(true);
   });
+
+  test('source_ingest.run_id differences produce IDENTICAL hash (provenance-only rerun)', async () => {
+    const content1 = `---
+type: equipment
+title: Vehicle A001
+source_ingest:
+  profile_id: fake-source-vehicle-v1
+  external_ref: fake-source:vehicle:veh-001
+  run_id: source-ingest-run-a
+---
+
+# Vehicle A001
+
+<!-- gbrain-source-sync:start profile="fake-source-vehicle-v1" external_ref="fake-source:vehicle:veh-001" -->
+## Source data
+
+- Name: Vehicle A001
+- External ID: veh-001
+<!-- gbrain-source-sync:end -->
+`;
+    const content2 = content1.replace('source-ingest-run-a', 'source-ingest-run-b');
+
+    let firstHash: string | undefined;
+    let secondPut = false;
+    const engine1 = mockEngine({
+      getPage: () => Promise.resolve(null),
+      putPage: (_slug: string, page: any) => {
+        firstHash = page.content_hash;
+        return Promise.resolve(null);
+      },
+    });
+    await importFromContent(engine1, 'source-ingest/vehicles/a-001', content1, { noEmbed: true });
+
+    const engine2 = mockEngine({
+      getPage: () => Promise.resolve({ content_hash: firstHash } as any),
+      putPage: () => {
+        secondPut = true;
+        return Promise.resolve(null);
+      },
+    });
+    const r2 = await importFromContent(engine2, 'source-ingest/vehicles/a-001', content2, { noEmbed: true });
+    expect(r2.status).toBe('skipped');
+    expect(secondPut).toBe(false);
+  });
 });

@@ -621,6 +621,70 @@ describe('v0.31.8 op-handler ctx.sourceId threading', () => {
     expect(tst.deleted_at).not.toBeNull();      // testsrc row soft-deleted
   });
 
+  test('delete_page accepts an explicitly granted federated source_id', async () => {
+    const DEL_SLUG = 'topics/op-delete-federated-target';
+    await engine.putPage(DEL_SLUG, { type: 'concept', title: 'Default', compiled_truth: '.' });
+    await engine.putPage(DEL_SLUG, { type: 'concept', title: 'Testsrc', compiled_truth: '.' }, { sourceId: 'testsrc' });
+
+    const op = getOp('delete_page');
+    await op.handler(makeCtx(engine, {
+      remote: true,
+      sourceId: 'default',
+      auth: { token: 'test-token', clientId: 'test', scopes: ['write'], sourceId: 'default', writeSources: ['default', 'testsrc'] },
+    }), { slug: DEL_SLUG, source_id: 'testsrc' });
+
+    const rows = await engine.executeRaw<{ source_id: string; deleted_at: string | null }>(
+      `SELECT source_id, deleted_at FROM pages WHERE slug = $1 ORDER BY source_id`,
+      [DEL_SLUG],
+    );
+    expect(rows.find(r => r.source_id === 'default')!.deleted_at).toBeNull();
+    expect(rows.find(r => r.source_id === 'testsrc')!.deleted_at).not.toBeNull();
+  });
+
+  test('add_timeline_entry accepts an explicitly granted federated source_id', async () => {
+    const op = getOp('add_timeline_entry');
+    await op.handler(makeCtx(engine, {
+      remote: true,
+      sourceId: 'default',
+      auth: { token: 'test-token', clientId: 'test', scopes: ['write'], sourceId: 'default', writeSources: ['default', 'testsrc'] },
+    }), {
+      slug: TAG_SLUG,
+      source_id: 'testsrc',
+      date: '2026-07-29',
+      summary: 'federated timeline routing regression',
+    });
+
+    const rows = await engine.executeRaw<{ source_id: string }>(
+      `SELECT p.source_id FROM timeline_entries te JOIN pages p ON p.id = te.page_id
+       WHERE p.slug = $1 AND te.summary = $2`,
+      [TAG_SLUG, 'federated timeline routing regression'],
+    );
+    expect(rows).toEqual([{ source_id: 'testsrc' }]);
+  });
+
+  test('restore_page accepts an explicitly granted federated source_id', async () => {
+    const RESTORE_SLUG = 'topics/op-restore-federated-target';
+    await engine.putPage(RESTORE_SLUG, { type: 'concept', title: 'Default', compiled_truth: '.' });
+    await engine.putPage(RESTORE_SLUG, { type: 'concept', title: 'Testsrc', compiled_truth: '.' }, { sourceId: 'testsrc' });
+    await engine.softDeletePage(RESTORE_SLUG, { sourceId: 'testsrc' });
+
+    const op = getOp('restore_page');
+    await op.handler(makeCtx(engine, {
+      remote: true,
+      sourceId: 'default',
+      auth: { token: 'test-token', clientId: 'test', scopes: ['write'], sourceId: 'default', writeSources: ['default', 'testsrc'] },
+    }), { slug: RESTORE_SLUG, source_id: 'testsrc' });
+
+    const rows = await engine.executeRaw<{ source_id: string; deleted_at: string | null }>(
+      `SELECT source_id, deleted_at FROM pages WHERE slug = $1 ORDER BY source_id`,
+      [RESTORE_SLUG],
+    );
+    expect(rows).toEqual([
+      { source_id: 'default', deleted_at: null },
+      { source_id: 'testsrc', deleted_at: null },
+    ]);
+  });
+
   test('put_raw_data handler threads ctx.sourceId (D21)', async () => {
     const op = getOp('put_raw_data');
     await op.handler(makeCtx(engine, { sourceId: 'testsrc' }), {

@@ -3,8 +3,35 @@ import {
   extractMarkdownLinks,
   extractLinksFromFile,
   extractTimelineFromContent,
+  resolveCandidateSources,
   walkMarkdownFiles,
 } from '../src/commands/extract.ts';
+
+describe('resolveCandidateSources', () => {
+  it('honors a qualified target source even when the same slug exists locally', () => {
+    const slug = 'meetings/weekly';
+    const resolved = resolveCandidateSources(
+      { targetSlug: slug, targetSourceId: 'internal-production', linkType: 'mentions', context: '', linkSource: 'markdown' },
+      slug,
+      'shared',
+      new Set([slug]),
+      new Map([[slug, ['shared', 'internal-production']]]),
+    );
+    expect(resolved).toEqual({ fromSlug: slug, fromSourceId: 'shared', toSourceId: 'internal-production' });
+  });
+
+  it('fails closed when the qualified target source does not contain the slug', () => {
+    const slug = 'meetings/weekly';
+    const resolved = resolveCandidateSources(
+      { targetSlug: slug, targetSourceId: 'internal-production', linkType: 'mentions', context: '', linkSource: 'markdown' },
+      slug,
+      'shared',
+      new Set([slug]),
+      new Map([[slug, ['shared']]]),
+    );
+    expect(resolved).toBeNull();
+  });
+});
 
 describe('extractMarkdownLinks', () => {
   it('extracts relative markdown links', () => {

@@ -577,9 +577,9 @@ async function measureAggregate(
     const candidates = seeds.filter(s => s.slug.startsWith(`${q.kind}/`)).map(s => s.slug);
 
     // C: structured backlink counts.
-    const counts = await engine.getBacklinkCounts(candidates);
+    const counts = await engine.getBacklinkCounts(candidates.map(slug => ({ slug, source_id: 'default' })));
     const cTop = candidates
-      .map(s => ({ slug: s, n: counts.get(s) ?? 0 }))
+      .map(s => ({ slug: s, n: counts.get(`default::${s}`) ?? 0 }))
       .sort((a, b) => b.n - a.n)
       .slice(0, q.topN)
       .map(x => x.slug);
@@ -752,10 +752,10 @@ async function measureRanking(
     .filter(r => { if (seenWithout.has(r.slug)) return false; seenWithout.add(r.slug); return true; });
 
   const allSlugs = sortedWithout.map(r => r.slug);
-  const counts = await engine.getBacklinkCounts(allSlugs);
+  const counts = await engine.getBacklinkCounts(allSlugs.map(slug => ({ slug, source_id: 'default' })));
   const boosted = sortedWithout.map(r => ({
     ...r,
-    score: r.score * (1 + 0.05 * Math.log(1 + (counts.get(r.slug) ?? 0))),
+    score: r.score * (1 + 0.05 * Math.log(1 + (counts.get(`default::${r.slug}`) ?? 0))),
   }));
   // boosted is already deduped (sortedWithout was). Just re-sort by new score.
   const sortedWith = [...boosted].sort((a, b) => b.score - a.score);

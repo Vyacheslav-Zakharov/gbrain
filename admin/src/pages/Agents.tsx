@@ -4,10 +4,10 @@ import { ALLOWED_SCOPES_LIST, type Scope } from '../lib/scope-constants';
 
 function timeAgo(date: Date): string {
   const s = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (s < 60) return 'just now';
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  if (s < 60) return 'только что';
+  if (s < 3600) return `${Math.floor(s / 60)} мин. назад`;
+  if (s < 86400) return `${Math.floor(s / 3600)} ч. назад`;
+  return `${Math.floor(s / 86400)} дн. назад`;
 }
 
 interface Agent {
@@ -50,13 +50,13 @@ export function AgentsPage() {
   return (
     <>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-        <h1 className="page-title" style={{ marginBottom: 0 }}>Agents</h1>
+        <h1 className="page-title" style={{ marginBottom: 0 }}>Агенты</h1>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <label style={{ fontSize: 13, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-            <input type="checkbox" checked={hideRevoked} onChange={e => setHideRevoked(e.target.checked)} /> Hide revoked
+            <input type="checkbox" checked={hideRevoked} onChange={e => setHideRevoked(e.target.checked)} /> Скрыть отозванные
           </label>
-          <button className="btn btn-secondary" onClick={() => setShowApiKeyCreate(true)}>+ API Key</button>
-          <button className="btn btn-primary" onClick={() => setShowRegister(true)}>+ OAuth Client</button>
+          <button className="btn btn-secondary" onClick={() => setShowApiKeyCreate(true)}>+ API-ключ</button>
+          <button className="btn btn-primary" onClick={() => setShowRegister(true)}>+ OAuth-клиент</button>
         </div>
       </div>
 
@@ -68,15 +68,20 @@ export function AgentsPage() {
         const visibleAgents = agents.filter(a => !hideRevoked || a.status !== 'revoked');
         if (agents.length === 0) {
           return (
-            <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-muted)' }}>
-              No agents registered. Register your first agent to get started.
+            <div className="action-empty-state">
+              <strong>Агенты ещё не зарегистрированы</strong>
+              <span>Создайте OAuth-клиент для ограниченных прав или API-ключ для полного административного доступа.</span>
+              <div className="empty-state-actions">
+                <button className="btn btn-primary" onClick={() => setShowRegister(true)}>Создать OAuth-клиент</button>
+                <button className="btn btn-secondary" onClick={() => setShowApiKeyCreate(true)}>Создать API-ключ</button>
+              </div>
             </div>
           );
         }
         if (visibleAgents.length === 0) {
           return (
             <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-muted)' }}>
-              All agents are revoked. Uncheck "Hide revoked" to view them.
+              Все агенты отозваны. Снимите флажок «Скрыть отозванные», чтобы увидеть их.
             </div>
           );
         }
@@ -85,12 +90,12 @@ export function AgentsPage() {
           <table>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Scopes</th>
-                <th>Status</th>
-                <th>Requests</th>
-                <th>Last Used</th>
+                <th>Название</th>
+                <th>Тип</th>
+                <th>Права</th>
+                <th>Статус</th>
+                <th>Запросы</th>
+                <th>Последнее использование</th>
               </tr>
             </thead>
             <tbody>
@@ -109,21 +114,21 @@ export function AgentsPage() {
                     ))}
                   </td>
                   <td>
-                    <span className={`badge ${a.status === 'active' ? 'badge-success' : 'badge-danger'}`}>{a.status}</span>
+                    <span className={`badge ${a.status === 'active' ? 'badge-success' : 'badge-danger'}`}>{a.status === 'active' ? 'активен' : 'отозван'}</span>
                   </td>
                   <td>
                     <span style={{ fontWeight: 500 }}>{a.requests_today || 0}</span>
                     <span style={{ color: 'var(--text-muted)', fontSize: 12 }}> / {a.total_requests || 0}</span>
                   </td>
                   <td style={{ color: 'var(--text-secondary)' }}>
-                    {a.last_used_at ? timeAgo(new Date(a.last_used_at)) : 'Never'}
+                    {a.last_used_at ? timeAgo(new Date(a.last_used_at)) : 'Никогда'}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
           <div style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: 12 }}>
-            {agents.filter(a => a.status === 'active').length} active / {agents.length} total
+            Активных: {agents.filter(a => a.status === 'active').length} · всего: {agents.length}
           </div>
         </>
         );
@@ -171,33 +176,33 @@ function ApiKeyCreateModal({ onClose, onCreated }: {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) { setError('Name required'); return; }
+    if (!name.trim()) { setError('Укажите название'); return; }
     setLoading(true);
     try {
       const data = await api.createApiKey(name.trim());
       onCreated({ name: data.name, token: data.token });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed');
+      setError(err instanceof Error ? err.message : 'Не удалось создать ключ');
     } finally { setLoading(false); }
   };
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <form className="modal" onClick={e => e.stopPropagation()} onSubmit={handleSubmit}>
-        <div className="modal-title">Create API Key</div>
+        <div className="modal-title">Создать API-ключ</div>
         <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 16 }}>
-          API keys use simple bearer token auth. They grant full read+write+admin access.
-          For scoped access, use OAuth clients instead.
+          API-ключи используют bearer token и дают полный доступ read+write+admin.
+          Для ограниченных прав используйте OAuth-клиент.
         </p>
         <div style={{ marginBottom: 16 }}>
-          <label>Key Name</label>
+          <label>Название ключа</label>
           <input placeholder="e.g. claude-code-local" value={name} onChange={e => setName(e.target.value)} autoFocus />
         </div>
         {error && <div style={{ color: 'var(--error)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
         <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
-          <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn btn-secondary" onClick={onClose}>Отмена</button>
           <button type="submit" className="btn btn-primary" disabled={loading}>
-            {loading ? 'Creating...' : 'Create Key'}
+            {loading ? 'Создаём…' : 'Создать ключ'}
           </button>
         </div>
       </form>
@@ -216,29 +221,29 @@ function ApiKeyTokenModal({ token, onClose }: {
       <div className="modal" style={{ maxWidth: 560 }}>
         <div style={{ textAlign: 'center', marginBottom: 16 }}>
           <div style={{ fontSize: 36, color: 'var(--success)', marginBottom: 8 }}>&#10003;</div>
-          <div style={{ fontSize: 20, fontWeight: 600 }}>API Key Created</div>
+          <div style={{ fontSize: 20, fontWeight: 600 }}>API-ключ создан</div>
         </div>
         <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 12 }}>Name</label>
+          <label style={{ fontSize: 12 }}>Название</label>
           <div className="code-block"><span>{token.name}</span></div>
         </div>
         <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 12 }}>Bearer Token</label>
+          <label style={{ fontSize: 12 }}>Bearer token</label>
           <div className="code-block">
             <span>{token.token}</span>
-            <button className="copy-btn" onClick={() => copy(token.token)}>Copy</button>
+            <button className="copy-btn" onClick={() => copy(token.token)}>Копировать</button>
           </div>
         </div>
         <div style={{ marginBottom: 12 }}>
-          <label style={{ fontSize: 12 }}>Usage</label>
+          <label style={{ fontSize: 12 }}>Использование</label>
           <div className="code-block">
             <pre style={{ whiteSpace: 'pre-wrap', margin: 0, fontSize: 12 }}>{`Authorization: Bearer ${token.token}`}</pre>
-            <button className="copy-btn" onClick={() => copy(`Authorization: Bearer ${token.token}`)}>Copy</button>
+            <button className="copy-btn" onClick={() => copy(`Authorization: Bearer ${token.token}`)}>Копировать</button>
           </div>
         </div>
-        <div className="warning-bar">Save this token now. It will not be shown again.</div>
+        <div className="warning-bar">Сохраните токен сейчас. Повторно он не показывается.</div>
         <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end', marginTop: 20 }}>
-          <button className="btn btn-primary" onClick={onClose}>Done</button>
+          <button className="btn btn-primary" onClick={onClose}>Готово</button>
         </div>
       </div>
     </div>
@@ -261,17 +266,17 @@ function RegisterModal({ onClose, onRegistered }: {
   const [error, setError] = useState('');
 
   const ttlOptions = [
-    { label: '1 hour', value: '3600' },
-    { label: '24 hours', value: '86400' },
-    { label: '7 days', value: '604800' },
-    { label: '30 days', value: '2592000' },
-    { label: '1 year', value: '31536000' },
-    { label: 'No expiry', value: '0' },
+    { label: '1 час', value: '3600' },
+    { label: '24 часа', value: '86400' },
+    { label: '7 дней', value: '604800' },
+    { label: '30 дней', value: '2592000' },
+    { label: '1 год', value: '31536000' },
+    { label: 'Без срока', value: '0' },
   ];
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) { setError('Name required'); return; }
+    if (!name.trim()) { setError('Укажите название'); return; }
     setLoading(true);
     setError('');
     try {
@@ -283,11 +288,11 @@ function RegisterModal({ onClose, onRegistered }: {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: name.trim(), scopes: selectedScopes, tokenTtl: ttl === '0' ? 315360000 : Number(ttl) }),
       });
-      if (!res.ok) throw new Error('Registration failed');
+      if (!res.ok) throw new Error('Регистрация не выполнена');
       const data = await res.json();
       onRegistered({ clientId: data.clientId, clientSecret: data.clientSecret, name: name.trim() });
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Registration failed');
+      setError(err instanceof Error ? err.message : 'Регистрация не выполнена');
     } finally {
       setLoading(false);
     }
@@ -296,13 +301,13 @@ function RegisterModal({ onClose, onRegistered }: {
   return (
     <div className="modal-overlay" onClick={onClose}>
       <form className="modal" onClick={e => e.stopPropagation()} onSubmit={handleSubmit}>
-        <div className="modal-title">Register Agent</div>
+        <div className="modal-title">Зарегистрировать агента</div>
         <div style={{ marginBottom: 16 }}>
-          <label>Agent Name</label>
+          <label>Название агента</label>
           <input placeholder="e.g. perplexity-production" value={name} onChange={e => setName(e.target.value)} autoFocus />
         </div>
         <div style={{ marginBottom: 16 }}>
-          <label>Scopes</label>
+          <label>Права (scopes)</label>
           <div className="checkbox-group">
             {ALLOWED_SCOPES_LIST.map(s => (
               <label key={s} className="checkbox-label">
@@ -313,7 +318,7 @@ function RegisterModal({ onClose, onRegistered }: {
           </div>
         </div>
         <div style={{ marginBottom: 20 }}>
-          <label>Token Lifetime</label>
+          <label>Срок действия токена</label>
           <select value={ttl} onChange={e => setTtl(e.target.value)}
             style={{ width: '100%', background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 10px', fontSize: 14 }}>
             {ttlOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
@@ -321,9 +326,9 @@ function RegisterModal({ onClose, onRegistered }: {
         </div>
         {error && <div style={{ color: 'var(--error)', fontSize: 13, marginBottom: 12 }}>{error}</div>}
         <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end' }}>
-          <button type="button" className="btn btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn btn-secondary" onClick={onClose}>Отмена</button>
           <button type="submit" className="btn btn-primary" disabled={loading}>
-            {loading ? 'Registering...' : 'Register'}
+            {loading ? 'Регистрируем…' : 'Зарегистрировать'}
           </button>
         </div>
       </form>
@@ -349,14 +354,14 @@ function CredentialsModal({ credentials, onClose }: {
       <div className="modal" style={{ maxWidth: 560 }}>
         <div style={{ textAlign: 'center', marginBottom: 16 }}>
           <div style={{ fontSize: 36, color: 'var(--success)', marginBottom: 8 }}>&#10003;</div>
-          <div style={{ fontSize: 20, fontWeight: 600 }}>Agent Registered</div>
+          <div style={{ fontSize: 20, fontWeight: 600 }}>Агент зарегистрирован</div>
         </div>
 
         <div style={{ marginBottom: 12 }}>
           <label style={{ fontSize: 12 }}>Client ID</label>
           <div className="code-block">
             <span>{credentials.clientId}</span>
-            <button className="copy-btn" onClick={() => copy(credentials.clientId)}>Copy</button>
+            <button className="copy-btn" onClick={() => copy(credentials.clientId)}>Копировать</button>
           </div>
         </div>
 
@@ -364,17 +369,17 @@ function CredentialsModal({ credentials, onClose }: {
           <label style={{ fontSize: 12 }}>Client Secret</label>
           <div className="code-block">
             <span>{credentials.clientSecret}</span>
-            <button className="copy-btn" onClick={() => copy(credentials.clientSecret)}>Copy</button>
+            <button className="copy-btn" onClick={() => copy(credentials.clientSecret)}>Копировать</button>
           </div>
         </div>
 
         <div className="warning-bar">
-          Save this secret now. It will not be shown again.
+          Сохраните secret сейчас. Повторно он не показывается.
         </div>
 
         <div style={{ display: 'flex', gap: 12, justifyContent: 'flex-end', marginTop: 20 }}>
-          <button className="btn btn-secondary" onClick={downloadJson}>Download as JSON</button>
-          <button className="btn btn-primary" onClick={onClose}>Done</button>
+          <button className="btn btn-secondary" onClick={downloadJson}>Скачать JSON</button>
+          <button className="btn btn-primary" onClick={onClose}>Готово</button>
         </div>
       </div>
     </div>
@@ -537,20 +542,20 @@ function AgentDrawer({ agent, onClose, onRevoked }: { agent: Agent; onClose: () 
       <div className="drawer">
         <button className="drawer-close" onClick={onClose}>&#10005;</button>
         <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>{agent.name || agent.client_name}</div>
-        <span className={`badge ${agent.status === 'active' ? 'badge-success' : 'badge-danger'}`}>{agent.status}</span>
+        <span className={`badge ${agent.status === 'active' ? 'badge-success' : 'badge-danger'}`}>{agent.status === 'active' ? 'активен' : 'отозван'}</span>
 
-        <div className="section-title">Details</div>
+        <div className="section-title">Сведения</div>
         <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: '6px 12px', fontSize: 13 }}>
           <span style={{ color: 'var(--text-secondary)' }}>Client ID</span>
           <span className="mono">{(agent.id || agent.id || agent.client_id || '').substring(0, 24)}...</span>
-          <span style={{ color: 'var(--text-secondary)' }}>Scopes</span>
+          <span style={{ color: 'var(--text-secondary)' }}>Права</span>
           <span>{(agent.scope || '').split(' ').filter(Boolean).map(s => (
             <span key={s} className={`badge badge-${s}`} style={{ marginRight: 4 }}>{s}</span>
           ))}</span>
-          <span style={{ color: 'var(--text-secondary)' }}>Registered</span>
+          <span style={{ color: 'var(--text-secondary)' }}>Зарегистрирован</span>
           <span>{new Date(agent.created_at).toLocaleDateString()}</span>
-          <span style={{ color: 'var(--text-secondary)' }}>Token TTL</span>
-          <span>{agent.token_ttl ? (agent.token_ttl >= 31536000 ? 'No expiry' : agent.token_ttl >= 86400 ? `${Math.floor(agent.token_ttl / 86400)}d` : agent.token_ttl >= 3600 ? `${Math.floor(agent.token_ttl / 3600)}h` : `${agent.token_ttl}s`) : '1h (default)'}</span>
+          <span style={{ color: 'var(--text-secondary)' }}>Срок токена</span>
+          <span>{agent.token_ttl ? (agent.token_ttl >= 31536000 ? 'Без срока' : agent.token_ttl >= 86400 ? `${Math.floor(agent.token_ttl / 86400)} дн.` : agent.token_ttl >= 3600 ? `${Math.floor(agent.token_ttl / 3600)} ч.` : `${agent.token_ttl} сек.`) : '1 ч. (по умолчанию)'}</span>
         </div>
 
         {/*
@@ -567,7 +572,7 @@ function AgentDrawer({ agent, onClose, onRevoked }: { agent: Agent; onClose: () 
           Claude Code + Cursor snippets along with the broken ones.
           (D5=C in the eng review.)
         */}
-        <div className="section-title">Config Export</div>
+        <div className="section-title">Экспорт конфигурации</div>
         <div className="tabs" style={{ flexWrap: 'wrap' }}>
           <div className={`tab ${tab === 'claude-code' ? 'active' : ''}`} onClick={() => setTab('claude-code')}>Claude Code</div>
           <div className={`tab ${tab === 'chatgpt' ? 'active' : ''}`} onClick={() => setTab('chatgpt')}>ChatGPT</div>
@@ -592,16 +597,16 @@ function AgentDrawer({ agent, onClose, onRevoked }: { agent: Agent; onClose: () 
                 color: 'var(--text-secondary)',
               }}>
                 <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: 6 }}>
-                  {clientName} requires an OAuth client
+                  Для {clientName} требуется OAuth-клиент
                 </div>
-                {clientName} only supports OAuth 2.0 (client_credentials). API keys use raw bearer tokens, which {clientName} does not accept. Register a separate OAuth client and use that to connect this AI.
+                {clientName} поддерживает только OAuth 2.0 (client_credentials) и не принимает bearer API-ключ. Зарегистрируйте отдельный OAuth-клиент.
               </div>
             );
           }
           return (
             <div className="code-block">
               <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>{configSnippets[tab]}</pre>
-              <button className="copy-btn" onClick={() => copy(configSnippets[tab])}>Copy</button>
+              <button className="copy-btn" onClick={() => copy(configSnippets[tab])}>Копировать</button>
             </div>
           );
         })()}
@@ -609,7 +614,7 @@ function AgentDrawer({ agent, onClose, onRevoked }: { agent: Agent; onClose: () 
         <div style={{ marginTop: 32 }}>
           {agent.status === 'active' && (
             <button className="btn btn-danger" onClick={async () => {
-              if (!confirm(`Revoke ${agent.name || agent.client_name}? All active tokens will be invalidated.`)) return;
+              if (!confirm(`Отозвать ${agent.name || agent.client_name}? Все активные токены станут недействительными.`)) return;
               try {
                 if (agent.auth_type === 'oauth') {
                   await api.revokeClient(agent.id || agent.client_id || '');
@@ -619,12 +624,12 @@ function AgentDrawer({ agent, onClose, onRevoked }: { agent: Agent; onClose: () 
                 onRevoked();
                 onClose();
               } catch (e) {
-                alert('Revoke failed: ' + (e instanceof Error ? e.message : 'unknown error'));
+                alert('Не удалось отозвать агента: ' + (e instanceof Error ? e.message : 'неизвестная ошибка'));
               }
-            }}>Revoke Agent</button>
+            }}>Отозвать агента</button>
           )}
           {agent.status === 'revoked' && (
-            <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>This agent has been revoked.</span>
+            <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>Агент отозван.</span>
           )}
         </div>
       </div>

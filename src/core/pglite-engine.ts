@@ -3,7 +3,7 @@ import { vector } from '@electric-sql/pglite/vector';
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
 import type { Transaction } from '@electric-sql/pglite';
 import type {
-  BrainEngine,
+  BrainEngine, LinkReadOpts,
   BatchOpts,
   LinkBatchInput, TimelineBatchInput,
   ReservedConnection,
@@ -59,6 +59,7 @@ import {
   EmbeddingColumnNotRegisteredError,
 } from './search/embedding-column.ts';
 import { hasCJK, escapeLikePattern } from './cjk.ts';
+import { redactLinks } from './redact-link.ts';
 
 type PGLiteDB = PGlite;
 
@@ -494,7 +495,17 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='embedding_signature') AS pages_embedding_signature_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
-                WHERE table_schema='public' AND table_name='pages' AND column_name='links_extracted_at') AS pages_links_extracted_at_exists
+                WHERE table_schema='public' AND table_name='pages' AND column_name='links_extracted_at') AS pages_links_extracted_at_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='source_sync_state') AS source_sync_state_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='source_sync_state' AND column_name='managed_block_hash') AS source_sync_state_managed_block_hash_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='source_sync_state' AND column_name='last_source_snapshot') AS source_sync_state_last_source_snapshot_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='source_ingest_profiles') AS source_ingest_profiles_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='source_ingest_run_items') AS source_ingest_run_items_exists
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
@@ -537,6 +548,11 @@ export class PGLiteEngine implements BrainEngine {
       pages_generation_exists: boolean;
       pages_embedding_signature_exists: boolean;
       pages_links_extracted_at_exists: boolean;
+      source_sync_state_exists: boolean;
+      source_sync_state_managed_block_hash_exists: boolean;
+      source_sync_state_last_source_snapshot_exists: boolean;
+      source_ingest_profiles_exists: boolean;
+      source_ingest_run_items_exists: boolean;
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
@@ -613,6 +629,15 @@ export class PGLiteEngine implements BrainEngine {
     // it; pre-v112 brains crash without the column, so bootstrap adds it before
     // the CREATE INDEX runs. v112 runs later via runMigrations and is idempotent.
     const needsPagesLinksExtractedAt = probe.pages_exists && !probe.pages_links_extracted_at_exists;
+    // v124 (source_sync_state_managed_block_hash): new named sentinel column.
+    // Existing v120 brains have source_sync_state already, so CREATE TABLE IF
+    // NOT EXISTS in the schema blob is a no-op and cannot add the column.
+    const needsSourceSyncManagedBlockHash = probe.source_sync_state_exists && !probe.source_sync_state_managed_block_hash_exists;
+    // v127: deterministic Change Intelligence compares the last JSON snapshot.
+    const needsSourceSyncLastSourceSnapshot = probe.source_sync_state_exists && !probe.source_sync_state_last_source_snapshot_exists;
+    // v125 (source_ingest_run_items_backfill): repair brains stamped at v120+
+    // before the append-only run ledger table was folded into v120.
+    const needsSourceIngestRunItems = probe.source_ingest_profiles_exists && !probe.source_ingest_run_items_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -624,7 +649,10 @@ export class PGLiteEngine implements BrainEngine {
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
-        && !needsPagesLinksExtractedAt) return;
+        && !needsPagesLinksExtractedAt
+        && !needsSourceSyncManagedBlockHash
+        && !needsSourceSyncLastSourceSnapshot
+        && !needsSourceIngestRunItems) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -869,6 +897,52 @@ export class PGLiteEngine implements BrainEngine {
       // v112 runs later via runMigrations and is idempotent.
       await this.db.exec(`
         ALTER TABLE pages ADD COLUMN IF NOT EXISTS links_extracted_at TIMESTAMPTZ;
+      `);
+    }
+
+    if (needsSourceSyncManagedBlockHash) {
+      // v124: managed-block drift sentinel split from content_fingerprint.
+      // Backfill happens in the migration; bootstrap only makes the column
+      // visible before schema replay and early post-init code paths.
+      await this.db.exec(`
+        ALTER TABLE source_sync_state ADD COLUMN IF NOT EXISTS managed_block_hash TEXT;
+      `);
+    }
+
+    if (needsSourceSyncLastSourceSnapshot) {
+      await this.db.exec(`
+        ALTER TABLE source_sync_state ADD COLUMN IF NOT EXISTS last_source_snapshot JSONB;
+      `);
+    }
+
+    if (needsSourceIngestRunItems) {
+      // v125: append-only source-ingest run ledger. Existing v120 brains can
+      // have profiles/sync state but no run ledger because the DDL was folded
+      // into an already-applied migration. Create the table before schema replay
+      // and before v123/v125 migration SQL can reference it.
+      await this.db.exec(`
+        CREATE TABLE IF NOT EXISTS source_ingest_run_items (
+          run_id              TEXT NOT NULL,
+          connector_id        TEXT NOT NULL,
+          source_object       TEXT NOT NULL,
+          external_id         TEXT NOT NULL,
+          slug                TEXT NOT NULL,
+          approved_source_id  TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+          profile_id          TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
+          profile_version     INTEGER NOT NULL,
+          action              TEXT NOT NULL CHECK (action IN ('created','updated','unchanged','skipped','failed')),
+          prior_version_id    BIGINT,
+          last_result         TEXT NOT NULL CHECK (last_result IN ('success','unchanged','skipped','failed')),
+          last_error          TEXT,
+          source_updated_at   TIMESTAMPTZ,
+          source_hash         TEXT,
+          created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (run_id, connector_id, source_object, external_id)
+        );
+        CREATE INDEX IF NOT EXISTS source_ingest_run_items_run_idx
+          ON source_ingest_run_items (run_id, approved_source_id, slug);
+        CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
+          ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
       `);
     }
   }
@@ -2583,16 +2657,36 @@ export class PGLiteEngine implements BrainEngine {
     }
   }
 
-  async getLinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]> {
+  async getLinks(slug: string, opts?: LinkReadOpts): Promise<Link[]> {
+    if (opts?.sourceIds && opts.sourceIds.length > 0 && opts.crossSourceEdges?.enabled) {
+      const { rows } = await this.db.query(
+        `SELECT f.slug as from_slug, t.slug as to_slug,
+                l.link_type, l.context, l.link_source,
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
+         FROM links l
+         JOIN pages f ON f.id = l.from_page_id AND f.deleted_at IS NULL
+         JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL
+         LEFT JOIN pages o ON o.id = l.origin_page_id AND o.deleted_at IS NULL
+         WHERE f.slug = $1 AND f.source_id = ANY($2::text[])`,
+        [slug, opts.sourceIds]
+      );
+      return redactLinks(rows as any, opts.sourceIds, opts.crossSourceEdges.policy, 'out') as unknown as Link[];
+    }
     // #2200: federated grant scopes ALL THREE page endpoints — from, to, AND the
     // origin (the authoring page, surfaced as origin_slug). The origin LEFT JOIN
     // carries the same ANY($) filter so an out-of-grant origin's slug nulls out.
-    // Remote MCP clients always land here.
+    // Remote MCP clients always land here when cross-source edges are disabled.
     if (opts?.sourceIds && opts.sourceIds.length > 0) {
       const { rows } = await this.db.query(
         `SELECT f.slug as from_slug, t.slug as to_slug,
                 l.link_type, l.context, l.link_source,
-                o.slug as origin_slug, l.origin_field
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
          FROM links l
          JOIN pages f ON f.id = l.from_page_id
          JOIN pages t ON t.id = l.to_page_id
@@ -2610,7 +2704,10 @@ export class PGLiteEngine implements BrainEngine {
       const { rows } = await this.db.query(
         `SELECT f.slug as from_slug, t.slug as to_slug,
                 l.link_type, l.context, l.link_source,
-                o.slug as origin_slug, l.origin_field
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
          FROM links l
          JOIN pages f ON f.id = l.from_page_id
          JOIN pages t ON t.id = l.to_page_id
@@ -2623,7 +2720,10 @@ export class PGLiteEngine implements BrainEngine {
     const { rows } = await this.db.query(
       `SELECT f.slug as from_slug, t.slug as to_slug,
               l.link_type, l.context, l.link_source,
-              o.slug as origin_slug, l.origin_field
+              o.slug as origin_slug, l.origin_field,
+              f.source_id as from_source_id,
+              t.source_id as to_source_id,
+              o.source_id as origin_source_id
        FROM links l
        JOIN pages f ON f.id = l.from_page_id
        JOIN pages t ON t.id = l.to_page_id
@@ -2634,7 +2734,24 @@ export class PGLiteEngine implements BrainEngine {
     return rows as unknown as Link[];
   }
 
-  async getBacklinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]> {
+  async getBacklinks(slug: string, opts?: LinkReadOpts): Promise<Link[]> {
+    if (opts?.sourceIds && opts.sourceIds.length > 0 && opts.crossSourceEdges?.enabled) {
+      const { rows } = await this.db.query(
+        `SELECT f.slug as from_slug, t.slug as to_slug,
+                l.link_type, l.context, l.link_source,
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
+         FROM links l
+         JOIN pages f ON f.id = l.from_page_id AND f.deleted_at IS NULL
+         JOIN pages t ON t.id = l.to_page_id AND t.deleted_at IS NULL
+         LEFT JOIN pages o ON o.id = l.origin_page_id AND o.deleted_at IS NULL
+         WHERE t.slug = $1 AND t.source_id = ANY($2::text[])`,
+        [slug, opts.sourceIds]
+      );
+      return redactLinks(rows as any, opts.sourceIds, opts.crossSourceEdges.policy, 'in') as unknown as Link[];
+    }
     // #2200: federated grant scopes all three endpoints (mirrors getLinks) — the
     // referrer (from), the queried page (to), AND the origin — so neither a
     // foreign referrer nor a foreign origin slug is disclosed to the caller.
@@ -2642,7 +2759,10 @@ export class PGLiteEngine implements BrainEngine {
       const { rows } = await this.db.query(
         `SELECT f.slug as from_slug, t.slug as to_slug,
                 l.link_type, l.context, l.link_source,
-                o.slug as origin_slug, l.origin_field
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
          FROM links l
          JOIN pages f ON f.id = l.from_page_id
          JOIN pages t ON t.id = l.to_page_id
@@ -2657,7 +2777,10 @@ export class PGLiteEngine implements BrainEngine {
       const { rows } = await this.db.query(
         `SELECT f.slug as from_slug, t.slug as to_slug,
                 l.link_type, l.context, l.link_source,
-                o.slug as origin_slug, l.origin_field
+                o.slug as origin_slug, l.origin_field,
+                f.source_id as from_source_id,
+                t.source_id as to_source_id,
+                o.source_id as origin_source_id
          FROM links l
          JOIN pages f ON f.id = l.from_page_id
          JOIN pages t ON t.id = l.to_page_id
@@ -2670,7 +2793,10 @@ export class PGLiteEngine implements BrainEngine {
     const { rows } = await this.db.query(
       `SELECT f.slug as from_slug, t.slug as to_slug,
               l.link_type, l.context, l.link_source,
-              o.slug as origin_slug, l.origin_field
+              o.slug as origin_slug, l.origin_field,
+              f.source_id as from_source_id,
+              t.source_id as to_source_id,
+              o.source_id as origin_source_id
        FROM links l
        JOIN pages f ON f.id = l.from_page_id
        JOIN pages t ON t.id = l.to_page_id
@@ -3048,28 +3174,59 @@ export class PGLiteEngine implements BrainEngine {
     }));
   }
 
-  async getBacklinkCounts(slugs: string[]): Promise<Map<string, number>> {
+  async getBacklinkCounts(
+    refs: Array<{ slug: string; source_id?: string | null }>,
+    opts?: { sourceIds?: string[] },
+  ): Promise<Map<string, number>> {
     const result = new Map<string, number>();
-    if (slugs.length === 0) return result;
-    // Initialize all slugs to 0 so callers get a consistent map.
-    for (const s of slugs) result.set(s, 0);
+    if (refs.length === 0) return result;
 
-    // v0.41.18.0 D12: filter mentions OUT of backlink-count for search
-    // ranking — parity with postgres-engine.ts. See that file's comment
-    // for the full rationale. `IS DISTINCT FROM` is NULL-safe so legacy
-    // rows with NULL link_source still count toward backlinks.
-    // PGLite needs explicit cast for array binding (does not auto-serialize JS arrays).
-    const { rows } = await this.db.query(
-      `SELECT p.slug AS slug, COUNT(l.id)::int AS cnt
-       FROM pages p
-       LEFT JOIN links l ON l.to_page_id = p.id
-         AND l.link_source IS DISTINCT FROM 'mentions'
-       WHERE p.slug = ANY($1::text[])
-       GROUP BY p.slug`,
-      [slugs]
+    const normalized = Array.from(
+      new Map(
+        refs.map(r => {
+          const sourceId = r.source_id ?? 'default';
+          return [`${sourceId}::${r.slug}`, { slug: r.slug, source_id: sourceId }];
+        }),
+      ).values(),
     );
-    for (const r of rows as { slug: string; cnt: number }[]) {
-      result.set(r.slug, Number(r.cnt));
+    for (const r of normalized) result.set(`${r.source_id}::${r.slug}`, 0);
+
+    const params: unknown[] = [];
+    const values = normalized.map((r, i) => {
+      params.push(r.slug, r.source_id);
+      const base = i * 2;
+      return `($${base + 1}::text, $${base + 2}::text)`;
+    }).join(', ');
+    let fromScopeSql = '';
+    let targetScopeSql = '';
+    let countExpr = 'COUNT(l.id)';
+    if (opts?.sourceIds && opts.sourceIds.length > 0) {
+      params.push(opts.sourceIds);
+      targetScopeSql = ` AND p.source_id = ANY($${params.length}::text[])`;
+      countExpr = 'COUNT(f.id)';
+      fromScopeSql = `
+          LEFT JOIN pages f ON f.id = l.from_page_id
+            AND f.deleted_at IS NULL
+            AND f.source_id = ANY($${params.length}::text[])`;
+    }
+
+    const { rows } = await this.db.query(
+      `WITH refs(slug, source_id) AS (VALUES ${values}),
+       targets AS (
+         SELECT p.id, p.slug, p.source_id
+         FROM refs v
+         JOIN pages p ON p.slug = v.slug AND p.source_id = v.source_id
+         WHERE p.deleted_at IS NULL${targetScopeSql}
+       )
+       SELECT t.source_id AS source_id, t.slug AS slug, ${countExpr}::int AS cnt
+       FROM targets t
+       LEFT JOIN links l ON l.to_page_id = t.id
+         AND l.link_source IS DISTINCT FROM 'mentions'${fromScopeSql}
+       GROUP BY t.source_id, t.slug`,
+      params,
+    );
+    for (const r of rows as { source_id: string; slug: string; cnt: number }[]) {
+      result.set(`${r.source_id ?? 'default'}::${r.slug}`, Number(r.cnt));
     }
     return result;
   }

@@ -1110,6 +1110,12 @@ export interface SearchOpts {
    */
   graph_signals?: boolean;
   /**
+   * INTERNAL: trusted/local callers may request exact graph_cross_source_hits
+   * in result rows. Remote/federated callers leave this false; they may still
+   * receive the safe cross-source boost but not the raw other-source count.
+   */
+  graphSignalsExposeCrossSourceHits?: boolean;
+  /**
    * v0.43 — relational recall arm per-call override. Per-call wins over the
    * `search.relational_retrieval` config key wins over the mode bundle. Eval
    * A/B gates need explicit per-call control or both branches resolve to the
@@ -1181,6 +1187,12 @@ export interface Link {
    * 'investors'). Used for debug output and the `unresolved` response list.
    */
   origin_field?: string | null;
+  /** Source ids for cross-source graph edges. Present on source-aware link reads. */
+  from_source_id?: string | null;
+  to_source_id?: string | null;
+  origin_source_id?: string | null;
+  /** True only for ACL-redacted remote/federated reads. */
+  locked?: true;
 }
 
 export interface GraphNode {

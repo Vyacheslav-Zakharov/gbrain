@@ -5367,6 +5367,524 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
   },
+  {
+    version: 120,
+    name: 'source_ingest_foundation',
+    // Stage 1 of Third-Party Source Ingest: profile/version storage plus
+    // mutable per-external-object sync state. Sync/freshness metadata lives
+    // here, NOT in page frontmatter, preserving import-file content_hash
+    // idempotency. Keep in sync with src/schema.sql, src/core/pglite-schema.ts,
+    // and generated src/core/schema-embedded.ts.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS source_ingest_profiles (
+        profile_id          TEXT PRIMARY KEY,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'draft'
+          CHECK (status IN ('draft', 'reviewed', 'active', 'paused', 'deprecated')),
+        approved_source_id  TEXT REFERENCES sources(id) ON DELETE RESTRICT,
+        target_type         TEXT NOT NULL,
+        profile_json        JSONB NOT NULL DEFAULT '{}'::jsonb,
+        profile_hash        TEXT NOT NULL,
+        current_version     INTEGER NOT NULL DEFAULT 1,
+        approved_by         TEXT,
+        approved_at         TIMESTAMPTZ,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS source_ingest_profile_versions (
+        profile_id      TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE CASCADE,
+        version         INTEGER NOT NULL,
+        profile_json    JSONB NOT NULL DEFAULT '{}'::jsonb,
+        profile_hash    TEXT NOT NULL,
+        created_by      TEXT,
+        change_note     TEXT,
+        created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (profile_id, version)
+      );
+
+      CREATE TABLE IF NOT EXISTS source_sync_state (
+        connector_id          TEXT NOT NULL,
+        source_object         TEXT NOT NULL,
+        external_id           TEXT NOT NULL,
+        slug                  TEXT NOT NULL,
+        approved_source_id    TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+        profile_id            TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
+        profile_version       INTEGER NOT NULL,
+        content_fingerprint   TEXT,
+        managed_block_hash    TEXT,
+        last_source_hash      TEXT,
+        source_updated_at     TIMESTAMPTZ,
+        last_synced_at        TIMESTAMPTZ,
+        stale_after           TIMESTAMPTZ,
+        freshness_policy      TEXT,
+        run_id                TEXT,
+        last_result           TEXT NOT NULL DEFAULT 'pending'
+          CHECK (last_result IN ('pending', 'success', 'unchanged', 'skipped', 'failed', 'archived')),
+        last_error            TEXT,
+        updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (profile_id, connector_id, source_object, external_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS source_ingest_profiles_status_idx
+        ON source_ingest_profiles (status, connector_id, source_object);
+      CREATE INDEX IF NOT EXISTS source_ingest_profiles_source_idx
+        ON source_ingest_profiles (approved_source_id) WHERE approved_source_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS source_sync_state_source_slug_idx
+        ON source_sync_state (approved_source_id, slug);
+      CREATE INDEX IF NOT EXISTS source_sync_state_profile_idx
+        ON source_sync_state (profile_id, profile_version);
+      CREATE INDEX IF NOT EXISTS source_sync_state_stale_idx
+        ON source_sync_state (approved_source_id, stale_after) WHERE stale_after IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS source_sync_state_run_idx
+        ON source_sync_state (run_id) WHERE run_id IS NOT NULL;
+
+      CREATE TABLE IF NOT EXISTS source_ingest_run_items (
+        run_id              TEXT NOT NULL,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        external_id         TEXT NOT NULL,
+        slug                TEXT NOT NULL,
+        approved_source_id  TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+        profile_id          TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
+        profile_version     INTEGER NOT NULL,
+        action              TEXT NOT NULL CHECK (action IN ('created','updated','unchanged','skipped','failed')),
+        prior_version_id    BIGINT,
+        last_result         TEXT NOT NULL CHECK (last_result IN ('success','unchanged','skipped','failed')),
+        last_error          TEXT,
+        source_updated_at   TIMESTAMPTZ,
+        source_hash         TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (run_id, connector_id, source_object, external_id)
+      );
+      CREATE INDEX IF NOT EXISTS source_ingest_run_items_run_idx
+        ON source_ingest_run_items (run_id, approved_source_id, slug);
+      CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
+        ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
+    `,
+  },
+  {
+    version: 121,
+    name: 'source_connector_configs',
+    // Stage 5B Source Ingest UI: persist non-secret connector configuration
+    // separately from credentials and source profiles. Secrets stay in env/config;
+    // this table stores table/object routing, slug/freshness defaults, enabled
+    // state, and audit metadata for the admin review console.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS source_connector_configs (
+        config_id           TEXT PRIMARY KEY,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        display_name        TEXT NOT NULL,
+        table_name          TEXT,
+        target_source_id    TEXT REFERENCES sources(id) ON DELETE RESTRICT,
+        slug_prefix         TEXT NOT NULL DEFAULT '',
+        freshness_policy    TEXT,
+        enabled             BOOLEAN NOT NULL DEFAULT false,
+        config_json         JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_by          TEXT,
+        updated_by          TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_connector_configs_connector_idx
+        ON source_connector_configs (connector_id, source_object);
+      CREATE INDEX IF NOT EXISTS source_connector_configs_enabled_idx
+        ON source_connector_configs (enabled, connector_id, source_object);
+    `,
+  },
+  {
+    version: 122,
+    name: 'source_connector_secret_storage',
+    // Stage 5D Source Ingest UI: DB-backed connector secret storage. Secrets
+    // are kept out of profile JSON and GBrain pages; reads expose only masked
+    // status plus audit metadata.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS source_connector_secrets (
+        config_id           TEXT PRIMARY KEY REFERENCES source_connector_configs(config_id) ON DELETE CASCADE,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        secret_json         JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_by          TEXT,
+        updated_by          TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_connector_secrets_connector_idx
+        ON source_connector_secrets (connector_id, source_object);
+      CREATE TABLE IF NOT EXISTS source_connector_secret_audit (
+        id                  BIGSERIAL PRIMARY KEY,
+        config_id           TEXT NOT NULL,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        action              TEXT NOT NULL CHECK (action IN ('rotate','delete')),
+        actor               TEXT,
+        secret_keys         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_connector_secret_audit_config_idx
+        ON source_connector_secret_audit (config_id, created_at DESC);
+    `,
+  },
+  {
+    version: 123,
+    name: 'source_ingest_rls_hardening',
+    // Stage 3B/B1 hardening: source-ingest ledger + connector config/secret
+    // tables are local/admin surfaces, not anon-readable PostgREST tables.
+    // PGLite has no RLS engine; Postgres enables RLS only when the migration
+    // role can do so safely.
+    idempotent: true,
+    sql: `
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          IF to_regclass('public.source_ingest_run_items') IS NOT NULL THEN
+            ALTER TABLE source_ingest_run_items ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_connector_configs') IS NOT NULL THEN
+            ALTER TABLE source_connector_configs ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_connector_secrets') IS NOT NULL THEN
+            ALTER TABLE source_connector_secrets ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_connector_secret_audit') IS NOT NULL THEN
+            ALTER TABLE source_connector_secret_audit ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_connectors') IS NOT NULL THEN
+            ALTER TABLE source_connectors ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_base_views') IS NOT NULL THEN
+            ALTER TABLE source_base_views ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_transform_views') IS NOT NULL THEN
+            ALTER TABLE source_transform_views ENABLE ROW LEVEL SECURITY;
+          END IF;
+          IF to_regclass('public.source_article_views') IS NOT NULL THEN
+            ALTER TABLE source_article_views ENABLE ROW LEVEL SECURITY;
+          END IF;
+        END IF;
+      END $$;
+    `,
+    sqlFor: { pglite: `SELECT 1;` },
+  },
+  {
+    version: 124,
+    name: 'source_sync_state_managed_block_hash',
+    // Stage 3D hardening: keep the managed-block drift sentinel in a named
+    // column instead of overloading content_fingerprint, which can later track
+    // whole-page/content fingerprints without breaking user-edit detection.
+    idempotent: true,
+    sql: `
+      ALTER TABLE source_sync_state
+        ADD COLUMN IF NOT EXISTS managed_block_hash TEXT;
+      UPDATE source_sync_state
+         SET managed_block_hash = content_fingerprint
+       WHERE managed_block_hash IS NULL
+         AND content_fingerprint IS NOT NULL;
+    `,
+  },
+  {
+    version: 125,
+    name: 'source_ingest_run_items_backfill',
+    // Safety repair for brains that applied v120 before the append-only run
+    // ledger DDL was folded into it. Such brains are stamped >=120 but lack
+    // source_ingest_run_items; keep this idempotent and do not rewrite v120
+    // history.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS source_ingest_run_items (
+        run_id              TEXT NOT NULL,
+        connector_id        TEXT NOT NULL,
+        source_object       TEXT NOT NULL,
+        external_id         TEXT NOT NULL,
+        slug                TEXT NOT NULL,
+        approved_source_id  TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+        profile_id          TEXT NOT NULL REFERENCES source_ingest_profiles(profile_id) ON DELETE RESTRICT,
+        profile_version     INTEGER NOT NULL,
+        action              TEXT NOT NULL CHECK (action IN ('created','updated','unchanged','skipped','failed')),
+        prior_version_id    BIGINT,
+        last_result         TEXT NOT NULL CHECK (last_result IN ('success','unchanged','skipped','failed')),
+        last_error          TEXT,
+        source_updated_at   TIMESTAMPTZ,
+        source_hash         TEXT,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (run_id, connector_id, source_object, external_id)
+      );
+      CREATE INDEX IF NOT EXISTS source_ingest_run_items_run_idx
+        ON source_ingest_run_items (run_id, approved_source_id, slug);
+      CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
+        ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
+    `,
+  },
+  {
+    version: 126,
+    name: 'source_ingest_catalog_views',
+    // Phase 0 catalog split: first-class connector/base/transform/article
+    // view objects. Article views freeze a compiled SourceIngestProfile
+    // snapshot; executor-facing batch inputs must read that snapshot rather
+    // than live upstream view objects.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS source_connectors (
+        connector_id       TEXT PRIMARY KEY,
+        kind               TEXT NOT NULL CHECK (kind IN ('appsheet','fake','postgres')),
+        display_name       TEXT NOT NULL,
+        config_json        JSONB NOT NULL DEFAULT '{}'::jsonb,
+        enabled            BOOLEAN NOT NULL DEFAULT true,
+        config_hash        TEXT NOT NULL,
+        last_test_ok       BOOLEAN,
+        last_test_at       TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_connectors_kind_idx
+        ON source_connectors (kind, enabled);
+
+      CREATE TABLE IF NOT EXISTS source_base_views (
+        base_view_id       TEXT PRIMARY KEY,
+        connector_id       TEXT NOT NULL REFERENCES source_connectors(connector_id) ON DELETE RESTRICT,
+        object_name        TEXT NOT NULL,
+        display_name       TEXT NOT NULL,
+        selected_fields    JSONB NOT NULL DEFAULT '[]'::jsonb,
+        row_filter         JSONB NOT NULL DEFAULT '[]'::jsonb,
+        sample_limit       INTEGER NOT NULL DEFAULT 50,
+        discovery_json     JSONB,
+        last_discovered_at TIMESTAMPTZ,
+        version_hash       TEXT NOT NULL,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_base_views_connector_idx
+        ON source_base_views (connector_id, object_name);
+
+      CREATE TABLE IF NOT EXISTS source_transform_views (
+        transform_view_id  TEXT PRIMARY KEY,
+        display_name       TEXT NOT NULL,
+        inputs             JSONB NOT NULL DEFAULT '[]'::jsonb,
+        sql                TEXT NOT NULL,
+        primary_key_field  TEXT NOT NULL,
+        updated_at_field   TEXT,
+        version_hash       TEXT NOT NULL,
+        last_preview_ok    BOOLEAN,
+        last_preview_at    TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS source_article_views (
+        article_view_id    TEXT PRIMARY KEY,
+        display_name       TEXT NOT NULL,
+        input_kind         TEXT NOT NULL CHECK (input_kind IN ('base_view','transform_view')),
+        input_id           TEXT NOT NULL,
+        status             TEXT NOT NULL DEFAULT 'draft'
+          CHECK (status IN ('draft','reviewed','active','paused')),
+        gbrain_type        TEXT NOT NULL,
+        target_source_id   TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+        article_json       JSONB NOT NULL DEFAULT '{}'::jsonb,
+        compiled_profile   JSONB,
+        version_hash       TEXT,
+        current_chain_hash TEXT,
+        stale              BOOLEAN NOT NULL DEFAULT false,
+        stale_reasons      JSONB NOT NULL DEFAULT '[]'::jsonb,
+        compiled_at        TIMESTAMPTZ,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS source_article_views_input_idx
+        ON source_article_views (input_kind, input_id);
+      CREATE INDEX IF NOT EXISTS source_article_views_status_idx
+        ON source_article_views (status, stale, target_source_id);
+
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass THEN
+          ALTER TABLE source_connectors ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE source_base_views ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE source_transform_views ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE source_article_views ENABLE ROW LEVEL SECURITY;
+        END IF;
+      END $$;
+    `,
+  },
+  {
+    version: 127,
+    name: 'source_ingest_change_intelligence_snapshots',
+    // Change Intelligence v1 persists the previous normalized source record so
+    // the executor can produce deterministic, idempotent timeline field diffs.
+    // The snapshot remains internal DB state; article rendering still obeys the
+    // profile field allowlists and managed-block ownership rules.
+    idempotent: true,
+    sql: `
+      ALTER TABLE source_sync_state
+        ADD COLUMN IF NOT EXISTS last_source_snapshot JSONB;
+      DO $$
+      DECLARE
+        has_bypass BOOLEAN;
+      BEGIN
+        SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+        IF has_bypass AND to_regclass('public.source_sync_state') IS NOT NULL THEN
+          ALTER TABLE source_sync_state ENABLE ROW LEVEL SECURITY;
+        END IF;
+      END $$;
+    `,
+    sqlFor: { pglite: `ALTER TABLE source_sync_state ADD COLUMN IF NOT EXISTS last_source_snapshot JSONB;` },
+  },
+  {
+    version: 128,
+    name: 'source_sync_state_profile_identity',
+    // One source record may have multiple approved projections (for example a
+    // shared organizational card and a restricted HR card). Keep each
+    // projection's identity binding, snapshot and retry state independent.
+    sql: `
+      ALTER TABLE source_sync_state DROP CONSTRAINT source_sync_state_pkey;
+      ALTER TABLE source_sync_state
+        ADD CONSTRAINT source_sync_state_pkey
+        PRIMARY KEY (profile_id, connector_id, source_object, external_id);
+    `,
+  },
+  {
+    version: 129,
+    name: 'source_base_view_identity_fields',
+    // Promote reviewer-selected source identity metadata out of discovery_json.
+    // Discovery refreshes must never erase the production PK/timestamp contract.
+    idempotent: true,
+    sql: `
+      ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS primary_key_field TEXT;
+      ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS updated_at_field TEXT;
+
+      UPDATE source_base_views
+         SET primary_key_field = NULLIF(discovery_json->>'primary_key_field', '')
+       WHERE primary_key_field IS NULL
+         AND discovery_json ? 'primary_key_field';
+
+      UPDATE source_base_views
+         SET updated_at_field = NULLIF(discovery_json->>'updated_at_field', '')
+       WHERE updated_at_field IS NULL
+         AND discovery_json ? 'updated_at_field';
+    `,
+  },
+  {
+    version: 130,
+    name: 'oauth_user_source_grants',
+    // Authorization-code tokens act on behalf of a Portal user. Snapshot the
+    // verified user's source grants into the code/token rows so refresh-token
+    // rotation preserves the resource-owner boundary.
+    idempotent: true,
+    sql: `
+      ALTER TABLE oauth_clients ADD COLUMN IF NOT EXISTS federated_write TEXT[] NOT NULL DEFAULT '{}';
+      ALTER TABLE oauth_codes ADD COLUMN IF NOT EXISTS source_id TEXT;
+      ALTER TABLE oauth_codes ADD COLUMN IF NOT EXISTS federated_read TEXT[];
+      ALTER TABLE oauth_codes ADD COLUMN IF NOT EXISTS federated_write TEXT[];
+      ALTER TABLE oauth_codes ADD COLUMN IF NOT EXISTS user_email TEXT;
+      ALTER TABLE oauth_tokens ADD COLUMN IF NOT EXISTS source_id TEXT;
+      ALTER TABLE oauth_tokens ADD COLUMN IF NOT EXISTS federated_read TEXT[];
+      ALTER TABLE oauth_tokens ADD COLUMN IF NOT EXISTS federated_write TEXT[];
+      ALTER TABLE oauth_tokens ADD COLUMN IF NOT EXISTS user_email TEXT;
+    `,
+  },
+  {
+    // 130 is occupied by oauth_user_source_grants in the current Avers live
+    // baseline. AI Review must advance the watermark instead of being skipped.
+    version: 131,
+    name: 'ai_review_foundation',
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS take_proposal_scans (
+        id                BIGSERIAL PRIMARY KEY,
+        source_id         TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+        page_slug         TEXT        NOT NULL,
+        content_hash      TEXT        NOT NULL,
+        prompt_version    TEXT        NOT NULL,
+        proposal_run_id   TEXT        NOT NULL,
+        model_id          TEXT        NOT NULL,
+        status            TEXT        NOT NULL DEFAULT 'running'
+                                      CHECK (status IN ('running','completed','failed')),
+        proposal_count    INTEGER     NOT NULL DEFAULT 0,
+        error_text        TEXT,
+        started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        completed_at      TIMESTAMPTZ,
+        UNIQUE (source_id, page_slug, content_hash, prompt_version)
+      );
+
+      ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS scan_id BIGINT REFERENCES take_proposal_scans(id) ON DELETE SET NULL;
+      ALTER TABLE take_proposals ADD COLUMN IF NOT EXISTS claim_hash TEXT;
+      UPDATE take_proposals
+         SET claim_hash = md5(concat_ws(E'\\x1f', claim_text, kind, holder, weight::text, COALESCE(domain, '')))
+       WHERE claim_hash IS NULL;
+      ALTER TABLE take_proposals ALTER COLUMN claim_hash SET NOT NULL;
+      DROP INDEX IF EXISTS take_proposals_idempotency_idx;
+      CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx
+        ON take_proposals (source_id, page_slug, content_hash, prompt_version, claim_hash);
+
+      CREATE TABLE IF NOT EXISTS ai_review_revisions (
+        id                BIGSERIAL PRIMARY KEY,
+        target_type       TEXT        NOT NULL CHECK (target_type IN ('take_proposal','concept_proposal')),
+        target_id         BIGINT      NOT NULL,
+        source_kind       TEXT        NOT NULL CHECK (source_kind IN ('manual','llm')),
+        base_version      INTEGER     NOT NULL,
+        original_payload  JSONB       NOT NULL,
+        proposed_payload  JSONB       NOT NULL,
+        reviewer_comment  TEXT,
+        model_id          TEXT,
+        prompt_version    TEXT,
+        status            TEXT        NOT NULL DEFAULT 'draft'
+                                      CHECK (status IN ('draft','applied','discarded')),
+        created_by        TEXT        NOT NULL,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        decided_at        TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS ai_review_revisions_target_idx
+        ON ai_review_revisions (target_type, target_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS ai_review_events (
+        id                BIGSERIAL PRIMARY KEY,
+        target_type       TEXT        NOT NULL CHECK (target_type IN ('take_proposal','concept_proposal')),
+        target_id         BIGINT      NOT NULL,
+        action            TEXT        NOT NULL,
+        actor              TEXT        NOT NULL,
+        expected_version  INTEGER,
+        previous_state    JSONB,
+        new_state         JSONB,
+        details           JSONB       NOT NULL DEFAULT '{}'::jsonb,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS ai_review_events_target_idx
+        ON ai_review_events (target_type, target_id, created_at DESC);
+
+      CREATE TABLE IF NOT EXISTS concept_proposals (
+        id                  BIGSERIAL PRIMARY KEY,
+        source_id           TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+        page_slug           TEXT        NOT NULL,
+        source_content_hash TEXT        NOT NULL,
+        destination_content_hash TEXT,
+        prompt_version      TEXT        NOT NULL,
+        proposal_run_id     TEXT        NOT NULL,
+        status              TEXT        NOT NULL DEFAULT 'pending'
+                                    CHECK (status IN ('pending','accepted','rejected','superseded','deferred')),
+        proposed_markdown   TEXT        NOT NULL,
+        source_atoms        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+        model_id            TEXT        NOT NULL,
+        version             INTEGER     NOT NULL DEFAULT 1,
+        proposed_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        acted_at            TIMESTAMPTZ,
+        acted_by            TEXT,
+        UNIQUE (source_id, page_slug, source_content_hash, prompt_version)
+      );
+      CREATE INDEX IF NOT EXISTS concept_proposals_pending_idx
+        ON concept_proposals (source_id, status, proposed_at DESC)
+        WHERE status = 'pending';
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

@@ -537,6 +537,16 @@ export async function importFromContent(
   for (const k of HASH_EPHEMERAL_FRONTMATTER_KEYS) {
     delete stableFrontmatter[k];
   }
+  const sourceIngest = stableFrontmatter.source_ingest;
+  if (sourceIngest && typeof sourceIngest === 'object' && !Array.isArray(sourceIngest)) {
+    // Source-ingest pages carry a per-run audit id in frontmatter. It is
+    // provenance, not semantic page content: changing only `run_id` must not
+    // force re-chunk/re-embed or defeat the unchanged short-circuit. Preserve
+    // meaningful identity fields such as profile_id/external_ref in the hash.
+    const stableSourceIngest = { ...(sourceIngest as Record<string, unknown>) };
+    delete stableSourceIngest.run_id;
+    stableFrontmatter.source_ingest = stableSourceIngest;
+  }
   // Hash includes all meaningful fields for idempotency.
   const hash = createHash('sha256')
     .update(JSON.stringify({

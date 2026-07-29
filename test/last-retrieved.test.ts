@@ -131,8 +131,10 @@ describe('awaitPendingLastRetrievedWrites', () => {
 
     expect(result.outcome).toBe('timeout');
     expect(result.pending).toBe(1);
-    // Should return within timeout + small buffer; not block forever
-    expect(dt).toBeGreaterThanOrEqual(100);
+    // Should return within timeout + small buffer; not block forever. Timer
+    // resolution can report 99ms for a requested 100ms delay on CI runners;
+    // the outcome assertion above is the semantic timeout contract.
+    expect(dt).toBeGreaterThanOrEqual(90);
     expect(dt).toBeLessThan(300);
     // C1 fix: snapshot's tracked promises ARE dropped from the set on
     // timeout so the next drain doesn't see ghosts (daemon leak guard).

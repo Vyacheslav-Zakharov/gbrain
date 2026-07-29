@@ -1573,6 +1573,11 @@ export async function registerBuiltinHandlers(
     return { imported: true };
   });
 
+  {
+    const { makeSourceIngestHandler } = await import('../core/minions/handlers/source-ingest.ts');
+    worker.register('source-ingest', makeSourceIngestHandler(engine));
+  }
+
   worker.register('extract', async (job) => {
     const { runExtractCore } = await import('./extract.ts');
     const mode = (typeof job.data.mode === 'string' && ['links', 'timeline', 'all'].includes(job.data.mode))
@@ -1885,7 +1890,9 @@ export async function registerBuiltinHandlers(
     // GC stale op_checkpoints rows (folded scope item +C from review).
     const { purgeStaleCheckpoints } = await import('../core/op-checkpoint.ts');
     const checkpointsPurged = await purgeStaleCheckpoints(engine, 7);
-    return { pagesPurged, sourcesPurged, checkpointsPurged, dryRun };
+    const { purgeStaleSourceIngestRunItems } = await import('../core/source-ingest/ledger.ts');
+    const sourceIngestRunItemsPurged = await purgeStaleSourceIngestRunItems(engine, 7);
+    return { pagesPurged, sourcesPurged, checkpointsPurged, sourceIngestRunItemsPurged, dryRun };
   });
 
   // Phase-wrapper handlers — each delegates to runCycle({ phases: [name] }).

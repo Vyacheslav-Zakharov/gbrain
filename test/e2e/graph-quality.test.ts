@@ -34,7 +34,7 @@ async function truncateAll() {
   }
 }
 
-function makeContext(): OperationContext {
+function makeContext(sourceId = 'default'): OperationContext {
   return {
     engine,
     config: { engine: 'pglite' } as any,
@@ -43,7 +43,7 @@ function makeContext(): OperationContext {
     // E2E graph quality simulates local-CLI writes (auto-link / timeline run).
     // After F7b made `remote` required this needs to be explicit.
     remote: false,
-    sourceId: 'default',
+    sourceId,
   };
 }
 
@@ -125,6 +125,49 @@ Attendees: [Alice](people/alice). Discussed [Acme](companies/acme).
     const links = await engine.getLinks('meetings/auto');
     expect(links.length).toBe(2);
     expect(new Set(links.map(l => l.to_slug))).toEqual(new Set(['people/alice', 'companies/acme']));
+  });
+
+  test('qualified same-slug wikilink creates a cross-source edge, not a self-edge', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES
+       ('shared', 'shared', '{}'),
+       ('internal-production', 'internal-production', '{}')
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    const slug = 'meetings/weekly';
+    await engine.putPage(slug, {
+      type: 'meeting', title: 'Restricted protocol', compiled_truth: '', timeline: '',
+    }, { sourceId: 'internal-production' });
+
+    const putOp = operationsByName['put_page'];
+    const result = await putOp.handler(makeContext('shared'), {
+      slug,
+      source_id: 'shared',
+      content: `---
+type: meeting
+title: Shared meeting stub
+---
+
+Закрытая часть: [[internal-production:meetings/weekly|Протокол]]
+`,
+    });
+
+    expect((result as any).auto_links.errors).toBe(0);
+    const links = await engine.getLinks(slug, { sourceId: 'shared' });
+    expect(links).toHaveLength(1);
+    expect(links[0].from_source_id).toBe('shared');
+    expect(links[0].to_source_id).toBe('internal-production');
+    expect(links[0].from_source_id).not.toBe(links[0].to_source_id);
+
+    // Engine parity: unscoped reads must preserve endpoint identity too.
+    const unscopedLinks = await engine.getLinks(slug);
+    expect(unscopedLinks).toHaveLength(1);
+    expect(unscopedLinks[0].from_source_id).toBe('shared');
+    expect(unscopedLinks[0].to_source_id).toBe('internal-production');
+    const unscopedBacklinks = await engine.getBacklinks(slug);
+    expect(unscopedBacklinks).toHaveLength(1);
+    expect(unscopedBacklinks[0].from_source_id).toBe('shared');
+    expect(unscopedBacklinks[0].to_source_id).toBe('internal-production');
   });
 
   test('auto-link reconciliation: edit page removes stale links', async () => {
@@ -310,9 +353,13 @@ Mention of [Alice](people/alice).
     await engine.addLink('ref/popular-0', 'topic/medium', '', 'mentions');
 
     // Verify backlink counts.
-    const counts = await engine.getBacklinkCounts(['topic/popular', 'topic/medium', 'topic/obscure']);
-    expect(counts.get('topic/popular')).toBe(5);
-    expect(counts.get('topic/medium')).toBe(1);
-    expect(counts.get('topic/obscure')).toBe(0);
+    const counts = await engine.getBacklinkCounts([
+      { slug: 'topic/popular', source_id: 'default' },
+      { slug: 'topic/medium', source_id: 'default' },
+      { slug: 'topic/obscure', source_id: 'default' },
+    ]);
+    expect(counts.get('default::topic/popular')).toBe(5);
+    expect(counts.get('default::topic/medium')).toBe(1);
+    expect(counts.get('default::topic/obscure')).toBe(0);
   });
 });

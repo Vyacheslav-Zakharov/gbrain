@@ -45,6 +45,50 @@ import {
   LIST_SKILLS_DESCRIPTION,
   GET_SKILL_DESCRIPTION,
 } from './operations-descriptions.ts';
+import { getSourceConnector } from './source-ingest/connectors/fake.ts';
+import { discoverSourceObject, profileRecords } from './source-ingest/discovery.ts';
+import { draftSourceIngestProfile } from './source-ingest/draft.ts';
+import { buildSourceDryRun } from './source-ingest/dry-run.ts';
+import { buildProfileSampleRecords, fetchSourceSample } from './source-ingest/source-fetch.ts';
+import { executeSourceTransform, type SourceTransformConfig, type SourceTransformSource } from './source-ingest/transform.ts';
+import { sourceIngestProfileJsonSchema, type SourceFilterRule, type SourceIngestProfile } from './source-ingest/profile-schema.ts';
+import { validateSourceIngestProfileAgainstBrain } from './source-ingest/profile-validator.ts';
+import { listSourceIngestProfiles, putSourceIngestProfile, profileHash } from './source-ingest/store.ts';
+import {
+  deleteSourceConnectorSecrets,
+  getSourceConnectorSecretConfig,
+  listSourceConnectorConfigs,
+  listSourceConnectorSecretAudit,
+  putSourceConnectorConfig,
+  putSourceConnectorSecrets,
+  sourceConnectorSecretStatus,
+} from './source-ingest/connector-config.ts';
+import { runSourceIngestExecutor } from './source-ingest/executor.ts';
+import { createAttachmentOperations } from './attachments.ts';
+import { buildSourceRevertReport } from './source-ingest/revert.ts';
+import { enqueueDueSourceRefreshJobs, listDueSourceRefreshes } from './source-ingest/freshness.ts';
+import {
+  buildSourceArticleViewSnapshot,
+  compileSourceArticleView,
+  deleteSourceArticleView,
+  deleteSourceBaseView,
+  deleteSourceConnectorView,
+  deleteSourceTransformView,
+  getCompiledArticleProfile,
+  listSourceArticleViewRuns,
+  listSourceArticleViews,
+  listSourceBaseViews,
+  listSourceConnectorViews,
+  listSourceTransformViews,
+  recordSourceBaseDiscovery,
+  recordSourceTransformPreview,
+  sourceCatalogDeleteImpact,
+  sourceIngestTree,
+  upsertSourceArticleView,
+  upsertSourceBaseView,
+  upsertSourceConnectorView,
+  upsertSourceTransformView,
+} from './source-ingest/catalog.ts';
 
 // --- Types ---
 
@@ -272,6 +316,13 @@ export interface AuthInfo {
    * case (back-compat).
    */
   allowedSources?: string[];
+  /**
+   * Source ids this authenticated caller may WRITE to. For OAuth logins this
+   * must be derived from user_permissions.json `federated_write`, not from
+   * federated_read. Undefined means legacy/no explicit write grant; handlers
+   * may fall back to scalar sourceId for backward compatibility.
+   */
+  writeSources?: string[];
 }
 
 export interface OperationContext {
@@ -446,6 +497,47 @@ export function linkReadScopeOpts(ctx: OperationContext): { sourceId?: string; s
     return { sourceIds: [scope.sourceId] };
   }
   return scope;
+}
+
+async function crossSourceLinkReadScopeOpts(ctx: OperationContext): Promise<{
+  sourceId?: string;
+  sourceIds?: string[];
+  crossSourceEdges?: { enabled?: boolean; policy?: { defaultPolicy?: 'locked-stub' | 'hidden'; bySource?: Record<string, 'locked-stub' | 'hidden'> } };
+}> {
+  const scope = linkReadScopeOpts(ctx);
+  // Trusted local/internal callers keep full cross-source view. Redaction is a
+  // remote/federated read-boundary concern.
+  if (ctx.remote === false || !scope.sourceIds?.length) return scope;
+
+  let enabled = Boolean(ctx.config.cross_source_edges?.enabled);
+  try {
+    const raw = await ctx.engine.getConfig('cross_source_edges.enabled');
+    if (raw !== null) enabled = ['true', '1', 'yes', 'on'].includes(raw.trim().toLowerCase());
+  } catch {
+    // Fail closed to current behavior: no cross-source locked stubs.
+  }
+  if (!enabled) return scope;
+
+  const bySource: Record<string, 'locked-stub' | 'hidden'> = { ...(ctx.config.cross_source_edges?.policy ?? {}) };
+  try {
+    const keys = await ctx.engine.listConfigKeys('cross_source_edges.policy.');
+    for (const key of keys) {
+      const sourceId = key.slice('cross_source_edges.policy.'.length);
+      const value = (await ctx.engine.getConfig(key))?.trim();
+      if (sourceId && (value === 'locked-stub' || value === 'hidden')) bySource[sourceId] = value;
+    }
+  } catch {
+    // DB-plane policy unavailable: file-plane policy (if any) still applies;
+    // otherwise the helper default is hidden.
+  }
+
+  return {
+    ...scope,
+    crossSourceEdges: {
+      enabled: true,
+      policy: { defaultPolicy: 'hidden', bySource },
+    },
+  };
 }
 
 /**
@@ -721,12 +813,24 @@ const get_page: Operation = {
   cliHints: { name: 'get', positional: ['slug'] },
 };
 
+export function resolveFederatedWriteSourceId(ctx: OperationContext, rawSourceId: unknown): string {
+  const sourceId = typeof rawSourceId === 'string' && rawSourceId.trim()
+    ? rawSourceId.trim()
+    : ctx.sourceId || 'default';
+  if (ctx.remote === false) return sourceId;
+  const fallbackSourceId = ctx.sourceId || 'default';
+  const writeSources = ctx.auth?.writeSources?.length ? ctx.auth.writeSources : [fallbackSourceId];
+  if (writeSources.includes(sourceId)) return sourceId;
+  throw new OperationError('permission_denied', `Permission denied for writing to source_id '${sourceId}'`);
+}
+
 const put_page: Operation = {
   name: 'put_page',
   description: 'Write/update a page (markdown with frontmatter). Chunks, embeds, reconciles tags, and (when auto_link/auto_timeline are enabled) extracts + reconciles graph links and timeline entries. For large content on Windows (pipe-buffer limit ~45KB) or any file-as-input workflow, use `gbrain capture --file PATH --slug SLUG` — capture reads the file as a Buffer with a binary-NUL guard and adds provenance write-through (v0.39.3.0).',
   params: {
     slug: { type: 'string', required: true, description: 'Page slug' },
     content: { type: 'string', required: true, description: 'Full markdown content with YAML frontmatter' },
+    source_id: { type: 'string', required: false, description: 'Target source. Remote callers must have this source in their OAuth write grant.' },
     // v0.39.3.0 provenance write-through (WARN-8 + A1 + CV6). Optional fields
     // for trusted local callers (capture CLI, autopilot, dream cycle). Remote
     // MCP callers (ctx.remote !== false) have their values OVERRIDDEN with
@@ -803,7 +907,8 @@ const put_page: Operation = {
       }
     }
 
-    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug };
+    const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
+    if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug, source_id: targetSourceId };
     // Skip embedding when the AI gateway has no embedding provider configured.
     // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
     // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).
@@ -825,7 +930,7 @@ const put_page: Operation = {
       const resolved = await loadActivePack({
         cfg: loadConfig(),
         remote: ctx.remote === false ? false : true,
-        sourceId: ctx.sourceId,
+        sourceId: targetSourceId,
       });
       activePack = { page_types: resolved.manifest.page_types };
     } catch {
@@ -838,7 +943,7 @@ const put_page: Operation = {
       // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
       // not strictly local is remote (matches CV6 / v0.26.9 F7b posture).
       remote: ctx.remote !== false,
-      ...(ctx.sourceId ? { sourceId: ctx.sourceId } : {}),
+      sourceId: targetSourceId,
       // v0.39.0.0 T1.5: pack-aware type inference (loaded above; legacy
       // inferType behavior when undefined).
       ...(activePack ? { activePack } : {}),
@@ -901,7 +1006,7 @@ const put_page: Operation = {
     const isSandboxSubagent = ctx.viaSubagent === true
       && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
     if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
-      const sourceId = ctx.sourceId ?? 'default';
+      const sourceId = targetSourceId;
       const provenanceVia = ctx.remote === false ? 'put_page' : 'mcp:put_page';
       // Shared canonical write-through (also used by `gbrain brainstorm/lsd
       // --save`). Renders the file from the saved DB row and writes it
@@ -954,7 +1059,7 @@ const put_page: Operation = {
       try {
         const enabled = await isAutoLinkEnabled(ctx.engine);
         if (enabled) {
-          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, ctx.sourceId ? { sourceId: ctx.sourceId } : undefined);
+          autoLinks = await runAutoLink(ctx.engine, slug, result.parsedPage, { sourceId: targetSourceId });
         }
       } catch (e) {
         autoLinks = { error: e instanceof Error ? e.message : String(e) };
@@ -1097,11 +1202,11 @@ async function runAutoLink(
   // a multi-source-aware handler); when omitted, every read returns the
   // pre-v0.31.8 cross-source view (back-compat for any existing caller).
   const sourceOpts = opts?.sourceId ? { sourceId: opts.sourceId } : {};
-  const linkSourceOpts = opts?.sourceId
-    ? { fromSourceId: opts.sourceId, toSourceId: opts.sourceId, originSourceId: opts.sourceId }
+  const linkSourceOptsFor = (targetSourceId?: string | null) => opts?.sourceId
+    ? { fromSourceId: opts.sourceId, toSourceId: targetSourceId || opts.sourceId, originSourceId: opts.sourceId }
     : {};
-  const removeSourceOpts = opts?.sourceId
-    ? { fromSourceId: opts.sourceId, toSourceId: opts.sourceId }
+  const removeSourceOptsFor = (targetSourceId?: string | null) => opts?.sourceId
+    ? { fromSourceId: opts.sourceId, toSourceId: targetSourceId || opts.sourceId }
     : {};
 
   // Live-mode resolver: per-put throwaway cache, pg_trgm + optional search.
@@ -1120,9 +1225,16 @@ async function runAutoLink(
   // v0.31.8 (D12): scoped to the source when opts.sourceId is set so wikilink
   // resolution doesn't span unrelated sources.
   const allSlugs = await engine.getAllSlugs(sourceOpts);
-  const valid = candidates.filter(c =>
-    allSlugs.has(c.targetSlug) && (!c.fromSlug || allSlugs.has(c.fromSlug))
-  );
+  const qualifiedSlugSets = new Map<string, Set<string>>();
+  await Promise.all(Array.from(new Set(
+    candidates.map(c => c.targetSourceId).filter((sourceId): sourceId is string => Boolean(sourceId)),
+  )).map(async (sourceId) => {
+    qualifiedSlugSets.set(sourceId, await engine.getAllSlugs({ sourceId }));
+  }));
+  const valid = candidates.filter(c => {
+    const targetSlugs = c.targetSourceId ? qualifiedSlugSets.get(c.targetSourceId) : allSlugs;
+    return Boolean(targetSlugs?.has(c.targetSlug) && (!c.fromSlug || allSlugs.has(c.fromSlug)));
+  });
 
   // Split candidates by direction. Outgoing (fromSlug === slug or unset) are
   // this page's own edges, reconciled against getLinks(slug). Incoming
@@ -1174,7 +1286,7 @@ async function runAutoLink(
     );
 
     const outKeys = new Set(out.map(c =>
-      `${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`
+      `${c.targetSourceId || opts?.sourceId || ''}\u0000${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`
     ));
     const incKeys = new Set(inc.map(c =>
       `${c.fromSlug}\u0000${c.linkType}`
@@ -1188,11 +1300,11 @@ async function runAutoLink(
         await tx.addLink(
           slug, c.targetSlug, c.context, c.linkType,
           c.linkSource, c.originSlug, c.originField,
-          linkSourceOpts,
+          linkSourceOptsFor(c.targetSourceId),
         );
-        const existKey = `${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`;
+        const existKey = `${c.targetSourceId || opts?.sourceId || ''}\u0000${c.targetSlug}\u0000${c.linkType}\u0000${c.linkSource ?? 'markdown'}`;
         const exists = reconcilableOut.some(l =>
-          `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}` === existKey
+          `${l.to_source_id || opts?.sourceId || ''}\u0000${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}` === existKey
         );
         if (!exists) created++;
       } catch {
@@ -1206,7 +1318,7 @@ async function runAutoLink(
         await tx.addLink(
           c.fromSlug!, c.targetSlug, c.context, c.linkType,
           'frontmatter', c.originSlug, c.originField,
-          linkSourceOpts,
+          linkSourceOptsFor(c.targetSourceId),
         );
         const existKey = `${c.fromSlug}\u0000${c.linkType}`;
         const exists = existingIn.some(l =>
@@ -1220,10 +1332,10 @@ async function runAutoLink(
 
     // Remove stale outgoing (markdown or our-frontmatter, not in desired set).
     for (const l of reconcilableOut) {
-      const key = `${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
+      const key = `${l.to_source_id || opts?.sourceId || ''}\u0000${l.to_slug}\u0000${l.link_type}\u0000${l.link_source ?? 'markdown'}`;
       if (!outKeys.has(key)) {
         try {
-          await tx.removeLink(slug, l.to_slug, l.link_type, l.link_source ?? undefined, removeSourceOpts);
+          await tx.removeLink(slug, l.to_slug, l.link_type, l.link_source ?? undefined, removeSourceOptsFor(l.to_source_id));
           removed++;
         } catch {
           errors++;
@@ -1236,7 +1348,7 @@ async function runAutoLink(
       const key = `${l.from_slug}\u0000${l.link_type}`;
       if (!incKeys.has(key)) {
         try {
-          await tx.removeLink(l.from_slug, slug, l.link_type, 'frontmatter', removeSourceOpts);
+          await tx.removeLink(l.from_slug, slug, l.link_type, 'frontmatter', removeSourceOptsFor(l.to_source_id));
           removed++;
         } catch {
           errors++;
@@ -1255,15 +1367,15 @@ const delete_page: Operation = {
   description: 'Soft-delete a page. The row is hidden from search and from get_page/list_pages, but is recoverable via restore_page within 72h. The autopilot purge phase hard-deletes after the recovery window. Pass include_deleted: true to get_page to verify the soft-delete landed.',
   params: {
     slug: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Target source. Remote callers must have this source in their OAuth write grant.' },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
-    if (ctx.dryRun) return { dry_run: true, action: 'soft_delete_page', slug };
-    // v0.31.8 (D7): thread ctx.sourceId so multi-source brains soft-delete the
-    // intended row instead of always targeting (default, slug).
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
+    const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
+    if (ctx.dryRun) return { dry_run: true, action: 'soft_delete_page', slug, source_id: targetSourceId };
+    const sourceOpts = { sourceId: targetSourceId };
     // v0.26.5: rewired from hard-delete to soft-delete. The hard-delete primitive
     // (engine.deletePage) is now reserved for purgeDeletedPages and explicit
     // tests. softDeletePage returns null when the slug is unknown OR already
@@ -1276,9 +1388,9 @@ const delete_page: Operation = {
       if (!existing) {
         throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug.');
       }
-      return { status: 'already_soft_deleted', slug, deleted_at: existing.deleted_at };
+      return { status: 'already_soft_deleted', slug, source_id: targetSourceId, deleted_at: existing.deleted_at };
     }
-    return { status: 'soft_deleted', slug, recoverable_until: 'now + 72h via restore_page' };
+    return { status: 'soft_deleted', slug, source_id: targetSourceId, recoverable_until: 'now + 72h via restore_page' };
   },
   cliHints: { name: 'delete', positional: ['slug'] },
 };
@@ -1288,14 +1400,15 @@ const restore_page: Operation = {
   description: 'v0.26.5 — restore a soft-deleted page (clear deleted_at). Returns success only if the page was actually soft-deleted. After this op, the page reappears in search and in get_page/list_pages without the include_deleted flag.',
   params: {
     slug: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Target source. Remote callers must have this source in their OAuth write grant.' },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
-    if (ctx.dryRun) return { dry_run: true, action: 'restore_page', slug };
-    // v0.31.8 (D7): thread ctx.sourceId.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
+    const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
+    if (ctx.dryRun) return { dry_run: true, action: 'restore_page', slug, source_id: targetSourceId };
+    const sourceOpts = { sourceId: targetSourceId };
     const ok = await ctx.engine.restorePage(slug, sourceOpts);
     if (!ok) {
       // Distinguish "not found" from "already active" (idempotent-as-false).
@@ -1303,9 +1416,9 @@ const restore_page: Operation = {
       if (!existing) {
         throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug.');
       }
-      return { status: 'already_active', slug };
+      return { status: 'already_active', slug, source_id: targetSourceId };
     }
-    return { status: 'restored', slug };
+    return { status: 'restored', slug, source_id: targetSourceId };
   },
   cliHints: { name: 'restore', positional: ['slug'] },
 };
@@ -1349,6 +1462,7 @@ const list_pages: Operation = {
       description: 'Sort order. Default updated_desc (matches pre-v0.29). Options: updated_desc, updated_asc, created_desc, slug.',
     },
     include_deleted: { type: 'boolean', description: 'v0.26.5: include soft-deleted pages (default: false). Used by restore workflows and operator diagnostics.' },
+    source_id: { type: 'string', description: 'Scope results to a single source. Remote callers may only request a granted source.' },
   },
   handler: async (ctx, p) => {
     // Whitelist the sort enum at the handler before passing to the engine.
@@ -1360,10 +1474,10 @@ const list_pages: Operation = {
       : undefined;
     // v0.34.1 (#861 — P0 leak seal): thread the auth'd client's source scope
     // into the listPages filter so an OAuth client scoped to src-A cannot
-    // enumerate src-B pages. Pre-fix, ctx.sourceId / ctx.auth?.allowedSources
-    // were ignored at this op handler and the engine returned every source's
-    // pages indiscriminately.
-    const scope = sourceScopeOpts(ctx);
+    // enumerate src-B pages. If the caller asks for source_id, validate it
+    // against the same grant resolver used by query/get_page rather than
+    // silently ignoring it and returning the whole federated view.
+    const scope = resolveRequestedScope(ctx, p.source_id as string | undefined, false);
     const pages = await ctx.engine.listPages({
       type: p.type as any,
       tag: p.tag as string,
@@ -1434,6 +1548,7 @@ const search: Operation = {
       offset,
       expansion: false,
       ...scope,
+      graphSignalsExposeCrossSourceHits: !ctx.remote,
       ...(perCallMode ? { mode: perCallMode } : {}),
       onMeta: (m) => { capturedMeta = m; },
     });
@@ -1616,6 +1731,7 @@ const query: Operation = {
       nearSymbol: (p.near_symbol as string) || undefined,
       walkDepth: typeof p.walk_depth === 'number' ? (p.walk_depth as number) : undefined,
       ...querySourceScope,
+      graphSignalsExposeCrossSourceHits: !ctx.remote,
       // v0.29.1 — agent-explicit recency + salience. Omitted = heuristic defaults.
       salience: p.salience as 'off' | 'on' | 'strong' | undefined,
       recency: p.recency as 'off' | 'on' | 'strong' | undefined,
@@ -1937,6 +2053,8 @@ const add_link: Operation = {
     link_type: { type: 'string', description: 'Link type (e.g., invested_in, works_at)' },
     context: { type: 'string', description: 'Context for the link' },
     link_source: { type: 'string', description: "Provenance tag (kebab-case, e.g. 'citation-graph'). Defaults to 'manual'. Reconciliation-managed built-ins (markdown/frontmatter/mentions/wikilink-resolved) are rejected." },
+    from_source_id: { type: 'string', description: 'Source id for the from page. Defaults to caller write source.' },
+    to_source_id: { type: 'string', description: 'Source id for the to page. Defaults to caller write source.' },
   },
   mutating: true,
   scope: 'write',
@@ -1952,18 +2070,37 @@ const add_link: Operation = {
         `use 'manual' (the default) or a custom kebab tag like 'citation-graph'`,
       );
     }
-    // v0.31.8 (D7): single ctx.sourceId scopes both endpoints + origin. Cross-
-    // source link creation is out of scope for this wave; use the engine API
-    // directly for that edge case.
-    const linkOpts = ctx.sourceId
-      ? { fromSourceId: ctx.sourceId, toSourceId: ctx.sourceId, originSourceId: ctx.sourceId }
-      : undefined;
-    await ctx.engine.addLink( // gbrain-allow-direct-insert: add_link MCP op is the explicit canonical surface for manual link creation; auto-link reconciliation runs separately via auto_link post-hook
-      p.from as string, p.to as string,
-      (p.context as string) || '', (p.link_type as string) || '',
-      linkSource, undefined, undefined,
-      linkOpts,
-    );
+    // Cross-source add_link authority model:
+    // - from_source_id is WRITE authority (ctx.auth.writeSources, fallback ctx.sourceId)
+    // - to_source_id is READ authority (ctx.auth.allowedSources, fallback ctx.sourceId)
+    // - trusted local callers (ctx.remote === false) keep unrestricted engine API power
+    const defaultSourceId = ctx.sourceId ?? 'default';
+    const fromSourceId = ((p.from_source_id as string | undefined) || defaultSourceId).trim();
+    const toSourceId = ((p.to_source_id as string | undefined) || defaultSourceId).trim();
+    if (!fromSourceId || !toSourceId) {
+      throw new OperationError('invalid_params', 'from_source_id/to_source_id must be non-empty when provided');
+    }
+
+    const opaqueRemoteLinkError = () => new OperationError('permission_denied', 'page not found or not accessible');
+    if (ctx.remote !== false) {
+      const writeSources = ctx.auth?.writeSources?.length ? ctx.auth.writeSources : [defaultSourceId];
+      const readSources = ctx.auth?.allowedSources?.length ? ctx.auth.allowedSources : [defaultSourceId];
+      if (!writeSources.includes(fromSourceId)) throw opaqueRemoteLinkError();
+      if (!readSources.includes(toSourceId)) throw opaqueRemoteLinkError();
+    }
+
+    const linkOpts = { fromSourceId, toSourceId, originSourceId: fromSourceId };
+    try {
+      await ctx.engine.addLink( // gbrain-allow-direct-insert: add_link MCP op is the explicit canonical surface for manual link creation; auto-link reconciliation runs separately via auto_link post-hook
+        p.from as string, p.to as string,
+        (p.context as string) || '', (p.link_type as string) || '',
+        linkSource, undefined, undefined,
+        linkOpts,
+      );
+    } catch (err) {
+      if (ctx.remote !== false) throw opaqueRemoteLinkError();
+      throw err;
+    }
     return { status: 'ok' };
   },
   cliHints: { name: 'link', aliases: ['link-add'], positional: ['from', 'to'] },
@@ -2006,7 +2143,7 @@ const get_links: Operation = {
     // #2200: linkReadScopeOpts so a federated grant — and an untrusted remote
     // scalar scope (promoted to sourceIds[]) — reaches the engine's all-endpoint
     // branch. Trusted local/internal callers keep the scalar cross-source view.
-    const sourceOpts = linkReadScopeOpts(ctx);
+    const sourceOpts = await crossSourceLinkReadScopeOpts(ctx);
     return ctx.engine.getLinks(p.slug as string, sourceOpts);
   },
   scope: 'read',
@@ -2021,7 +2158,7 @@ const get_backlinks: Operation = {
   handler: async (ctx, p) => {
     // #2200: linkReadScopeOpts — federated grant + untrusted remote scalar
     // (promoted to sourceIds[]) reach the engine's all-endpoint branch.
-    const sourceOpts = linkReadScopeOpts(ctx);
+    const sourceOpts = await crossSourceLinkReadScopeOpts(ctx);
     return ctx.engine.getBacklinks(p.slug as string, sourceOpts);
   },
   scope: 'read',
@@ -2095,6 +2232,7 @@ const add_timeline_entry: Operation = {
   description: 'Add timeline entry to a page',
   params: {
     slug: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Target source. Remote callers must have this source in their OAuth write grant.' },
     date: { type: 'string', required: true },
     summary: { type: 'string', required: true },
     detail: { type: 'string' },
@@ -2103,7 +2241,8 @@ const add_timeline_entry: Operation = {
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
-    if (ctx.dryRun) return { dry_run: true, action: 'add_timeline_entry', slug: p.slug };
+    const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
+    if (ctx.dryRun) return { dry_run: true, action: 'add_timeline_entry', slug: p.slug, source_id: targetSourceId };
     const date = p.date as string;
     // Reject anything that isn't a strict YYYY-MM-DD with year 1900-2199 and
     // a real calendar day. PG DATE accepts year 5874897 silently — that's a
@@ -2120,15 +2259,13 @@ const add_timeline_entry: Operation = {
     if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date) {
       throw new Error(`Invalid calendar date "${date}"`);
     }
-    // v0.31.8 (D7): thread ctx.sourceId.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
     await ctx.engine.addTimelineEntry(p.slug as string, { // gbrain-allow-direct-insert: add_timeline_entry MCP op is the explicit canonical surface for manual timeline entries
       date,
       source: (p.source as string) || '',
       summary: p.summary as string,
       detail: (p.detail as string) || '',
-    }, sourceOpts);
-    return { status: 'ok' };
+    }, { sourceId: targetSourceId });
+    return { status: 'ok', source_id: targetSourceId };
   },
   cliHints: { name: 'timeline-add', positional: ['slug', 'date', 'summary'] },
 };
@@ -2752,6 +2889,1368 @@ const file_url: Operation = {
     }
     // TODO: generate signed URL from Supabase Storage
     return { storage_path: rows[0].storage_path, url: `gbrain:files/${rows[0].storage_path}` };
+  },
+};
+
+// --- Source Ingest (Stage 1 contract) ---
+
+function resolveSourceConnectorOrThrow(connectorId: string, connectorConfig?: Record<string, unknown>) {
+  const connector = getSourceConnector(connectorId, connectorConfig);
+  if (!connector) {
+    throw new OperationError(
+      'invalid_params',
+      `Unknown source connector '${connectorId}'.`,
+      'Stage 1 ships only the deterministic fake-source connector; register real connectors after connector registry lands.',
+      'docs/source-ingest-phase-0-inventory.md',
+    );
+  }
+  return connector;
+}
+
+const source_discover: Operation = {
+  name: 'source_discover',
+  description: 'Discover/profile an object exposed by a third-party source connector. Read-only; MCP-safe. Stage 1 includes deterministic fake-source connector.',
+  scope: 'read',
+  params: {
+    connector_id: { type: 'string', required: true, description: 'Connector id, e.g. fake-source' },
+    source_object: { type: 'string', required: true, description: 'Object/collection name, e.g. vehicle' },
+    sample_limit: { type: 'number', description: 'Sample size for field profiling (default 50)' },
+    connector_config: { type: 'object', description: 'Non-secret connector config override, e.g. table_name. Secrets are never passed here.' },
+    selected_fields: { type: 'array', items: { type: 'string' }, description: 'Optional field allowlist for sampling/profiling.' },
+    primary_key_field: { type: 'string', description: 'Reviewer-selected stable identity field.' },
+    updated_at_field: { type: 'string', description: 'Reviewer-selected updated-at field.' },
+  },
+  handler: async (_ctx, p) => {
+    const connector = resolveSourceConnectorOrThrow(p.connector_id as string, p.connector_config as Record<string, unknown> | undefined);
+    const selectedFields = Array.isArray(p.selected_fields) ? p.selected_fields.flatMap(v => String(v).split(/\\n|[\n,]/)).map(s => s.trim()).filter(Boolean) : undefined;
+    const primaryKeyField = typeof p.primary_key_field === 'string' && p.primary_key_field.trim() ? p.primary_key_field.trim() : undefined;
+    const updatedAtField = typeof p.updated_at_field === 'string' && p.updated_at_field.trim() ? p.updated_at_field.trim() : undefined;
+    return discoverSourceObject(connector, p.source_object as string, (p.sample_limit as number | undefined) ?? 50, {
+      ...(selectedFields?.length ? { fields: selectedFields } : {}),
+      ...(primaryKeyField ? { primaryKeyField } : {}),
+      ...(updatedAtField ? { updatedAtField } : {}),
+    });
+  },
+};
+
+const source_connector_config_get: Operation = {
+  name: 'source_connector_config_get',
+  description: 'Read persisted non-secret source connector configuration plus masked secret readiness. Read-only; MCP-safe.',
+  scope: 'read',
+  params: {
+    config_id: { type: 'string', description: 'Optional connector config id. Secrets are canonical at connector:<connector_id>; legacy object-scope IDs are read as fallback.' },
+  },
+  handler: async (ctx, p) => {
+    const rows = await listSourceConnectorConfigs(ctx.engine, p.config_id as string | undefined);
+    return {
+      rows: await Promise.all(rows.map(async row => ({
+        ...row,
+        secrets: await sourceConnectorSecretStatus(ctx.engine, row.connector_id, row.config_id, row.source_object),
+      }))),
+      count: rows.length,
+    };
+  },
+};
+
+const source_connector_config_put: Operation = {
+  name: 'source_connector_config_put',
+  description: 'LOCAL/TRUSTED: persist non-secret source connector configuration for the admin review console. Secrets are stored separately in source_connector_secrets.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    config: { type: 'object', required: true, description: 'Non-secret connector config JSON' },
+    actor: { type: 'string', description: 'Audit actor label supplied by trusted admin UI/CLI' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_config_put is local/trusted only.');
+    const raw = p.config as Record<string, unknown>;
+    const connector_id = String(raw.connector_id || '');
+    const source_object = String(raw.source_object || '');
+    if (!connector_id || !source_object) throw new OperationError('invalid_params', 'connector_id and source_object are required.');
+    const actor = typeof p.actor === 'string' && p.actor.trim() ? p.actor.trim() : 'local';
+    const saved = await putSourceConnectorConfig(ctx.engine, {
+      config_id: typeof raw.config_id === 'string' ? raw.config_id : undefined,
+      connector_id,
+      source_object,
+      display_name: typeof raw.display_name === 'string' ? raw.display_name : undefined,
+      table_name: typeof raw.table_name === 'string' ? raw.table_name : null,
+      target_source_id: typeof raw.target_source_id === 'string' ? raw.target_source_id : null,
+      slug_prefix: typeof raw.slug_prefix === 'string' ? raw.slug_prefix : '',
+      freshness_policy: typeof raw.freshness_policy === 'string' ? raw.freshness_policy : null,
+      enabled: Boolean(raw.enabled),
+      config_json: (raw.config_json && typeof raw.config_json === 'object' ? raw.config_json : {}) as Record<string, unknown>,
+    }, { actor });
+    return { ok: true, saved: { ...saved, secrets: await sourceConnectorSecretStatus(ctx.engine, saved.connector_id, saved.config_id, saved.source_object) } };
+  },
+};
+
+const source_connector_secret_put: Operation = {
+  name: 'source_connector_secret_put',
+  description: 'LOCAL/TRUSTED: rotate source connector credentials in DB-backed secret storage. Returns masked status only.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    config_id: { type: 'string', description: 'Optional connector config id. Secrets are canonical at connector:<connector_id>; legacy object-scope IDs are read as fallback.' },
+    connector_id: { type: 'string', required: true },
+    source_object: { type: 'string', required: true },
+    secrets: { type: 'object', required: true, description: 'Secret values, e.g. app_id/access_key. Never returned.' },
+    actor: { type: 'string', description: 'Audit actor label supplied by trusted admin UI/CLI' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_secret_put is local/trusted only.');
+    const connector_id = String(p.connector_id || '');
+    const source_object = String(p.source_object || '');
+    if (!connector_id || !source_object) throw new OperationError('invalid_params', 'connector_id and source_object are required.');
+    const actor = typeof p.actor === 'string' && p.actor.trim() ? p.actor.trim() : 'local';
+    const status = await putSourceConnectorSecrets(ctx.engine, {
+      config_id: typeof p.config_id === 'string' ? p.config_id : undefined,
+      connector_id,
+      source_object,
+      secret_json: (p.secrets && typeof p.secrets === 'object' ? p.secrets : {}) as Record<string, unknown>,
+    }, { actor });
+    return { ok: true, secrets: status };
+  },
+};
+
+const source_connector_secret_delete: Operation = {
+  name: 'source_connector_secret_delete',
+  description: 'LOCAL/TRUSTED: delete source connector credentials from DB-backed secret storage. Audit row is retained without values.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    config_id: { type: 'string', description: 'Optional connector config id. Secrets are canonical at connector:<connector_id>; legacy object-scope IDs are read as fallback.' },
+    connector_id: { type: 'string', required: true },
+    source_object: { type: 'string', required: true },
+    actor: { type: 'string', description: 'Audit actor label supplied by trusted admin UI/CLI' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_secret_delete is local/trusted only.');
+    const connector_id = String(p.connector_id || '');
+    const source_object = String(p.source_object || '');
+    if (!connector_id || !source_object) throw new OperationError('invalid_params', 'connector_id and source_object are required.');
+    const actor = typeof p.actor === 'string' && p.actor.trim() ? p.actor.trim() : 'local';
+    const status = await deleteSourceConnectorSecrets(ctx.engine, {
+      config_id: typeof p.config_id === 'string' ? p.config_id : undefined,
+      connector_id,
+      source_object,
+    }, { actor });
+    return { ok: true, secrets: status };
+  },
+};
+
+const source_connector_secret_audit: Operation = {
+  name: 'source_connector_secret_audit',
+  description: 'Read source connector credential audit trail. Values are never stored in audit rows.',
+  scope: 'read',
+  params: {
+    config_id: { type: 'string', description: 'Optional connector config id. Secrets are canonical at connector:<connector_id>; legacy object-scope IDs are read as fallback.' },
+    limit: { type: 'number', description: 'Max audit rows (default 20)' },
+  },
+  handler: async (ctx, p) => ({
+    rows: await listSourceConnectorSecretAudit(ctx.engine, p.config_id as string | undefined, (p.limit as number | undefined) ?? 20),
+  }),
+};
+
+const source_ingest_tree: Operation = {
+  name: 'source_ingest_tree',
+  description: 'Read source-ingest catalog tree: connectors, base views, transform views, article views, links, and stale flags.',
+  scope: 'read',
+  params: {},
+  handler: async (ctx) => sourceIngestTree(ctx.engine),
+};
+
+const source_connector_list: Operation = {
+  name: 'source_connector_list',
+  description: 'List first-class source-ingest connector instances (system + non-secret config, no table binding).',
+  scope: 'read',
+  params: { connector_id: { type: 'string', description: 'Optional connector id filter' } },
+  handler: async (ctx, p) => ({ rows: await listSourceConnectorViews(ctx.engine, p.connector_id as string | undefined) }),
+};
+
+const source_connector_upsert: Operation = {
+  name: 'source_connector_upsert',
+  description: 'ADMIN: create/update a first-class source-ingest connector instance. Secrets remain in source_connector_secret_* ops.',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    connector_id: { type: 'string', required: true },
+    kind: { type: 'string', required: true },
+    display_name: { type: 'string', required: true },
+    config_json: { type: 'object' },
+    enabled: { type: 'boolean' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_upsert is local/trusted only for Phase 0.');
+    const row = await upsertSourceConnectorView(ctx.engine, {
+      connector_id: String(p.connector_id || ''),
+      kind: String(p.kind || ''),
+      display_name: String(p.display_name || p.connector_id || ''),
+      config_json: (p.config_json && typeof p.config_json === 'object' ? p.config_json : {}) as Record<string, unknown>,
+      enabled: typeof p.enabled === 'boolean' ? p.enabled : true,
+    });
+    return { ok: true, row };
+  },
+};
+
+const source_catalog_delete_impact: Operation = {
+  name: 'source_catalog_delete_impact',
+  description: 'ADMIN: preview dependent Source Ingest catalog objects before deleting connector/base/transform/article views.',
+  scope: 'admin',
+  params: {
+    kind: { type: 'string', required: true, description: 'connector | base_view | transform_view | article_view' },
+    id: { type: 'string', required: true },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_catalog_delete_impact is local/trusted only.');
+    const kind = String(p.kind || '') as any;
+    if (!['connector', 'base_view', 'transform_view', 'article_view'].includes(kind)) throw new OperationError('invalid_params', 'invalid catalog delete kind.');
+    return { ok: true, impact: await sourceCatalogDeleteImpact(ctx.engine, kind, String(p.id || '')) };
+  },
+};
+
+const source_connector_delete: Operation = {
+  name: 'source_connector_delete',
+  description: 'ADMIN: delete a first-class source-ingest connector instance when no base views depend on it.',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    connector_id: { type: 'string', required: true },
+    confirm_token: { type: 'string' },
+    force: { type: 'boolean' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_connector_delete is local/trusted only for Phase 1.');
+    try {
+      return { ok: true, ...(await deleteSourceConnectorView(ctx.engine, String(p.connector_id || ''), { confirmToken: typeof p.confirm_token === 'string' ? p.confirm_token : undefined, force: p.force === true })) };
+    } catch (e) {
+      throw new OperationError('conflict', e instanceof Error ? e.message : String(e));
+    }
+  },
+};
+
+function sourceValueAt(data: Record<string, unknown>, path: string): unknown {
+  return path.split('.').reduce<unknown>((cur, part) => cur && typeof cur === 'object' ? (cur as Record<string, unknown>)[part] : undefined, data);
+}
+
+function sourceFilterMatches(rule: SourceFilterRule, data: Record<string, unknown>): boolean {
+  const v = sourceValueAt(data, rule.field);
+  switch (rule.op) {
+    case 'exists': return v !== undefined && v !== null && v !== '';
+    case 'not_exists': return v === undefined || v === null || v === '';
+    case 'eq': return v === rule.value;
+    case 'neq': return v !== rule.value;
+    case 'in': return Array.isArray(rule.value) && rule.value.includes(v);
+    case 'not_in': return Array.isArray(rule.value) && !rule.value.includes(v);
+    case 'lte': return Number(v) <= Number(rule.value);
+    case 'gte': return Number(v) >= Number(rule.value);
+    case 'lt': return Number(v) < Number(rule.value);
+    case 'gt': return Number(v) > Number(rule.value);
+    default: return false;
+  }
+}
+
+function normalizeSourceFilterRules(value: unknown): SourceFilterRule[] {
+  return Array.isArray(value)
+    ? value.filter((rule): rule is SourceFilterRule => Boolean(rule && typeof rule === 'object' && typeof (rule as Record<string, unknown>).field === 'string' && typeof (rule as Record<string, unknown>).op === 'string'))
+    : [];
+}
+
+function compactDiscoveryProfile(discovery: Record<string, unknown>, selectedFields: string[] = []): Record<string, unknown> {
+  const { samples: _samples, ...rest } = discovery;
+  const selected = new Set(selectedFields);
+  const fields = Array.isArray(rest.fields)
+    ? rest.fields
+        .filter(field => field && typeof field === 'object' && (selectedFields.length === 0 || selected.has(String((field as Record<string, unknown>).name || ''))))
+        .map(field => {
+          const { samples: _fieldSamples, ...compact } = field as Record<string, unknown>;
+          return compact;
+        })
+    : [];
+  if (selectedFields.length === 0) return { ...rest, fields };
+  return {
+    ...rest,
+    fields,
+    idCandidates: Array.isArray(rest.idCandidates) ? rest.idCandidates.map(String).filter(name => selected.has(name)) : [],
+    updatedAtCandidates: Array.isArray(rest.updatedAtCandidates) ? rest.updatedAtCandidates.map(String).filter(name => selected.has(name)) : [],
+    parentCandidates: Array.isArray(rest.parentCandidates) ? rest.parentCandidates.map(String).filter(name => selected.has(name)) : [],
+  };
+}
+
+async function buildTransformConfigFromCatalog(engine: BrainEngine, transformId: string): Promise<SourceTransformConfig> {
+  const [transform] = await listSourceTransformViews(engine, transformId) as Array<Record<string, unknown>>;
+  if (!transform) throw new OperationError('invalid_params', `transform_view not found: ${transformId}`);
+  const inputs = Array.isArray(transform.inputs) ? transform.inputs as Array<Record<string, unknown>> : [];
+  const sources: SourceTransformSource[] = [];
+  for (const input of inputs) {
+    const baseViewId = String(input.base_view_id || '').trim();
+    if (!baseViewId) continue;
+    const [base] = await listSourceBaseViews(engine, baseViewId) as Array<Record<string, unknown>>;
+    if (!base) throw new OperationError('invalid_params', `base_view not found: ${baseViewId}`);
+    sources.push({
+      alias: String(input.alias || '').trim(),
+      source_table_id: baseViewId,
+      connector: String(base.connector_id || ''),
+      object: String(base.object_name || ''),
+      fields: Array.isArray(base.selected_fields) ? base.selected_fields.map(String).filter(Boolean) : undefined,
+      sample_limit: Number(base.sample_limit || 50),
+    });
+  }
+  return {
+    engine: 'pglite',
+    sources,
+    sql: String(transform.sql || ''),
+    primary_key_field: String(transform.primary_key_field || ''),
+    updated_at_field: typeof transform.updated_at_field === 'string' ? transform.updated_at_field : undefined,
+  };
+}
+
+const source_base_view_list: Operation = {
+  name: 'source_base_view_list',
+  description: 'List first-class source-ingest base views.',
+  scope: 'read',
+  params: { base_view_id: { type: 'string', description: 'Optional base view id filter' } },
+  handler: async (ctx, p) => ({ rows: await listSourceBaseViews(ctx.engine, p.base_view_id as string | undefined) }),
+};
+
+const source_base_view_execute: Operation = {
+  name: 'source_base_view_execute',
+  description: 'LOCAL/TRUSTED: execute a saved or draft base view over a read-only sample, returning filtered rows and discovery profile.',
+  scope: 'read',
+  localOnly: true,
+  params: {
+    base_view_id: { type: 'string', description: 'Saved base view id. Mutually optional with draft.' },
+    draft: { type: 'object', description: 'Inline draft with connector_id, object_name, selected_fields, row_filter.' },
+    sample_limit: { type: 'number', description: 'Sample size (default from base view or 50).' },
+    discover_all_fields: { type: 'boolean', description: 'Ignore saved selected_fields during preview/discovery and sample every exposed source column.' },
+    connector_config: { type: 'object', description: 'Optional non-secret runtime config override for draft execution.' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_base_view_execute is local/trusted only.');
+    const draft = p.draft && typeof p.draft === 'object' ? p.draft as Record<string, unknown> : undefined;
+    const baseViewId = typeof p.base_view_id === 'string' && p.base_view_id.trim() ? p.base_view_id.trim() : undefined;
+    const saved = baseViewId ? (await listSourceBaseViews(ctx.engine, baseViewId) as Array<Record<string, unknown>>)[0] : undefined;
+    if (baseViewId && !saved) throw new OperationError('invalid_params', `base_view not found: ${baseViewId}`);
+    const src = saved || draft;
+    if (!src) throw new OperationError('invalid_params', 'base_view_id or draft is required.');
+    const connectorId = String(src.connector_id || '').trim();
+    const objectName = String(src.object_name || '').trim();
+    if (!connectorId || !objectName) throw new OperationError('invalid_params', 'connector_id and object_name are required.');
+    const selectedFields = Array.isArray(src.selected_fields) ? src.selected_fields.map(String).filter(Boolean) : [];
+    const discoverAllFields = p.discover_all_fields === true;
+    const rowFilter = normalizeSourceFilterRules(src.row_filter);
+    const sampleLimit = Number.isFinite(Number(p.sample_limit)) ? Number(p.sample_limit) : Number(src.sample_limit || 50);
+    const sourceTableId = saved ? String(saved.base_view_id) : undefined;
+    const records = await fetchSourceSample({
+      engine: ctx.engine,
+      connectorConfigOverride: p.connector_config as Record<string, unknown> | undefined,
+      defaultConnector: connectorId,
+      defaultObject: objectName,
+    }, {
+      alias: 'source',
+      connector: connectorId,
+      object: objectName,
+      source_table_id: sourceTableId,
+      fields: !discoverAllFields && selectedFields.length ? selectedFields : undefined,
+      sample_limit: sampleLimit,
+    }, sampleLimit);
+    const filteredRows = rowFilter.length ? records.filter(record => rowFilter.every(rule => sourceFilterMatches(rule, record.data))) : records;
+    const discovery = profileRecords(connectorId, objectName, filteredRows, undefined, {
+      fields: discoverAllFields ? [] : selectedFields,
+      primaryKeyField: saved
+        ? (typeof saved.primary_key_field === 'string' ? saved.primary_key_field : undefined)
+        : typeof src.primary_key_field === 'string'
+          ? src.primary_key_field
+          : typeof (src.discovery_json as Record<string, unknown> | undefined)?.primary_key_field === 'string'
+            ? String((src.discovery_json as Record<string, unknown>).primary_key_field)
+            : undefined,
+      updatedAtField: saved
+        ? (typeof saved.updated_at_field === 'string' ? saved.updated_at_field : undefined)
+        : typeof src.updated_at_field === 'string'
+          ? src.updated_at_field
+          : typeof (src.discovery_json as Record<string, unknown> | undefined)?.updated_at_field === 'string'
+            ? String((src.discovery_json as Record<string, unknown>).updated_at_field)
+            : undefined,
+    }) as unknown as Record<string, unknown>;
+    const fieldNames = new Set((Array.isArray(discovery.fields) ? discovery.fields as Array<{ name?: string }> : []).map(f => String(f.name || '')).filter(Boolean));
+    const drift = selectedFields.filter(name => !fieldNames.has(name));
+    const warnings = [...(Array.isArray(discovery.warnings) ? discovery.warnings.map(String) : []), ...drift.map(name => `field_drift:${name}`)];
+    const outDiscovery = { ...discovery, warnings, samples: filteredRows };
+    const updated = saved ? await recordSourceBaseDiscovery(ctx.engine, String(saved.base_view_id), compactDiscoveryProfile(outDiscovery, selectedFields), drift.map(name => `field_drift:${name}`)) : null;
+    return { ok: true, base_view_id: saved?.base_view_id ?? null, sampled: records.length, filtered: filteredRows.length, rows: filteredRows, discovery: outDiscovery, warnings, drift_fields: drift, updated };
+  },
+};
+
+const source_base_view_upsert: Operation = {
+  name: 'source_base_view_upsert',
+  description: 'ADMIN: create/update a base view (connector + object + selected fields + row filter).',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    base_view_id: { type: 'string', required: true },
+    connector_id: { type: 'string', required: true },
+    object_name: { type: 'string', required: true },
+    display_name: { type: 'string' },
+    selected_fields: { type: 'array', items: { type: 'string' } },
+    row_filter: { type: 'array' },
+    sample_limit: { type: 'number' },
+    primary_key_field: { type: 'string' },
+    updated_at_field: { type: 'string' },
+    discovery_json: { type: 'object' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_base_view_upsert is local/trusted only for Phase 0.');
+    const row = await upsertSourceBaseView(ctx.engine, {
+      base_view_id: String(p.base_view_id || ''),
+      connector_id: String(p.connector_id || ''),
+      object_name: String(p.object_name || ''),
+      display_name: typeof p.display_name === 'string' ? p.display_name : undefined,
+      selected_fields: Array.isArray(p.selected_fields) ? p.selected_fields.map(String).filter(Boolean) : [],
+      row_filter: Array.isArray(p.row_filter) ? p.row_filter as any : [],
+      sample_limit: typeof p.sample_limit === 'number' ? p.sample_limit : 50,
+      ...(Object.prototype.hasOwnProperty.call(p, 'primary_key_field') ? {
+        primary_key_field: typeof p.primary_key_field === 'string' && p.primary_key_field.trim() ? p.primary_key_field.trim() : null,
+      } : {}),
+      ...(Object.prototype.hasOwnProperty.call(p, 'updated_at_field') ? {
+        updated_at_field: typeof p.updated_at_field === 'string' && p.updated_at_field.trim() ? p.updated_at_field.trim() : null,
+      } : {}),
+      discovery_json: (p.discovery_json && typeof p.discovery_json === 'object' ? p.discovery_json : null) as Record<string, unknown> | null,
+    });
+    return { ok: true, row };
+  },
+};
+
+const source_base_view_delete: Operation = {
+  name: 'source_base_view_delete',
+  description: 'ADMIN: delete a base view, guarded by dependency impact confirmation when transforms/articles depend on it.',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    base_view_id: { type: 'string', required: true },
+    confirm_token: { type: 'string' },
+    force: { type: 'boolean' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_base_view_delete is local/trusted only.');
+    try {
+      return { ok: true, ...(await deleteSourceBaseView(ctx.engine, String(p.base_view_id || ''), { confirmToken: typeof p.confirm_token === 'string' ? p.confirm_token : undefined, force: p.force === true })) };
+    } catch (e) {
+      throw new OperationError('conflict', e instanceof Error ? e.message : String(e));
+    }
+  },
+};
+
+const source_transform_view_list: Operation = {
+  name: 'source_transform_view_list',
+  description: 'List first-class source-ingest transform views.',
+  scope: 'read',
+  params: { transform_view_id: { type: 'string', description: 'Optional transform view id filter' } },
+  handler: async (ctx, p) => ({ rows: await listSourceTransformViews(ctx.engine, p.transform_view_id as string | undefined) }),
+};
+
+const source_transform_view_execute: Operation = {
+  name: 'source_transform_view_execute',
+  description: 'LOCAL/TRUSTED: execute a saved or draft transform view in the isolated PGLite sandbox over source samples.',
+  scope: 'read',
+  localOnly: true,
+  params: {
+    transform_view_id: { type: 'string', description: 'Saved transform view id. Mutually optional with draft.' },
+    draft: { type: 'object', description: 'Inline draft with inputs, sql, primary_key_field, updated_at_field.' },
+    sample_limit: { type: 'number', description: 'Sample size / row cap for preview (default 50).' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_transform_view_execute is local/trusted only.');
+    const transformId = typeof p.transform_view_id === 'string' && p.transform_view_id.trim() ? p.transform_view_id.trim() : undefined;
+    const draft = p.draft && typeof p.draft === 'object' ? p.draft as Record<string, unknown> : undefined;
+    let config: SourceTransformConfig;
+    if (draft) {
+      const inputs = Array.isArray(draft.inputs) ? draft.inputs as Array<Record<string, unknown>> : [];
+      const sources: SourceTransformSource[] = [];
+      for (const input of inputs) {
+        const baseViewId = String(input.base_view_id || input.source_table_id || '').trim();
+        if (!baseViewId) continue;
+        const [base] = await listSourceBaseViews(ctx.engine, baseViewId) as Array<Record<string, unknown>>;
+        if (!base) throw new OperationError('invalid_params', `base_view not found: ${baseViewId}`);
+        sources.push({
+          alias: String(input.alias || '').trim(),
+          source_table_id: baseViewId,
+          connector: String(base.connector_id || ''),
+          object: String(base.object_name || ''),
+          fields: Array.isArray(base.selected_fields) ? base.selected_fields.map(String).filter(Boolean) : undefined,
+          sample_limit: Number(base.sample_limit || 50),
+        });
+      }
+      config = {
+        engine: 'pglite',
+        sources,
+        sql: String(draft.sql || ''),
+        primary_key_field: String(draft.primary_key_field || ''),
+        updated_at_field: typeof draft.updated_at_field === 'string' ? draft.updated_at_field : undefined,
+      };
+    } else if (transformId) {
+      config = await buildTransformConfigFromCatalog(ctx.engine, transformId);
+    } else {
+      throw new OperationError('invalid_params', 'transform_view_id or draft is required.');
+    }
+    const sampleLimit = Number.isFinite(Number(p.sample_limit)) ? Number(p.sample_limit) : 50;
+    try {
+      const result = await executeSourceTransform(config, source => fetchSourceSample({
+        engine: ctx.engine,
+        defaultConnector: source.connector || '',
+        defaultObject: source.object,
+      }, source, source.sample_limit ?? sampleLimit), { rowLimit: sampleLimit });
+      const updated = transformId ? await recordSourceTransformPreview(ctx.engine, transformId, true) : null;
+      return { ok: true, transform_view_id: transformId ?? null, rows: result.records.map(record => record.data), records: result.records, row_count: result.row_count, source_counts: result.source_counts, warnings: result.warnings, updated };
+    } catch (e) {
+      if (transformId) await recordSourceTransformPreview(ctx.engine, transformId, false).catch(() => undefined);
+      return { ok: false, transform_view_id: transformId ?? null, error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+};
+
+const source_transform_view_upsert: Operation = {
+  name: 'source_transform_view_upsert',
+  description: 'ADMIN: create/update a transform view. SQL executes only in staging PGLite, never pushed down to sources.',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    transform_view_id: { type: 'string', required: true },
+    display_name: { type: 'string' },
+    inputs: { type: 'array', required: true },
+    sql: { type: 'string', required: true },
+    primary_key_field: { type: 'string', required: true },
+    updated_at_field: { type: 'string' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_transform_view_upsert is local/trusted only for Phase 0.');
+    const row = await upsertSourceTransformView(ctx.engine, {
+      transform_view_id: String(p.transform_view_id || ''),
+      display_name: typeof p.display_name === 'string' ? p.display_name : undefined,
+      inputs: Array.isArray(p.inputs) ? p.inputs as any : [],
+      sql: String(p.sql || ''),
+      primary_key_field: String(p.primary_key_field || ''),
+      updated_at_field: typeof p.updated_at_field === 'string' ? p.updated_at_field : undefined,
+    });
+    return { ok: true, row };
+  },
+};
+
+const source_transform_view_delete: Operation = {
+  name: 'source_transform_view_delete',
+  description: 'ADMIN: delete a transform view, guarded by dependent article-view confirmation.',
+  scope: 'admin',
+  mutating: true,
+  params: {
+    transform_view_id: { type: 'string', required: true },
+    confirm_token: { type: 'string' },
+    force: { type: 'boolean' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_transform_view_delete is local/trusted only.');
+    try {
+      return { ok: true, ...(await deleteSourceTransformView(ctx.engine, String(p.transform_view_id || ''), { confirmToken: typeof p.confirm_token === 'string' ? p.confirm_token : undefined, force: p.force === true })) };
+    } catch (e) {
+      throw new OperationError('conflict', e instanceof Error ? e.message : String(e));
+    }
+  },
+};
+
+const source_article_view_list: Operation = {
+  name: 'source_article_view_list',
+  description: 'List first-class source-ingest article views and their compiled snapshot/stale state.',
+  scope: 'read',
+  params: { article_view_id: { type: 'string', description: 'Optional article view id filter' } },
+  handler: async (ctx, p) => ({ rows: await listSourceArticleViews(ctx.engine, p.article_view_id as string | undefined) }),
+};
+
+const source_article_view_upsert: Operation = {
+  name: 'source_article_view_upsert',
+  description: 'ADMIN: create/update an article view. Any edit invalidates the compiled snapshot until re-approve.',
+  scope: 'admin',
+  mutating: true,
+  params: { article_view: { type: 'object', required: true } },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_upsert is local/trusted only for Phase 0.');
+    const row = await upsertSourceArticleView(ctx.engine, p.article_view as any);
+    return { ok: true, row };
+  },
+};
+
+const source_article_view_delete: Operation = {
+  name: 'source_article_view_delete',
+  description: 'ADMIN: delete an article view and its compiled snapshot metadata.',
+  scope: 'admin',
+  mutating: true,
+  params: { article_view_id: { type: 'string', required: true } },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_delete is local/trusted only.');
+    return { ok: true, ...(await deleteSourceArticleView(ctx.engine, String(p.article_view_id || ''))) };
+  },
+};
+
+function articleTemplateFallback(gbrainType: string) {
+  const common = [
+    { key: 'title', label: 'Заголовок H1 / frontmatter title', hint: 'Обычно {{ display_name_field }}.' },
+    { key: 'summary', label: 'Описание под заголовком' },
+  ];
+  const byType: Record<string, Array<{ key: string; label: string; hint?: string }>> = {
+    equipment: [
+      { key: 'characteristics_type', label: 'Характеристики → Тип' },
+      { key: 'characteristics_model', label: 'Характеристики → Производитель/модель' },
+      { key: 'characteristics_status', label: 'Характеристики → Состояние' },
+      { key: 'characteristics_inventory', label: 'Характеристики → Инвентарный/серийный №' },
+      { key: 'links', label: 'Связи' },
+      { key: 'notes', label: 'Заметки' },
+      { key: 'timeline', label: 'Timeline' },
+    ],
+    company: [
+      { key: 'profile', label: 'Профиль' },
+      { key: 'links', label: 'Связи' },
+      { key: 'open_questions', label: 'Открытые вопросы' },
+      { key: 'source', label: 'Источник' },
+      { key: 'timeline', label: 'Timeline' },
+    ],
+    meeting: [
+      { key: 'participants', label: 'Участники' },
+      { key: 'agenda', label: 'Повестка' },
+      { key: 'decisions', label: 'Решения' },
+      { key: 'tasks', label: 'Поручения' },
+      { key: 'risks', label: 'Риски / открытые вопросы' },
+      { key: 'links', label: 'Связи' },
+      { key: 'source', label: 'Источник' },
+      { key: 'ai_loop_review', label: 'AI-loop review' },
+      { key: 'timeline', label: 'Timeline' },
+    ],
+  };
+  const generic = [
+    { key: 'profile', label: 'Профиль' },
+    { key: 'links', label: 'Связи' },
+    { key: 'notes', label: 'Заметки' },
+    { key: 'timeline', label: 'Timeline' },
+  ];
+  const sections = [...common, ...(byType[gbrainType] || generic)];
+  return { sections, required_frontmatter: ['type', 'source_id', 'status'], template_page: null, warnings: [`template_page_missing:${gbrainType}`] };
+}
+
+function extractMarkdownFence(markdown: string): string {
+  const m = markdown.match(/````markdown\n([\s\S]*?)\n````|```markdown\n([\s\S]*?)\n```/i);
+  return (m?.[1] || m?.[2] || markdown).trim();
+}
+
+function slugKey(label: string): string {
+  const lower = label.toLowerCase().replace(/[`*_<>]/g, '').trim();
+  if (lower.includes('характер')) return 'characteristics';
+  if (lower.includes('связ')) return 'links';
+  if (lower.includes('замет')) return 'notes';
+  if (lower.includes('timeline') || lower.includes('тайм')) return 'timeline';
+  return lower.replace(/[^a-z0-9а-яё]+/gi, '_').replace(/^_+|_+$/g, '') || 'section';
+}
+
+function extractTemplateSections(markdown: string) {
+  const body = extractMarkdownFence(markdown);
+  const headings = Array.from(body.matchAll(/^##\s+(.+)$/gm)).map(m => String(m[1] || '').trim()).filter(Boolean);
+  const out: Array<{ key: string; label: string; hint?: string }> = [
+    { key: 'title', label: 'Заголовок H1 / frontmatter title', hint: 'Из строки # ... внутри шаблона.' },
+    { key: 'summary', label: 'Описание под заголовком', hint: 'Первый абзац после заголовка.' },
+  ];
+  for (const label of headings) {
+    const key = slugKey(label);
+    if (!out.some(s => s.key === key)) out.push({ key, label });
+  }
+  if (out.some(s => s.key === 'characteristics')) {
+    out.push(
+      { key: 'characteristics_type', label: 'Характеристики → Тип' },
+      { key: 'characteristics_model', label: 'Характеристики → Производитель/модель' },
+      { key: 'characteristics_status', label: 'Характеристики → Состояние' },
+      { key: 'characteristics_inventory', label: 'Характеристики → Инвентарный/серийный №' },
+    );
+  }
+  return out.filter((s, i, arr) => arr.findIndex(x => x.key === s.key) === i);
+}
+
+async function loadSourceArticleTemplate(engine: BrainEngine, gbrainType: string) {
+  const type = gbrainType.trim();
+  if (!type) throw new OperationError('invalid_params', 'gbrain_type_required');
+  const slug = `_templates/${type}`;
+  const rows = await engine.executeRaw<{ slug: string; compiled_truth: string | null }>(
+    `SELECT slug, compiled_truth FROM pages WHERE deleted_at IS NULL AND source_id = 'shared' AND slug = $1 LIMIT 1`,
+    [slug],
+  );
+  const fallback = articleTemplateFallback(type);
+  if (!rows[0]?.compiled_truth) return fallback;
+  const sections = extractTemplateSections(rows[0].compiled_truth);
+  return { sections: sections.length ? sections : fallback.sections, required_frontmatter: ['type', 'source_id', 'status'], template_page: rows[0].slug, warnings: [] as string[] };
+}
+
+async function validateArticleTemplateRequired(engine: BrainEngine, profile: SourceIngestProfile) {
+  const template = await loadSourceArticleTemplate(engine, profile.target.gbrain_type);
+  const frontmatter = { ...(profile.mapping?.frontmatter || {}), ...(profile.mapping?.article_template?.frontmatter || {}) } as Record<string, unknown>;
+  const generated = new Set(['type', 'title', 'source_id', 'status']);
+  const missing = template.required_frontmatter.filter((key: string) => !generated.has(key) && !(key in frontmatter));
+  return { ok: missing.length === 0, missing, template };
+}
+
+function appendSourceScope(where: string, params: unknown[], scope: { sourceId?: string; sourceIds?: string[] }, tableAlias = 'p'): string {
+  if (scope.sourceIds && scope.sourceIds.length > 0) {
+    params.push(scope.sourceIds);
+    return `${where} AND ${tableAlias}.source_id = ANY($${params.length}::text[])`;
+  }
+  if (scope.sourceId) {
+    params.push(scope.sourceId);
+    return `${where} AND ${tableAlias}.source_id = $${params.length}`;
+  }
+  return where;
+}
+
+function extractResolverSection(markdown: string, type: string): string | null {
+  const lines = markdown.split(/\r?\n/);
+  const escaped = type.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const heading = new RegExp(`^(#{1,6})\\s+.*\\b${escaped}\\b.*$`, 'i');
+  let start = -1;
+  let level = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const match = lines[i]?.match(heading);
+    if (match) {
+      start = i;
+      level = match[1]!.length;
+      break;
+    }
+  }
+  if (start < 0) return null;
+  let end = lines.length;
+  const nextHeading = new RegExp(`^#{1,${level}}\\s+`);
+  for (let i = start + 1; i < lines.length; i++) {
+    if (nextHeading.test(lines[i] ?? '')) { end = i; break; }
+  }
+  return lines.slice(start, end).join('\n').trim() || null;
+}
+
+function proposalSlugPart(value: string): string {
+  return value.toLowerCase().trim().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '') || 'change';
+}
+
+function yamlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+async function loadSchemaTypeCard(ctx: OperationContext, typeName: string) {
+  const type = typeName.trim();
+  if (!type) throw new OperationError('invalid_params', 'type_required');
+  const { loadActivePack } = await import('./schema-pack/load-active.ts');
+  const { loadConfig } = await import('./config.ts');
+  const cfg = loadConfig();
+  const pack = await loadActivePack({ cfg, remote: ctx.remote ?? true, sourceId: ctx.sourceId });
+  const found = pack.manifest.page_types.find((t) => t.name === type);
+  if (!found) return { error: 'type_not_found', type, pack: pack.manifest.name };
+  const scope = ctx.remote === false && ctx.sourceId === 'default' ? {} : sourceScopeOpts(ctx);
+
+  const countParams: unknown[] = [type];
+  const countWhere = appendSourceScope('WHERE p.deleted_at IS NULL AND p.type = $1', countParams, scope, 'p');
+  const pageCountRows = await ctx.engine.executeRaw<{ source_id: string; count: number | string | bigint }>(
+    `SELECT p.source_id, COUNT(*) AS count FROM pages p ${countWhere} GROUP BY p.source_id ORDER BY count DESC, p.source_id`,
+    countParams,
+  );
+  const pageCounts = pageCountRows.map(row => ({ source_id: row.source_id, count: Number(row.count || 0) }));
+  const totalPages = pageCounts.reduce((sum, row) => sum + Number(row.count || 0), 0);
+
+  const fieldParams: unknown[] = [type];
+  const fieldWhere = appendSourceScope('WHERE p.deleted_at IS NULL AND p.type = $1 AND p.frontmatter IS NOT NULL', fieldParams, scope, 'p');
+  const liveFieldRows = await ctx.engine.executeRaw<{ key: string; count: number | string | bigint; coverage_pct: number | string | null }>(
+    `SELECT k.key, COUNT(*) AS count,
+            ROUND((COUNT(*)::numeric / NULLIF($${fieldParams.length + 1}::numeric, 0)) * 100, 1) AS coverage_pct
+       FROM pages p
+       CROSS JOIN LATERAL jsonb_object_keys(p.frontmatter) AS k(key)
+       ${fieldWhere}
+       GROUP BY k.key
+       ORDER BY COUNT(*) DESC, k.key
+       LIMIT 50`,
+    [...fieldParams, totalPages],
+  );
+  const liveFields = liveFieldRows.map(row => ({ key: row.key, count: Number(row.count || 0), coverage_pct: Number(row.coverage_pct || 0) }));
+
+  const template = await loadSourceArticleTemplate(ctx.engine, type);
+  const canonicalFieldKeys = Array.from(new Set([
+    ...((template as Record<string, unknown>).required_frontmatter as string[] | undefined ?? []),
+    ...(((template as Record<string, unknown>).sections as Array<Record<string, unknown>> | undefined ?? []).map(s => String(s.key ?? '')).filter(Boolean)),
+  ]));
+  const liveFieldSet = new Set(liveFields.map(f => f.key));
+  const drift = {
+    canonical_missing_in_live: canonicalFieldKeys.filter(k => !liveFieldSet.has(k)),
+    live_not_in_canon: liveFields.map(f => f.key).filter(k => !canonicalFieldKeys.includes(k)).slice(0, 30),
+  };
+
+  const frontmatterLinks = pack.manifest.frontmatter_links
+    .filter(fl => fl.page_type === type)
+    .map(fl => ({ fields: fl.fields, link_type: fl.link_type, target: '*' }));
+  const outgoing = pack.manifest.link_types
+    .filter(lt => lt.inference?.page_type === type)
+    .map(lt => ({ verb: lt.name, target_type: lt.inference?.target_type ?? '*', inverse: lt.inverse ?? null }));
+  const incoming = pack.manifest.link_types
+    .filter(lt => lt.inference?.target_type === type)
+    .map(lt => ({ from_type: lt.inference?.page_type ?? '*', verb: lt.name, inverse: lt.inverse ?? null }));
+  const touchedLinkTypes = Array.from(new Set([...frontmatterLinks.map(fl => fl.link_type), ...outgoing.map(o => o.verb), ...incoming.map(i => i.verb)]));
+  const linkCountRows = touchedLinkTypes.length
+    ? await ctx.engine.executeRaw<{ link_type: string; count: number | string | bigint }>(
+        `SELECT link_type, COUNT(*) AS count FROM links WHERE link_type = ANY($1::text[]) GROUP BY link_type ORDER BY link_type`,
+        [touchedLinkTypes],
+      )
+    : [];
+  const linkCounts = linkCountRows.map(row => ({ link_type: row.link_type, count: Number(row.count || 0) }));
+
+  const articleViews = await listSourceArticleViews(ctx.engine);
+  const ingestUsage = articleViews
+    .filter(row => String(row.gbrain_type ?? '') === type)
+    .map(row => ({
+      article_view_id: row.article_view_id,
+      display_name: String(row.article_json?.display_name ?? row.article_view_id),
+      status: row.status,
+      target_source_id: row.target_source_id,
+      stale: row.stale,
+      stale_reasons: row.stale_reasons,
+    }));
+
+  const lint = await operationsByName.schema_lint.handler(ctx, {} as Record<string, unknown>) as { errors?: Array<Record<string, unknown>>; warnings?: Array<Record<string, unknown>> };
+  const lintItems = [...(lint.errors ?? []), ...(lint.warnings ?? [])].filter(item => String(item.type ?? '') === type || String(item.message ?? '').includes(`'${type}'`));
+
+  const resolverRows = await ctx.engine.executeRaw<{ compiled_truth: string | null }>(
+    `SELECT compiled_truth FROM pages WHERE deleted_at IS NULL AND source_id = 'shared' AND slug = 'RESOLVER.md' LIMIT 1`,
+  );
+  const resolverSection = resolverRows[0]?.compiled_truth ? extractResolverSection(resolverRows[0].compiled_truth, type) : null;
+  const reverseAliases = pack.manifest.page_types
+    .filter(t => t.name !== type && (t.aliases ?? []).includes(type))
+    .map(t => t.name);
+
+  return {
+    schema_version: 1,
+    pack: { name: pack.manifest.name, version: pack.manifest.version, sha8: pack.manifest_sha8, identity: pack.identity },
+    type,
+    header: {
+      name: found.name,
+      primitive: found.primitive,
+      total_pages: totalPages,
+      pages_by_source: pageCounts,
+      extractable: found.extractable,
+      expert_routing: found.expert_routing,
+      lint: lintItems,
+    },
+    resolution: {
+      path_prefixes: found.path_prefixes,
+      canonical_prefix: found.path_prefixes?.[0] ?? null,
+      first_match_wins: true,
+      aliases: found.aliases ?? [],
+      reverse_aliases: reverseAliases,
+      subtypes: found.subtypes ?? [],
+      resolver_section: resolverSection,
+    },
+    fields: {
+      canonical_template: template,
+      live_usage: liveFields,
+      drift,
+      frontmatter_links: frontmatterLinks,
+    },
+    relations: {
+      outgoing,
+      incoming,
+      link_counts: linkCounts,
+    },
+    ingest_usage: ingestUsage,
+  };
+}
+
+async function buildSchemaProposalImpact(ctx: OperationContext, type: string, mutations: Array<{ op: string; [key: string]: unknown }>) {
+  const card = await loadSchemaTypeCard(ctx, type) as Record<string, unknown>;
+  const { loadActivePack } = await import('./schema-pack/load-active.ts');
+  const { loadConfig } = await import('./config.ts');
+  const cfg = loadConfig();
+  const pack = await loadActivePack({ cfg, remote: ctx.remote ?? true, sourceId: ctx.sourceId });
+  const allPrefixes = pack.manifest.page_types.flatMap(t => (t.path_prefixes ?? []).map(prefix => ({ type: t.name, prefix })));
+  const prefixConflicts = mutations
+    .filter(m => m.op === 'add_prefix' && typeof m.prefix === 'string')
+    .flatMap(m => {
+      const prefix = String(m.prefix);
+      const targetType = String(m.type || type);
+      return allPrefixes
+        .filter(existing => existing.type !== targetType && (prefix.startsWith(existing.prefix) || existing.prefix.startsWith(prefix)))
+        .map(existing => ({ mutation: m, conflicting_type: existing.type, conflicting_prefix: existing.prefix, proposed_prefix: prefix }));
+    });
+  const touchedLinkTypes = Array.from(new Set(mutations.flatMap(m => {
+    if (m.op === 'add_link_type' && typeof m.name === 'string') return [m.name];
+    if ((m.op === 'remove_link_type' || m.op === 'remove_link') && typeof m.name === 'string') return [m.name];
+    return [] as string[];
+  })));
+  const liveEdges = touchedLinkTypes.length
+    ? (await ctx.engine.executeRaw<{ link_type: string; count: number | string | bigint }>(
+        `SELECT link_type, COUNT(*) AS count FROM links WHERE link_type = ANY($1::text[]) GROUP BY link_type ORDER BY link_type`,
+        [touchedLinkTypes],
+      )).map(row => ({ link_type: row.link_type, count: Number(row.count || 0) }))
+    : [];
+  return {
+    schema_version: 1,
+    type,
+    pack: card.pack,
+    pages: (card.header as Record<string, unknown> | undefined)?.pages_by_source ?? [],
+    total_pages: (card.header as Record<string, unknown> | undefined)?.total_pages ?? 0,
+    ingest_usage: card.ingest_usage ?? [],
+    touched_link_types: touchedLinkTypes,
+    live_edges: liveEdges,
+    prefix_conflicts: prefixConflicts,
+    guards: {
+      live_apply_allowed: prefixConflicts.length === 0,
+      destructive_ops: mutations.filter(m => String(m.op).startsWith('remove_') || m.op === 'update_type').map(m => m.op),
+      note: 'proposal-only path: no schema mutation is applied by this operation',
+    },
+  };
+}
+
+async function createSchemaProposal(ctx: OperationContext, params: Record<string, unknown>) {
+  if (ctx.remote !== false) throw new OperationError('permission_denied', 'schema proposal creation is local/admin UI only.');
+  const type = String(params.type || '').trim();
+  const mutations = Array.isArray(params.mutations) ? params.mutations as Array<{ op: string; [key: string]: unknown }> : [];
+  if (!type) throw new OperationError('invalid_params', 'type_required');
+  if (!mutations.length) throw new OperationError('invalid_params', 'mutations_required');
+  const title = String(params.title || `Schema proposal: ${type}`).trim();
+  const reason = String(params.reason || '').trim();
+  const impact = await buildSchemaProposalImpact(ctx, type, mutations);
+  const date = new Date().toISOString().slice(0, 10);
+  const slug = `schema-proposals/${date}-${proposalSlugPart(type)}-${proposalSlugPart(title)}`;
+  const content = `---\nsource_id: shared\ntype: note\nstatus: proposed\ntitle: ${yamlString(title)}\nschema_proposal_type: ${yamlString(type)}\ncreated_by: source-ingest-admin-ui\n---\n\n# ${title}\n\n## Статус\n\nproposed\n\n## Обоснование\n\n${reason || 'Не указано.'}\n\n## Impact-preview\n\n\`\`\`json\n${JSON.stringify(impact, null, 2)}\n\`\`\`\n\n## Payload schema_apply_mutations\n\n\`\`\`json\n${JSON.stringify({ pack: (impact.pack as Record<string, unknown> | undefined)?.name ?? 'avers-ea', mutations }, null, 2)}\n\`\`\`\n\n## Проверка Hermes перед apply\n\n- [ ] pack-first gate: validate manifest shape\n- [ ] schema_lint errors = 0\n- [ ] prefix conflicts reviewed\n- [ ] affected Source Ingest publications reviewed\n- [ ] git commit/reload plan selected\n`;
+  const writeCtx: OperationContext = { ...ctx, sourceId: 'shared', dryRun: false, remote: false };
+  const write = await operationsByName.put_page.handler(writeCtx, {
+    slug,
+    content,
+    source_kind: 'admin-ui:schema-proposal',
+    ingested_via: 'source-ingest-admin-ui',
+  });
+  return { ok: true, slug, source_id: 'shared', title, impact, write };
+}
+
+const source_article_template: Operation = {
+  name: 'source_article_template',
+  description: 'Read schema/template-derived article sections for a GBrain page type.',
+  scope: 'read',
+  params: { gbrain_type: { type: 'string', required: true } },
+  handler: async (ctx, p) => loadSourceArticleTemplate(ctx.engine, String(p.gbrain_type || '')),
+};
+
+const schema_type_card: Operation = {
+  name: 'schema_type_card',
+  description: 'Source Ingest Schema View: aggregate one page-type card from schema pack, templates, live page/frontmatter usage, graph link counts, resolver text, and article-view usage.',
+  scope: 'read',
+  params: { type: { type: 'string', required: true, description: 'Page type name to inspect' } },
+  handler: async (ctx, p) => loadSchemaTypeCard(ctx, String(p.type || '')),
+};
+
+const schema_proposal_create: Operation = {
+  name: 'schema_proposal_create',
+  description: 'LOCAL/TRUSTED: create a shared schema proposal page with schema_apply_mutations payload plus impact-preview. Does not mutate the schema pack.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    type: { type: 'string', required: true },
+    title: { type: 'string' },
+    reason: { type: 'string' },
+    mutations: { type: 'array', required: true, items: { type: 'object' } },
+  },
+  handler: async (ctx, p) => createSchemaProposal(ctx, p),
+};
+
+const source_article_view_dry_run: Operation = {
+  name: 'source_article_view_dry_run',
+  description: 'LOCAL/TRUSTED: compile an article view chain in-memory and run source dry-run without freezing the snapshot.',
+  scope: 'read',
+  localOnly: true,
+  params: {
+    article_view_id: { type: 'string', required: true },
+    sample_limit: { type: 'number', description: 'Sample size for preview (default 25)' },
+    connector_config: { type: 'object', description: 'Optional non-secret runtime connector config override.' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_dry_run is local/trusted only.');
+    const snapshot = await buildSourceArticleViewSnapshot(ctx.engine, String(p.article_view_id || ''), { approvedBy: 'dry-run' });
+    const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, snapshot.compiled_profile);
+    if (!validation.ok || !validation.profile) return { ok: false, validation, current_chain_hash: snapshot.current_chain_hash, compiled: snapshot };
+    const template_validation = await validateArticleTemplateRequired(ctx.engine, validation.profile);
+    if (!template_validation.ok) return { ok: false, validation, template_validation, current_chain_hash: snapshot.current_chain_hash, compiled: snapshot };
+    const sample = await buildProfileSampleRecords(validation.profile, (p.sample_limit as number | undefined) ?? 25, {
+      engine: ctx.engine,
+      connectorConfigOverride: p.connector_config as Record<string, unknown> | undefined,
+      defaultConnector: validation.profile.source_connector,
+      defaultObject: validation.profile.source_object,
+    });
+    const dry_run = buildSourceDryRun(validation.profile, sample);
+    return { ok: true, current_chain_hash: snapshot.current_chain_hash, compiled: snapshot, validation, dry_run };
+  },
+};
+
+const source_article_view_approve: Operation = {
+  name: 'source_article_view_approve',
+  description: 'LOCAL/TRUSTED: compile an article view chain into a frozen SourceIngestProfile snapshot and persist a compatibility profile version.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    article_view_id: { type: 'string', required: true },
+    approved_by: { type: 'string' },
+    current_chain_hash: { type: 'string', required: true, description: 'Chain hash returned by source_article_view_dry_run; approve fails if definition changed.' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_approve is local/trusted only.');
+    const expectedChainHash = typeof p.current_chain_hash === 'string' && p.current_chain_hash.trim() ? p.current_chain_hash.trim() : undefined;
+    if (!expectedChainHash) throw new OperationError('invalid_params', 'current_chain_hash_required: run article preview before approving this publication.');
+    const snapshot = await buildSourceArticleViewSnapshot(ctx.engine, String(p.article_view_id || ''), { approvedBy: p.approved_by as string | undefined });
+    if (snapshot.current_chain_hash !== expectedChainHash) {
+      throw new OperationError('conflict', 'chain_hash_mismatch: run article preview again before approving this publication.');
+    }
+    const compiled = await compileSourceArticleView(ctx.engine, String(p.article_view_id || ''), { approvedBy: p.approved_by as string | undefined });
+    const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, compiled.compiled_profile);
+    if (!validation.ok || !validation.profile) return { ok: false, validation, compiled };
+    const template_validation = await validateArticleTemplateRequired(ctx.engine, validation.profile);
+    if (!template_validation.ok) return { ok: false, validation, template_validation, compiled };
+    const saved = await putSourceIngestProfile(ctx.engine, validation.profile, { createdBy: (p.approved_by as string | undefined) || 'local', changeNote: 'compiled article_view snapshot' });
+    return { ok: true, compiled, saved };
+  },
+};
+
+const source_article_view_run: Operation = {
+  name: 'source_article_view_run',
+  description: 'LOCAL/TRUSTED: run a source-ingest article view using its frozen compiled_profile snapshot.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    article_view_id: { type: 'string', required: true },
+    run_id: { type: 'string' },
+    limit: { type: 'number' },
+    require_clean_git: { type: 'boolean' },
+    no_embed: { type: 'boolean' },
+    changed_since: { type: 'boolean' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_article_view_run is local/trusted only.');
+    const articleViewId = String(p.article_view_id || '');
+    const compiled = await getCompiledArticleProfile(ctx.engine, articleViewId);
+    if (!compiled) throw new OperationError('invalid_params', 'article_view has no compiled_profile; run source_article_view_approve first.');
+    if (compiled.stale) throw new OperationError('conflict', 'article_view is stale; re-run dry-run/approve before batch execution.');
+    await putSourceIngestProfile(ctx.engine, compiled.profile, { createdBy: 'source_article_view_run', changeNote: 'compatibility snapshot for executor' });
+    return runSourceIngestExecutor(ctx.engine, {
+      profile_id: compiled.profile.profile_id,
+      ...(typeof p.run_id === 'string' ? { run_id: p.run_id } : {}),
+      ...(typeof p.limit === 'number' ? { limit: p.limit } : {}),
+      ...(typeof p.require_clean_git === 'boolean' ? { require_clean_git: p.require_clean_git } : {}),
+      ...(typeof p.no_embed === 'boolean' ? { no_embed: p.no_embed } : {}),
+      ...(typeof p.changed_since === 'boolean' ? { changed_since: p.changed_since } : {}),
+    }, ctx.logger);
+  },
+};
+
+const source_article_view_runs: Operation = {
+  name: 'source_article_view_runs',
+  description: 'Read run history rollups for a first-class article view.',
+  scope: 'read',
+  params: {
+    article_view_id: { type: 'string', required: true },
+    limit: { type: 'number', description: 'Max run groups to return (default 20).' },
+  },
+  handler: async (ctx, p) => {
+    const articleViewId = String(p.article_view_id || '').trim();
+    if (!articleViewId) throw new OperationError('invalid_params', 'article_view_id_required');
+    return { rows: await listSourceArticleViewRuns(ctx.engine, articleViewId, typeof p.limit === 'number' ? p.limit : 20) };
+  },
+};
+
+const source_profile_draft: Operation = {
+  name: 'source_profile_draft',
+  description: 'Draft an editable source-ingest profile from connector discovery. Does not approve or freeze source_id; human review is required before ingest.',
+  scope: 'read',
+  params: {
+    connector_id: { type: 'string', required: true },
+    source_object: { type: 'string', required: true },
+    target_source_id: { type: 'string', description: 'Optional suggested source; returned as suggestion only, not executable approval.' },
+    sample_limit: { type: 'number', description: 'Sample size for discovery (default 50)' },
+    connector_config: { type: 'object', description: 'Non-secret connector config override, e.g. table_name. Secrets are never passed here.' },
+    selected_fields: { type: 'array', items: { type: 'string' }, description: 'Optional source field allowlist selected by the admin UI before drafting.' },
+    primary_key_field: { type: 'string', description: 'Source-table primary key field selected by the reviewer.' },
+    updated_at_field: { type: 'string', description: 'Source-table updated-at field selected by the reviewer.' },
+  },
+  handler: async (_ctx, p) => {
+    const connectorId = p.connector_id as string;
+    const sourceObject = p.source_object as string;
+    const selectedFields = Array.isArray(p.selected_fields) ? p.selected_fields.flatMap(v => String(v).split(/\\n|[\n,]/)).map(s => s.trim()).filter(Boolean) : undefined;
+    const discovery = await discoverSourceObject(resolveSourceConnectorOrThrow(connectorId, p.connector_config as Record<string, unknown> | undefined), sourceObject, (p.sample_limit as number | undefined) ?? 50, selectedFields?.length ? { fields: selectedFields } : {});
+    const { profile, warnings } = draftSourceIngestProfile({
+      connectorId,
+      sourceObject,
+      discovery,
+      targetSourceId: p.target_source_id as string | undefined,
+      selectedFields,
+      primaryKeyField: typeof p.primary_key_field === 'string' && p.primary_key_field.trim() ? p.primary_key_field.trim() : undefined,
+      updatedAtField: typeof p.updated_at_field === 'string' && p.updated_at_field.trim() ? p.updated_at_field.trim() : undefined,
+    });
+    return { discovery, profile, warnings };
+  },
+};
+
+const source_validate_profile: Operation = {
+  name: 'source_validate_profile',
+  description: 'Validate a source-ingest profile against the Stage 1 JSON contract and current GBrain sources. Read-only; does not approve or persist the profile.',
+  scope: 'read',
+  params: {
+    profile: { type: 'object', required: true, description: 'Source ingest profile JSON' },
+    include_schema: { type: 'boolean', description: 'Include JSON Schema in response' },
+  },
+  handler: async (ctx, p) => {
+    const result = await validateSourceIngestProfileAgainstBrain(ctx.engine, p.profile);
+    return { ...result, ...(p.include_schema ? { json_schema: sourceIngestProfileJsonSchema() } : {}) };
+  },
+};
+
+const source_profile_get: Operation = {
+  name: 'source_profile_get',
+  description: 'List persisted source-ingest profiles or read one profile. Read-only; MCP-safe.',
+  scope: 'read',
+  params: {
+    profile_id: { type: 'string', description: 'Optional profile id' },
+  },
+  handler: async (ctx, p) => {
+    const rows = await listSourceIngestProfiles(ctx.engine, p.profile_id as string | undefined);
+    return { rows, count: rows.length };
+  },
+};
+
+const source_profile_put: Operation = {
+  name: 'source_profile_put',
+  description: 'LOCAL/TRUSTED: persist a reviewed source-ingest profile version. Approval freezes approved_source_id before any batch ingest can run.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    profile: { type: 'object', required: true, description: 'Source ingest profile JSON' },
+    approve: { type: 'boolean', description: 'When true, require/freeze approved_source_id and mark profile reviewed unless already active.' },
+    approved_source_id: { type: 'string', description: 'Source id to freeze on approval' },
+    approved_by: { type: 'string', description: 'Reviewer identity' },
+    profile_hash: { type: 'string', description: 'Profile hash returned by the last dry-run preview; required for approve=true.' },
+    change_note: { type: 'string', description: 'Version note' },
+  },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_profile_put is local/trusted only.');
+    const raw = { ...(p.profile as Record<string, unknown>) } as Record<string, unknown>;
+    const target = { ...((raw.target as Record<string, unknown>) || {}) };
+    if (p.approve) {
+      if (typeof p.profile_hash !== 'string' || !p.profile_hash) throw new OperationError('invalid_params', 'profile_hash from the last dry-run is required when approve=true.');
+      const preApprovalValidation = await validateSourceIngestProfileAgainstBrain(ctx.engine, raw);
+      if (!preApprovalValidation.ok || !preApprovalValidation.profile) return { ok: false, validation: preApprovalValidation };
+      const actualPreApprovalHash = profileHash(preApprovalValidation.profile);
+      if (p.profile_hash !== actualPreApprovalHash) {
+        throw new OperationError('conflict', 'profile_hash_mismatch: run dry-run preview again before approving this profile.');
+      }
+      const approvedSourceId = (p.approved_source_id as string | undefined) || (target.approved_source_id as string | undefined);
+      if (!approvedSourceId) throw new OperationError('invalid_params', 'approved_source_id is required when approve=true.');
+      target.approved_source_id = approvedSourceId;
+      raw.target = target;
+      raw.status = raw.status === 'active' ? 'active' : 'reviewed';
+      raw.review = { ...((raw.review as Record<string, unknown>) || {}), approved_by: p.approved_by || 'local', approved_at: new Date().toISOString() };
+    }
+    const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, raw);
+    if (!validation.ok || !validation.profile) return { ok: false, validation };
+    if (ctx.dryRun) return { dry_run: true, validation };
+    const saved = await putSourceIngestProfile(ctx.engine, validation.profile, { createdBy: (p.approved_by as string | undefined) || 'local', changeNote: p.change_note as string | undefined });
+    return { ok: true, saved, profile: validation.profile };
+  },
+};
+
+const source_dry_run: Operation = {
+  name: 'source_dry_run',
+  description: 'Apply a source-ingest profile to connector samples without writing pages, links, timeline, or sync state. Returns counts, skipped records, sensitivity hints, and link-rule coverage.',
+  scope: 'read',
+  localOnly: true,
+  params: {
+    profile: { type: 'object', required: true },
+    sample_limit: { type: 'number', description: 'Sample size for preview (default 50)' },
+    connector_config: { type: 'object', description: 'Non-secret connector config override, e.g. table_name. Secrets are never passed here.' },
+  },
+  handler: async (ctx, p) => {
+    const validation = await validateSourceIngestProfileAgainstBrain(ctx.engine, p.profile);
+    if (!validation.ok || !validation.profile) return { ok: false, validation, dry_run: true };
+    const profile = validation.profile;
+    const sample = await buildProfileSampleRecords(profile, (p.sample_limit as number | undefined) ?? 50, {
+      engine: ctx.engine,
+      connectorConfigOverride: p.connector_config as Record<string, unknown> | undefined,
+      defaultConnector: profile.source_connector,
+      defaultObject: profile.source_object,
+    });
+    return { ...buildSourceDryRun(profile, sample), validation, profile_hash: profileHash(profile) };
+  },
+};
+
+const source_sync_status: Operation = {
+  name: 'source_sync_status',
+  description: 'Read source-ingest profile and sync-state freshness/status summary. Read-only; MCP-safe.',
+  scope: 'read',
+  params: {
+    profile_id: { type: 'string', description: 'Optional profile id filter' },
+    connector_id: { type: 'string', description: 'Optional connector id filter' },
+    source_object: { type: 'string', description: 'Optional source object filter' },
+    limit: { type: 'number', description: 'Max sync-state rows to return (default 50)' },
+  },
+  cliHints: { name: 'source-sync-status', positional: ['profile_id'] },
+  handler: async (ctx, p) => {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (p.profile_id) { params.push(p.profile_id); clauses.push(`profile_id = $${params.length}`); }
+    if (p.connector_id) { params.push(p.connector_id); clauses.push(`connector_id = $${params.length}`); }
+    if (p.source_object) { params.push(p.source_object); clauses.push(`source_object = $${params.length}`); }
+    const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    const limit = Math.min(Math.max((p.limit as number | undefined) ?? 50, 1), 200);
+    params.push(limit);
+    const rows = await ctx.engine.executeRaw(
+      `SELECT connector_id, source_object, external_id, slug, approved_source_id, profile_id, profile_version,
+              source_updated_at::text, last_synced_at::text, stale_after::text, freshness_policy,
+              CASE WHEN stale_after IS NULL THEN 'unknown'
+                   WHEN stale_after < now() THEN 'stale'
+                   ELSE 'fresh' END AS freshness,
+              run_id, last_result, last_error, updated_at::text
+         FROM source_sync_state
+         ${where}
+         ORDER BY updated_at DESC
+         LIMIT $${params.length}`,
+      params,
+    );
+    const summary = await ctx.engine.executeRaw(
+      `SELECT count(*)::int AS rows,
+              count(*) FILTER (WHERE last_result = 'failed')::int AS failed,
+              count(*) FILTER (WHERE stale_after IS NULL)::int AS unknown,
+              count(*) FILTER (WHERE stale_after IS NOT NULL AND stale_after < now())::int AS stale,
+              count(*) FILTER (WHERE stale_after IS NOT NULL AND stale_after >= now())::int AS fresh,
+              min(stale_after)::text AS next_due_at,
+              max(last_synced_at)::text AS last_synced_at,
+              max(run_id) AS last_run_id
+         FROM source_sync_state
+         ${where}`,
+      params.slice(0, -1),
+    );
+    return { rows, count: rows.length, summary: summary[0] ?? null };
+  },
+};
+
+const source_ingest: Operation = {
+  name: 'source_ingest',
+  description: 'LOCAL/TRUSTED Stage 3A batch ingest executor. Fake-source only; writes git-backed pages through the existing import/write-through path and records source_sync_state.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    profile_id: { type: 'string', required: true },
+    run_id: { type: 'string', description: 'Optional run id. Defaults to source-ingest-<timestamp>.' },
+    limit: { type: 'number', description: 'Optional max records for pilot runs.' },
+    dry_run: { type: 'boolean', description: 'Return action preview only. Use source_dry_run for read-side page preview.' },
+    require_clean_git: { type: 'boolean', description: 'Fail if the target source repo has uncommitted/untracked changes. Default true.' },
+    allow_db_only: { type: 'boolean', description: 'Allow explicitly DB-only sources. Stage 3A still requires git-backed and rejects this for real writes.' },
+    no_embed: { type: 'boolean', description: 'Skip embedding during pilot import. Default true.' },
+    changed_since: { type: 'boolean', description: 'Use connector fetchChangedSince when available and prior source_updated_at exists.' },
+    job: { type: 'boolean', description: 'Submit as a Minion job instead of running inline.' },
+    queue: { type: 'string', description: 'Minion queue name for --job (default: default).' },
+    priority: { type: 'number', description: 'Minion job priority for --job (0 = highest, default 0).' },
+    timeout_ms: { type: 'number', description: 'Minion job timeout for --job (default 10 minutes).' },
+  },
+  cliHints: { name: 'source-ingest-run', positional: ['profile_id'], aliases: ['source-ingest'] },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_ingest is local/trusted only.');
+    if (ctx.dryRun || p.dry_run) return { dry_run: true, action: 'source_ingest', profile_id: p.profile_id, job: !!p.job };
+    const jobData = {
+      profile_id: p.profile_id as string,
+      ...(typeof p.run_id === 'string' ? { run_id: p.run_id } : {}),
+      ...(typeof p.limit === 'number' ? { limit: p.limit } : {}),
+      ...(typeof p.require_clean_git === 'boolean' ? { require_clean_git: p.require_clean_git } : {}),
+      ...(typeof p.allow_db_only === 'boolean' ? { allow_db_only: p.allow_db_only } : {}),
+      ...(typeof p.no_embed === 'boolean' ? { no_embed: p.no_embed } : {}),
+      ...(typeof p.changed_since === 'boolean' ? { changed_since: p.changed_since } : {}),
+    };
+    if (p.job) {
+      const { MinionQueue } = await import('./minions/queue.ts');
+      const queue = new MinionQueue(ctx.engine);
+      const runId = typeof p.run_id === 'string' && p.run_id.length > 0 ? p.run_id : `source-ingest-job-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+      const data = { ...jobData, run_id: runId };
+      const job = await queue.add('source-ingest', data, {
+        queue: (p.queue as string) || 'default',
+        priority: typeof p.priority === 'number' ? p.priority : 0,
+        max_attempts: 1,
+        max_stalled: 5,
+        timeout_ms: typeof p.timeout_ms === 'number' ? p.timeout_ms : 10 * 60_000,
+        idempotency_key: `source-ingest:${data.profile_id}:${runId}`,
+      });
+      return { submitted: true, name: 'source-ingest', job_id: job.id, status: job.status, queue: job.queue, data };
+    }
+    try {
+      return await runSourceIngestExecutor(ctx.engine, jobData, ctx.logger);
+    } catch (e) {
+      throw new OperationError('source_ingest_failed', e instanceof Error ? e.message : String(e));
+    }
+  },
+};
+
+const source_refresh: Operation = {
+  name: 'source_refresh',
+  description: 'LOCAL/TRUSTED Stage 4 freshness planner. Enqueues source-ingest jobs for due profiles; does not perform connector I/O inline.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    profile_id: { type: 'string', description: 'Optional profile id filter' },
+    source_id: { type: 'string', description: 'Optional approved source id filter' },
+    active_only: { type: 'boolean', description: 'Only active profiles. Use for unattended schedulers; reviewed profiles remain manual.' },
+    limit: { type: 'number', description: 'Max due profiles to plan/enqueue (default 50)' },
+    enqueue: { type: 'boolean', description: 'Submit source-ingest jobs for due profiles. Default false returns report-only plan.' },
+    queue: { type: 'string', description: 'Minion queue name for enqueue (default: default).' },
+    priority: { type: 'number', description: 'Minion job priority (0 = highest, default 0).' },
+    timeout_ms: { type: 'number', description: 'Minion job timeout (default 10 minutes).' },
+    require_clean_git: { type: 'boolean', description: 'Forward to source-ingest job. Default true.' },
+    no_embed: { type: 'boolean', description: 'Forward to source-ingest job. Default true.' },
+  },
+  cliHints: { name: 'source-ingest-refresh', positional: ['profile_id'] },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_refresh is local/trusted only.');
+    const due = await listDueSourceRefreshes(ctx.engine, {
+      profile_id: typeof p.profile_id === 'string' && p.profile_id.length > 0 ? p.profile_id : undefined,
+      source_id: typeof p.source_id === 'string' && p.source_id.length > 0 ? p.source_id : undefined,
+      active_only: p.active_only === true,
+      limit: typeof p.limit === 'number' ? p.limit : undefined,
+    });
+    if (ctx.dryRun || !p.enqueue) return { mode: 'report-only', count: due.length, due };
+    const jobs = await enqueueDueSourceRefreshJobs(ctx.engine, due, {
+      queue: (p.queue as string) || 'default',
+      priority: typeof p.priority === 'number' ? p.priority : 0,
+      timeout_ms: typeof p.timeout_ms === 'number' ? p.timeout_ms : 10 * 60_000,
+      ...(typeof p.require_clean_git === 'boolean' ? { require_clean_git: p.require_clean_git } : {}),
+      no_embed: p.no_embed !== false,
+    });
+    return { mode: 'enqueue', count: due.length, due, jobs };
+  },
+};
+
+const source_revert: Operation = {
+  name: 'source_revert',
+  description: 'LOCAL/TRUSTED report-only revert planner for source-ingest runs. Stage 3B does not mutate pages yet.',
+  scope: 'write',
+  mutating: true,
+  localOnly: true,
+  params: {
+    run_id: { type: 'string', required: true },
+    apply: { type: 'boolean', description: 'Apply guarded rollback. Default false returns a report-only plan.' },
+    force: { type: 'boolean', description: 'Allow rollback when the page was updated after the target run. Default false.' },
+    no_embed: { type: 'boolean', description: 'Skip embedding while restoring prior versions. Default true.' },
+  },
+  cliHints: { name: 'source-ingest-revert', positional: ['run_id'] },
+  handler: async (ctx, p) => {
+    if (ctx.remote !== false) throw new OperationError('permission_denied', 'source_revert is local/trusted only.');
+    if (ctx.dryRun || p.dry_run) return { dry_run: true, action: 'source_revert', run_id: p.run_id, apply: !!p.apply };
+    return buildSourceRevertReport(ctx.engine, p.run_id as string, {
+      apply: p.apply === true,
+      force: p.force === true,
+      no_embed: p.no_embed !== false,
+    });
   },
 };
 
@@ -3760,6 +5259,21 @@ const sources_add: Operation = {
   cliHints: { name: 'sources_add', hidden: true },
 };
 
+export function filterSourcesForCaller(
+  ctx: OperationContext,
+  rows: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  if (ctx.remote === false) return rows;
+  const allowed = new Set(
+    ctx.auth?.allowedSources?.length
+      ? ctx.auth.allowedSources
+      : ctx.sourceId ? [ctx.sourceId] : [],
+  );
+  return rows
+    .filter(row => typeof row.id === 'string' && allowed.has(row.id))
+    .map(({ local_path: _localPath, clone_dir: _cloneDir, ...safe }) => safe);
+}
+
 const sources_list: Operation = {
   name: 'sources_list',
   description:
@@ -3772,10 +5286,11 @@ const sources_list: Operation = {
   scope: 'read',
   handler: async (ctx, p) => {
     const { listSources } = await import('./sources-ops.ts');
+    const rows = await listSources(ctx.engine, {
+      includeArchived: (p.include_archived as boolean) === true,
+    });
     return {
-      sources: await listSources(ctx.engine, {
-        includeArchived: (p.include_archived as boolean) === true,
-      }),
+      sources: filterSourcesForCaller(ctx, rows as unknown as Array<Record<string, unknown>>),
     };
   },
   cliHints: { name: 'sources_list', hidden: true },
@@ -5019,6 +6534,8 @@ const run_skillopt: Operation = {
   },
 };
 
+const attachmentOperations = createAttachmentOperations({ OperationError, validatePageSlug });
+
 export const operations: Operation[] = [
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
@@ -5050,8 +6567,21 @@ export const operations: Operation[] = [
   resolve_slugs, get_chunks,
   // Ingest log
   log_ingest, get_ingest_log,
+  // Source Ingest (third-party connectors; Stage 1 read contracts + local write skeletons)
+  source_discover, source_connector_config_get, source_connector_config_put,
+  source_connector_secret_put, source_connector_secret_delete, source_connector_secret_audit,
+  source_ingest_tree,
+  source_catalog_delete_impact,
+  source_connector_list, source_connector_upsert, source_connector_delete,
+  source_base_view_list, source_base_view_execute, source_base_view_upsert, source_base_view_delete,
+  source_transform_view_list, source_transform_view_execute, source_transform_view_upsert, source_transform_view_delete,
+  source_article_view_list, source_article_view_upsert, source_article_view_delete, source_article_template, source_article_view_dry_run, source_article_view_approve, source_article_view_run, source_article_view_runs,
+  source_profile_draft, source_validate_profile, source_profile_get, source_profile_put, source_dry_run, source_sync_status,
+  source_ingest, source_refresh, source_revert,
   // Files
   file_list, file_upload, file_url,
+  // Avers raw attachment tools (Git-backed, source-scoped, MCP-safe)
+  ...attachmentOperations,
   // Jobs (Minions)
   submit_job, get_job, list_jobs, cancel_job, retry_job, get_job_progress,
   pause_job, resume_job, replay_job, send_job_message,
@@ -5091,7 +6621,7 @@ export const operations: Operation[] = [
   // mutations applied atomically inside one withPackLock scope.
   get_active_schema_pack, list_schema_packs,
   schema_stats, schema_lint, schema_graph, schema_explain_type,
-  schema_review_orphans,
+  schema_type_card, schema_proposal_create, schema_review_orphans,
   schema_apply_mutations, reload_schema_pack,
   // v0.41.18.0 (T16, A7, codex #5)
   run_onboard,

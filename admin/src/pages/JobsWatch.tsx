@@ -33,6 +33,7 @@ function dollars(cents: number): string {
 export function JobsWatchPage() {
   const [snap, setSnap] = useState<WatchSnapshot | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     let alive = true;
@@ -56,19 +57,20 @@ export function JobsWatchPage() {
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, []);
+  }, [retryKey]);
 
   if (err) {
     return (
-      <div style={{ padding: 24, color: 'var(--accent-danger, #f85149)' }}>
-        <h2>Jobs Watch — error</h2>
-        <pre style={{ whiteSpace: 'pre-wrap' }}>{err}</pre>
+      <div className="page-error" style={{ margin: 24 }} role="alert">
+        <strong>Не удалось загрузить состояние заданий</strong>
+        <span>{err}</span>
+        <button className="btn btn-secondary" onClick={() => { setErr(null); setSnap(null); setRetryKey(value => value + 1); }}>Повторить</button>
       </div>
     );
   }
 
   if (!snap) {
-    return <div style={{ padding: 24, color: 'var(--text-muted, #777)' }}>Loading jobs watch…</div>;
+    return <div className="page-loading" style={{ padding: 24 }} aria-busy="true"><span className="loading-spinner" />Загружаем состояние заданий…</div>;
   }
 
   const ts = new Date(snap.ts_ms).toLocaleTimeString();
@@ -76,18 +78,18 @@ export function JobsWatchPage() {
   return (
     <div style={{ padding: 24, fontFamily: 'var(--font-mono, "JetBrains Mono", monospace)' }}>
       <h1 style={{ fontSize: 18, marginBottom: 4 }}>
-        Jobs Watch
+        Задания
         <span style={{ marginLeft: 12, color: 'var(--text-muted, #777)', fontSize: 12, fontWeight: 'normal' }}>
-          updated {ts}
+          обновлено {ts}
         </span>
       </h1>
 
       <section style={{ marginTop: 24 }}>
-        <h2 style={{ fontSize: 14, marginBottom: 8 }}>Queue</h2>
+        <h2 style={{ fontSize: 14, marginBottom: 8 }}>Очередь</h2>
         <div>
-          waiting=<b>{snap.queue_health.waiting}</b>{'  '}
-          active=<b>{snap.queue_health.active}</b>{'  '}
-          stalled=<b style={{ color: snap.queue_health.stalled > 0 ? 'var(--accent-warn, #d29922)' : undefined }}>
+          ожидают=<b>{snap.queue_health.waiting}</b>{'  '}
+          активны=<b>{snap.queue_health.active}</b>{'  '}
+          зависли=<b style={{ color: snap.queue_health.stalled > 0 ? 'var(--accent-warn, #d29922)' : undefined }}>
             {snap.queue_health.stalled}
           </b>
         </div>
@@ -95,7 +97,7 @@ export function JobsWatchPage() {
 
       {snap.by_type.length > 0 && (
         <section style={{ marginTop: 24 }}>
-          <h2 style={{ fontSize: 14, marginBottom: 8 }}>By type (24h)</h2>
+          <h2 style={{ fontSize: 14, marginBottom: 8 }}>По типам за 24 часа</h2>
           <table style={{ borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ color: 'var(--text-muted, #777)', fontSize: 12 }}>
@@ -122,15 +124,15 @@ export function JobsWatchPage() {
       )}
 
       <section style={{ marginTop: 24 }}>
-        <h2 style={{ fontSize: 14, marginBottom: 8 }}>Lease pressure (1h)</h2>
+        <h2 style={{ fontSize: 14, marginBottom: 8 }}>Нагрузка lease за час</h2>
         <div style={{ color: leasePressureColor(snap.lease_pressure_1h) }}>
-          {snap.lease_pressure_1h} bounce{snap.lease_pressure_1h === 1 ? '' : 's'}
+          {snap.lease_pressure_1h} повторных назначений
         </div>
       </section>
 
       {snap.top_errors.length > 0 && (
         <section style={{ marginTop: 24 }}>
-          <h2 style={{ fontSize: 14, marginBottom: 8 }}>Top errors (24h)</h2>
+          <h2 style={{ fontSize: 14, marginBottom: 8 }}>Частые ошибки за 24 часа</h2>
           <table style={{ borderCollapse: 'collapse' }}>
             <tbody>
               {snap.top_errors.slice(0, 5).map(e => (
@@ -148,7 +150,7 @@ export function JobsWatchPage() {
 
       {snap.budget_owners.length > 0 && (
         <section style={{ marginTop: 24 }}>
-          <h2 style={{ fontSize: 14, marginBottom: 8 }}>Budget owners</h2>
+          <h2 style={{ fontSize: 14, marginBottom: 8 }}>Бюджеты владельцев</h2>
           <table style={{ borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ color: 'var(--text-muted, #777)', fontSize: 12 }}>

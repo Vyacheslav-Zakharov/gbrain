@@ -183,6 +183,8 @@ interface GBrainOAuthProviderOptions {
    * before mcpAuthRouter ran).
    */
   dcrDisabled?: boolean;
+  /** Test/embedding seam; production defaults to user_permissions.json. */
+  userSourceGrantResolver?: (email: string) => SourceGrant | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +339,52 @@ class GBrainClientsStore implements OAuthRegisteredClientsStore {
   }
 }
 
+
+export type SourceGrant = {
+  source_id?: string;
+  federated_read?: string[];
+  federated_write?: string[];
+  user_email?: string;
+};
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : undefined;
+}
+
+function normalizeUserSourceGrant(emailRaw: unknown, raw: unknown): SourceGrant | undefined {
+  const email = typeof emailRaw === 'string' ? emailRaw.trim().toLowerCase() : '';
+  if (!email || !raw || typeof raw !== 'object') return undefined;
+  const row = raw as Record<string, unknown>;
+  const sourceId = typeof row.source_id === 'string' ? row.source_id.trim() : '';
+  const federatedRead = normalizeStringArray(row.federated_read);
+  const federatedWrite = normalizeStringArray(row.federated_write);
+  if (!sourceId || !federatedRead || !federatedWrite) return undefined;
+  if (!federatedRead.includes(sourceId)) return undefined;
+  if (federatedWrite.some(source => !federatedRead.includes(source))) return undefined;
+  return {
+    user_email: email,
+    source_id: sourceId,
+    federated_read: federatedRead,
+    federated_write: federatedWrite,
+  };
+}
+
+function readUserSourceGrant(emailRaw: unknown): SourceGrant | undefined {
+  const email = typeof emailRaw === 'string' ? emailRaw.trim().toLowerCase() : '';
+  if (!email) return undefined;
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const configPath = path.join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
+    if (!fs.existsSync(configPath)) return undefined;
+    const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    return normalizeUserSourceGrant(email, data[email]);
+  } catch (err) {
+    console.error('[GBrain OAuth] Failed to read user source grants:', err);
+    return undefined;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // OAuth Provider
 // ---------------------------------------------------------------------------
@@ -347,6 +395,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   private readonly dcrDisabled: boolean;
   private tokenTtl: number;
   private refreshTtl: number;
+  private readonly resolveUserSourceGrant: (email: string) => SourceGrant | undefined;
 
   constructor(options: GBrainOAuthProviderOptions) {
     this.sql = options.sql;
@@ -354,6 +403,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     this.dcrDisabled = options.dcrDisabled === true;
     this.tokenTtl = options.tokenTtl || 3600;
     this.refreshTtl = options.refreshTtl || 30 * 24 * 3600;
+    this.resolveUserSourceGrant = options.userSourceGrantResolver ?? readUserSourceGrant;
   }
 
   get clientsStore(): OAuthRegisteredClientsStore {
@@ -402,16 +452,39 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     // to the allowed set, so an explicit over-broad request can't escalate.
     const allowedScopes = parseScopeString(client.scope);
     const requestedScopes = (params.scopes && params.scopes.length) ? params.scopes : allowedScopes;
-    const grantedScopes = requestedScopes.filter(s => hasScope(allowedScopes, s));
+
+    // The Portal uses an opaque server-side session cookie. serve-http resolves
+    // that session and places only the verified email in res.locals; never
+    // trust the removed legacy session_user identity cookie here. Authorization
+    // fails closed if the server-side ACL record is missing or malformed.
+    const portalEmail = (res as any).locals?.gbrainPortalUser;
+    const userGrant = normalizeUserSourceGrant(
+      portalEmail,
+      this.resolveUserSourceGrant(String(portalEmail ?? '')),
+    );
+    if (!userGrant) {
+      throw new Error('OAuth authorization denied: valid Portal user source grant required');
+    }
+    const sourceId = userGrant.source_id!;
+    const federatedRead = userGrant.federated_read!;
+    const federatedWrite = userGrant.federated_write!;
+    const userEmail = userGrant.user_email!;
+    // Portal users have source-level read/write ACLs, not platform-admin roles.
+    // A broadly registered shared client must never promote a user to
+    // admin/agent/sources_admin/users_admin. Exact read/write only.
+    const userScopes = federatedWrite.length > 0 ? new Set(['read', 'write']) : new Set(['read']);
+    const grantedScopes = requestedScopes.filter(s => userScopes.has(s) && hasScope(allowedScopes, s));
 
     await this.sql`
       INSERT INTO oauth_codes (code_hash, client_id, scopes, code_challenge,
-                                code_challenge_method, redirect_uri, state, resource, expires_at)
+                                code_challenge_method, redirect_uri, state, resource, expires_at,
+                                source_id, federated_read, federated_write, user_email)
       VALUES (${codeHash}, ${client.client_id},
               ${pgArray(grantedScopes)},
               ${params.codeChallenge}, ${'S256'},
               ${params.redirectUri}, ${params.state || null},
-              ${params.resource?.toString() || null}, ${expiresAt})
+              ${params.resource?.toString() || null}, ${expiresAt},
+              ${sourceId}, ${pgArray(federatedRead)}, ${pgArray(federatedWrite)}, ${userEmail})
     `;
 
     // Redirect back with the code
@@ -469,14 +542,14 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
             AND client_id = ${client.client_id}
             AND redirect_uri = ${redirectUri}
             AND expires_at > ${now}
-          RETURNING client_id, scopes, resource
+          RETURNING client_id, scopes, resource, source_id, federated_read, federated_write, user_email
         `
       : await this.sql`
           DELETE FROM oauth_codes
           WHERE code_hash = ${codeHash}
             AND client_id = ${client.client_id}
             AND expires_at > ${now}
-          RETURNING client_id, scopes, resource
+          RETURNING client_id, scopes, resource, source_id, federated_read, federated_write, user_email
         `;
     if (rows.length === 0) throw new Error('Authorization code not found or expired');
 
@@ -484,7 +557,12 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
 
     // Issue tokens
     const scopes = (codeRow.scopes as string[]) || [];
-    return this.issueTokens(client.client_id, scopes, resource, true);
+    return this.issueTokens(client.client_id, scopes, resource, true, undefined, {
+      source_id: (codeRow.source_id as string | null) ?? undefined,
+      federated_read: normalizeStringArray(codeRow.federated_read),
+      federated_write: normalizeStringArray(codeRow.federated_write),
+      user_email: (codeRow.user_email as string | null) ?? undefined,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -513,7 +591,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       WHERE token_hash = ${tokenHash}
         AND token_type = 'refresh'
         AND client_id = ${client.client_id}
-      RETURNING client_id, scopes, expires_at
+      RETURNING client_id, scopes, expires_at, source_id, federated_read, federated_write, user_email
     `;
     if (rows.length === 0) throw new Error('Refresh token not found');
 
@@ -542,7 +620,17 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       throw new Error('Requested scope exceeds refresh token grant');
     }
     const tokenScopes = scopes ?? grantedScopes;
-    return this.issueTokens(client.client_id, tokenScopes, resource, true);
+    const userEmail = (row.user_email as string | null) ?? undefined;
+    const sourceGrant = userEmail ? {
+      source_id: (row.source_id as string | null) ?? undefined,
+      federated_read: normalizeStringArray(row.federated_read),
+      federated_write: normalizeStringArray(row.federated_write),
+      user_email: userEmail,
+    } : undefined;
+    const effectiveTokenScopes = userEmail
+      ? tokenScopes.filter(s => s === 'read' || (s === 'write' && (sourceGrant?.federated_write?.length ?? 0) > 0))
+      : tokenScopes;
+    return this.issueTokens(client.client_id, effectiveTokenScopes, resource, true, undefined, sourceGrant);
   }
 
   // -------------------------------------------------------------------------
@@ -568,7 +656,10 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     try {
       oauthRows = await this.sql`
         SELECT t.client_id, t.scopes, t.expires_at, t.resource, c.client_name,
-               c.source_id, c.federated_read
+               CASE WHEN t.user_email IS NOT NULL THEN t.source_id ELSE COALESCE(t.source_id, c.source_id) END AS source_id,
+               CASE WHEN t.user_email IS NOT NULL THEN t.federated_read ELSE COALESCE(t.federated_read, c.federated_read) END AS federated_read,
+               CASE WHEN t.user_email IS NOT NULL THEN t.federated_write ELSE COALESCE(t.federated_write, c.federated_write) END AS federated_write,
+               t.user_email
         FROM oauth_tokens t
         LEFT JOIN oauth_clients c ON c.client_id = t.client_id
         WHERE t.token_hash = ${tokenHash} AND t.token_type = 'access'
@@ -621,24 +712,35 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       // array vs undefined matters: empty array = explicit no-federated-
       // read; undefined = column missing on this brain.
       const federatedRaw = row.federated_read;
-      const allowedSources = Array.isArray(federatedRaw)
-        ? (federatedRaw as string[])
-        : undefined;
+      const allowedSources = normalizeStringArray(federatedRaw);
+      const federatedWriteRaw = row.federated_write;
+      const writeSources = normalizeStringArray(federatedWriteRaw);
+      const userEmail = (row.user_email as string | null) ?? undefined;
+      const sourceId = (row.source_id as string | null) ?? undefined;
+      if (userEmail && (!sourceId || allowedSources === undefined || writeSources === undefined)) {
+        throw new InvalidTokenError('Invalid user-bound token source grant');
+      }
+      const rowScopes = (row.scopes as string[]) || [];
+      const effectiveScopes = userEmail
+        ? rowScopes.filter(s => s === 'read' || (s === 'write' && (writeSources?.length ?? 0) > 0))
+        : rowScopes;
       return {
         token,
         clientId: row.client_id as string,
         clientName: (row.client_name as string | null) ?? undefined,
-        scopes: (row.scopes as string[]) || [],
+        scopes: effectiveScopes,
         expiresAt,
         resource: row.resource ? new URL(row.resource as string) : undefined,
         // v0.34.1 (#861, D2): source-isolation scope from oauth_clients.
         // Undefined when the row predates v60 or when the brain itself
         // predates v60 (fell through to the legacy projection above).
-        sourceId: (row.source_id as string | null) ?? undefined,
+        sourceId,
         // v0.34.1 (#876): federated read scope. sourceScopeOpts in
         // operations.ts prefers this array over scalar sourceId when set
         // and non-empty.
         allowedSources,
+        writeSources,
+        userEmail,
       } as CoreAuthInfo as SdkAuthInfo;
     }
 
@@ -684,6 +786,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         ? (permissions as Record<string, unknown>).source_id
         : undefined;
       const { sourceId, allowedSources } = parseLegacyTokenScope(sourceGrant);
+      const writeSources = [sourceId];
       return {
         token,
         clientId: name,
@@ -695,6 +798,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
         // allowedSources for federated reads, matching legacy HTTP transport.
         sourceId,
         allowedSources,
+        writeSources,
       } as CoreAuthInfo as SdkAuthInfo;
     }
 
@@ -822,8 +926,28 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       if (!isUndefinedColumnError(e, 'token_ttl')) throw e;
     }
 
+    let sourceGrant: SourceGrant | undefined;
+    try {
+      const [grantRow] = await this.sql`
+        SELECT source_id, federated_read, federated_write
+        FROM oauth_clients
+        WHERE client_id = ${clientId}
+      `;
+      if (grantRow) {
+        sourceGrant = {
+          source_id: (grantRow.source_id as string | null) ?? undefined,
+          federated_read: normalizeStringArray(grantRow.federated_read),
+          federated_write: normalizeStringArray(grantRow.federated_write),
+        };
+      }
+    } catch (e) {
+      if (!isUndefinedColumnError(e, 'source_id')
+        && !isUndefinedColumnError(e, 'federated_read')
+        && !isUndefinedColumnError(e, 'federated_write')) throw e;
+    }
+
     // Client credentials: access token only, NO refresh token (RFC 6749 4.4.3)
-    return this.issueTokens(clientId, grantedScopes, undefined, false, clientTtl);
+    return this.issueTokens(clientId, grantedScopes, undefined, false, clientTtl, sourceGrant);
   }
 
   // -------------------------------------------------------------------------
@@ -950,6 +1074,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     resource: URL | undefined,
     includeRefresh: boolean,
     ttlOverride?: number,
+    sourceGrant?: SourceGrant,
   ): Promise<OAuthTokens> {
     const accessToken = generateToken('gbrain_at_');
     const accessHash = hashToken(accessToken);
@@ -957,10 +1082,17 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const effectiveTtl = ttlOverride || this.tokenTtl;
     const accessExpiry = now + effectiveTtl;
 
+    const sourceId = sourceGrant?.source_id ?? null;
+    const federatedRead = sourceGrant ? (sourceGrant.federated_read ?? (sourceId ? [sourceId] : [])) : null;
+    const federatedWrite = sourceGrant ? (sourceGrant.federated_write ?? (sourceId ? [sourceId] : [])) : null;
+    const userEmail = sourceGrant?.user_email ?? null;
+
     await this.sql`
-      INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource)
+      INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource,
+                                source_id, federated_read, federated_write, user_email)
       VALUES (${accessHash}, ${'access'}, ${clientId},
-              ${pgArray(scopes)}, ${accessExpiry}, ${resource?.toString() || null})
+              ${pgArray(scopes)}, ${accessExpiry}, ${resource?.toString() || null},
+              ${sourceId}, ${federatedRead === null ? null : pgArray(federatedRead)}, ${federatedWrite === null ? null : pgArray(federatedWrite)}, ${userEmail})
     `;
 
     const result: OAuthTokens = {
@@ -976,9 +1108,11 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
       const refreshExpiry = now + this.refreshTtl;
 
       await this.sql`
-        INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource)
+        INSERT INTO oauth_tokens (token_hash, token_type, client_id, scopes, expires_at, resource,
+                                  source_id, federated_read, federated_write, user_email)
         VALUES (${refreshHash}, ${'refresh'}, ${clientId},
-                ${pgArray(scopes)}, ${refreshExpiry}, ${resource?.toString() || null})
+                ${pgArray(scopes)}, ${refreshExpiry}, ${resource?.toString() || null},
+                ${sourceId}, ${federatedRead === null ? null : pgArray(federatedRead)}, ${federatedWrite === null ? null : pgArray(federatedWrite)}, ${userEmail})
       `;
 
       result.refresh_token = refreshToken;

@@ -58,6 +58,7 @@ export type CyclePhase =
   | 'lint' | 'backlinks' | 'sync' | 'synthesize' | 'extract' | 'extract_facts'
   | 'resolve_symbol_edges'
   | 'patterns' | 'recompute_emotional_weight' | 'consolidate'
+  | 'source_refresh'
   // v0.36.1.0 Hindsight calibration wave:
   //  - propose_takes: LLM scans markdown prose, proposes gradeable claims
   //    to a review queue. User accepts/rejects via `gbrain takes propose`.
@@ -137,6 +138,9 @@ export const ALL_PHASES: CyclePhase[] = [
   // stay as audit trail. Placed AFTER patterns (graph-fresh) and BEFORE
   // embed (so the new takes get embedded same-cycle).
   'consolidate',
+  // v0.43 source-ingest Stage 4 — enqueue due source refresh jobs only;
+  // actual connector I/O happens in Minion source-ingest workers.
+  'source_refresh',
   // v0.36.1.0 Hindsight calibration wave. Ordering rationale:
   //   - propose_takes AFTER consolidate so the proposal LLM sees the
   //     freshly-consolidated takes when deciding what's NOT yet captured
@@ -218,6 +222,7 @@ export const PHASE_SCOPE: Record<CyclePhase, PhaseScope> = {
   patterns: 'mixed',
   recompute_emotional_weight: 'source',
   consolidate: 'source',
+  source_refresh: 'source',
   propose_takes: 'source',
   grade_takes: 'global',
   calibration_profile: 'global',
@@ -283,6 +288,7 @@ const NEEDS_LOCK_PHASES: ReadonlySet<CyclePhase> = new Set([
   // v0.29 — writes pages.emotional_weight column.
   'recompute_emotional_weight',
   'consolidate',
+  'source_refresh',
   // v0.36.1.0 — propose_takes / grade_takes / calibration_profile all
   // mutate DB state (take_proposals, take_grade_cache, calibration_profiles)
   // so they coordinate via the cycle lock.
@@ -1283,6 +1289,16 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
     } catch {
       // Non-fatal: op_checkpoints table may not exist yet on pre-v67 brains.
     }
+    // Source-ingest run ledger is append-only for revert/reporting; sweep it
+    // with the same conservative 7-day window so long-lived brains do not grow
+    // unbounded.
+    let purgedSourceIngestRunItems = 0;
+    try {
+      const { purgeStaleSourceIngestRunItems } = await import('./source-ingest/ledger.ts');
+      purgedSourceIngestRunItems = await purgeStaleSourceIngestRunItems(engine, 7);
+    } catch {
+      // Non-fatal: source-ingest tables may not exist on older brains.
+    }
     // v0.37.x — TX3 / A5: GC stale brainstorm checkpoints (filesystem-side).
     // 7-day mtime window mirrors op_checkpoints. Wrapped in try/catch
     // because the brainstorm dir may not exist on a brain that's never
@@ -1321,6 +1337,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
       summary:
         `purged ${purgedSources.length} source(s), ${purgedPages.count} page(s), ` +
         `${purgedClones.count} orphan clone temp dir(s), ${purgedCheckpoints} stale op_checkpoint(s), ` +
+        `${purgedSourceIngestRunItems} stale source-ingest run item(s), ` +
         `${purgedBrainstormCheckpoints} stale brainstorm checkpoint(s), ` +
         `${purgedBatchRetryAuditFiles} stale batch-retry audit file(s), ` +
         `and ${purgedVolunteerEvents} stale volunteer event(s)`,
@@ -1332,6 +1349,7 @@ async function runPhasePurge(engine: BrainEngine, dryRun: boolean): Promise<Phas
         purged_sources: purgedSources,
         purged_page_slugs: purgedPages.slugs,
         purged_checkpoints_count: purgedCheckpoints,
+        purged_source_ingest_run_items_count: purgedSourceIngestRunItems,
         purged_brainstorm_checkpoints_count: purgedBrainstormCheckpoints,
         purged_batch_retry_audit_files_count: purgedBatchRetryAuditFiles,
         purged_volunteer_events_count: purgedVolunteerEvents,
@@ -1991,6 +2009,32 @@ export async function runCycle(
           dryRun,
           yieldDuringPhase: opts.yieldDuringPhase,
           signal: opts.signal,
+        }));
+        result.duration_ms = duration_ms;
+        phaseResults.push(result);
+        progress.finish();
+      }
+      await safeYield(opts.yieldBetweenPhases);
+    }
+
+    // ── Stage 4 source-ingest freshness: enqueue only ─────────────
+    if (phases.includes('source_refresh')) {
+      checkAborted(opts.signal);
+      if (!engine) {
+        phaseResults.push({
+          phase: 'source_refresh',
+          status: 'skipped',
+          duration_ms: 0,
+          summary: 'no database connected',
+          details: { reason: 'no_database' },
+        });
+      } else {
+        progress.start('cycle.source_refresh');
+        const { runPhaseSourceRefresh } = await import('./cycle/source-refresh.ts');
+        const { result, duration_ms } = await timePhase(() => runPhaseSourceRefresh(engine, {
+          dryRun,
+          sourceId: cycleSourceId,
+          queue: 'default',
         }));
         result.duration_ms = duration_ms;
         phaseResults.push(result);

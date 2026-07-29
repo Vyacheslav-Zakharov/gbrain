@@ -70,8 +70,8 @@ describe('getBacklinkCounts — D12 mention filter', () => {
       });
     }
     await engine.addLinksBatch(links);
-    const counts = await engine.getBacklinkCounts([target]);
-    expect(counts.get(target)).toBe(10);
+    const counts = await engine.getBacklinkCounts([{ slug: target, source_id: 'default' }]);
+    expect(counts.get(`default::${target}`)).toBe(10);
   });
 
   test('0 markdown + 50 mention-source links → backlink count = 0', async () => {
@@ -90,8 +90,8 @@ describe('getBacklinkCounts — D12 mention filter', () => {
       });
     }
     await engine.addLinksBatch(links);
-    const counts = await engine.getBacklinkCounts([target]);
-    expect(counts.get(target)).toBe(0);
+    const counts = await engine.getBacklinkCounts([{ slug: target, source_id: 'default' }]);
+    expect(counts.get(`default::${target}`)).toBe(0);
   });
 
   test('10 markdown + 50 mention-source → backlink count = 10', async () => {
@@ -113,8 +113,8 @@ describe('getBacklinkCounts — D12 mention filter', () => {
       });
     }
     await engine.addLinksBatch(links);
-    const counts = await engine.getBacklinkCounts([target]);
-    expect(counts.get(target)).toBe(10);
+    const counts = await engine.getBacklinkCounts([{ slug: target, source_id: 'default' }]);
+    expect(counts.get(`default::${target}`)).toBe(10);
   });
 
   test('NULL link_source legacy rows still count toward backlinks (IS DISTINCT FROM semantics)', async () => {
@@ -142,8 +142,8 @@ describe('getBacklinkCounts — D12 mention filter', () => {
        VALUES ($1, $2, $3, NULL), ($4, $2, $3, NULL)`,
       [src1Id, targetId, 'mentions', src2Id],
     );
-    const counts = await engine.getBacklinkCounts([target]);
-    expect(counts.get(target)).toBe(2);
+    const counts = await engine.getBacklinkCounts([{ slug: target, source_id: 'default' }]);
+    expect(counts.get(`default::${target}`)).toBe(2);
   });
 
   test('mixed link_source (markdown, frontmatter, manual, NULL) all count; only mentions filtered', async () => {
@@ -170,13 +170,47 @@ describe('getBacklinkCounts — D12 mention filter', () => {
               ($4, $5, 'mentions', 'mentions')`,
       [m.get('w/md'), m.get('w/fm'), m.get('w/manual'), m.get('w/auto'), targetId],
     );
-    const counts = await engine.getBacklinkCounts([target]);
+    const counts = await engine.getBacklinkCounts([{ slug: target, source_id: 'default' }]);
     // markdown + frontmatter + manual = 3; mentions filtered out.
-    expect(counts.get(target)).toBe(3);
+    expect(counts.get(`default::${target}`)).toBe(3);
+  });
+
+  test('scopes referrers and target identity by source to close the backlink oracle', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived)
+       VALUES ('shared', 'Shared backlink test', false), ('hidden', 'Hidden backlink test', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false`,
+    );
+    const page = { type: 'note' as const, title: 'Same slug', compiled_truth: 'body', timeline: '', frontmatter: {} };
+    await engine.putPage('topic/same', page, { sourceId: 'shared' });
+    await engine.putPage('topic/same', page, { sourceId: 'hidden' });
+    await engine.putPage('ref/visible', { ...page, title: 'Visible ref' }, { sourceId: 'shared' });
+    await engine.putPage('ref/secret', { ...page, title: 'Secret ref' }, { sourceId: 'hidden' });
+    await engine.addLink('ref/visible', 'topic/same', '', 'manual', 'manual', undefined, undefined, {
+      fromSourceId: 'shared', toSourceId: 'shared',
+    });
+    await engine.addLink('ref/secret', 'topic/same', '', 'manual', 'manual', undefined, undefined, {
+      fromSourceId: 'hidden', toSourceId: 'shared',
+    });
+    await engine.addLink('ref/visible', 'topic/same', '', 'manual', 'manual', undefined, undefined, {
+      fromSourceId: 'shared', toSourceId: 'hidden',
+    });
+
+    const refs = [
+      { slug: 'topic/same', source_id: 'shared' },
+      { slug: 'topic/same', source_id: 'hidden' },
+    ];
+    const unrestricted = await engine.getBacklinkCounts(refs);
+    expect(unrestricted.get('shared::topic/same')).toBe(2);
+    expect(unrestricted.get('hidden::topic/same')).toBe(1);
+
+    const sharedOnly = await engine.getBacklinkCounts(refs, { sourceIds: ['shared'] });
+    expect(sharedOnly.get('shared::topic/same')).toBe(1);
+    expect(sharedOnly.get('hidden::topic/same')).toBe(0);
   });
 
   test('uninitialized slug returns 0 (consistent map shape)', async () => {
-    const counts = await engine.getBacklinkCounts(['does/not/exist']);
-    expect(counts.get('does/not/exist')).toBe(0);
+    const counts = await engine.getBacklinkCounts([{ slug: 'does/not/exist', source_id: 'default' }]);
+    expect(counts.get('default::does/not/exist')).toBe(0);
   });
 });

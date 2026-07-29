@@ -168,6 +168,10 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // SCHEMA_SQL replay creates the index. Powers `gbrain extract --stale` + the
   // `links_extraction_lag` doctor check.
   { kind: 'column', table: 'pages', column: 'links_extracted_at' },
+  // v125 — append-only source-ingest run ledger. Brains that already applied
+  // v120 before the ledger DDL was folded in can have profiles/sync state but
+  // no run-items table; bootstrap must create it before schema/migration replay.
+  { kind: 'table', name: 'source_ingest_run_items' },
 ];
 
 test('applyForwardReferenceBootstrap covers every forward reference declared in REQUIRED_BOOTSTRAP_COVERAGE', async () => {
@@ -253,6 +257,11 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       ALTER TABLE pages DROP COLUMN IF EXISTS generation;
       ALTER TABLE pages DROP COLUMN IF EXISTS contextual_retrieval_mode;
       ALTER TABLE pages DROP COLUMN IF EXISTS corpus_generation;
+      DROP INDEX IF EXISTS pages_links_extracted_at_idx;
+      ALTER TABLE pages DROP COLUMN IF EXISTS links_extracted_at;
+      DROP INDEX IF EXISTS source_ingest_run_items_run_idx;
+      DROP INDEX IF EXISTS source_ingest_run_items_external_idx;
+      DROP TABLE IF EXISTS source_ingest_run_items;
     `);
 
     // Note: we don't strip sources.archived* here because they're inline in the

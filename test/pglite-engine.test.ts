@@ -1153,12 +1153,15 @@ describe('PGLiteEngine: getBacklinkCounts', () => {
     await engine.putPage('companies/acme', { ...testPage, type: 'company', title: 'Acme' });
   });
 
-  test('returns Map<slug, count> for given slugs', async () => {
+  test('returns source-qualified backlink counts', async () => {
     await engine.addLink('people/alice', 'companies/acme', '', 'works_at');
     await engine.addLink('people/bob', 'companies/acme', '', 'invested_in');
-    const counts = await engine.getBacklinkCounts(['companies/acme', 'people/alice']);
-    expect(counts.get('companies/acme')).toBe(2);
-    expect(counts.get('people/alice')).toBe(0);
+    const counts = await engine.getBacklinkCounts([
+      { slug: 'companies/acme', source_id: 'default' },
+      { slug: 'people/alice', source_id: 'default' },
+    ]);
+    expect(counts.get('default::companies/acme')).toBe(2);
+    expect(counts.get('default::people/alice')).toBe(0);
   });
 
   test('empty input -> empty Map', async () => {
@@ -1167,8 +1170,8 @@ describe('PGLiteEngine: getBacklinkCounts', () => {
   });
 
   test('slugs with zero links: present in Map with 0', async () => {
-    const counts = await engine.getBacklinkCounts(['people/alice']);
-    expect(counts.get('people/alice')).toBe(0);
+    const counts = await engine.getBacklinkCounts([{ slug: 'people/alice', source_id: 'default' }]);
+    expect(counts.get('default::people/alice')).toBe(0);
   });
 });
 

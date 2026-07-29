@@ -33,7 +33,17 @@ beforeAll(async () => {
     return result.rows;
   };
 
-  provider = new GBrainOAuthProvider({ sql, tokenTtl: 60, refreshTtl: 300 });
+  provider = new GBrainOAuthProvider({
+    sql,
+    tokenTtl: 60,
+    refreshTtl: 300,
+    userSourceGrantResolver: (email) => email === 'alice@example.test' ? {
+      user_email: email,
+      source_id: 'alice-example',
+      federated_read: ['alice-example', 'shared', 'internal-example'],
+      federated_write: ['alice-example', 'internal-example'],
+    } : undefined,
+  });
 }, 30_000); // PGLITE_SCHEMA_SQL execution under full-suite load can exceed default 5s
 
 afterAll(async () => {
@@ -378,6 +388,46 @@ describe('revokeToken', () => {
 // ---------------------------------------------------------------------------
 
 describe('authorization code flow', () => {
+  test('fails closed without a verified Portal principal or valid ACL row', async () => {
+    const { clientId } = await provider.registerClientManual(
+      'authcode-fail-closed', ['authorization_code'], 'read write',
+      ['http://localhost:3000/callback'],
+    );
+    const client = (await provider.clientsStore.getClient(clientId))!;
+    const params = {
+      codeChallenge: 'challenge',
+      redirectUri: 'http://localhost:3000/callback',
+      scopes: ['read', 'write'],
+    };
+    await expect(provider.authorize(client, params, { locals: {}, redirect: () => {} } as any))
+      .rejects.toThrow('valid Portal user source grant required');
+    await expect(provider.authorize(client, params, {
+      locals: { gbrainPortalUser: 'unknown@example.test' }, redirect: () => {},
+    } as any)).rejects.toThrow('valid Portal user source grant required');
+    const rows = await sql`SELECT count(*)::int AS count FROM oauth_codes WHERE client_id = ${clientId}`;
+    expect(Number(rows[0].count)).toBe(0);
+  });
+
+  test('shared broad client is clamped to Portal user read/write scopes', async () => {
+    const broad = 'admin agent read sources_admin users_admin write';
+    const { clientId } = await provider.registerClientManual(
+      'broad-portal-client', ['authorization_code'], broad,
+      ['http://localhost:3000/callback'],
+    );
+    const client = (await provider.clientsStore.getClient(clientId))!;
+    let redirectUrl = '';
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
+    await provider.authorize(client, {
+      codeChallenge: 'challenge',
+      redirectUri: 'http://localhost:3000/callback',
+      scopes: broad.split(' '),
+    }, mockRes);
+    const code = new URL(redirectUrl).searchParams.get('code')!;
+    const tokens = await provider.exchangeAuthorizationCode(client, code);
+    const auth = await provider.verifyAccessToken(tokens.access_token);
+    expect(auth.scopes.sort()).toEqual(['read', 'write']);
+  });
+
   test('code issuance and exchange', async () => {
     const { clientId } = await provider.registerClientManual(
       'authcode-test', ['authorization_code'], 'read write',
@@ -388,6 +438,7 @@ describe('authorization code flow', () => {
     // Mock Express response for authorize
     let redirectUrl = '';
     const mockRes = {
+      locals: { gbrainPortalUser: 'alice@example.test' },
       redirect: (url: string) => { redirectUrl = url; },
     } as any;
 
@@ -409,6 +460,17 @@ describe('authorization code flow', () => {
     const tokens = await provider.exchangeAuthorizationCode(client, code);
     expect(tokens.access_token).toStartWith('gbrain_at_');
     expect(tokens.refresh_token).toBeDefined(); // Auth code flow includes refresh
+    const auth = await provider.verifyAccessToken(tokens.access_token) as CoreAuthInfo & { userEmail?: string };
+    expect(auth.userEmail).toBe('alice@example.test');
+    expect(auth.sourceId).toBe('alice-example');
+    expect(auth.allowedSources).toEqual(['alice-example', 'shared', 'internal-example']);
+    expect(auth.writeSources).toEqual(['alice-example', 'internal-example']);
+
+    const rotated = await provider.exchangeRefreshToken(client, tokens.refresh_token!);
+    const rotatedAuth = await provider.verifyAccessToken(rotated.access_token) as CoreAuthInfo & { userEmail?: string };
+    expect(rotatedAuth.userEmail).toBe('alice@example.test');
+    expect(rotatedAuth.allowedSources).toEqual(['alice-example', 'shared', 'internal-example']);
+    expect(rotatedAuth.writeSources).toEqual(['alice-example', 'internal-example']);
   });
 
   test('code is single-use', async () => {
@@ -419,7 +481,7 @@ describe('authorization code flow', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
 
     await provider.authorize(client, {
       codeChallenge: 'challenge',
@@ -468,7 +530,7 @@ describe('authorization code flow', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
 
     // Read-only client requests admin via the SDK's parsed scopes array.
     await provider.authorize(client, {
@@ -495,7 +557,7 @@ describe('authorization code flow', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
 
     await provider.authorize(client, {
       codeChallenge: 'challenge',
@@ -522,7 +584,7 @@ describe('authorization code flow', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -554,7 +616,7 @@ describe('refresh token', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
 
     await provider.authorize(client, {
       codeChallenge: 'challenge',
@@ -586,7 +648,7 @@ describe('refresh token', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -773,7 +835,7 @@ describe('F1/F4 cross-client isolation', () => {
     const attacker = (await provider.clientsStore.getClient(attackerId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(owner, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -804,7 +866,7 @@ describe('F1/F4 cross-client isolation', () => {
     const attacker = (await provider.clientsStore.getClient(attackerId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(owner, {
       codeChallenge: 'owner-challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -852,7 +914,7 @@ describe('F2/F3 refresh hardening', () => {
     const attacker = (await provider.clientsStore.getClient(attackerId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(owner, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -885,7 +947,7 @@ describe('F2/F3 refresh hardening', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -900,11 +962,7 @@ describe('F2/F3 refresh hardening', () => {
     ).rejects.toThrow(/scope/i);
   });
 
-  // T1 (eng-review): admin grant must be refreshable down to sources_admin
-  // via hasScope. Pre-v0.28 the F3 check was exact-string-match, so an
-  // admin grant could not refresh down to sources_admin even though admin
-  // implies it. gstack /setup-gbrain Path 4 needs this to work.
-  test('admin grant CAN refresh down to sources_admin (hasScope hierarchy)', async () => {
+  test('Portal user cannot inherit sources_admin from a shared admin client', async () => {
     const { clientId } = await provider.registerClientManual(
       'admin-down-test', ['authorization_code'], 'admin',
       ['http://localhost:3000/callback'],
@@ -912,7 +970,7 @@ describe('F2/F3 refresh hardening', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -920,29 +978,14 @@ describe('F2/F3 refresh hardening', () => {
     }, mockRes);
     const code = new URL(redirectUrl).searchParams.get('code')!;
     const tokens = await provider.exchangeAuthorizationCode(client, code);
-
-    // Refresh requesting only sources_admin — admin implies it, so this
-    // must succeed and the new token must carry only the requested subset.
-    const rotated = await provider.exchangeRefreshToken(
-      client, tokens.refresh_token!, ['sources_admin'],
-    );
-    expect(rotated.access_token).toBeDefined();
-    expect(rotated.scope).toBe('sources_admin');
-
-    // The original refresh token must be dead (single-use rotation).
+    const auth = await provider.verifyAccessToken(tokens.access_token);
+    expect(auth.scopes).toEqual([]);
     await expect(
-      provider.exchangeRefreshToken(client, tokens.refresh_token!),
-    ).rejects.toThrow();
-
-    // Note: rotated.refresh_token's grant is now sources_admin, not admin.
-    // Refreshing it up to users_admin would correctly fail (sibling
-    // non-implication) — that constraint is exercised in the F3 sibling
-    // test below. To prove "admin implies users_admin too" we'd need a
-    // fresh authorize round trip, which the existing F2 hardening tests
-    // already cover. One direction at a time.
+      provider.exchangeRefreshToken(client, tokens.refresh_token!, ['sources_admin']),
+    ).rejects.toThrow(/scope/i);
   });
 
-  test('admin grant CAN refresh down to users_admin (different axis)', async () => {
+  test('Portal user cannot inherit users_admin from a shared admin client', async () => {
     const { clientId } = await provider.registerClientManual(
       'admin-down-users-test', ['authorization_code'], 'admin',
       ['http://localhost:3000/callback'],
@@ -950,7 +993,7 @@ describe('F2/F3 refresh hardening', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -959,10 +1002,9 @@ describe('F2/F3 refresh hardening', () => {
     const code = new URL(redirectUrl).searchParams.get('code')!;
     const tokens = await provider.exchangeAuthorizationCode(client, code);
 
-    const rotated = await provider.exchangeRefreshToken(
-      client, tokens.refresh_token!, ['users_admin'],
-    );
-    expect(rotated.scope).toBe('users_admin');
+    await expect(
+      provider.exchangeRefreshToken(client, tokens.refresh_token!, ['users_admin']),
+    ).rejects.toThrow(/scope/i);
   });
 
   // T1 sibling: write grant cannot refresh up to sources_admin (different axis)
@@ -974,7 +1016,7 @@ describe('F2/F3 refresh hardening', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -1094,7 +1136,7 @@ describe('F7c redirect_uri binding on auth code exchange', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -1116,7 +1158,7 @@ describe('F7c redirect_uri binding on auth code exchange', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -1147,7 +1189,7 @@ describe('F7c redirect_uri binding on auth code exchange', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -1172,7 +1214,7 @@ describe('F7c redirect_uri binding on auth code exchange', () => {
     const client = (await provider.clientsStore.getClient(clientId))!;
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'challenge',
       redirectUri: 'http://localhost:3000/callback',
@@ -1301,7 +1343,7 @@ describe('PKCE DCR public-client gate (#909)', () => {
     expect(client.client_secret).toBeUndefined();
 
     let redirectUrl = '';
-    const mockRes = { redirect: (url: string) => { redirectUrl = url; } } as any;
+    const mockRes = { locals: { gbrainPortalUser: 'alice@example.test' }, redirect: (url: string) => { redirectUrl = url; } } as any;
     await provider.authorize(client, {
       codeChallenge: 'test-challenge-value',
       redirectUri: 'http://localhost:3000/callback',

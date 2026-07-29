@@ -938,6 +938,74 @@ export function formatResult(opName: string, result: unknown): string {
         `#${v.id}  ${v.snapshot_at?.toString().slice(0, 19) || '?'}  ${v.compiled_truth?.slice(0, 60) || ''}...`,
       ).join('\n') + '\n';
     }
+    case 'source_sync_status': {
+      const r = result as any;
+      const s = r.summary ?? {};
+      const lines = [
+        `source_sync_status rows=${s.rows ?? r.count ?? 0} fresh=${s.fresh ?? 0} stale=${s.stale ?? 0} unknown=${s.unknown ?? 0} failed=${s.failed ?? 0}`,
+        `next_due_at=${s.next_due_at ?? 'n/a'} last_synced_at=${s.last_synced_at ?? 'n/a'} last_run_id=${s.last_run_id ?? 'n/a'}`,
+      ];
+      if (Array.isArray(r.rows) && r.rows.length) {
+        lines.push('rows:');
+        for (const row of r.rows.slice(0, 20)) lines.push(`  ${row.profile_id}/${row.external_id} ${row.freshness} result=${row.last_result} slug=${row.slug}`);
+      }
+      return lines.join('\n') + '\n';
+    }
+    case 'source_ingest': {
+      const r = result as any;
+      if (r?.submitted) {
+        return [
+          `source_ingest job submitted id=${r.job_id} status=${r.status} queue=${r.queue}`,
+          `run_id=${r.data?.run_id ?? '?'} profile=${r.data?.profile_id ?? '?'}`,
+          'watch: gbrain jobs get ' + r.job_id,
+        ].join('\n') + '\n';
+      }
+      const lines = [
+        `source_ingest ${r.ok ? 'ok' : 'failed'} run_id=${r.run_id ?? '?'}`,
+        `profile=${r.profile_id ?? '?'} source=${r.source_id ?? '?'}`,
+      ];
+      if (r.storage) {
+        lines.push(`storage=${r.storage.mode}${r.storage.local_path ? ` path=${r.storage.local_path}` : ''}${r.storage.git_clean === false ? ' dirty=true' : ''}`);
+        if (Array.isArray(r.storage.dirty_paths) && r.storage.dirty_paths.length) lines.push(`dirty_paths=${r.storage.dirty_paths.join(', ')}`);
+      }
+      if (r.counts) lines.push(`counts sampled=${r.counts.sampled ?? 0} written=${r.counts.written ?? 0} unchanged=${r.counts.unchanged ?? 0} skipped=${r.counts.skipped ?? 0} failed=${r.counts.failed ?? 0}`);
+      if (r.git_commit) lines.push(`git_commit=${r.git_commit.committed ? r.git_commit.sha : `no (${r.git_commit.reason ?? 'unknown'})`}`);
+      if (r.graph_writes) lines.push(`graph_writes=${r.graph_writes}`);
+      if (Array.isArray(r.results) && r.results.length) {
+        lines.push('results:');
+        for (const item of r.results) lines.push(`  ${item.external_id}: ${item.status}${item.slug ? ` ${item.slug}` : ''}${item.reason ? ` (${item.reason})` : ''}${item.warnings?.length ? ` warnings=${item.warnings.join(',')}` : ''}`);
+      }
+      return lines.join('\n') + '\n';
+    }
+    case 'source_refresh': {
+      const r = result as any;
+      const lines = [
+        `source_refresh ${r.mode ?? 'report-only'} count=${r.count ?? 0}`,
+      ];
+      if (Array.isArray(r.due) && r.due.length) {
+        lines.push('due:');
+        for (const d of r.due) lines.push(`  ${d.profile_id} source=${d.approved_source_id} rows=${d.total_rows} due=${d.due_rows} reason=${d.reason} oldest=${d.oldest_stale_after ?? 'never'}`);
+      }
+      if (Array.isArray(r.jobs) && r.jobs.length) {
+        lines.push('jobs:');
+        for (const j of r.jobs) lines.push(`  ${j.profile_id}: job=${j.job_id} status=${j.status} queue=${j.queue} run_id=${j.run_id}`);
+      }
+      return lines.join('\n') + '\n';
+    }
+    case 'source_revert': {
+      const r = result as any;
+      const lines = [
+        `source_revert ${r.mode ?? 'report'} run_id=${r.run_id ?? '?'}`,
+        `counts affected=${r.counts?.affected ?? 0} success_or_unchanged=${r.counts?.success_or_unchanged ?? 0} failed=${r.counts?.failed ?? 0} reverted=${r.counts?.reverted ?? 0} blocked=${r.counts?.blocked ?? 0} noop=${r.counts?.noop ?? 0}`,
+      ];
+      if (Array.isArray(r.pages) && r.pages.length) {
+        lines.push('pages:');
+        for (const p of r.pages) lines.push(`  ${p.slug} source=${p.source_id} external=${p.external_id} action=${p.revert_action}${p.reason ? ` reason=${p.reason}` : ''}${p.version_id ? ` version=${p.version_id}` : ''}`);
+      }
+      if (r.git_commit) lines.push(`git_commit=${r.git_commit.committed ? r.git_commit.sha : 'no'}${r.git_commit.reason ? ` (${r.git_commit.reason})` : ''}`);
+      if (Array.isArray(r.warnings) && r.warnings.length) lines.push(`warnings=${r.warnings.join(', ')}`);
+      return lines.join('\n') + '\n';
+    }
     default:
       return JSON.stringify(result, null, 2) + '\n';
   }

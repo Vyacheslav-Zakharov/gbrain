@@ -177,6 +177,16 @@ export interface GBrainConfig {
    * reflex knobs.
    */
   retrieval_reflex_window_turns?: number;
+  /**
+   * Cross-source graph edges (v0.43 local hardening). Default disabled.
+   * DB-plane keys mirror this shape:
+   *   cross_source_edges.enabled = boolean
+   *   cross_source_edges.policy.<source_id> = locked-stub | hidden
+   */
+  cross_source_edges?: {
+    enabled?: boolean;
+    policy?: Record<string, 'locked-stub' | 'hidden'>;
+  };
   embedding_image_ocr?: boolean;
   embedding_image_ocr_model?: string;
 
@@ -923,6 +933,11 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'spend.posture',
   'sync.cost_gate_min_usd',
   'sync.federated_v2',
+  // Cross-source edges (feature flag + per-source visibility policy)
+  'cross_source_edges',
+  'cross_source_edges.enabled',
+  // Source Ingest production connector allowlist (DB-plane).
+  'source_ingest.live_connectors',
   'embed.backfill_cooldown_min',
   'embed.backfill_max_usd_per_source_24h',
   'embed.backfill_max_usd',
@@ -944,6 +959,7 @@ export const KNOWN_CONFIG_KEY_PREFIXES: readonly string[] = [
   'mcp.',               // mcp.publish_skills, mcp.skills_dir (PR1 skill catalog)
   'autopilot.',         // autopilot.nightly_quality_probe.*, autopilot.auto_drain.* (#1685)
   'self_upgrade.',      // v0.42 self-upgrade (mode, quiet_hours, state)
+  'cross_source_edges.policy.', // per-source locked-stub | hidden policy
 ];
 
 export function saveConfig(config: GBrainConfig): void {

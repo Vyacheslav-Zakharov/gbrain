@@ -18,6 +18,16 @@ import type {
   AdjacencyRow,
   EnrichCandidatesOpts, EnrichCandidate,
 } from './types.ts';
+import type { CrossSourceEdgePolicyConfig } from './redact-link.ts';
+
+export interface LinkReadOpts {
+  sourceId?: string;
+  sourceIds?: string[];
+  crossSourceEdges?: {
+    enabled?: boolean;
+    policy?: CrossSourceEdgePolicyConfig;
+  };
+}
 
 /**
  * v0.27.1: file row for binary-asset metadata. Mirrors the `files` table
@@ -1155,13 +1165,13 @@ export interface BrainEngine {
    * grant); the scalar branch is internal/CLI and keeps cross-source visibility
    * (reconcileLinks + back-link validators depend on it).
    */
-  getLinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]>;
+  getLinks(slug: string, opts?: LinkReadOpts): Promise<Link[]>;
   /**
    * v0.31.8 (D12 + D16): same `opts.sourceId` semantics as `getLinks`,
    * applied to the to-page side of the join. #2200: `opts.sourceIds` federated
    * grant constrains both endpoints (see `getLinks`).
    */
-  getBacklinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Link[]>;
+  getBacklinks(slug: string, opts?: LinkReadOpts): Promise<Link[]>;
   /**
    * v114 (#1941): distinct link_source provenances with edge counts, for
    * `gbrain link-sources`. Source-scoped via `{sourceId?, sourceIds?}` (both
@@ -1241,11 +1251,18 @@ export interface BrainEngine {
     opts?: RelationalFanoutOpts,
   ): Promise<RelationalFanoutRow[]>;
   /**
-   * For a list of slugs, return how many inbound links each has.
+   * For a list of source-qualified page refs, return how many inbound links each has.
    * Used by hybrid search backlink boost. Single SQL query, not N+1.
-   * Slugs with zero inbound links are present in the map with value 0.
+   * Keys are `${source_id}::${slug}` so same-slug pages in different sources
+   * cannot share backlink boost. When opts.sourceIds is set, only inbound links
+   * whose FROM endpoint is in the caller's accessible sources count; this closes
+   * the cross-source backlink oracle for remote/federated search callers.
+   * Refs with zero inbound links are present in the map with value 0.
    */
-  getBacklinkCounts(slugs: string[]): Promise<Map<string, number>>;
+  getBacklinkCounts(
+    refs: Array<{ slug: string; source_id?: string | null }>,
+    opts?: { sourceIds?: string[] },
+  ): Promise<Map<string, number>>;
   /**
    * v0.40.4 — for a list of page_ids, return adjacency aggregates
    * restricted to the subgraph induced by them. Returns ALL pages with

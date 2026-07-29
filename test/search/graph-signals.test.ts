@@ -196,6 +196,7 @@ describe('applyGraphSignals — cross-source boost (stacks on adjacency)', () =>
     await applyGraphSignals(results, ENGINE_STUB, {
       enabled: true,
       adjacencyFn: async () => adjacency,
+      exposeCrossSourceHits: true,
     });
     const acme = results.find(r => r.slug === 'companies/acme')!;
     expect(acme.score).toBeCloseTo(8 * ADJACENCY_BOOST * CROSS_SOURCE_BOOST, 5);
@@ -217,6 +218,7 @@ describe('applyGraphSignals — cross-source boost (stacks on adjacency)', () =>
     expect(acme.score).toBeCloseTo(8 * CROSS_SOURCE_BOOST, 5);
     expect(acme.graph_adjacency_boost).toBeUndefined();
     expect(acme.graph_cross_source_boost).toBe(CROSS_SOURCE_BOOST);
+    expect(acme.graph_cross_source_hits).toBeUndefined();
   });
 });
 

@@ -19,6 +19,10 @@ describe('KNOWN_CONFIG_KEYS', () => {
     expect(KNOWN_CONFIG_KEYS).toContain('chat_model');
   });
 
+  test('contains the source-ingest production connector allowlist', () => {
+    expect(KNOWN_CONFIG_KEYS).toContain('source_ingest.live_connectors');
+  });
+
   test('contains the search-mode keys (v0.32.3)', () => {
     expect(KNOWN_CONFIG_KEYS).toContain('search.mode');
     expect(KNOWN_CONFIG_KEYS).toContain('search.cache.enabled');

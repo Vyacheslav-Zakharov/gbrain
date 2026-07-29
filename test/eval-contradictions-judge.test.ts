@@ -275,6 +275,23 @@ describe('judgeContradiction', () => {
     expect(out.usage.outputTokens).toBe(50);
   });
 
+  test('uses bounded reasoning-token headroom for structured verdicts', async () => {
+    let seenMaxTokens: number | undefined;
+    await judgeContradiction({
+      ...baseInput,
+      chatFn: stubChat((opts) => {
+        seenMaxTokens = opts.maxTokens;
+        return mkResult(JSON.stringify({
+          verdict: 'no_contradiction',
+          severity: 'info',
+          confidence: 0.2,
+          resolution_kind: 'none',
+        }));
+      }),
+    });
+    expect(seenMaxTokens).toBe(2048);
+  });
+
   test('fence-wrapped JSON: parseModelJSON 4-strategy fallback', async () => {
     const fenced = '```json\n' + JSON.stringify({
       verdict: 'no_contradiction',

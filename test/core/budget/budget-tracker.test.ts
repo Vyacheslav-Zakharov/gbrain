@@ -75,6 +75,26 @@ describe('BudgetTracker.reserve', () => {
     expect(audit[0].schema_version).toBe(1);
   });
 
+  test('canonical multi-provider chat pricing works under a finite cap', () => {
+    const tracker = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
+    expect(() => tracker.reserve({
+      modelId: 'google:gemini-2.5-flash',
+      estimatedInputTokens: 1000,
+      maxOutputTokens: 1000,
+      kind: 'chat',
+    })).not.toThrow();
+  });
+
+  test('configured hosted ZeroEntropy reranker has a bounded local cap estimate', () => {
+    const tracker = new BudgetTracker({ maxCostUsd: 1.0, label: 'test', auditPath });
+    expect(() => tracker.reserve({
+      modelId: 'zeroentropyai:zerank-2',
+      estimatedInputTokens: 1000,
+      maxOutputTokens: 0,
+      kind: 'rerank',
+    })).not.toThrow();
+  });
+
   test('throws BudgetExhausted (reason: cost) when projected > cap', () => {
     const t = new BudgetTracker({ maxCostUsd: 0.001, label: 'test', auditPath });
     let caught: unknown = null;

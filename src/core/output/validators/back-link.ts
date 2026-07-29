@@ -14,6 +14,10 @@
  * matching (target → slug) via engine.getBacklinks(target). Missing reverses
  * are warnings (lint mode), not errors — runAutoLink is the authoritative
  * enforcer at write time; this is defense-in-depth.
+ *
+ * Remote/federated read-redaction can return locked stubs whose far endpoint is
+ * deliberately null. Those rows are not verifiable and MUST NOT produce a
+ * warning that leaks the hidden target's existence.
  */
 
 import type { PageValidator, PageValidationContext, ValidationFinding } from '../writer.ts';
@@ -31,7 +35,10 @@ export const backLinkValidator: PageValidator = {
     // We check target's outbound links; if none of them point at ctx.slug,
     // the back-link is missing.
     const uniqueTargets = new Set<string>();
-    for (const link of outbound) uniqueTargets.add(link.to_slug);
+    for (const link of outbound) {
+      if (!link.to_slug || link.locked) continue;
+      uniqueTargets.add(link.to_slug);
+    }
 
     for (const target of uniqueTargets) {
       const targetOutbound = await ctx.engine.getLinks(target);

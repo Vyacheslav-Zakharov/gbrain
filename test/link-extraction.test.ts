@@ -214,6 +214,20 @@ const allowAllResolver = {
 const nullResolver = { resolve: async () => null };
 
 describe('extractPageLinks', () => {
+  test('preserves the pinned target source on qualified wikilinks', async () => {
+    const { candidates } = await extractPageLinks(
+      'meetings/weekly',
+      'Закрытая часть: [[internal-production:meetings/weekly|Протокол]]',
+      {},
+      'meeting',
+      allowAllResolver,
+    );
+    const link = candidates.find(c => c.targetSlug === 'meetings/weekly');
+    expect(link).toBeDefined();
+    expect(link!.targetSourceId).toBe('internal-production');
+    expect(candidates.filter(c => c.targetSlug === 'meetings/weekly')).toHaveLength(1);
+  });
+
   test('returns LinkCandidate[] with inferred types', async () => {
     const { candidates } = await extractPageLinks(
       'docs/x',
