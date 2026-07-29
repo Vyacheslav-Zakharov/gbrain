@@ -158,13 +158,21 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
   }
   const fallbackTitle = stringifyValue(valueAt(record.data, profile.identity.display_name_field) ?? record.external_id);
   const title = cleanLineValue(renderedFields.title || fallbackTitle);
+  const renderedFrontmatter = Object.fromEntries(
+    Object.entries(mapping.frontmatter || {}).map(([key, value]) => [
+      key,
+      typeof value === 'string'
+        ? renderTemplateString(value, record, emptySlots, sourceFields)
+        : value,
+    ]),
+  );
   const frontmatter: Record<string, unknown> = {
     type: profile.target.gbrain_type,
     title,
     status: 'draft',
     source_id: profile.target.approved_source_id,
     ...(profile.mapping?.frontmatter || {}),
-    ...(mapping.frontmatter || {}),
+    ...renderedFrontmatter,
   };
   frontmatter.type = profile.target.gbrain_type;
   frontmatter.title = title;

@@ -564,7 +564,7 @@ describe('source-ingest Stage 3A executor', () => {
     expect(result.records[0].data.big_code).toBe('9007199254740993');
   });
 
-  test('template renderer rejects unknown filters and keeps markdown title single-line/capped', () => {
+  test('template renderer renders frontmatter fields and keeps markdown title single-line/capped', () => {
     const emptySlots: string[] = [];
     const rendered = renderTemplateString('{{ name | unknown }}', { external_id: 'x', data: { name: 'Secret' } }, emptySlots);
     expect(rendered).toBe('');
@@ -573,11 +573,16 @@ describe('source-ingest Stage 3A executor', () => {
       ...profile,
       mapping: {
         ...profile.mapping,
-        article_template: { sections: { title: '{{ name }}', notes: 'ok' } },
+        article_template: {
+          frontmatter: { status: '{{ status }}', reviewed: true },
+          sections: { title: '{{ name }}', notes: 'ok' },
+        },
       },
-    }, { external_id: 'x', data: { name: 'Line 1\nLine 2' } });
+    }, { external_id: 'x', data: { name: 'Line 1\nLine 2', status: 'active' } });
     expect(article.title).toBe('Line 1 Line 2');
     expect(article.body).toContain('# Line 1 Line 2\n');
+    expect(article.frontmatter.status).toBe('active');
+    expect(article.frontmatter.reviewed).toBe(true);
   });
 
   test('meeting templates render type-specific sections, Cyrillic fields, and transliterated slugs', () => {
@@ -714,7 +719,11 @@ describe('source-ingest Stage 3A executor', () => {
       update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true, include_external_id_in_content: false, render_source_data: false },
       mapping: {
         ...profile.mapping,
-        article_template: { ...profile.mapping?.article_template, include_title_heading: false },
+        article_template: {
+          ...profile.mapping?.article_template,
+          include_title_heading: false,
+          frontmatter: { status: '{{ status }}' },
+        },
       },
       identity: {
         ...profile.identity,
@@ -748,6 +757,7 @@ describe('source-ingest Stage 3A executor', () => {
     expect(page?.frontmatter.aliases).toEqual(['manual-a001']);
     expect(page?.frontmatter.company_metadata).toEqual({ owner: 'human', tier: 'gold' });
     expect((page?.frontmatter.source_ingest as Record<string, unknown>)?.run_id).toBeUndefined();
+    expect((await engine.getPage('source-ingest/vehicles/a-002', { sourceId: 'shared' }))?.frontmatter.status).toBe('repair');
   }, 30000);
 
   test('second identical run is unchanged and preserves page content_hash', async () => {
