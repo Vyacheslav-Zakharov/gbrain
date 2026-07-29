@@ -5,7 +5,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { putSourceIngestProfile, profileHash } from '../src/core/source-ingest/store.ts';
-import { buildSourceGraphLinks, enrichSourceIngestLinkedCollections, reconcileSourceGraphLinks, runSourceIngestExecutor, sourceIngestLockId } from '../src/core/source-ingest/executor.ts';
+import { buildSourceGraphLinks, enrichSourceIngestLinkedCollections, runSourceIngestExecutor, sourceIngestLockId } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
 import { listDueSourceRefreshes, parseFreshnessPolicyMs, enqueueDueSourceRefreshJobs } from '../src/core/source-ingest/freshness.ts';
@@ -261,50 +261,44 @@ describe('source-ingest Stage 3A executor', () => {
         WHERE link_source = 'source-ingest' AND link_type = 'located_at'`,
       [],
     );
-    const desiredConflictLinks = buildSourceGraphLinks(
-      graphProfile,
-      { location_id: 'facility-almaty-yard' },
-      'source-ingest/vehicles/a-001',
-      'shared',
-    );
-    await expect(reconcileSourceGraphLinks(
-      engine,
-      graphProfile,
-      'source-ingest/vehicles/a-001',
-      'shared',
-      desiredConflictLinks,
-    )).rejects.toThrow('source_ingest graph ownership conflict');
+    const beforeConflictPage = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    const beforeConflictCommit = execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+    await engine.executeRaw('DELETE FROM op_checkpoint_paths');
+    await engine.executeRaw('DELETE FROM op_checkpoints');
+    const conflictRun = await runSourceIngestExecutor(engine, {
+      profile_id: graphProfile.profile_id,
+      run_id: 'run-graph-owner-conflict',
+      no_embed: true,
+    });
+    expect(conflictRun.results.filter(row => row.status === 'failed')).toHaveLength(2);
+    expect(conflictRun.results.filter(row => row.status === 'failed').every(row => row.reason?.includes('source_ingest graph ownership conflict'))).toBe(true);
+    const afterConflictPage = await engine.getPage('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(afterConflictPage?.content_hash).toBe(beforeConflictPage?.content_hash);
+    expect(execFileSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()).toBe(beforeConflictCommit);
     const conflictingOwners = await engine.executeRaw<{ origin_field: string }>(
       `SELECT origin_field FROM links WHERE link_source = 'source-ingest' AND link_type = 'located_at'`,
       [],
     );
     expect(conflictingOwners.every(row => row.origin_field === 'other-article-view:located-at-facility')).toBe(true);
+  }, 30000);
 
-    // Pre-profile-scoping releases stored only rule.id. The next run must adopt
-    // those exact Source Ingest edges instead of leaving unmanaged legacy rows.
-    await engine.executeRaw(
-      `UPDATE links
-          SET origin_field = 'located-at-facility',
-              context = 'source-ingest rule located-at-facility'
-        WHERE link_source = 'source-ingest' AND link_type = 'located_at'`,
-      [],
-    );
-    const migrated = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-legacy-migration', no_embed: true });
-    expect(migrated.graph_writes).toEqual({ created: 0, removed: 0 });
-    let links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
-    const projected = links.filter(l => l.link_type === 'located_at' && l.link_source === 'source-ingest');
-    expect(projected.length).toBe(1);
-    expect(projected[0]?.origin_field).toBe('fake-source-vehicle-graph-v1:located-at-facility');
-    expect(projected[0]?.context).toBe('source-ingest profile fake-source-vehicle-graph-v1 rule located-at-facility');
-
-    const second = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-second', no_embed: true });
-    expect(second.graph_writes).toEqual({ created: 0, removed: 0 });
-    links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
-    expect(links.some(l => l.to_slug === 'facility-almaty-yard' && l.link_type === 'located_at' && l.link_source === 'source-ingest')).toBe(true);
-
-    // Simulate an upgrade where the rule is deleted before its legacy edge ever
-    // receives profile scoping. The sole page projection may safely claim and
-    // remove that orphaned legacy edge.
+  test('adopts and removes a legacy graph edge when its rule was deleted before migration', async () => {
+    const repo = tempGitRepo();
+    await seed(repo);
+    await importFromContent(engine, 'facility-almaty-yard', `---\ntype: facility\ntitle: Almaty Yard\n---\n# Almaty Yard\n`, { noEmbed: true, sourceId: 'shared' });
+    const graphProfile: SourceIngestProfile = {
+      ...profile,
+      profile_id: 'fake-source-vehicle-legacy-graph-v1',
+      links: [{
+        id: 'located-at-facility',
+        type: 'located_at',
+        target: { type: 'facility', lookup: 'field_value', value_field: 'location_id', slug_template: '{{ value }}' },
+        when: [{ field: 'location_id', op: 'exists' }],
+      }],
+    };
+    await putSourceIngestProfile(engine, graphProfile, { createdBy: 'test', changeNote: 'legacy graph projection' });
+    const first = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-legacy-graph-first', no_embed: true });
+    expect(first.graph_writes).toEqual({ created: 2, removed: 0 });
     await engine.executeRaw(
       `UPDATE links
           SET origin_field = 'located-at-facility',
@@ -315,11 +309,11 @@ describe('source-ingest Stage 3A executor', () => {
     await putSourceIngestProfile(engine, {
       ...graphProfile,
       links: [],
-    }, { createdBy: 'test', changeNote: 'remove graph rule entirely' });
-    const third = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-remove', no_embed: true });
-    expect(third.graph_writes).toEqual({ created: 0, removed: 2 });
-    links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
-    expect(links.some(l => l.link_type === 'located_at' && l.link_source === 'source-ingest')).toBe(false);
+    }, { createdBy: 'test', changeNote: 'remove graph rule before legacy migration' });
+    const removed = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-legacy-graph-remove', no_embed: true });
+    expect(removed.graph_writes).toEqual({ created: 0, removed: 2 });
+    const links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(links.some(link => link.link_type === 'located_at' && link.link_source === 'source-ingest')).toBe(false);
   }, 30000);
 
   test('draft template only uses selected discovery fields and drops noisy/unselected fields', () => {
