@@ -206,7 +206,8 @@ export async function runPhaseSynthesizeConcepts(
                     .join('\n\n')}`,
               },
             ],
-            maxTokens: 500,
+            // Reasoning providers consume output tokens before emitting the narrative.
+            maxTokens: 2048,
           });
           // Post-await yield (T3): the LLM call is the main TTL hazard
           // codex flagged. Throttle inside maybeYield bounds the actual
