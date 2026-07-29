@@ -325,11 +325,12 @@ fi
 INNER_CMD=$(cat <<'EOF'
 set -euo pipefail
 echo "[runner] bun version: $(bun --version)"
-# oven/bun:1 omits git; many unit tests use mkdtemp + git init for fixtures.
-if ! command -v git >/dev/null 2>&1; then
-  echo "[runner] Installing git (debian apt)..."
+# oven/bun:1 omits git and procps. Tests use git fixtures, and the worker
+# registry's PID-reuse guard reads process start times through `ps`.
+if ! command -v git >/dev/null 2>&1 || ! command -v ps >/dev/null 2>&1; then
+  echo "[runner] Installing git + procps (debian apt)..."
   apt-get update -qq >/dev/null
-  apt-get install -y -qq git ca-certificates >/dev/null
+  apt-get install -y -qq git ca-certificates procps >/dev/null
 fi
 # Container runs as root (uid 0) against a host-uid bind-mount; mark repo +
 # any worktree gitdir as safe so `git status` etc. don't refuse.

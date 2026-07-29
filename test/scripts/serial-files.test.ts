@@ -74,5 +74,6 @@ describe('run-serial-tests.sh contract', () => {
     const invocations = src.match(/env -u DATABASE_URL -u GBRAIN_PGLITE_SNAPSHOT bash scripts\/run-serial-tests\.sh/g) ?? [];
     // --diff unsharded, full unsharded, and the default sharded path.
     expect(invocations).toHaveLength(3);
+    expect(src).toMatch(/apt-get install[^\n]*procps/);
   });
 });
