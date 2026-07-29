@@ -1393,14 +1393,15 @@ const restore_page: Operation = {
   description: 'v0.26.5 — restore a soft-deleted page (clear deleted_at). Returns success only if the page was actually soft-deleted. After this op, the page reappears in search and in get_page/list_pages without the include_deleted flag.',
   params: {
     slug: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Target source. Remote callers must have this source in their OAuth write grant.' },
   },
   mutating: true,
   scope: 'write',
   handler: async (ctx, p) => {
     const slug = p.slug as string;
-    if (ctx.dryRun) return { dry_run: true, action: 'restore_page', slug };
-    // v0.31.8 (D7): thread ctx.sourceId.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
+    const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
+    if (ctx.dryRun) return { dry_run: true, action: 'restore_page', slug, source_id: targetSourceId };
+    const sourceOpts = { sourceId: targetSourceId };
     const ok = await ctx.engine.restorePage(slug, sourceOpts);
     if (!ok) {
       // Distinguish "not found" from "already active" (idempotent-as-false).
@@ -1408,9 +1409,9 @@ const restore_page: Operation = {
       if (!existing) {
         throw new OperationError('page_not_found', `Page not found: ${slug}`, 'Check the slug.');
       }
-      return { status: 'already_active', slug };
+      return { status: 'already_active', slug, source_id: targetSourceId };
     }
-    return { status: 'restored', slug };
+    return { status: 'restored', slug, source_id: targetSourceId };
   },
   cliHints: { name: 'restore', positional: ['slug'] },
 };

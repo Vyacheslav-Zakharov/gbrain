@@ -11,7 +11,7 @@ describe('federated put_page write routing', () => {
     },
   } as any;
 
-  test.each(['put_page', 'delete_page', 'add_timeline_entry'])(
+  test.each(['put_page', 'delete_page', 'restore_page', 'add_timeline_entry'])(
     '%s exposes an explicit source_id parameter',
     (name) => {
       const op = operations.find((candidate) => candidate.name === name);
@@ -39,7 +39,7 @@ describe('federated put_page write routing', () => {
       .toBe('internal-example');
   });
 
-  test.each(['delete_page', 'add_timeline_entry'])(
+  test.each(['delete_page', 'restore_page', 'add_timeline_entry'])(
     '%s rejects an ungranted source_id before mutation',
     async (name) => {
       const op = operations.find((candidate) => candidate.name === name)!;
