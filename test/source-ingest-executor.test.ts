@@ -5,7 +5,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { putSourceIngestProfile, profileHash } from '../src/core/source-ingest/store.ts';
-import { buildSourceGraphLinks, runSourceIngestExecutor, sourceIngestLockId } from '../src/core/source-ingest/executor.ts';
+import { buildSourceGraphLinks, enrichSourceIngestLinkedCollections, runSourceIngestExecutor, sourceIngestLockId } from '../src/core/source-ingest/executor.ts';
 import { buildSourceRevertReport } from '../src/core/source-ingest/revert.ts';
 import { makeSourceIngestHandler, parseSourceIngestJobData } from '../src/core/minions/handlers/source-ingest.ts';
 import { listDueSourceRefreshes, parseFreshnessPolicyMs, enqueueDueSourceRefreshJobs } from '../src/core/source-ingest/freshness.ts';
@@ -188,10 +188,39 @@ describe('source-ingest Stage 3A executor', () => {
     };
     const links = buildSourceGraphLinks(graphProfile, { position_ids: ['pos-1', 'pos-2', 'pos-1'] }, 'hcm/employees/alice-example', 'shared');
     expect(links.map(l => [l.link_type, l.to_slug, l.link_source, l.origin_field])).toEqual([
-      ['holds_position', 'business-architecture/positions/pos-1', 'source-ingest', 'holds-position'],
-      ['holds_position', 'business-architecture/positions/pos-2', 'source-ingest', 'holds-position'],
+      ['holds_position', 'business-architecture/positions/pos-1', 'source-ingest', 'fake-source-vehicle-v1:holds-position'],
+      ['holds_position', 'business-architecture/positions/pos-2', 'source-ingest', 'fake-source-vehicle-v1:holds-position'],
     ]);
     expect(links.every(l => l.from_source_id === 'shared' && l.to_source_id === 'shared')).toBe(true);
+  });
+
+  test('renders linked collections with canonical identity slugs and fails closed when unresolved', () => {
+    const linkedProfile: SourceIngestProfile = {
+      ...profile,
+      mapping: {
+        ...profile.mapping,
+        linked_collections: [{
+          source_field: 'assignments',
+          output_field: 'assignments_display',
+          item_template: '- {{ position }} · {{ department }}',
+          links: {
+            position: { profile_id: 'positions-v1', id_field: 'position_id', label_field: 'position_name' },
+            department: { profile_id: 'departments-v1', id_field: 'department_id', label_field: 'department_name' },
+          },
+        }],
+      },
+    };
+    const record = {
+      external_id: 'person-1',
+      data: { assignments: [{ position_id: 'pos-1', position_name: 'Director', department_id: 'dep-1', department_name: 'IT' }] },
+    };
+    const resolutions = new Map([
+      ['positions-v1\u0000pos-1', { slug: 'business-architecture/positions/director', sourceId: 'shared' }],
+      ['departments-v1\u0000dep-1', { slug: 'business-architecture/departments/it', sourceId: 'shared' }],
+    ]);
+    const enriched = enrichSourceIngestLinkedCollections(linkedProfile, record, resolutions);
+    expect(enriched.data.assignments_display).toBe('- [[business-architecture/positions/director|Director]] · [[business-architecture/departments/it|IT]]');
+    expect(() => enrichSourceIngestLinkedCollections(linkedProfile, record, new Map())).toThrow('linked collection target unresolved');
   });
 
   test('writes typed source-ingest graph links idempotently after durable article commits', async () => {
@@ -212,8 +241,17 @@ describe('source-ingest Stage 3A executor', () => {
     expect(first.graph_writes).toEqual({ created: 2, removed: 0 });
     const second = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-second', no_embed: true });
     expect(second.graph_writes).toEqual({ created: 0, removed: 0 });
-    const links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    let links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
     expect(links.some(l => l.to_slug === 'facility-almaty-yard' && l.link_type === 'located_at' && l.link_source === 'source-ingest')).toBe(true);
+
+    await putSourceIngestProfile(engine, {
+      ...graphProfile,
+      links: graphProfile.links?.map(rule => ({ ...rule, when: [{ field: 'status', op: 'eq', value: '__never__' }] })),
+    }, { createdBy: 'test', changeNote: 'remove projected relation' });
+    const third = await runSourceIngestExecutor(engine, { profile_id: graphProfile.profile_id, run_id: 'run-graph-remove', no_embed: true });
+    expect(third.graph_writes).toEqual({ created: 0, removed: 2 });
+    links = await engine.getLinks('source-ingest/vehicles/a-001', { sourceId: 'shared' });
+    expect(links.some(l => l.link_type === 'located_at' && l.link_source === 'source-ingest')).toBe(false);
   }, 30000);
 
   test('draft template only uses selected discovery fields and drops noisy/unselected fields', () => {
@@ -611,7 +649,11 @@ describe('source-ingest Stage 3A executor', () => {
 
     await putSourceIngestProfile(engine, {
       ...profile,
-      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true, include_external_id_in_content: false },
+      update_policy: { ...profile.update_policy, manage_generated_article: true, manage_adopted_article: true, include_external_id_in_content: false, render_source_data: false },
+      mapping: {
+        ...profile.mapping,
+        article_template: { ...profile.mapping?.article_template, include_title_heading: false },
+      },
       identity: {
         ...profile.identity,
         existing_slug_map: { 'veh-001': slug },
@@ -631,6 +673,8 @@ describe('source-ingest Stage 3A executor', () => {
     expect(page?.compiled_truth).toContain('Toyota Hilux A001');
     expect(page?.compiled_truth?.indexOf('Human-owned context.')).toBeLessThan(page?.compiled_truth?.indexOf('gbrain-source-article:start') ?? -1);
     expect(page?.compiled_truth).toContain('source-sync:start');
+    expect(page?.compiled_truth).not.toContain('## Source data');
+    expect(page?.compiled_truth?.match(/^#\s+/gm)).toHaveLength(1);
     expect(page?.timeline).toContain('Human timeline entry.');
     const persistedMarkdown = readFileSync(join(repo, `${slug}.md`), 'utf8');
     expect(persistedMarkdown).toContain('<!-- timeline -->');
@@ -676,6 +720,7 @@ describe('source-ingest Stage 3A executor', () => {
         current_state_fields: ['name', 'status', 'updated_at'],
         timeline_fields: ['status'],
         baseline_timeline_fields: [],
+        timeline_field_labels: { status: 'Статус техники' },
         relationship_rules: [],
         related_pages: { policy: 'graph_projection' },
         agent: { enabled: false, semantic_fields: [], confidence_threshold: 0.9, allowed_actions: [] },
@@ -707,7 +752,7 @@ describe('source-ingest Stage 3A executor', () => {
     expect(changed.results[0]?.timeline_created).toBe(1);
     const timeline = await engine.getTimeline('source-ingest/vehicles/a-001', { sourceId: 'shared' });
     expect(timeline).toHaveLength(1);
-    expect(timeline[0].summary).toBe('Изменено поле «status»: repair → active');
+    expect(timeline[0].summary).toBe('Изменено поле «Статус техники»: repair → active');
     expect(timeline[0].source).toMatch(/^source-ingest:fake-source-vehicle-v1:[a-f0-9]{16}$/);
 
     const repeated = await runSourceIngestExecutor(engine, { profile_id: profile.profile_id, run_id: 'run-ci-repeated', limit: 1, no_embed: true });
