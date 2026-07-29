@@ -14,6 +14,7 @@ const sourceIngestUi = () => [
   'admin/src/pages/source-ingest/SourceIngestCatalogPanel.tsx',
   'admin/src/pages/source-ingest/SourceIngestWizard.tsx',
   'admin/src/pages/source-ingest/TransformViewEditor.tsx',
+  'admin/src/pages/source-ingest/useSourceIngestConnectorDomain.ts',
   'admin/src/pages/source-ingest/ArticleViewStatePanel.tsx',
   'admin/src/pages/source-ingest/shared.tsx',
   'admin/src/pages/source-ingest/ru.ts',
@@ -264,6 +265,31 @@ describe('source-ingest admin review gates', () => {
     expect(coordinator).not.toContain('const [schemaWorkbench, setSchemaWorkbench] = useState');
     expect(coordinator).not.toContain('const load = async');
     expect(coordinator).not.toContain('const refreshCatalogTree = async');
+  });
+
+  test('connector state and credential actions live in one domain hook without changing editor props', () => {
+    const hookPath = join(root, 'admin/src/pages/source-ingest/useSourceIngestConnectorDomain.ts');
+    const coordinator = readFileSync(join(root, 'admin/src/pages/SourceIngest.tsx'), 'utf8');
+    const editor = readFileSync(join(root, 'admin/src/pages/source-ingest/ConnectorEditor.tsx'), 'utf8');
+
+    expect(existsSync(hookPath)).toBe(true);
+    if (!existsSync(hookPath)) return;
+    const hook = readFileSync(hookPath, 'utf8');
+    expect(hook).toContain('export function useSourceIngestConnectorDomain');
+    for (const action of ['saveConfig', 'rotateSecret', 'deleteSecret', 'loadSecretAudit', 'testConnection', 'saveCatalogConnector', 'saveCatalogConnectorCredentials', 'deleteCatalogConnectorCredentials', 'listCatalogConnectorObjects', 'testCatalogConnector']) {
+      expect(hook).toContain(`const ${action} = async`);
+    }
+    for (const step of ['save-config', 'save-secret', 'delete-secret', 'secret-audit', 'test-connection', 'catalog-connector', 'catalog-save-secret', 'catalog-delete-secret', 'catalog-list-objects', 'catalog-test-connector']) {
+      expect(hook).toContain(`runStep('${step}'`);
+    }
+    expect(coordinator).toContain("import { useSourceIngestConnectorDomain } from './source-ingest/useSourceIngestConnectorDomain';");
+    expect(coordinator).toContain('useSourceIngestConnectorDomain({');
+    expect(coordinator).not.toContain('const [catalogConnectorForm, setCatalogConnectorForm] = useState');
+    expect(coordinator).not.toContain('const [secretForm, setSecretForm] = useState');
+    expect(coordinator).not.toContain('const saveCatalogConnectorCredentials = async');
+    for (const prop of ['catalogConnectorForm', 'setCatalogConnectorForm', 'secretForm', 'setSecretForm', 'saveCatalogConnector', 'saveCatalogConnectorCredentials', 'deleteCatalogConnectorCredentials', 'listCatalogConnectorObjects', 'testCatalogConnector']) {
+      expect(editor).toContain(`${prop}:`);
+    }
   });
 
   test('connector registry exposes implemented v1 connector kinds', () => {

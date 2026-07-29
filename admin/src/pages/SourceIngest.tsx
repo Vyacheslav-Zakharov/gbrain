@@ -10,6 +10,7 @@ import { SourceIngestWizard } from './source-ingest/SourceIngestWizard';
 import { TransformViewEditor } from './source-ingest/TransformViewEditor';
 import { asArr, asObj, MiniBadge, shortHash, type CatalogArea, val } from './source-ingest/shared';
 import { useAsyncActionRunner } from './source-ingest/useAsyncActionRunner';
+import { useSourceIngestConnectorDomain } from './source-ingest/useSourceIngestConnectorDomain';
 import { useSourceIngestBootstrap } from './source-ingest/useSourceIngestBootstrap';
 
 type ConnectorChoice = {
@@ -595,9 +596,6 @@ export function SourceIngestPage() {
   const [dryRunSourceId, setDryRunSourceId] = useState<string | null>(null);
   const [sensitivityAck, setSensitivityAck] = useState(false);
   const [approveResult, setApproveResult] = useState<unknown>(null);
-  const [connectionTest, setConnectionTest] = useState<unknown>(null);
-  const [secretAudit, setSecretAudit] = useState<unknown>(null);
-  const [secretForm, setSecretForm] = useState({ app_id: '', access_key: '', connection_string: '' });
   const [form, setForm] = useState<ReviewForm>({
     connector_id: 'appsheet-vehicles',
     source_object: 'vehicle',
@@ -618,11 +616,7 @@ export function SourceIngestPage() {
   const [transformSql, setTransformSql] = useState('');
   const [transformPrimaryKey, setTransformPrimaryKey] = useState('vehicleID');
   const [transformUpdatedAt, setTransformUpdatedAt] = useState('');
-  const [catalogConnectorForm, setCatalogConnectorForm] = useState({ connector_id: '', kind: 'appsheet', display_name: '', enabled: true });
-  const [catalogConnectorObjects, setCatalogConnectorObjects] = useState<unknown>(null);
-  const [catalogConnectorTest, setCatalogConnectorTest] = useState<unknown>(null);
   const [catalogDeleteImpact, setCatalogDeleteImpact] = useState<unknown>(null);
-  const [catalogConnectorSecretStatus, setCatalogConnectorSecretStatus] = useState<unknown>(null);
   const [baseViewForm, setBaseViewForm] = useState<BaseViewForm>({
     base_view_id: '',
     connector_id: '',
@@ -886,6 +880,43 @@ export function SourceIngestPage() {
     config_json: { table_name: form.table_name, primary_key_field: form.primary_key_field, updated_at_field: form.updated_at_field, selected_fields: selectedSourceFields, article_sections: articleSections, transform_enabled: transformEnabled, transform_sources: parseJsonArray(transformSourcesText), transform_sql: transformSql, transform_primary_key: transformPrimaryKey, transform_updated_at: transformUpdatedAt },
   });
 
+  const {
+    connectionTest,
+    secretAudit,
+    secretForm,
+    setSecretForm,
+    catalogConnectorForm,
+    setCatalogConnectorForm,
+    catalogConnectorObjects,
+    setCatalogConnectorObjects,
+    catalogConnectorTest,
+    setCatalogConnectorTest,
+    catalogConnectorSecretStatus,
+    catalogConnectorSecretConfigId,
+    saveConfig,
+    rotateSecret,
+    deleteSecret,
+    loadSecretAudit,
+    testConnection,
+    saveCatalogConnector,
+    saveCatalogConnectorCredentials,
+    deleteCatalogConnectorCredentials,
+    listCatalogConnectorObjects,
+    testCatalogConnector,
+    resetCatalogConnector,
+    selectCatalogConnectorState,
+  } = useSourceIngestConnectorDomain({
+    runStep,
+    load,
+    activeNode,
+    catalogConnectors,
+    configId,
+    connectorId: form.connector_id,
+    sourceObject: form.source_object,
+    configPayload,
+    connectionPayload: payload,
+  });
+
   const applySavedConfig = () => {
     if (!savedConfig) return;
     const savedJson = asObj(savedConfig.config_json);
@@ -917,52 +948,6 @@ export function SourceIngestPage() {
     setApproveResult(null);
   };
 
-  const saveConfig = async () => runStep('save-config', async () => {
-    await api.sourceIngestSaveConfig(configPayload());
-    await load();
-  });
-
-  const rotateSecret = async () => runStep('save-secret', async () => {
-    await api.sourceIngestSaveConfig(configPayload());
-    await api.sourceIngestSaveSecret({
-      config_id: configId,
-      connector_id: form.connector_id,
-      source_object: form.source_object,
-      secrets: secretForm,
-    });
-    setSecretForm({ app_id: '', access_key: '', connection_string: '' });
-    await load();
-    setConnectionTest(await api.sourceIngestTestConnection(payload()));
-    setSecretAudit(await api.sourceIngestSecretAudit(configId));
-  });
-
-  const deleteSecret = async () => runStep('delete-secret', async () => {
-    await api.sourceIngestDeleteSecret({ config_id: configId, connector_id: form.connector_id, source_object: form.source_object });
-    await load();
-    setSecretAudit(await api.sourceIngestSecretAudit(configId));
-  });
-
-  const loadSecretAudit = async () => runStep('secret-audit', async () => {
-    setSecretAudit(await api.sourceIngestSecretAudit(configId));
-  });
-
-  const saveCatalogConnector = async () => runStep('catalog-connector', async () => {
-    const connectorId = catalogConnectorForm.connector_id.trim();
-    if (!connectorId) throw new Error('connector_id_required');
-    if (activeNode === 'connector:new' && catalogConnectors.some(row => String(row.connector_id) === connectorId)) {
-      throw new Error(`connector_already_exists:${connectorId}`);
-    }
-    await api.sourceIngestSaveCatalogConnector({
-      ...catalogConnectorForm,
-      connector_id: connectorId,
-      display_name: catalogConnectorForm.display_name.trim() || catalogConnectorForm.connector_id,
-      config_json: catalogConnectorForm.kind === 'postgres'
-        ? { source: 'admin-ui', phase: 'catalog-tree-shell', schema: 'gbrain', allowed_objects: ['companies', 'departments', 'positions', 'employees'] }
-        : { source: 'admin-ui', phase: 'catalog-tree-shell' },
-    });
-    await load();
-  });
-
   const setRouteHash = (node: string) => {
     if (typeof window === 'undefined') return;
     if (!node.includes(':')) return;
@@ -991,11 +976,7 @@ export function SourceIngestPage() {
     }
     if (node === 'connector:new') {
       setActiveArea('connectors');
-      setCatalogConnectorForm({ connector_id: '', kind: 'appsheet', display_name: '', enabled: true });
-      setSecretForm({ app_id: '', access_key: '', connection_string: '' });
-      setCatalogConnectorObjects(null);
-      setCatalogConnectorTest(null);
-      setCatalogConnectorSecretStatus(null);
+      resetCatalogConnector();
       setCatalogDeleteImpact(null);
     } else if (node === 'base_view:new') {
       setActiveArea('base_views');
@@ -1076,26 +1057,11 @@ export function SourceIngestPage() {
 
   const selectCatalogConnector = (row: Record<string, unknown>) => {
     setActiveArea('connectors');
-    const connectorId = String(row.connector_id ?? '');
+    const connectorId = selectCatalogConnectorState(row);
     setActiveNode(`connector:${connectorId}`);
     setRouteHash(`connector:${connectorId}`);
-    setCatalogConnectorForm({
-      connector_id: connectorId,
-      kind: String(row.kind ?? 'appsheet'),
-      display_name: String(row.display_name ?? connectorId),
-      enabled: row.enabled !== false,
-    });
     setForm(prev => ({ ...prev, connector_id: connectorId }));
-    setCatalogConnectorObjects(null);
-    setCatalogConnectorTest(null);
   };
-
-  const catalogConnectorSecretConfigId = () => `connector:${catalogConnectorForm.connector_id}`;
-  const catalogConnectorPayload = () => ({
-    connector_id: catalogConnectorForm.connector_id,
-    kind: catalogConnectorForm.kind,
-    config_id: catalogConnectorSecretConfigId(),
-  });
 
   useEffect(() => {
     const connectorId = baseViewForm.connector_id.trim();
@@ -1130,56 +1096,6 @@ export function SourceIngestPage() {
   const createSchemaProposal = async (payload: Record<string, unknown>) => {
     return (await runStep('schema-proposal', () => api.sourceIngestSchemaProposalCreate(payload))) ?? null;
   };
-
-  const saveCatalogConnectorCredentials = async () => runStep('catalog-save-secret', async () => {
-    await api.sourceIngestSaveCatalogConnector({
-      ...catalogConnectorForm,
-      display_name: catalogConnectorForm.display_name.trim() || catalogConnectorForm.connector_id,
-      config_json: catalogConnectorForm.kind === 'postgres'
-        ? { source: 'admin-ui', phase: 'catalog-tree-shell', schema: 'gbrain', allowed_objects: ['companies', 'departments', 'positions', 'employees'] }
-        : { source: 'admin-ui', phase: 'catalog-tree-shell' },
-    });
-    await api.sourceIngestSaveConfig({
-      config_id: catalogConnectorSecretConfigId(),
-      connector_id: catalogConnectorForm.connector_id,
-      source_object: '__connection__',
-      display_name: catalogConnectorForm.display_name.trim() || catalogConnectorForm.connector_id,
-      enabled: true,
-      config_json: { connector_level: true, kind: catalogConnectorForm.kind },
-    });
-    const status = await api.sourceIngestSaveSecret({
-      config_id: catalogConnectorSecretConfigId(),
-      connector_id: catalogConnectorForm.connector_id,
-      source_object: '__connection__',
-      secrets: secretForm,
-    });
-    setCatalogConnectorSecretStatus(status);
-    setSecretForm({ app_id: '', access_key: '', connection_string: '' });
-    setSecretAudit(await api.sourceIngestSecretAudit(catalogConnectorSecretConfigId()));
-    await load();
-  });
-
-  const deleteCatalogConnectorCredentials = async () => runStep('catalog-delete-secret', async () => {
-    const status = await api.sourceIngestDeleteSecret({
-      config_id: catalogConnectorSecretConfigId(),
-      connector_id: catalogConnectorForm.connector_id,
-      source_object: '__connection__',
-    });
-    setCatalogConnectorSecretStatus(status);
-    setSecretAudit(await api.sourceIngestSecretAudit(catalogConnectorSecretConfigId()));
-    await load();
-  });
-
-  const listCatalogConnectorObjects = async () => runStep('catalog-list-objects', async () => {
-    setCatalogConnectorObjects(await api.sourceIngestConnectorListObjects(catalogConnectorPayload()));
-  });
-
-  const testCatalogConnector = async () => runStep('catalog-test-connector', async () => {
-    const out = await api.sourceIngestCatalogConnectorTest(catalogConnectorPayload());
-    setCatalogConnectorTest(out);
-    const objs = asArr<Record<string, unknown>>(asObj(out).objects);
-    if (objs.length > 0) setCatalogConnectorObjects(out);
-  });
 
   const runDeleteGuard = async (kind: string, id: string): Promise<{ confirmed: boolean; token?: string }> => {
     const out = await api.sourceIngestCatalogDeleteImpact({ kind, id });
@@ -1625,10 +1541,6 @@ export function SourceIngestPage() {
     }
     setArticleViewApproveResult(await api.sourceIngestApproveArticleView(articleViewForm.article_view_id, articleViewCurrentChainHash));
     await load();
-  });
-
-  const testConnection = async () => runStep('test-connection', async () => {
-    setConnectionTest(await api.sourceIngestTestConnection(payload()));
   });
 
   const refreshReport = async () => runStep('refresh-report', async () => {
