@@ -283,8 +283,18 @@ describe('v0.41 T6: runPhaseSynthesizeConcepts via stubbed chat', () => {
     ];
     const result = await runPhaseSynthesizeConcepts(engine, { _atoms: atoms });
     expect(result.details?.concepts_written).toBe(2);
-    expect(await engine.getPage('concepts/same-theme', { sourceId: 'shared' })).not.toBeNull();
-    expect(await engine.getPage('concepts/same-theme', { sourceId: 'hidden' })).not.toBeNull();
+    const proposals = await engine.executeRaw<{ source_id: string; page_slug: string; status: string }>(
+      `SELECT source_id, page_slug, status
+         FROM concept_proposals
+        WHERE page_slug = 'concepts/same-theme'
+        ORDER BY source_id`,
+    );
+    expect(proposals).toEqual([
+      { source_id: 'hidden', page_slug: 'concepts/same-theme', status: 'pending' },
+      { source_id: 'shared', page_slug: 'concepts/same-theme', status: 'pending' },
+    ]);
+    expect(await engine.getPage('concepts/same-theme', { sourceId: 'shared' })).toBeNull();
+    expect(await engine.getPage('concepts/same-theme', { sourceId: 'hidden' })).toBeNull();
     expect(await engine.getPage('concepts/same-theme', { sourceId: 'default' })).toBeNull();
   });
 
