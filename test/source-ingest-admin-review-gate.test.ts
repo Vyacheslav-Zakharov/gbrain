@@ -237,6 +237,8 @@ describe('source-ingest admin review gates', () => {
     expect(css).toContain('min-height: 38px');
     const connector = readFileSync(join(root, 'admin/src/pages/source-ingest/ConnectorEditor.tsx'), 'utf8');
     expect(connector).toContain("gridTemplateColumns: 'repeat(2, minmax(220px, 1fr))'");
+    expect(css).toContain('@media (min-width: 901px) and (max-width: 1180px)');
+    expect(css).toContain('.source-ingest-form-grid { grid-template-columns: minmax(0, 1fr) !important; }');
   });
 
   test('source-ingest orchestration uses one typed async action runner', () => {

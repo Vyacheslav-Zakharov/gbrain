@@ -89,11 +89,14 @@ export function AIReviewPage() {
   const [receipt, setReceipt] = useState<Record<string, unknown> | null>(null);
   const [mobileDetail, setMobileDetail] = useState(false);
   const detailRequest = useRef(0);
+  const listRequest = useRef(0);
 
   const loadList = useCallback(async () => {
+    const request = ++listRequest.current;
     setLoading(true);
     try {
       const data = await api.aiReviewProposals({ status, q: query, source_id: sourceFilter, limit: 200 });
+      if (request !== listRequest.current) return;
       setRows(data.rows ?? []);
       setTotal(data.total ?? 0);
       if (status === 'pending' && !query && !sourceFilter) {
@@ -103,6 +106,7 @@ export function AIReviewPage() {
       setPageError(null);
       if (!data.rows?.some((r: Proposal) => r.id === selectedId)) setSelectedId(null);
     } catch (e) {
+      if (request !== listRequest.current) return;
       setRows([]);
       setTotal(null);
       setSelectedId(null);
@@ -110,7 +114,7 @@ export function AIReviewPage() {
       setDraft(null);
       setPageError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (request === listRequest.current) setLoading(false);
     }
   }, [status, query, sourceFilter, selectedId]);
 

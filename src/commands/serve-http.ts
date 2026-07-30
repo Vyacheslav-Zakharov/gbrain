@@ -2510,11 +2510,20 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     const data = { cwd: homedir(), argv: [process.execPath, cliEntry, 'dream', '--phase', 'calibration_profile'] };
     validateShellJobParams(data);
     const hourBucket = new Date().toISOString().slice(0, 13);
-    return meetingReviewQueue.add('shell', data, {
+    let job = await meetingReviewQueue.add('shell', data, {
       max_attempts: 1,
       timeout_ms: 1_800_000,
       idempotency_key: `admin-calibration-profile:${hourBucket}`,
     }, { allowProtectedSubmit: true });
+    if (['failed', 'dead', 'cancelled'].includes(job.status)) {
+      const minuteBucket = new Date().toISOString().slice(0, 16);
+      job = await meetingReviewQueue.add('shell', data, {
+        max_attempts: 1,
+        timeout_ms: 1_800_000,
+        idempotency_key: `admin-calibration-profile:retry:${job.id}:${minuteBucket}`,
+      }, { allowProtectedSubmit: true });
+    }
+    return job;
   };
 
   app.get('/admin/api/meeting-review/items', requireAdmin, async (req: Request, res: Response) => {

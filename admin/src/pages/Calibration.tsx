@@ -109,7 +109,15 @@ export function CalibrationPage() {
     setStartError('');
     try {
       const result = await api.startCalibration();
-      setNotice(`Задача #${result.job_id} поставлена в очередь. Ход выполнения виден в разделе «Задания».`);
+      if (result.status === 'active') {
+        setNotice(`Задача #${result.job_id} уже выполняется. Ход выполнения виден в разделе «Задания».`);
+      } else if (['waiting', 'delayed', 'waiting-children', 'paused'].includes(result.status)) {
+        setNotice(`Задача #${result.job_id} находится в очереди. Ход выполнения виден в разделе «Задания».`);
+      } else if (result.status === 'completed') {
+        setNotice(`Задача #${result.job_id} уже завершена. Обновите страницу; если профиль не появился, проверьте наличие пяти оценённых тезисов.`);
+      } else {
+        setStartError(`Задача #${result.job_id} имеет статус «${result.status}». Повторите запуск через минуту или откройте раздел «Задания».`);
+      }
     } catch (err) {
       setStartError(err instanceof Error ? err.message : String(err));
     } finally {

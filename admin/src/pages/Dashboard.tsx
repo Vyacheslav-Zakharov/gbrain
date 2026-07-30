@@ -1,15 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
-
-interface FeedEvent {
-  id?: number;
-  agent: string;
-  operation: string;
-  scopes: string;
-  latency_ms: number;
-  status: string;
-  timestamp: string;
-}
+import { mergeEvents, type FeedEvent } from '../event-merge';
 
 interface RequestLogRow {
   id: number;
@@ -19,19 +10,6 @@ interface RequestLogRow {
   latency_ms: number;
   status: string;
   created_at: string;
-}
-
-function mergeEvents(current: FeedEvent[], incoming: FeedEvent[]): FeedEvent[] {
-  const seen = new Set<string>();
-  return [...incoming, ...current]
-    .filter(event => {
-      const key = event.id ? `id:${event.id}` : `${event.timestamp}|${event.agent}|${event.operation}|${event.status}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .slice(0, 50);
 }
 
 export function DashboardPage() {

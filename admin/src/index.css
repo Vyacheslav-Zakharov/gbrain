@@ -528,6 +528,10 @@ label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
   .source-ingest-layout table { display: block; max-width: 100%; overflow-x: auto; }
 }
 
+@media (min-width: 901px) and (max-width: 1180px) {
+  .source-ingest-form-grid { grid-template-columns: minmax(0, 1fr) !important; }
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   .mobile-nav-toggle {

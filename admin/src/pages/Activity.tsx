@@ -124,8 +124,20 @@ function statusColor(status: string, partial = false): string {
   return 'var(--text-muted, #8b949e)';
 }
 
+const STATUS_LABELS: Record<string, string> = {
+  waiting: 'ожидает', active: 'выполняется', completed: 'завершено', failed: 'ошибка',
+  delayed: 'отложено', dead: 'остановлено', cancelled: 'отменено',
+  'waiting-children': 'ожидает подзадачи', waiting_children: 'ожидает подзадачи',
+  paused: 'приостановлено', partial: 'частично', warn: 'предупреждение',
+  ok: 'успешно', clean: 'без ошибок', fail: 'ошибка', skip: 'пропущено',
+};
+
+function statusLabel(status: string, partial = false): string {
+  return partial ? STATUS_LABELS.partial : (STATUS_LABELS[status] ?? status);
+}
+
 function StatusBadge({ status, partial = false }: { status: string; partial?: boolean }) {
-  const label = partial ? 'partial' : status;
+  const label = statusLabel(status, partial);
   return <span style={{
     border: `1px solid ${statusColor(status, partial)}`,
     color: statusColor(status, partial),
@@ -153,7 +165,7 @@ function DetailValue({ value }: { value: unknown }) {
 
 function RunDetails({ run, id }: { run: ActivityRun; id: string }) {
   if (run.phases.length === 0) {
-    return <div id={id} style={{ color: 'var(--text-muted)', padding: 14 }}>У этого job нет структурированного отчёта по фазам.</div>;
+    return <div id={id} style={{ color: 'var(--text-muted)', padding: 14 }}>У этого задания нет структурированного отчёта по фазам.</div>;
   }
   return <div id={id} style={{ padding: '4px 14px 14px' }}>
     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
@@ -180,10 +192,10 @@ function RunDetails({ run, id }: { run: ActivityRun; id: string }) {
                 </div>)}
               </div>
               {phase.pages_affected_count > 0 && <div style={{ marginTop: 8 }}>
-                <span style={{ color: 'var(--text-muted)' }}>pages affected: </span>{phase.pages_affected_count}
+                <span style={{ color: 'var(--text-muted)' }}>Затронуто страниц: </span>{phase.pages_affected_count}
               </div>}
               {phase.has_error && <div style={{ marginTop: 8, color: 'var(--error)' }}>
-                Ошибка зафиксирована{phase.error_code ? ` · code=${phase.error_code}` : ''}; текст скрыт политикой безопасности
+                Ошибка зафиксирована{phase.error_code ? ` · код=${phase.error_code}` : ''}; текст скрыт политикой безопасности
               </div>}
             </details>
           </td>
@@ -191,7 +203,7 @@ function RunDetails({ run, id }: { run: ActivityRun; id: string }) {
       </React.Fragment>)}</tbody>
     </table>
     {run.has_error && <div style={{ color: 'var(--error)', margin: '10px 6px 0', fontSize: 12 }}>
-      Ошибка job зафиксирована; текст скрыт политикой безопасности
+      Ошибка задания зафиксирована; текст скрыт политикой безопасности
     </div>}
   </div>;
 }
@@ -275,7 +287,7 @@ export function ActivityPage() {
       a.click();
       URL.revokeObjectURL(url);
       if (report.pagination.export_truncated) {
-        setError(`Экспорт ограничен первыми ${report.pagination.returned} runs из ${report.pagination.total}`);
+        setError(`Экспорт ограничен первыми ${report.pagination.returned} запусками из ${report.pagination.total}`);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -305,16 +317,16 @@ export function ActivityPage() {
         <label style={{ color: 'var(--text-muted)', fontSize: 12 }}>По <input type="date" value={customUntil} onChange={e => { setCustomUntil(e.target.value); setOffset(0); }} /></label>
       </div>}
       <select value={source} onChange={e => { setSource(e.target.value); setOffset(0); }} style={{ minWidth: 150 }}>
-        <option value="">Все sources</option>
+        <option value="">Все источники</option>
         {snapshot?.by_source.map(item => <option key={item.source_id} value={item.source_id}>{item.source_id} ({item.total})</option>)}
       </select>
       <select value={name} onChange={e => { setName(e.target.value); setOffset(0); }} style={{ minWidth: 180 }}>
-        <option value="">Все типы jobs</option>
+        <option value="">Все типы заданий</option>
         {snapshot?.by_type.map(item => <option key={item.name} value={item.name}>{item.name} ({item.total})</option>)}
       </select>
       <select value={status} onChange={e => { setStatus(e.target.value); setOffset(0); }}>
         <option value="">Все статусы</option>
-        {(snapshot?.statuses ?? []).map(v => <option key={v} value={v}>{v}</option>)}
+        {(snapshot?.statuses ?? []).map(v => <option key={v} value={v}>{statusLabel(v)}</option>)}
       </select>
       {snapshot && <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 12 }}>
         {new Date(snapshot.range.since).toLocaleDateString('ru-RU')} — {displayRangeEnd(snapshot.range).toLocaleDateString('ru-RU')}
@@ -369,13 +381,13 @@ export function ActivityPage() {
         <section style={{ ...panel, alignSelf: 'start' }}>
           <div style={{ padding: '13px 14px', borderBottom: '1px solid var(--border)', fontWeight: 600 }}>Самые дорогие фазы</div>
           <div style={{ padding: 14 }}>
-            {phaseTotals.length === 0 && <span style={{ color: 'var(--text-muted)' }}>Нет phase reports</span>}
+            {phaseTotals.length === 0 && <span style={{ color: 'var(--text-muted)' }}>Нет отчётов по фазам</span>}
             {phaseTotals.map(item => <div key={item.phase} style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                 <code>{item.phase}</code><strong>{formatDuration(item.duration_ms)}</strong>
               </div>
               <div style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 3 }}>
-                {item.runs} runs · ${item.spend.toFixed(3)}{item.warnings ? ` · ${item.warnings} warn/skip/fail` : ''}
+                {item.runs} запусков · ${item.spend.toFixed(3)}{item.warnings ? ` · ${item.warnings} с предупреждением, пропуском или ошибкой` : ''}
               </div>
             </div>)}
           </div>
