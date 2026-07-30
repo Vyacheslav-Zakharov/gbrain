@@ -3,7 +3,12 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { acceptTakeProposal, rejectTakeProposal } from '../src/core/ai-review.ts';
+import {
+  acceptTakeProposal,
+  deferTakeProposal,
+  rejectTakeProposal,
+  restoreTakeProposalToPending,
+} from '../src/core/ai-review.ts';
 import { acceptConceptProposal, createManualConceptRevision } from '../src/core/concept-review.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { contentHash } from '../src/core/cycle/propose-takes.ts';
@@ -30,15 +35,15 @@ beforeEach(async () => {
   await engine.executeRaw(`INSERT INTO sources (id,name,local_path,config) VALUES ('review-test','Review test',$1,'{}'::jsonb)`, [dir]);
 });
 
-async function seedProposal(): Promise<number> {
+async function seedProposal(suffix = '1'): Promise<number> {
   const markdown = `---\ntype: note\ntitle: Review source\n---\n\nSource prose that supports a bounded claim.\n`;
   await importFromContent(engine, 'notes/review-source', markdown, { sourceId: 'review-test', noEmbed: true });
   const page = await engine.getPage('notes/review-source', { sourceId: 'review-test' });
   const rows = await engine.executeRaw<{ id: number }>(
     `INSERT INTO take_proposals
        (source_id,page_slug,content_hash,prompt_version,proposal_run_id,claim_hash,claim_text,kind,holder,weight,domain,model_id)
-     VALUES ('review-test','notes/review-source',$1,'test-v1','run-test','claim-1','Supported bounded claim','take','world',0.7,'testing','stub') RETURNING id`,
-    [contentHash(page!.compiled_truth)],
+     VALUES ('review-test','notes/review-source',$1,'test-v1','run-test',$2,$3,'take','world',0.7,'testing','stub') RETURNING id`,
+    [contentHash(page!.compiled_truth), `claim-${suffix}`, `Supported bounded claim ${suffix}`],
   );
   return rows[0].id;
 }
@@ -68,6 +73,75 @@ describe('AI review canonical acceptance', () => {
     expect(page!.compiled_truth).not.toContain('gbrain:takes:begin');
     const events = await engine.executeRaw<{ details: { reason: string } }>(`SELECT details FROM ai_review_events WHERE target_id=$1`, [id]);
     expect(events[0].details.reason).toBe('unsupported');
+  });
+
+  test('reject rolls back the status when the audit event cannot be written', async () => {
+    const id = await seedProposal();
+    await engine.executeRaw(
+      `ALTER TABLE ai_review_events ADD CONSTRAINT reject_event_test CHECK (action <> 'reject')`,
+    );
+    try {
+      await expect(rejectTakeProposal(engine, id, 'admin-test', 'must roll back')).rejects.toThrow();
+    } finally {
+      await engine.executeRaw(`ALTER TABLE ai_review_events DROP CONSTRAINT reject_event_test`);
+    }
+    const rows = await engine.executeRaw<{ status: string; acted_at: string | null; acted_by: string | null }>(
+      `SELECT status, acted_at, acted_by FROM take_proposals WHERE id=$1`, [id],
+    );
+    expect(rows[0]).toMatchObject({ status: 'pending', acted_at: null, acted_by: null });
+  });
+
+  test('defer and restore are audited reversible state transitions without canonical writes', async () => {
+    const id = await seedProposal();
+    const deferred = await deferTakeProposal(engine, id, 'admin-test', 'capacity');
+    expect(deferred.proposal.status).toBe('deferred');
+    expect(deferred.proposal.acted_by).toBe('admin-test');
+
+    const restored = await restoreTakeProposalToPending(engine, id, 'admin-test', 'rollback rehearsal');
+    expect(restored.proposal.status).toBe('pending');
+    expect(restored.proposal.acted_at).toBeNull();
+    expect(restored.proposal.acted_by).toBeNull();
+
+    const page = await engine.getPage('notes/review-source', { sourceId: 'review-test' });
+    expect(page!.compiled_truth).not.toContain('gbrain:takes:begin');
+    const events = await engine.executeRaw<{ action: string; details: { reason: string } }>(
+      `SELECT action, details FROM ai_review_events WHERE target_id=$1 ORDER BY id`, [id],
+    );
+    expect(events.map(event => event.action)).toEqual(['defer', 'restore']);
+    expect(events.map(event => event.details.reason)).toEqual(['capacity', 'rollback rehearsal']);
+  });
+
+  test('restore can roll back a governed rejection but never an accepted proposal', async () => {
+    const rejectedId = await seedProposal();
+    await rejectTakeProposal(engine, rejectedId, 'admin-test', 'unsupported');
+    const restored = await restoreTakeProposalToPending(engine, rejectedId, 'admin-test', 'operator rollback');
+    expect(restored.proposal.status).toBe('pending');
+
+    const acceptedId = await seedProposal('2');
+    await acceptTakeProposal(engine, acceptedId, undefined, 'admin-test');
+    await expect(restoreTakeProposalToPending(engine, acceptedId, 'admin-test'))
+      .rejects.toMatchObject({ code: 'stale_status' });
+  });
+
+  test('restore refuses to create a second pending revision of the same claim', async () => {
+    const deferredId = await seedProposal();
+    await deferTakeProposal(engine, deferredId, 'admin-test', 'capacity');
+    const newer = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO take_proposals
+         (source_id,page_slug,content_hash,prompt_version,proposal_run_id,claim_hash,claim_text,kind,holder,weight,domain,model_id)
+       SELECT source_id,page_slug,'newer-content','test-v2','run-newer',claim_hash,claim_text,kind,holder,weight,domain,model_id
+         FROM take_proposals WHERE id=$1
+       RETURNING id`,
+      [deferredId],
+    );
+
+    await expect(restoreTakeProposalToPending(engine, deferredId, 'admin-test', 'late rollback'))
+      .rejects.toMatchObject({ code: 'newer_pending_exists' });
+    const states = await engine.executeRaw<{ id: number; status: string }>(
+      `SELECT id, status FROM take_proposals WHERE id IN ($1,$2) ORDER BY id`,
+      [deferredId, newer[0].id],
+    );
+    expect(states.map(row => row.status)).toEqual(['deferred', 'pending']);
   });
 });
 

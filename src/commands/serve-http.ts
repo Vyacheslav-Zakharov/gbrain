@@ -73,10 +73,12 @@ import {
   acceptTakeProposal,
   createLlmTakeRevision,
   createManualTakeRevision,
+  deferTakeProposal,
   getTakeProposalReview,
   listTakeProposals,
   rejectTakeProposal,
   ReviewConflictError,
+  restoreTakeProposalToPending,
   type TakeProposalStatus,
 } from '../core/ai-review.ts';
 import {
@@ -2593,7 +2595,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   app.get('/admin/api/ai-review/proposals', requireAdmin, async (req: Request, res: Response) => {
     try {
       const statusRaw = String(req.query.status ?? 'pending');
-      const status = ['pending', 'accepted', 'rejected', 'superseded'].includes(statusRaw)
+      const status = ['pending', 'accepted', 'rejected', 'superseded', 'deferred'].includes(statusRaw)
         ? statusRaw as TakeProposalStatus
         : 'pending';
       res.json(await listTakeProposals(engine, {
@@ -2655,6 +2657,22 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   app.post('/admin/api/ai-review/proposals/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
       res.json(await rejectTakeProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/defer', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await deferTakeProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/restore', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await restoreTakeProposalToPending(engine, Number(req.params.id), adminActor(req), req.body?.reason));
     } catch (error) {
       sendReviewError(res, error);
     }

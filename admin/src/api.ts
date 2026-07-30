@@ -120,6 +120,12 @@ export const api = {
   aiReviewReject: (id: number, reason?: string) => apiFetch(`/admin/api/ai-review/proposals/${id}/reject`, {
     method: 'POST', body: JSON.stringify({ reason }),
   }),
+  aiReviewDefer: (id: number, reason?: string) => apiFetch(`/admin/api/ai-review/proposals/${id}/defer`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  }),
+  aiReviewRestore: (id: number, reason?: string) => apiFetch(`/admin/api/ai-review/proposals/${id}/restore`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  }),
   aiReviewConcepts: (params: { status?: string; q?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') qs.set(key, String(value));

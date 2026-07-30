@@ -13,7 +13,7 @@ import { contentHash } from './cycle/propose-takes.ts';
 import { writePageThrough, type WriteThroughResult } from './write-through.ts';
 import { readFile } from 'node:fs/promises';
 
-export type TakeProposalStatus = 'pending' | 'accepted' | 'rejected' | 'superseded';
+export type TakeProposalStatus = 'pending' | 'accepted' | 'rejected' | 'superseded' | 'deferred';
 
 export interface TakeProposalRow {
   id: number;
@@ -23,6 +23,7 @@ export interface TakeProposalRow {
   prompt_version: string;
   proposal_run_id: string;
   status: TakeProposalStatus;
+  claim_hash: string;
   claim_text: string;
   kind: string;
   holder: string;
@@ -291,23 +292,105 @@ export async function rejectTakeProposal(
 ): Promise<ReviewMutationResult> {
   const identity = await loadProposal(engine, proposalId);
   return withPageLock(`ai-review:${identity.source_id}:${identity.page_slug}`, async () => {
-    const proposal = await loadProposal(engine, proposalId);
-    if (proposal.status !== 'pending') throw new ReviewConflictError('proposal is no longer pending', 'stale_status');
-    const rows = await engine.executeRaw<TakeProposalRow>(
-      `UPDATE take_proposals
-          SET status = 'rejected', acted_at = now(), acted_by = $2
-        WHERE id = $1 AND status = 'pending'
-        RETURNING *`,
-      [proposalId, actor],
-    );
-    if (!rows[0]) throw new ReviewConflictError('proposal changed concurrently', 'concurrent_change');
-    await engine.executeRaw(
-      `INSERT INTO ai_review_events
-         (target_type, target_id, action, actor, previous_state, new_state, details)
-       VALUES ('take_proposal', $1, 'reject', $2, $3::text::jsonb, $4::text::jsonb, $5::text::jsonb)`,
-      [proposalId, actor, JSON.stringify({ status: proposal.status }), JSON.stringify({ status: 'rejected' }), JSON.stringify({ reason: reason ?? null })],
-    );
-    return { proposal: { ...proposal, ...rows[0] } };
+    return engine.transaction(async tx => {
+      const proposal = await loadProposal(tx, proposalId);
+      if (proposal.status !== 'pending') throw new ReviewConflictError('proposal is no longer pending', 'stale_status');
+      const rows = await tx.executeRaw<TakeProposalRow>(
+        `UPDATE take_proposals
+            SET status = 'rejected', acted_at = now(), acted_by = $2
+          WHERE id = $1 AND status = 'pending'
+          RETURNING *`,
+        [proposalId, actor],
+      );
+      if (!rows[0]) throw new ReviewConflictError('proposal changed concurrently', 'concurrent_change');
+      await tx.executeRaw(
+        `INSERT INTO ai_review_events
+           (target_type, target_id, action, actor, previous_state, new_state, details)
+         VALUES ('take_proposal', $1, 'reject', $2, $3::text::jsonb, $4::text::jsonb, $5::text::jsonb)`,
+        [proposalId, actor, JSON.stringify({ status: proposal.status }), JSON.stringify({ status: 'rejected' }), JSON.stringify({ reason: reason ?? null })],
+      );
+      return { proposal: { ...proposal, ...rows[0] } };
+    });
+  });
+}
+
+export async function deferTakeProposal(
+  engine: BrainEngine,
+  proposalId: number,
+  actor: string,
+  reason?: string,
+): Promise<ReviewMutationResult> {
+  return transitionTakeProposalStatus(engine, proposalId, actor, 'pending', 'deferred', 'defer', reason);
+}
+
+export async function restoreTakeProposalToPending(
+  engine: BrainEngine,
+  proposalId: number,
+  actor: string,
+  reason?: string,
+): Promise<ReviewMutationResult> {
+  const identity = await loadProposal(engine, proposalId);
+  if (identity.status !== 'deferred' && identity.status !== 'rejected') {
+    throw new ReviewConflictError('only deferred or rejected proposals can be restored', 'stale_status');
+  }
+  return transitionTakeProposalStatus(engine, proposalId, actor, identity.status, 'pending', 'restore', reason);
+}
+
+async function transitionTakeProposalStatus(
+  engine: BrainEngine,
+  proposalId: number,
+  actor: string,
+  expectedStatus: 'pending' | 'deferred' | 'rejected',
+  nextStatus: 'pending' | 'deferred',
+  action: 'defer' | 'restore',
+  reason?: string,
+): Promise<ReviewMutationResult> {
+  const cleanReason = reason?.trim() || null;
+  if (cleanReason && cleanReason.length > 1000) throw new Error('reason must be at most 1000 characters');
+  const identity = await loadProposal(engine, proposalId);
+  return withPageLock(`ai-review:${identity.source_id}:${identity.page_slug}`, async () => {
+    return engine.transaction(async tx => {
+      const proposal = await loadProposal(tx, proposalId);
+      if (proposal.status !== expectedStatus) {
+        throw new ReviewConflictError(`proposal is no longer ${expectedStatus}`, 'stale_status');
+      }
+      if (nextStatus === 'pending') {
+        const competing = await tx.executeRaw<{ id: number }>(
+          `SELECT id
+             FROM take_proposals
+            WHERE source_id = $1 AND page_slug = $2 AND claim_hash = $3
+              AND status = 'pending' AND id <> $4
+            ORDER BY proposed_at DESC, id DESC
+            LIMIT 1`,
+          [proposal.source_id, proposal.page_slug, proposal.claim_hash, proposalId],
+        );
+        if (competing[0]) {
+          throw new ReviewConflictError(
+            `a newer pending proposal already exists for this claim (proposal ${competing[0].id})`,
+            'newer_pending_exists',
+          );
+        }
+      }
+      const rows = await tx.executeRaw<TakeProposalRow>(
+        `UPDATE take_proposals
+            SET status = $4,
+                acted_at = CASE WHEN $4 = 'pending' THEN NULL ELSE now() END,
+                acted_by = CASE WHEN $4 = 'pending' THEN NULL ELSE $2 END
+          WHERE id = $1 AND status = $3
+          RETURNING *`,
+        [proposalId, actor, expectedStatus, nextStatus],
+      );
+      if (!rows[0]) throw new ReviewConflictError('proposal changed concurrently', 'concurrent_change');
+      const previousState = { status: proposal.status, acted_at: proposal.acted_at, acted_by: proposal.acted_by };
+      const newState = { status: nextStatus, acted_at: rows[0].acted_at, acted_by: rows[0].acted_by };
+      await tx.executeRaw(
+        `INSERT INTO ai_review_events
+           (target_type, target_id, action, actor, previous_state, new_state, details)
+         VALUES ('take_proposal', $1, $2, $3, $4::text::jsonb, $5::text::jsonb, $6::text::jsonb)`,
+        [proposalId, action, actor, JSON.stringify(previousState), JSON.stringify(newState), JSON.stringify({ reason: cleanReason })],
+      );
+      return { proposal: { ...proposal, ...rows[0] } };
+    });
   });
 }
 

@@ -3,13 +3,14 @@ import { api } from '../api';
 import { formatChangedDraftFields } from '../review-diff';
 import './AIReview.css';
 
-type Status = 'pending' | 'accepted' | 'rejected' | 'superseded';
+type Status = 'pending' | 'accepted' | 'rejected' | 'superseded' | 'deferred';
 
 const STATUS_LABELS: Record<Status, string> = {
   pending: 'Ожидают',
   accepted: 'Приняты',
   rejected: 'Отклонены',
   superseded: 'Заменены',
+  deferred: 'Отложены',
 };
 
 interface Proposal {
@@ -228,6 +229,39 @@ export function AIReviewPage() {
     }
   };
 
+  const defer = async () => {
+    if (!detail) return;
+    const reason = prompt('Причина отсрочки (необязательно):', 'Ограничение текущей review capacity') ?? undefined;
+    if (reason === undefined) return;
+    setBusy('defer');
+    setActionError(null);
+    try {
+      await api.aiReviewDefer(detail.proposal.id, reason);
+      await loadList();
+      setMobileDetail(false);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const restore = async () => {
+    if (!detail) return;
+    if (!confirm(`Вернуть предложение #${detail.proposal.id} в очередь ожидания?`)) return;
+    setBusy('restore');
+    setActionError(null);
+    try {
+      await api.aiReviewRestore(detail.proposal.id, 'Явное восстановление оператором');
+      await loadList();
+      setMobileDetail(false);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="ai-review">
       <header className="ai-review-header">
@@ -240,7 +274,7 @@ export function AIReviewPage() {
 
       <div className="ai-review-toolbar">
         <div className="ai-review-tabs">
-          {(['pending', 'accepted', 'rejected', 'superseded'] as Status[]).map(value => (
+          {(['pending', 'deferred', 'accepted', 'rejected', 'superseded'] as Status[]).map(value => (
             <button key={value} className={status === value ? 'active' : ''} onClick={() => changeStatus(value)}>{STATUS_LABELS[value]}</button>
           ))}
         </div>
@@ -310,7 +344,12 @@ export function AIReviewPage() {
 
             {detail.proposal.status === 'pending' && <div className="review-actions">
               <button className="reject" onClick={reject} disabled={busy !== null}>{busy === 'reject' ? 'Отклоняем…' : 'Отклонить'}</button>
+              <button onClick={defer} disabled={busy !== null}>{busy === 'defer' ? 'Откладываем…' : 'Отложить'}</button>
               <button className="accept" onClick={accept} disabled={busy !== null}>{busy === 'accept' ? 'Записываем и проверяем…' : diff.length ? 'Принять изменённый черновик' : 'Принять'}</button>
+            </div>}
+
+            {(detail.proposal.status === 'deferred' || detail.proposal.status === 'rejected') && <div className="review-actions">
+              <button onClick={restore} disabled={busy !== null}>{busy === 'restore' ? 'Восстанавливаем…' : 'Вернуть в ожидающие'}</button>
             </div>}
 
             {receipt && <div className="receipt"><strong>Подтверждение публикации</strong><pre>{JSON.stringify(receipt, null, 2)}</pre></div>}

@@ -5885,6 +5885,20 @@ export const MIGRATIONS: Migration[] = [
         WHERE status = 'pending';
     `,
   },
+  {
+    version: 132,
+    name: 'take_proposals_deferred_status',
+    idempotent: true,
+    sql: `
+      ALTER TABLE take_proposals DROP CONSTRAINT IF EXISTS take_proposals_status_check;
+      ALTER TABLE take_proposals
+        ADD CONSTRAINT take_proposals_status_check
+        CHECK (status IN ('pending','accepted','rejected','superseded','deferred'));
+      CREATE INDEX IF NOT EXISTS take_proposals_deferred_idx
+        ON take_proposals (source_id, proposed_at DESC)
+        WHERE status = 'deferred';
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

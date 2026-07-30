@@ -285,6 +285,27 @@ export function validateRepoState(
   if (!stat.isDirectory()) return 'not-a-dir';
   if (!existsSync(join(repoPath, '.git'))) return 'no-git';
 
+  // Path-only sources are user-managed working trees, not managed clones.
+  // They do not need an `origin` remote, but the .git directory must still
+  // describe a valid worktree. Requiring `git remote get-url origin` here
+  // mislabeled every legitimate local-only source as corrupted.
+  if (expectedRemoteUrl === undefined) {
+    try {
+      const out = execFileSync(
+        'git',
+        ['-C', repoPath, 'rev-parse', '--is-inside-work-tree'],
+        {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: 10_000,
+          env: { ...process.env, ...GIT_ENV },
+        },
+      );
+      return out.toString().trim() === 'true' ? 'healthy' : 'corrupted';
+    } catch {
+      return 'corrupted';
+    }
+  }
+
   let remoteUrl: string;
   try {
     const out = execFileSync('git', ['-C', repoPath, 'remote', 'get-url', 'origin'], {

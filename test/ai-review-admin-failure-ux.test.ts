@@ -22,6 +22,19 @@ describe('AI Review admin failure UX', () => {
     expect(source).toContain('setSelectedId(null);');
   });
 
+  test('Take Review exposes deferred as a separate reversible queue state', () => {
+    const page = readFileSync(new URL('../admin/src/pages/AIReview.tsx', import.meta.url), 'utf8');
+    const api = readFileSync(new URL('../admin/src/api.ts', import.meta.url), 'utf8');
+    const server = readFileSync(new URL('../src/commands/serve-http.ts', import.meta.url), 'utf8');
+    expect(page).toContain("deferred: 'Отложены'");
+    expect(page).toContain('api.aiReviewDefer');
+    expect(page).toContain('api.aiReviewRestore');
+    expect(api).toContain('/defer`');
+    expect(api).toContain('/restore`');
+    expect(server).toContain("proposals/:id/defer");
+    expect(server).toContain("proposals/:id/restore");
+  });
+
   test('Concept Review clears stale rows and counters when a list request fails', () => {
     const source = readFileSync(new URL('../admin/src/pages/ConceptReview.tsx', import.meta.url), 'utf8');
     expect(source).toContain('setRows([]);');

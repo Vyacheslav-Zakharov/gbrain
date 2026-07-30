@@ -774,7 +774,7 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   proposed_at                 TIMESTAMPTZ  NOT NULL DEFAULT now(),
   proposal_run_id             TEXT         NOT NULL,
   status                      TEXT         NOT NULL DEFAULT 'pending'
-                                           CHECK (status IN ('pending','accepted','rejected','superseded')),
+                                           CHECK (status IN ('pending','accepted','rejected','superseded','deferred')),
   claim_text                  TEXT         NOT NULL,
   claim_hash                  TEXT         NOT NULL,
   kind                        TEXT         NOT NULL,

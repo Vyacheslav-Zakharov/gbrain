@@ -48,6 +48,7 @@ import type { Page, PageFilters } from '../types.ts';
 import type { OperationContext } from '../operations.ts';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseStatus, CyclePhase } from '../cycle.ts';
+import { withPageLock } from '../page-lock.ts';
 
 /**
  * Bump when the extractor prompt or the JSON output shape changes. Old
@@ -426,8 +427,11 @@ class ProposeTakesPhase extends BaseCyclePhase {
         continue;
       }
 
-      // Item-level idempotency preserves every distinct same-page claim.
-      for (const p of proposals) {
+      // Serialize producer writes with defer/reject/restore for the same page.
+      // This closes the race between restore's same-claim check and a new insert.
+      await withPageLock(`ai-review:${sourceId}:${page.slug}`, async () => {
+        // Item-level idempotency preserves every distinct same-page claim.
+        for (const p of proposals) {
         const inserted = await engine.executeRaw<{ id: number }>(
           `INSERT INTO take_proposals
              (scan_id, source_id, page_slug, content_hash, prompt_version, proposal_run_id,
@@ -452,11 +456,11 @@ class ProposeTakesPhase extends BaseCyclePhase {
             modelId,
           ],
         );
-        result.proposals_inserted += inserted.length;
-      }
-      // A successful extraction under a newer prompt replaces only older pending
-      // proposals for this exact source revision. Accepted/rejected history stays intact.
-      await engine.executeRaw(
+          result.proposals_inserted += inserted.length;
+        }
+        // A successful extraction under a newer prompt replaces only older pending
+        // proposals for this exact source revision. Accepted/rejected history stays intact.
+        await engine.executeRaw(
         `WITH superseded AS (
            UPDATE take_proposals
               SET status = 'superseded', acted_at = now(), acted_by = 'system:propose_takes'
@@ -470,8 +474,9 @@ class ProposeTakesPhase extends BaseCyclePhase {
                 '{"status":"pending"}'::jsonb, '{"status":"superseded"}'::jsonb,
                 jsonb_build_object('replacement_prompt_version', $4)
            FROM superseded`,
-        [sourceId, page.slug, ch, promptVersion],
-      );
+          [sourceId, page.slug, ch, promptVersion],
+        );
+      });
       await engine.executeRaw(
         `UPDATE take_proposal_scans
             SET status = 'completed', proposal_count = $2, completed_at = now(), error_text = NULL
