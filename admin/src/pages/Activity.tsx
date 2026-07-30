@@ -287,7 +287,7 @@ export function ActivityPage() {
   return <div className="activity-page" style={{ padding: 24, maxWidth: 1500, margin: '0 auto' }}>
     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
       <div>
-        <h1 style={{ margin: 0, fontSize: 22 }}>Activity / Runs</h1>
+        <h1 style={{ margin: 0, fontSize: 22 }}>Активность</h1>
         <p style={{ color: 'var(--text-muted)', margin: '6px 0 0' }}>Что делали Autopilot и Minions за выбранный период</p>
       </div>
       <div style={{ display: 'flex', gap: 8 }}>
@@ -326,14 +326,14 @@ export function ActivityPage() {
 
     {snapshot && <>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(135px, 1fr))', gap: 10, marginTop: 16 }}>
-        <MetricCard label="Runs" value={snapshot.summary.total} hint={`${snapshot.summary.completed} завершено · ${snapshot.summary.active + snapshot.summary.waiting + snapshot.summary.delayed + snapshot.summary.waiting_children + snapshot.summary.paused} в очереди`} />
-        <MetricCard label="Partial" value={snapshot.summary.partial} hint={`${snapshot.summary.failed + snapshot.summary.dead} ошибок`} />
-        <MetricCard label="Страницы" value={snapshot.summary.pages_changed} hint="reported writes" />
-        <MetricCard label="Atoms" value={snapshot.summary.atoms_extracted} />
-        <MetricCard label="Concepts" value={snapshot.summary.concepts_written} />
-        <MetricCard label="Proposals" value={snapshot.summary.proposals_inserted} />
-        <MetricCard label="Takes" value={snapshot.summary.takes_written} />
-        <MetricCard label="LLM spend" value={`$${snapshot.summary.estimated_spend_usd.toFixed(3)}`} />
+        <MetricCard label="Запуски" value={snapshot.summary.total} hint={`${snapshot.summary.completed} завершено · ${snapshot.summary.active + snapshot.summary.waiting + snapshot.summary.delayed + snapshot.summary.waiting_children + snapshot.summary.paused} в очереди`} />
+        <MetricCard label="Частичные" value={snapshot.summary.partial} hint={`${snapshot.summary.failed + snapshot.summary.dead} ошибок`} />
+        <MetricCard label="Страницы" value={snapshot.summary.pages_changed} hint="зафиксированные изменения" />
+        <MetricCard label="Атомы" value={snapshot.summary.atoms_extracted} />
+        <MetricCard label="Концепции" value={snapshot.summary.concepts_written} />
+        <MetricCard label="Предложения" value={snapshot.summary.proposals_inserted} />
+        <MetricCard label="Тезисы" value={snapshot.summary.takes_written} />
+        <MetricCard label="Расход LLM" value={`$${snapshot.summary.estimated_spend_usd.toFixed(3)}`} />
       </div>
 
       <div className="activity-content-grid" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 2fr) minmax(280px, 1fr)', gap: 14, marginTop: 16 }}>

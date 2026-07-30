@@ -51,6 +51,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const syncPendingCount = (event: Event) => {
+      const count = Number((event as CustomEvent<number>).detail);
+      if (Number.isFinite(count)) setPendingReviewCount(count);
+    };
+    window.addEventListener('gbrain:ai-review-pending-count', syncPendingCount);
+    return () => window.removeEventListener('gbrain:ai-review-pending-count', syncPendingCount);
+  }, []);
+
+  useEffect(() => {
     localStorage.setItem('gbrain-admin-sidebar-collapsed', sidebarCollapsed ? '1' : '0');
   }, [sidebarCollapsed]);
 
@@ -65,7 +74,7 @@ export function App() {
         .catch(() => { if (alive) setPendingMeetingCount(null); });
     };
     refreshCount();
-    const timer = window.setInterval(refreshCount, 60_000);
+    const timer = window.setInterval(refreshCount, 15_000);
     window.addEventListener('focus', refreshCount);
     return () => {
       alive = false;

@@ -491,6 +491,21 @@ label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
   font-size: 12px;
 }
 .source-ingest-danger-zone__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.source-ingest-form-grid > label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  line-height: 1.4;
+}
+.source-ingest-form-grid input,
+.source-ingest-form-grid select,
+.source-ingest-form-grid textarea {
+  min-height: 38px;
+  padding: 9px 10px;
+}
+.source-ingest-layout > main > section {
+  padding: 20px !important;
+}
 .source-ingest-layout pre { max-width: 100%; overflow: auto; }
 .source-ingest-layout main:has(> .source-ingest-wizard--open) .source-ingest-context-primary { display: none; }
 .mobile-nav-toggle,

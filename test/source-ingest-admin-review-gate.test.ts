@@ -221,6 +221,22 @@ describe('source-ingest admin review gates', () => {
       expect(editor).toMatch(/<DangerZone[\s\S]*className="btn btn-danger"[\s\S]*<\/DangerZone>/);
       expect(editor.match(/className="btn btn-danger"/g)?.length).toBe(editors[index][1]);
     }
+    const connectorDomain = readFileSync(join(root, 'admin/src/pages/source-ingest/useSourceIngestConnectorDomain.ts'), 'utf8');
+    expect(connectorDomain).toContain('Удалить сохранённые секреты подключения');
+    expect(connectorDomain).toContain('Удалить сохранённые секреты этого источника');
+  });
+
+  test('source-ingest catalog and forms use readable operator density', () => {
+    const catalog = readFileSync(join(root, 'admin/src/pages/source-ingest/SourceIngestCatalogPanel.tsx'), 'utf8');
+    const coordinator = readFileSync(join(root, 'admin/src/pages/SourceIngest.tsx'), 'utf8');
+    const css = adminCss();
+    expect(catalog).toContain('fontSize: 14');
+    expect(catalog).toContain('lineHeight: 1.4');
+    expect(coordinator).toContain("gridTemplateColumns: '360px minmax(0, 1fr)'");
+    expect(css).toContain('.source-ingest-form-grid > label');
+    expect(css).toContain('min-height: 38px');
+    const connector = readFileSync(join(root, 'admin/src/pages/source-ingest/ConnectorEditor.tsx'), 'utf8');
+    expect(connector).toContain("gridTemplateColumns: 'repeat(2, minmax(220px, 1fr))'");
   });
 
   test('source-ingest orchestration uses one typed async action runner', () => {

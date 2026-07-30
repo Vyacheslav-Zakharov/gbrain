@@ -82,12 +82,15 @@ function ChartSvg({ type, ariaLabel }: ChartSvgProps) {
 export function CalibrationPage() {
   const [profile, setProfile] = useState<CalibrationProfileSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>('');
+  const [loadError, setLoadError] = useState<string>('');
+  const [startError, setStartError] = useState<string>('');
   const [retryKey, setRetryKey] = useState(0);
+  const [starting, setStarting] = useState(false);
+  const [notice, setNotice] = useState('');
 
   useEffect(() => {
     setLoading(true);
-    setError('');
+    setLoadError('');
     api
       .calibrationProfile()
       .then(p => {
@@ -95,19 +98,33 @@ export function CalibrationPage() {
         setLoading(false);
       })
       .catch(err => {
-        setError(err.message ?? 'fetch failed');
+        setLoadError(err.message ?? 'fetch failed');
         setLoading(false);
       });
   }, [retryKey]);
 
+  const startCalibration = async () => {
+    if (!confirm('Создать профиль калибровки сейчас? Задача может использовать LLM и занять несколько минут.')) return;
+    setStarting(true);
+    setStartError('');
+    try {
+      const result = await api.startCalibration();
+      setNotice(`Задача #${result.job_id} поставлена в очередь. Ход выполнения виден в разделе «Задания».`);
+    } catch (err) {
+      setStartError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStarting(false);
+    }
+  };
+
   if (loading) {
     return <div className="page-loading" style={{ padding: 24 }} aria-busy="true"><span className="loading-spinner" />Загружаем профиль калибровки…</div>;
   }
-  if (error) {
+  if (loadError) {
     return (
       <div className="page-error" style={{ margin: 24 }} role="alert">
         <strong>Не удалось загрузить профиль калибровки</strong>
-        <span>{error}</span>
+        <span>{loadError}</span>
         <button className="btn btn-secondary" onClick={() => setRetryKey(value => value + 1)}>Повторить</button>
       </div>
     );
@@ -119,18 +136,14 @@ export function CalibrationPage() {
         <p style={{ color: 'var(--text-secondary)' }}>
           Профиль калибровки ещё не создан. Он строится после пяти или более оценённых takes.
         </p>
-        <pre
-          style={{
-            background: 'var(--bg-secondary)',
-            padding: 12,
-            borderRadius: 4,
-            color: 'var(--text-primary)',
-            marginTop: 12,
-            fontFamily: 'var(--font-mono)',
-          }}
-        >
-          gbrain dream --phase calibration_profile
-        </pre>
+        <p style={{ color: 'var(--text-muted)', fontSize: 13 }}>
+          Запуск выполняется как контролируемая фоновая задача. Возможны расходы на LLM.
+        </p>
+        <button className="btn btn-primary" disabled={starting} onClick={() => void startCalibration()}>
+          {starting ? 'Ставим задачу в очередь…' : 'Создать профиль калибровки'}
+        </button>
+        {notice && <div className="receipt" role="status" style={{ marginTop: 14 }}>{notice}</div>}
+        {startError && <div className="page-error" role="alert" style={{ marginTop: 14 }}>{startError}</div>}
       </div>
     );
   }

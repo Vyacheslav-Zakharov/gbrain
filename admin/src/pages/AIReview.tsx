@@ -76,7 +76,7 @@ export function AIReviewPage() {
   const [sourceFilter, setSourceFilter] = useState('');
   const [sourceOptions, setSourceOptions] = useState<string[]>([]);
   const [rows, setRows] = useState<Proposal[]>([]);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<DetailPayload | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -96,12 +96,15 @@ export function AIReviewPage() {
       const data = await api.aiReviewProposals({ status, q: query, source_id: sourceFilter, limit: 200 });
       setRows(data.rows ?? []);
       setTotal(data.total ?? 0);
+      if (status === 'pending' && !query && !sourceFilter) {
+        window.dispatchEvent(new CustomEvent('gbrain:ai-review-pending-count', { detail: Number(data.total ?? 0) }));
+      }
       setSourceOptions(current => [...new Set([...current, ...(data.rows ?? []).map((row: Proposal) => row.source_id)])].sort());
       setPageError(null);
       if (!data.rows?.some((r: Proposal) => r.id === selectedId)) setSelectedId(null);
     } catch (e) {
       setRows([]);
-      setTotal(0);
+      setTotal(null);
       setSelectedId(null);
       setDetail(null);
       setDraft(null);
@@ -142,7 +145,7 @@ export function AIReviewPage() {
 
   const changeStatus = (value: Status) => {
     if (diff.length > 0 && !confirm('Отменить несохранённые изменения черновика?')) return;
-    setRows([]); setTotal(0); setPageError(null); setActionError(null);
+    setRows([]); setTotal(null); setPageError(null); setActionError(null);
     setSelectedId(null); setMobileDetail(false); setStatus(value);
   };
 
@@ -225,7 +228,7 @@ export function AIReviewPage() {
           <h1>Проверка AI-предложений</h1>
           <p>AI готовит предложения и черновики. Каноническое знание меняется только после явного принятия человеком.</p>
         </div>
-        <div className="ai-review-count">{total} · {STATUS_LABELS[status].toLowerCase()}</div>
+        <div className="ai-review-count" aria-busy={total === null}>{total === null ? '…' : total} · {STATUS_LABELS[status].toLowerCase()}</div>
       </header>
 
       <div className="ai-review-toolbar">
@@ -273,10 +276,10 @@ export function AIReviewPage() {
                 <textarea value={draft.claim_text} onChange={e => updateDraft('claim_text', e.target.value)} rows={4} disabled={detail.proposal.status !== 'pending'} />
               </label>
               <div className="field-grid">
-                <label className={diff.includes('kind') ? 'changed' : ''}>Тип (kind)<input value={draft.kind} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('kind', e.target.value)} /></label>
-                <label className={diff.includes('holder') ? 'changed' : ''}>Владелец (holder)<input value={draft.holder} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('holder', e.target.value)} /></label>
+                <label className={diff.includes('kind') ? 'changed' : ''}>Тип<input value={draft.kind} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('kind', e.target.value)} /></label>
+                <label className={diff.includes('holder') ? 'changed' : ''}>Владелец<input value={draft.holder} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('holder', e.target.value)} /></label>
                 <label className={diff.includes('weight') ? 'changed' : ''}>Вес уверенности<input type="number" min="0" max="1" step="0.05" value={draft.weight} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('weight', Number(e.target.value))} /></label>
-                <label className={diff.includes('domain') ? 'changed' : ''}>Область (domain)<input value={draft.domain} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('domain', e.target.value)} /></label>
+                <label className={diff.includes('domain') ? 'changed' : ''}>Область<input value={draft.domain} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('domain', e.target.value)} /></label>
                 <label className={diff.includes('since_date') ? 'changed' : ''}>Действует с<input value={draft.since_date} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('since_date', e.target.value)} placeholder="ГГГГ-ММ-ДД" /></label>
                 <label className={diff.includes('source') ? 'changed' : ''}>Дополнительный источник<input value={draft.source} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('source', e.target.value)} placeholder="Необязательно; ссылка или примечание" /></label>
               </div>

@@ -2504,6 +2504,18 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       idempotency_key: idempotencyKey,
     }, { allowProtectedSubmit: true });
   };
+  const enqueueCalibrationProfile = async () => {
+    const cliEntry = process.argv[1];
+    if (!cliEntry) throw new Error('calibration_cli_entry_unavailable');
+    const data = { cwd: homedir(), argv: [process.execPath, cliEntry, 'dream', '--phase', 'calibration_profile'] };
+    validateShellJobParams(data);
+    const hourBucket = new Date().toISOString().slice(0, 13);
+    return meetingReviewQueue.add('shell', data, {
+      max_attempts: 1,
+      timeout_ms: 1_800_000,
+      idempotency_key: `admin-calibration-profile:${hourBucket}`,
+    }, { allowProtectedSubmit: true });
+  };
 
   app.get('/admin/api/meeting-review/items', requireAdmin, async (req: Request, res: Response) => {
     try {
@@ -3776,6 +3788,15 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
   });
 
+  app.post('/admin/api/calibration/run', requireAdmin, requireAdminSameOrigin, async (_req: Request, res: Response) => {
+    try {
+      const job = await enqueueCalibrationProfile();
+      res.status(202).json({ job_id: job.id, status: job.status });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'calibration_enqueue_failed' });
+    }
+  });
+
   app.get('/admin/api/calibration/profile', requireAdmin, async (req: Request, res: Response) => {
     try {
       const { getLatestProfile } = await import('./calibration.ts');
@@ -4050,10 +4071,18 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
+    res.write('retry: 3000\n: connected\n\n');
 
     sseClients.add(res);
-    req.on('close', () => sseClients.delete(res));
+    const heartbeat = setInterval(() => {
+      try { res.write(': heartbeat\n\n'); } catch { clearInterval(heartbeat); sseClients.delete(res); }
+    }, 15_000);
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    });
   });
 
   // ---------------------------------------------------------------------------

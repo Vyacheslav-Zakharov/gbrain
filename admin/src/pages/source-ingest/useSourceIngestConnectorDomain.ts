@@ -93,6 +93,7 @@ export function useSourceIngestConnectorDomain({
   });
 
   const deleteSecret = async () => runStep('delete-secret', async () => {
+    if (!window.confirm('Удалить сохранённые секреты этого источника? Подключение перестанет читать данные до повторной настройки.')) return;
     await api.sourceIngestDeleteSecret({ config_id: configId, connector_id: connectorId, source_object: sourceObject });
     await load();
     setSecretAudit(await api.sourceIngestSecretAudit(configId));
@@ -148,6 +149,7 @@ export function useSourceIngestConnectorDomain({
   });
 
   const deleteCatalogConnectorCredentials = async () => runStep('catalog-delete-secret', async () => {
+    if (!window.confirm('Удалить сохранённые секреты подключения? Все его источники потеряют доступ к данным до повторной настройки.')) return;
     const status = await api.sourceIngestDeleteSecret({
       config_id: catalogConnectorSecretConfigId(),
       connector_id: catalogConnectorForm.connector_id,

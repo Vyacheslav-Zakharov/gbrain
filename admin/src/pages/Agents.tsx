@@ -34,6 +34,12 @@ interface ApiKey {
   status: 'active' | 'revoked';
 }
 
+function agentShortId(agent: Agent): string {
+  const id = agent.client_id || agent.id;
+  if (!id) return '';
+  return id.length > 10 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
+}
+
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [hideRevoked, setHideRevoked] = useState(true);
@@ -102,7 +108,10 @@ export function AgentsPage() {
               {visibleAgents.map(a => (
                 <tr key={a.id} onClick={() => setSelectedAgent(a)}
                     style={{ cursor: 'pointer' }}>
-                  <td style={{ fontWeight: 500 }}>{a.name || a.client_name}</td>
+                  <td style={{ fontWeight: 500 }}>
+                    <span>{a.name || a.client_name}</span>
+                    <span className="mono" style={{ display: 'block', color: 'var(--text-secondary)', fontSize: 11, marginTop: 2 }}>{agentShortId(a)}</span>
+                  </td>
                   <td>
                     <span className={`badge ${a.auth_type === 'oauth' ? 'badge-read' : 'badge-write'}`} style={{ fontSize: 11 }}>
                       {a.auth_type === 'oauth' ? 'OAuth' : 'API Key'}

@@ -2,12 +2,36 @@ import React, { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
 
 interface FeedEvent {
+  id?: number;
   agent: string;
   operation: string;
   scopes: string;
   latency_ms: number;
   status: string;
   timestamp: string;
+}
+
+interface RequestLogRow {
+  id: number;
+  agent_name: string;
+  token_name: string;
+  operation: string;
+  latency_ms: number;
+  status: string;
+  created_at: string;
+}
+
+function mergeEvents(current: FeedEvent[], incoming: FeedEvent[]): FeedEvent[] {
+  const seen = new Set<string>();
+  return [...incoming, ...current]
+    .filter(event => {
+      const key = event.id ? `id:${event.id}` : `${event.timestamp}|${event.agent}|${event.operation}|${event.status}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+    .slice(0, 50);
 }
 
 export function DashboardPage() {
@@ -21,28 +45,40 @@ export function DashboardPage() {
     api.stats().then(setStats).catch(() => {});
     api.health().then(setHealth).catch(() => {});
 
-    const es = new EventSource('/admin/events');
+    const loadRecent = () => api.requests(1)
+      .then((data: { rows?: RequestLogRow[] }) => {
+        const recent = (data.rows ?? []).map(row => ({
+          id: row.id,
+          agent: row.agent_name || row.token_name,
+          operation: row.operation,
+          scopes: '',
+          latency_ms: row.latency_ms,
+          status: row.status,
+          timestamp: row.created_at,
+        }));
+        setEvents(current => mergeEvents(current, recent));
+      })
+      .catch(() => {});
+    void loadRecent();
+
+    const es = new EventSource('/admin/events', { withCredentials: true });
     eventSourceRef.current = es;
     es.onopen = () => setSseStatus('connected');
     es.onmessage = (e) => {
       try {
         const event = JSON.parse(e.data) as FeedEvent;
-        setEvents(prev => [event, ...prev].slice(0, 50));
+        setEvents(prev => mergeEvents(prev, [event]));
       } catch {}
     };
     es.onerror = () => {
       setSseStatus('disconnected');
-      setTimeout(() => {
-        setSseStatus('connecting');
-        es.close();
-        // Reconnect handled by browser EventSource auto-retry
-      }, 3000);
     };
 
     const interval = setInterval(() => {
       api.stats().then(setStats).catch(() => {});
       api.health().then(setHealth).catch(() => {});
-    }, 30000);
+      void loadRecent();
+    }, 15000);
 
     return () => { es.close(); clearInterval(interval); };
   }, []);
@@ -104,9 +140,9 @@ export function DashboardPage() {
                     <tr key={i}>
                       <td className="mono">{e.agent}</td>
                       <td className="mono">{e.operation}</td>
-                      <td>{e.scopes.split(',').map(s => (
+                      <td>{e.scopes ? e.scopes.split(',').map(s => (
                         <span key={s} className={`badge badge-${s.trim()}`} style={{ marginRight: 4 }}>{s.trim()}</span>
-                      ))}</td>
+                      )) : <span style={{ color: 'var(--text-muted)' }}>—</span>}</td>
                       <td className="mono">{e.latency_ms} ms</td>
                       <td><span className={`badge badge-${e.status}`}>{e.status}</span></td>
                       <td style={{ color: 'var(--text-secondary)' }}>{timeAgo(e.timestamp)}</td>
