@@ -57,9 +57,9 @@ describe('meeting review queue', () => {
     expect(detail.item.created_stubs).toEqual(['shared:people/alice-example']);
   });
 
-  test('does not resurrect candidates from older preview snapshots', async () => {
+  test('retains unresolved candidates from older preview snapshots', async () => {
     await writeFile(join(paths.reportsDir, 'run-3.json'), JSON.stringify({ dry_run: true, generated_at: '2026-07-30T01:00:00Z', results: [] }));
-    expect((await listMeetingReviewItems({}, { paths })).total).toBe(0);
+    expect((await listMeetingReviewItems({}, { paths })).total).toBe(1);
   });
 
   test('filters meetings already present in ingest state', async () => {

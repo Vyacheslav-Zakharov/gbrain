@@ -124,12 +124,12 @@ async function loadPreviewItems(paths: MeetingReviewPaths): Promise<Map<string, 
   let names: string[] = [];
   try { names = (await readdir(paths.reportsDir)).filter(name => name.endsWith('.json')).sort().reverse(); } catch { return new Map(); }
   const items = new Map<string, MeetingReviewItem>();
-  for (const name of names) {
+  for (const name of names.slice(0, 200)) {
     const report = await readJsonLoose<PreviewReport | null>(join(paths.reportsDir, name), null);
     if (!report?.dry_run || !Array.isArray(report.results)) continue;
     for (const row of report.results) {
       const id = text(row.id);
-      if (!SAFE_ID.test(id)) continue;
+      if (!SAFE_ID.test(id) || items.has(id)) continue;
       items.set(id, {
         id,
         topic: text(row.topic),
@@ -144,9 +144,6 @@ async function loadPreviewItems(paths: MeetingReviewPaths): Promise<Map<string, 
         generated_at: text(report.generated_at),
       });
     }
-    // A dry-run report is a point-in-time snapshot. Never resurrect candidates
-    // from older reports after their AppSheet status or ingest state changed.
-    break;
   }
   const ingestState = await readJson<{ ingested?: unknown[] }>(paths.ingestStatePath, {});
   for (const id of stringArray(ingestState.ingested)) items.delete(id);
