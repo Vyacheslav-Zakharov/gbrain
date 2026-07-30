@@ -55,7 +55,7 @@ import type { PhaseStatus, CyclePhase } from '../cycle.ts';
  * valid as audit history; new runs re-spend LLM tokens on every page.
  */
 export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.1-ru-v1';
-const PROPOSE_TAKES_ROLLOUT_COMPATIBLE_PROMPT_VERSION = 'v0.36.1.1';
+const PROPOSE_TAKES_ROLLOUT_COMPATIBLE_PROMPT_VERSION = 'v0.36.1.0-tuned-cat15';
 
 /**
  * Tuned extractor prompt, validated against the hand-labeled synthetic
