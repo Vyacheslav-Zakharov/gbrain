@@ -50,6 +50,7 @@ import type { BrainEngine } from '../engine.ts';
 import type { PhaseStatus, CyclePhase } from '../cycle.ts';
 import { withPageLock } from '../page-lock.ts';
 
+
 /**
  * Bump when the extractor prompt or the JSON output shape changes. Old
  * verdicts in `take_proposals` (composite key includes prompt_version) stay
@@ -57,6 +58,14 @@ import { withPageLock } from '../page-lock.ts';
  */
 export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.1-ru-v1';
 const PROPOSE_TAKES_ROLLOUT_COMPATIBLE_PROMPT_VERSION = 'v0.36.1.0-tuned-cat15';
+const PENDING_CLAIM_WRITE_ATTEMPTS = 3;
+
+class PendingClaimWriteConflict extends Error {
+  constructor() {
+    super('pending claim changed concurrently');
+    this.name = 'PendingClaimWriteConflict';
+  }
+}
 
 /**
  * Tuned extractor prompt, validated against the hand-labeled synthetic
@@ -427,40 +436,79 @@ class ProposeTakesPhase extends BaseCyclePhase {
         continue;
       }
 
-      // Serialize producer writes with defer/reject/restore for the same page.
-      // This closes the race between restore's same-claim check and a new insert.
-      await withPageLock(`ai-review:${sourceId}:${page.slug}`, async () => {
-        // Item-level idempotency preserves every distinct same-page claim.
-        for (const p of proposals) {
-        const inserted = await engine.executeRaw<{ id: number }>(
-          `INSERT INTO take_proposals
-             (scan_id, source_id, page_slug, content_hash, prompt_version, proposal_run_id,
-              claim_text, claim_hash, kind, holder, weight, domain, dedup_against_fence_rows, model_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-           ON CONFLICT (source_id, page_slug, content_hash, prompt_version, claim_hash) DO NOTHING
-           RETURNING id`,
-          [
-            scanId,
-            sourceId,
-            page.slug,
-            ch,
-            promptVersion,
-            proposalRunId,
-            p.claim_text,
-            proposalClaimHash(p),
-            p.kind,
-            p.holder,
-            p.weight,
-            p.domain ?? null,
-            JSON.stringify(existingTakes),
-            modelId,
-          ],
-        );
-          result.proposals_inserted += inserted.length;
+      // Item-level idempotency preserves every distinct same-page claim. The
+      // transaction makes a newer revision replace an older pending row of the
+      // same claim. Migration 133's partial UNIQUE index is the cross-process
+      // guard against producer/restore races.
+      for (const p of proposals) {
+        const claimHash = proposalClaimHash(p);
+        let inserted: Array<{ id: number }> | undefined;
+        for (let attempt = 1; attempt <= PENDING_CLAIM_WRITE_ATTEMPTS; attempt += 1) {
+          try {
+            inserted = await withPageLock(`ai-review-claim:${sourceId}:${page.slug}:${claimHash}`, async () => engine.transaction(async tx => {
+          const exact = await tx.executeRaw<{ id: number; status: string }>(
+            `SELECT id, status FROM take_proposals
+              WHERE source_id=$1 AND page_slug=$2 AND content_hash=$3
+                AND prompt_version=$4 AND claim_hash=$5
+              FOR UPDATE`,
+            [sourceId, page.slug, ch, promptVersion, claimHash],
+          );
+          const keepPendingId = exact[0]?.status === 'pending' ? exact[0].id : null;
+          await tx.executeRaw(
+            `WITH superseded AS (
+               UPDATE take_proposals
+                  SET status='superseded', acted_at=now(), acted_by='system:propose_takes'
+                WHERE source_id=$1 AND page_slug=$2 AND claim_hash=$3
+                  AND status='pending' AND ($4::bigint IS NULL OR id <> $4)
+                RETURNING id
+             )
+             INSERT INTO ai_review_events
+               (target_type, target_id, action, actor, previous_state, new_state, details)
+             SELECT 'take_proposal', id, 'supersede', 'system:propose_takes',
+                    '{"status":"pending"}'::jsonb, '{"status":"superseded"}'::jsonb,
+                    jsonb_build_object('replacement_content_hash', $5::text, 'replacement_prompt_version', $6::text)
+               FROM superseded`,
+            [sourceId, page.slug, claimHash, keepPendingId, ch, promptVersion],
+          );
+          if (exact[0]) return [];
+          const rows = await tx.executeRaw<{ id: number }>(
+            `INSERT INTO take_proposals
+               (scan_id, source_id, page_slug, content_hash, prompt_version, proposal_run_id,
+                claim_text, claim_hash, kind, holder, weight, domain, dedup_against_fence_rows, model_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+             ON CONFLICT DO NOTHING
+             RETURNING id`,
+            [
+              scanId,
+              sourceId,
+              page.slug,
+              ch,
+              promptVersion,
+              proposalRunId,
+              p.claim_text,
+              claimHash,
+              p.kind,
+              p.holder,
+              p.weight,
+              p.domain ?? null,
+              JSON.stringify(existingTakes),
+              modelId,
+            ],
+          );
+              if (rows.length === 0) throw new PendingClaimWriteConflict();
+              return rows;
+            }));
+            break;
+          } catch (error) {
+            if (!(error instanceof PendingClaimWriteConflict) || attempt === PENDING_CLAIM_WRITE_ATTEMPTS) throw error;
+          }
         }
-        // A successful extraction under a newer prompt replaces only older pending
-        // proposals for this exact source revision. Accepted/rejected history stays intact.
-        await engine.executeRaw(
+        if (!inserted) throw new PendingClaimWriteConflict();
+        result.proposals_inserted += inserted.length;
+      }
+      // A successful extraction under a newer prompt replaces only older pending
+      // proposals for this exact source revision. Accepted/rejected history stays intact.
+      await engine.executeRaw(
         `WITH superseded AS (
            UPDATE take_proposals
               SET status = 'superseded', acted_at = now(), acted_by = 'system:propose_takes'
@@ -474,9 +522,8 @@ class ProposeTakesPhase extends BaseCyclePhase {
                 '{"status":"pending"}'::jsonb, '{"status":"superseded"}'::jsonb,
                 jsonb_build_object('replacement_prompt_version', $4)
            FROM superseded`,
-          [sourceId, page.slug, ch, promptVersion],
-        );
-      });
+        [sourceId, page.slug, ch, promptVersion],
+      );
       await engine.executeRaw(
         `UPDATE take_proposal_scans
             SET status = 'completed', proposal_count = $2, completed_at = now(), error_text = NULL

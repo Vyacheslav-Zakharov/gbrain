@@ -291,7 +291,7 @@ export async function rejectTakeProposal(
   reason?: string,
 ): Promise<ReviewMutationResult> {
   const identity = await loadProposal(engine, proposalId);
-  return withPageLock(`ai-review:${identity.source_id}:${identity.page_slug}`, async () => {
+  return withPageLock(`ai-review-claim:${identity.source_id}:${identity.page_slug}:${identity.claim_hash}`, async () => {
     return engine.transaction(async tx => {
       const proposal = await loadProposal(tx, proposalId);
       if (proposal.status !== 'pending') throw new ReviewConflictError('proposal is no longer pending', 'stale_status');
@@ -348,8 +348,9 @@ async function transitionTakeProposalStatus(
   const cleanReason = reason?.trim() || null;
   if (cleanReason && cleanReason.length > 1000) throw new Error('reason must be at most 1000 characters');
   const identity = await loadProposal(engine, proposalId);
-  return withPageLock(`ai-review:${identity.source_id}:${identity.page_slug}`, async () => {
-    return engine.transaction(async tx => {
+  return withPageLock(`ai-review-claim:${identity.source_id}:${identity.page_slug}:${identity.claim_hash}`, async () => {
+    try {
+      return await engine.transaction(async tx => {
       const proposal = await loadProposal(tx, proposalId);
       if (proposal.status !== expectedStatus) {
         throw new ReviewConflictError(`proposal is no longer ${expectedStatus}`, 'stale_status');
@@ -390,7 +391,13 @@ async function transitionTakeProposalStatus(
         [proposalId, action, actor, JSON.stringify(previousState), JSON.stringify(newState), JSON.stringify({ reason: cleanReason })],
       );
       return { proposal: { ...proposal, ...rows[0] } };
-    });
+      });
+    } catch (error) {
+      if (nextStatus === 'pending' && (error as { code?: string })?.code === '23505') {
+        throw new ReviewConflictError('a newer pending revision of this claim already exists', 'newer_pending_exists');
+      }
+      throw error;
+    }
   });
 }
 

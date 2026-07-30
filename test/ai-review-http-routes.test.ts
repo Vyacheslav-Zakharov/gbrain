@@ -27,8 +27,10 @@ describe('AI review reversible route contract', () => {
     expect(block).not.toContain('acceptTakeProposal(');
   });
 
-  test('producer and review transitions share the same cross-process page lock namespace', () => {
-    expect(producerSource).toContain('withPageLock(`ai-review:${sourceId}:${page.slug}`');
-    expect(reviewSource).toContain('withPageLock(`ai-review:${identity.source_id}:${identity.page_slug}`');
+  test('same-claim pending uniqueness is database-enforced without page-wide review locks', () => {
+    expect(producerSource).toContain('ON CONFLICT DO NOTHING');
+    expect(producerSource).not.toContain('withPageLock(`ai-review:${sourceId}:${page.slug}`');
+    expect(producerSource).toContain('withPageLock(`ai-review-claim:${sourceId}:${page.slug}:${claimHash}`');
+    expect(reviewSource).toContain('withPageLock(`ai-review-claim:${identity.source_id}:${identity.page_slug}:${identity.claim_hash}`');
   });
 });

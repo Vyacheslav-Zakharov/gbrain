@@ -791,6 +791,9 @@ CREATE TABLE IF NOT EXISTS take_proposals (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_idempotency_idx
   ON take_proposals (source_id, page_slug, content_hash, prompt_version, claim_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_one_pending_per_claim_idx
+  ON take_proposals (source_id, page_slug, claim_hash)
+  WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS take_proposals_pending_idx
   ON take_proposals (source_id, status, proposed_at DESC)
   WHERE status = 'pending';

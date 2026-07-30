@@ -5899,6 +5899,16 @@ export const MIGRATIONS: Migration[] = [
         WHERE status = 'deferred';
     `,
   },
+  {
+    version: 133,
+    name: 'take_proposals_one_pending_per_claim',
+    idempotent: true,
+    sql: `
+      CREATE UNIQUE INDEX IF NOT EXISTS take_proposals_one_pending_per_claim_idx
+        ON take_proposals (source_id, page_slug, claim_hash)
+        WHERE status = 'pending';
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

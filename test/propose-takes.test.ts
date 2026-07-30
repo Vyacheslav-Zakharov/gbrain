@@ -45,12 +45,19 @@ interface CapturedSql {
 function buildMockEngine(opts: {
   pages: Page[];
   existingProposals?: Set<string>; // page-level scan keys retained for compatibility
-}): { engine: BrainEngine; captured: CapturedSql[] } {
+  insertConflicts?: number;
+}): { engine: BrainEngine; captured: CapturedSql[]; transactionAttempts: () => number } {
   const captured: CapturedSql[] = [];
   const scans = opts.existingProposals ?? new Set<string>();
+  let remainingInsertConflicts = opts.insertConflicts ?? 0;
+  let transactionAttemptCount = 0;
 
   const engine = {
     kind: 'pglite',
+    async transaction<T>(fn: (tx: BrainEngine) => Promise<T>): Promise<T> {
+      transactionAttemptCount += 1;
+      return fn(engine as unknown as BrainEngine);
+    },
     async listPages() {
       return opts.pages;
     },
@@ -69,13 +76,17 @@ function buildMockEngine(opts: {
         return [{ id: scans.size } as unknown as T];
       }
       if (sql.includes('INSERT INTO take_proposals')) {
+        if (remainingInsertConflicts > 0) {
+          remainingInsertConflicts -= 1;
+          return [];
+        }
         return [{ id: captured.length } as unknown as T];
       }
       return [];
     },
   } as unknown as BrainEngine;
 
-  return { engine, captured };
+  return { engine, captured, transactionAttempts: () => transactionAttemptCount };
 }
 
 function buildPage(opts: { slug: string; body: string; sourceId?: string }): Page {
@@ -276,6 +287,20 @@ describe('runPhaseProposeTakes — phase integration', () => {
     expect(inserts[0]!.params[6]).toBe('Marketplaces with cold-start liquidity win'); // claim_text
     expect(inserts[0]!.params[8]).toBe('bet'); // kind
     expect(inserts[0]!.params[11]).toBe('market'); // domain
+  });
+
+  test('retries the whole claim transaction when a concurrent pending row wins the unique race', async () => {
+    const pages = [buildPage({ slug: 'wiki/retry-claim', body: 'A bounded claim that must not be lost.' })];
+    const { engine, transactionAttempts } = buildMockEngine({ pages, insertConflicts: 1 });
+    const result = await runPhaseProposeTakes(buildCtx(engine), {
+      extractor: async () => [
+        { claim_text: 'Claim survives a concurrent restore', kind: 'take', holder: 'brain', weight: 0.7 },
+      ],
+    });
+
+    expect(result.status).toBe('ok');
+    expect((result.details as Record<string, unknown>).proposals_inserted).toBe(1);
+    expect(transactionAttempts()).toBe(2);
   });
 
   test('cache hit: page already in take_proposals is skipped', async () => {

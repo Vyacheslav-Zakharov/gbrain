@@ -11,7 +11,8 @@ import {
 } from '../src/core/ai-review.ts';
 import { acceptConceptProposal, createManualConceptRevision } from '../src/core/concept-review.ts';
 import { importFromContent } from '../src/core/import-file.ts';
-import { contentHash } from '../src/core/cycle/propose-takes.ts';
+import { contentHash, proposalClaimHash, runPhaseProposeTakes, PROPOSE_TAKES_PROMPT_VERSION, type ProposedTake } from '../src/core/cycle/propose-takes.ts';
+import type { OperationContext } from '../src/core/operations.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
@@ -142,6 +143,65 @@ describe('AI review canonical acceptance', () => {
       [deferredId, newer[0].id],
     );
     expect(states.map(row => row.status)).toEqual(['deferred', 'pending']);
+  });
+
+  test('producer replaces a restored old revision and leaves other claims independent', async () => {
+    const oldId = await seedProposal();
+    const proposal: ProposedTake = {
+      claim_text: 'Supported bounded claim 1', kind: 'take', holder: 'world', weight: 0.7, domain: 'testing',
+    };
+    const claimHash = proposalClaimHash(proposal);
+    await engine.executeRaw(`UPDATE take_proposals SET claim_hash=$2 WHERE id=$1`, [oldId, claimHash]);
+    await deferTakeProposal(engine, oldId, 'admin-test', 'capacity');
+    await restoreTakeProposalToPending(engine, oldId, 'admin-test', 'operator restore');
+
+    const page = await engine.getPage('notes/review-source', { sourceId: 'review-test' });
+    const other = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO take_proposals
+         (source_id,page_slug,content_hash,prompt_version,proposal_run_id,claim_hash,claim_text,kind,holder,weight,domain,model_id)
+       VALUES ('review-test','notes/review-source',$1,$2,'run-other','other-claim','Independent claim','take','world',0.6,'testing','stub')
+       RETURNING id`,
+      [contentHash(page!.compiled_truth), PROPOSE_TAKES_PROMPT_VERSION],
+    );
+    const ctx: OperationContext = {
+      engine,
+      config: {} as never,
+      logger: { info() {}, warn() {}, error() {} } as never,
+      dryRun: false,
+      remote: false,
+      sourceId: 'review-test',
+    };
+    const result = await runPhaseProposeTakes(ctx, { extractor: async () => [proposal] });
+    expect(result.status).toBe('ok');
+
+    const sameClaim = await engine.executeRaw<{ id: number; status: string }>(
+      `SELECT id,status FROM take_proposals
+        WHERE source_id='review-test' AND page_slug='notes/review-source' AND claim_hash=$1
+        ORDER BY id`,
+      [claimHash],
+    );
+    expect(sameClaim.map(row => row.status)).toEqual(['superseded', 'pending']);
+    const independent = await engine.executeRaw<{ status: string }>(`SELECT status FROM take_proposals WHERE id=$1`, [other[0].id]);
+    expect(independent[0].status).toBe('pending');
+  });
+
+  test('database rejects a second pending row for the same claim but allows a different claim', async () => {
+    const id = await seedProposal();
+    await expect(engine.executeRaw(
+      `INSERT INTO take_proposals
+         (source_id,page_slug,content_hash,prompt_version,proposal_run_id,claim_hash,claim_text,kind,holder,weight,domain,model_id)
+       SELECT source_id,page_slug,'second-content','test-v2','run-second',claim_hash,claim_text,kind,holder,weight,domain,model_id
+         FROM take_proposals WHERE id=$1`,
+      [id],
+    )).rejects.toThrow();
+    const different = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO take_proposals
+         (source_id,page_slug,content_hash,prompt_version,proposal_run_id,claim_hash,claim_text,kind,holder,weight,domain,model_id)
+       SELECT source_id,page_slug,'second-content','test-v2','run-second','different-claim','Different claim',kind,holder,weight,domain,model_id
+         FROM take_proposals WHERE id=$1 RETURNING id`,
+      [id],
+    );
+    expect(different).toHaveLength(1);
   });
 });
 
