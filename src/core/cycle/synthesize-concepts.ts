@@ -63,9 +63,11 @@ const SYNTH_PROMPT = `You write a 1-paragraph executive summary of a concept
 based on multiple atom-shaped insights that reference it.
 
 Output ONLY the summary paragraph (3-5 sentences). No headers, no JSON,
-no preamble. Write in plain English, present-tense voice. Synthesize what
-the atoms collectively SAY about the concept; don't enumerate the atoms.`;
-export const SYNTHESIZE_CONCEPTS_PROMPT_VERSION = 'synthesize-concepts-review-v1';
+no preamble. Write на русском языке in a concise, natural business style.
+Keep proper names, product names, identifiers, and source-specific terminology
+unchanged when translating them would distort meaning. Synthesize what the
+atoms collectively SAY about the concept; don't enumerate the atoms.`;
+export const SYNTHESIZE_CONCEPTS_PROMPT_VERSION = 'synthesize-concepts-review-v2-ru';
 
 export async function runPhaseSynthesizeConcepts(
   engine: BrainEngine,
@@ -284,6 +286,25 @@ export async function runPhaseSynthesizeConcepts(
         ],
       );
       proposalInserted = inserted.length;
+      if (inserted[0]) {
+        await engine.executeRaw(
+          `WITH superseded AS (
+             UPDATE concept_proposals
+                SET status = 'superseded', acted_at = now(), acted_by = 'system:synthesize_concepts',
+                    version = version + 1
+              WHERE source_id = $1 AND page_slug = $2 AND status = 'pending'
+                AND id <> $3 AND prompt_version <> $4
+              RETURNING id, version - 1 AS expected_version
+           )
+           INSERT INTO ai_review_events
+             (target_type, target_id, action, actor, expected_version, previous_state, new_state, details)
+           SELECT 'concept_proposal', id, 'supersede', 'system:synthesize_concepts', expected_version,
+                  '{"status":"pending"}'::jsonb, '{"status":"superseded"}'::jsonb,
+                  jsonb_build_object('replacement_id', $3, 'prompt_version', $4)
+             FROM superseded`,
+          [group.sourceId, pageSlug, inserted[0].id, SYNTHESIZE_CONCEPTS_PROMPT_VERSION],
+        );
+      }
     }
     conceptsWritten += proposalInserted;
     // v0.41.19.0 (T4): one tick per concept group with running count.
@@ -360,8 +381,8 @@ function deterministicNarrative(group: AtomGroup): string {
   const tier = group.tier;
   const count = group.atomTitles.length;
   return (
-    `${tier} concept. ${count} atom${count === 1 ? '' : 's'} reference this. ` +
-    `Top mentions:\n${group.atomTitles
+    `Концепция уровня ${tier}. На неё ссылаются ${count} атомов. ` +
+    `Основные упоминания:\n${group.atomTitles
       .slice(0, 5)
       .map((t) => `  - ${t}`)
       .join('\n')}`

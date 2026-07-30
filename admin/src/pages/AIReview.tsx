@@ -27,6 +27,8 @@ interface Proposal {
   page_title?: string | null;
   page_body?: string | null;
   promoted_row_num?: number | null;
+  draft_revision_id?: number | null;
+  draft_claim_text?: string | null;
 }
 
 interface Draft {
@@ -43,6 +45,7 @@ interface DetailPayload {
   proposal: Proposal;
   revisions: Array<Record<string, unknown>>;
   events: Array<Record<string, unknown>>;
+  active_draft?: { revision_id: number; draft: Draft } | null;
 }
 
 function asDraft(p: Proposal): Draft {
@@ -108,7 +111,7 @@ export function AIReviewPage() {
     } catch (e) {
       if (request !== listRequest.current) return;
       setRows([]);
-      setTotal(null);
+      setTotal(0);
       setSelectedId(null);
       setDetail(null);
       setDraft(null);
@@ -124,8 +127,8 @@ export function AIReviewPage() {
       const data = await api.aiReviewProposal(id) as DetailPayload;
       if (request !== detailRequest.current) return;
       setDetail(data);
-      setDraft(asDraft(data.proposal));
-      setRevisionId(undefined);
+      setDraft(data.active_draft ? normalizeDraft(data.active_draft.draft) : asDraft(data.proposal));
+      setRevisionId(data.active_draft?.revision_id);
       setReceipt(null);
       setPageError(null);
     } catch (e) {
@@ -261,8 +264,9 @@ export function AIReviewPage() {
           {rows.map(row => (
             <button key={row.id} className={`proposal-row ${selectedId === row.id ? 'selected' : ''}`} onClick={() => select(row.id)}>
               <div className="proposal-row-top"><span>#{row.id}</span><span>{row.source_id}</span><span>{Number(row.weight).toFixed(2)}</span></div>
-              <strong>{row.claim_text}</strong>
+              <strong>{row.draft_claim_text ?? row.claim_text}</strong>
               <div className="proposal-row-meta">{row.page_slug} · {row.kind} · {row.holder}</div>
+              {row.draft_revision_id && <span className="draft-badge">Есть русский черновик · revision #{row.draft_revision_id}</span>}
             </button>
           ))}
         </section>

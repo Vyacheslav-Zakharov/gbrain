@@ -39,6 +39,7 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('gbrain-admin-sidebar-collapsed') === '1');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [pendingReviewCount, setPendingReviewCount] = useState<number | null>(null);
+  const [pendingConceptCount, setPendingConceptCount] = useState<number | null>(null);
   const [pendingMeetingCount, setPendingMeetingCount] = useState<number | null>(null);
 
   useEffect(() => {
@@ -60,6 +61,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const syncPendingCount = (event: Event) => {
+      const count = Number((event as CustomEvent<number>).detail);
+      if (Number.isFinite(count)) setPendingConceptCount(count);
+    };
+    window.addEventListener('gbrain:concept-review-pending-count', syncPendingCount);
+    return () => window.removeEventListener('gbrain:concept-review-pending-count', syncPendingCount);
+  }, []);
+
+  useEffect(() => {
     localStorage.setItem('gbrain-admin-sidebar-collapsed', sidebarCollapsed ? '1' : '0');
   }, [sidebarCollapsed]);
 
@@ -69,6 +79,9 @@ export function App() {
       void api.aiReviewProposals({ status: 'pending', limit: 1 })
         .then(data => { if (alive) setPendingReviewCount(Number(data.total ?? 0)); })
         .catch(() => { if (alive) setPendingReviewCount(null); });
+      void api.aiReviewConcepts({ status: 'pending', limit: 1 })
+        .then(data => { if (alive) setPendingConceptCount(Number(data.total ?? 0)); })
+        .catch(() => { if (alive) setPendingConceptCount(null); });
       void api.meetingReviewItems({ status: 'pending', limit: 1 })
         .then(data => { if (alive) setPendingMeetingCount(Number(data.total ?? 0)); })
         .catch(() => { if (alive) setPendingMeetingCount(null); });
@@ -142,6 +155,9 @@ export function App() {
             <span className="nav-label">{item.label}</span>
             {item.page === 'ai-review' && pendingReviewCount !== null && pendingReviewCount > 0 && (
               <span className="nav-badge" aria-label={`${pendingReviewCount} ожидают проверки`}>{pendingReviewCount}</span>
+            )}
+            {item.page === 'concept-review' && pendingConceptCount !== null && pendingConceptCount > 0 && (
+              <span className="nav-badge" aria-label={`${pendingConceptCount} концепций ожидают проверки`}>{pendingConceptCount}</span>
             )}
             {item.page === 'meeting-review' && pendingMeetingCount !== null && pendingMeetingCount > 0 && (
               <span className="nav-badge" aria-label={`${pendingMeetingCount} встреч ожидают проверки`}>{pendingMeetingCount}</span>

@@ -317,6 +317,26 @@ describe('v0.41 T6: runPhaseSynthesizeConcepts via stubbed chat', () => {
     };
     await runPhaseSynthesizeConcepts(engine, { _atoms: atoms, _chat: chat as typeof import('../../src/core/ai/gateway.ts').chat });
     expect(chatCalled).toBe(false);
+    const proposals = await engine.executeRaw<{ proposed_markdown: string }>(
+      `SELECT proposed_markdown FROM concept_proposals WHERE page_slug = 'concepts/theme'`,
+    );
+    expect(proposals[0].proposed_markdown).toContain('Концепция уровня T3');
+  });
+
+  test('T1/T2 synthesis prompt requires Russian output', async () => {
+    const atoms = Array.from({ length: 6 }, (_, i) => ({
+      slug: `ru-${i}`,
+      title: `Тема ${i}`,
+      body: `Содержание ${i}`,
+      concept_refs: ['russian-output'],
+    }));
+    let systemPrompt = '';
+    const chat = async (opts: ChatOpts) => {
+      systemPrompt = opts.system ?? '';
+      return stubChat('Русское описание концепции.')(opts);
+    };
+    await runPhaseSynthesizeConcepts(engine, { _atoms: atoms, _chat: chat as typeof import('../../src/core/ai/gateway.ts').chat });
+    expect(systemPrompt).toContain('на русском языке');
   });
 
   test('dry-run counts but does NOT write', async () => {

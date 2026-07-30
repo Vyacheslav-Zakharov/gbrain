@@ -54,7 +54,8 @@ import type { PhaseStatus, CyclePhase } from '../cycle.ts';
  * verdicts in `take_proposals` (composite key includes prompt_version) stay
  * valid as audit history; new runs re-spend LLM tokens on every page.
  */
-export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.0-tuned-cat15';
+export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.1-ru-v1';
+const PROPOSE_TAKES_ROLLOUT_COMPATIBLE_PROMPT_VERSION = 'v0.36.1.1';
 
 /**
  * Tuned extractor prompt, validated against the hand-labeled synthetic
@@ -99,12 +100,15 @@ NOT gradeable (do NOT extract these):
 - Restatements of an earlier claim in the same page
 
 For each gradeable claim, output a JSON object with:
-- claim_text   (string, <=200 chars, paraphrase or near-verbatim from prose)
+- claim_text   (string, <=200 chars, сформулируйте claim_text на русском языке)
 - kind         ('prediction' | 'judgment' | 'bet')
 - holder       ('world' | 'people/<slug>' | 'companies/<slug>' | 'brain' — default 'brain' when author asserts the claim)
 - weight       (number 0..1 inferred from hedging language: 'I bet'/'strong conviction'=0.7-0.85,
                 'I think'/'moderate conviction'=0.5-0.7, 'maybe'/'I'd guess'=0.3-0.5)
 - domain       (short tag — e.g. 'tactics', 'macro', 'hiring', 'geography', 'pricing')
+
+Не переводите имена собственные, названия продуктов, идентификаторы и термины,
+если перевод искажает смысл. Не добавляйте сведения, которых нет в PAGE PROSE.
 
 Output ONLY a JSON array of these objects. No prose. No commentary. If no
 gradeable claims, return [].
@@ -358,6 +362,19 @@ class ProposeTakesPhase extends BaseCyclePhase {
       // hits; failed rows are reclaimed for retry. This also caches [] results.
       const sourceId = page.source_id ?? scope.sourceId ?? 'default';
       const modelId = opts.model ?? 'claude-sonnet-4-6';
+      if (promptVersion === PROPOSE_TAKES_PROMPT_VERSION) {
+        const compatible = await engine.executeRaw<{ id: number }>(
+          `SELECT id FROM take_proposal_scans
+             WHERE source_id=$1 AND page_slug=$2 AND content_hash=$3
+               AND prompt_version=$4 AND status IN ('running','completed')
+             LIMIT 1`,
+          [sourceId, page.slug, ch, PROPOSE_TAKES_ROLLOUT_COMPATIBLE_PROMPT_VERSION],
+        );
+        if (compatible.length > 0) {
+          result.cache_hits += 1;
+          continue;
+        }
+      }
       const scanRows = await engine.executeRaw<{ id: number }>(
         `INSERT INTO take_proposal_scans
            (source_id, page_slug, content_hash, prompt_version, proposal_run_id, model_id, status)
@@ -437,6 +454,24 @@ class ProposeTakesPhase extends BaseCyclePhase {
         );
         result.proposals_inserted += inserted.length;
       }
+      // A successful extraction under a newer prompt replaces only older pending
+      // proposals for this exact source revision. Accepted/rejected history stays intact.
+      await engine.executeRaw(
+        `WITH superseded AS (
+           UPDATE take_proposals
+              SET status = 'superseded', acted_at = now(), acted_by = 'system:propose_takes'
+            WHERE source_id = $1 AND page_slug = $2 AND content_hash = $3
+              AND status = 'pending' AND prompt_version <> $4
+            RETURNING id
+         )
+         INSERT INTO ai_review_events
+           (target_type, target_id, action, actor, previous_state, new_state, details)
+         SELECT 'take_proposal', id, 'supersede', 'system:propose_takes',
+                '{"status":"pending"}'::jsonb, '{"status":"superseded"}'::jsonb,
+                jsonb_build_object('replacement_prompt_version', $4)
+           FROM superseded`,
+        [sourceId, page.slug, ch, promptVersion],
+      );
       await engine.executeRaw(
         `UPDATE take_proposal_scans
             SET status = 'completed', proposal_count = $2, completed_at = now(), error_text = NULL

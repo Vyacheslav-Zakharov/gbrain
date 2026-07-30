@@ -24,14 +24,25 @@ export interface ConceptProposalRow {
   proposed_at: string;
   current_page_body?: string | null;
   current_page_frontmatter?: Record<string, unknown> | null;
+  draft_revision_id?: number | null;
+  draft_proposed_markdown?: string | null;
 }
 
 export async function listConceptProposals(engine: BrainEngine, opts: { status?: string; query?: string; limit?: number } = {}) {
   const rows = await engine.executeRaw<ConceptProposalRow & { total_count: number }>(
     `SELECT cp.*, p.compiled_truth AS current_page_body, p.frontmatter AS current_page_frontmatter,
+            draft.id::int AS draft_revision_id,
+            draft.proposed_payload->>'proposed_markdown' AS draft_proposed_markdown,
             count(*) OVER()::int AS total_count
        FROM concept_proposals cp
        LEFT JOIN pages p ON p.source_id = cp.source_id AND p.slug = cp.page_slug AND p.deleted_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT r.id, r.proposed_payload
+           FROM ai_review_revisions r
+          WHERE r.target_type = 'concept_proposal' AND r.target_id = cp.id AND r.status = 'draft'
+          ORDER BY r.created_at DESC, r.id DESC
+          LIMIT 1
+       ) draft ON true
       WHERE cp.status = $1
         AND ($2::text IS NULL OR cp.page_slug ILIKE '%' || $2 || '%' OR cp.proposed_markdown ILIKE '%' || $2 || '%')
       ORDER BY cp.proposed_at DESC, cp.id DESC LIMIT $3`,
@@ -51,7 +62,13 @@ export async function getConceptProposalReview(engine: BrainEngine, id: number) 
     engine.executeRaw(`SELECT * FROM ai_review_revisions WHERE target_type = 'concept_proposal' AND target_id = $1 ORDER BY created_at DESC`, [id]),
     engine.executeRaw(`SELECT * FROM ai_review_events WHERE target_type = 'concept_proposal' AND target_id = $1 ORDER BY created_at DESC`, [id]),
   ]);
-  return { proposal: rows[0], revisions, events };
+  const activeRevision = (revisions as Array<{ id?: unknown; status?: unknown; proposed_payload?: unknown }>)
+    .find(revision => revision.status === 'draft');
+  const payload = activeRevision?.proposed_payload as { proposed_markdown?: unknown } | undefined;
+  const activeDraft = activeRevision && typeof activeRevision.id === 'number' && typeof payload?.proposed_markdown === 'string'
+    ? { revision_id: activeRevision.id, proposed_markdown: payload.proposed_markdown }
+    : null;
+  return { proposal: rows[0], revisions, events, active_draft: activeDraft };
 }
 
 export async function createLlmConceptRevision(engine: BrainEngine, id: number, comment: string, actor: string, model?: string) {

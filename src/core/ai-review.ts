@@ -37,6 +37,8 @@ export interface TakeProposalRow {
   page_updated_at?: string | null;
   page_body?: string | null;
   pending_count?: number;
+  draft_revision_id?: number | null;
+  draft_claim_text?: string | null;
 }
 
 export interface TakeDraft {
@@ -166,9 +168,18 @@ export async function listTakeProposals(engine: BrainEngine, opts: ReviewListOpt
   const offset = Math.max(0, opts.offset ?? 0);
   const rows = await engine.executeRaw<TakeProposalRow & { total_count: number }>(
     `SELECT tp.*, p.title AS page_title, p.updated_at::text AS page_updated_at,
+            draft.id::int AS draft_revision_id,
+            draft.proposed_payload->>'claim_text' AS draft_claim_text,
             count(*) OVER()::int AS total_count
        FROM take_proposals tp
        LEFT JOIN pages p ON p.source_id = tp.source_id AND p.slug = tp.page_slug AND p.deleted_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT r.id, r.proposed_payload
+           FROM ai_review_revisions r
+          WHERE r.target_type = 'take_proposal' AND r.target_id = tp.id AND r.status = 'draft'
+          ORDER BY r.created_at DESC, r.id DESC
+          LIMIT 1
+       ) draft ON true
       WHERE tp.status = $1
         AND ($2::text IS NULL OR tp.source_id = $2)
         AND ($3::text IS NULL OR tp.claim_text ILIKE '%' || $3 || '%' OR tp.page_slug ILIKE '%' || $3 || '%')
@@ -183,6 +194,7 @@ export async function getTakeProposalReview(engine: BrainEngine, id: number): Pr
   proposal: TakeProposalRow;
   revisions: unknown[];
   events: unknown[];
+  active_draft: { revision_id: number; draft: TakeDraft } | null;
 }> {
   const proposal = await loadProposal(engine, id);
   const [revisions, events] = await Promise.all([
@@ -199,7 +211,12 @@ export async function getTakeProposalReview(engine: BrainEngine, id: number): Pr
       [id],
     ),
   ]);
-  return { proposal, revisions, events };
+  const activeRevision = (revisions as Array<{ id?: unknown; status?: unknown; proposed_payload?: unknown }>)
+    .find(revision => revision.status === 'draft');
+  const activeDraft = activeRevision && typeof activeRevision.id === 'number' && activeRevision.proposed_payload
+    ? { revision_id: activeRevision.id, draft: validateDraft(activeRevision.proposed_payload as TakeDraft) }
+    : null;
+  return { proposal, revisions, events, active_draft: activeDraft };
 }
 
 export async function createManualTakeRevision(

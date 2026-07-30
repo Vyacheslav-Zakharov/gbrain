@@ -22,12 +22,18 @@ import {
   hasCompleteFence,
   extractExistingTakesForDedup,
   PROPOSE_TAKES_PROMPT_VERSION,
+  EXTRACT_TAKES_PROMPT,
   type ProposeTakesExtractor,
   type ProposedTake,
 } from '../src/core/cycle/propose-takes.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import type { Page } from '../src/core/types.ts';
+
+test('take extractor preserves source meaning but returns claim text in Russian', () => {
+  expect(EXTRACT_TAKES_PROMPT).toContain('claim_text на русском языке');
+  expect(EXTRACT_TAKES_PROMPT).toContain('Не переводите имена собственные');
+});
 
 // ─── Mock engine ────────────────────────────────────────────────────
 
@@ -50,6 +56,11 @@ function buildMockEngine(opts: {
     },
     async executeRaw<T>(sql: string, params?: unknown[]): Promise<T[]> {
       captured.push({ sql, params: params ?? [] });
+      if (sql.includes('SELECT id FROM take_proposal_scans')) {
+        const [sourceId, slug, ch, pv] = params ?? [];
+        const key = `${sourceId}|${slug}|${ch}|${pv}`;
+        return scans.has(key) ? [{ id: 1 } as unknown as T] : [];
+      }
       if (sql.includes('INSERT INTO take_proposal_scans')) {
         const [sourceId, slug, ch, pv] = params ?? [];
         const key = `${sourceId}|${slug}|${ch}|${pv}`;
@@ -287,6 +298,22 @@ describe('runPhaseProposeTakes — phase integration', () => {
     // v0.42: extract rollup row UPSERTs on every phase invocation (best-
     // effort cache). Filter the assertion to take_proposals INSERTs only.
     expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(0);
+  });
+
+  test('Russian prompt rollout reuses a completed scan from the previous production version', async () => {
+    const body = 'A page already processed before the Russian-output rollout.';
+    const pages = [buildPage({ slug: 'wiki/rollout-safe', body })];
+    const ch = contentHash(body);
+    const existing = new Set([`default|wiki/rollout-safe|${ch}|v0.36.1.1`]);
+    const { engine } = buildMockEngine({ pages, existingProposals: existing });
+    let extractorCalled = false;
+    const result = await runPhaseProposeTakes(buildCtx(engine), {
+      extractor: async () => { extractorCalled = true; return []; },
+    });
+
+    expect(extractorCalled).toBe(false);
+    expect((result.details as Record<string, unknown>).cache_hits).toBe(1);
+    expect((result.details as Record<string, unknown>).cache_misses).toBe(0);
   });
 
   test('persists every distinct claim returned for one page', async () => {

@@ -11,16 +11,31 @@ describe('Admin design P0 contracts', () => {
     expect(mergeEvents([sse], [persisted])).toEqual([persisted]);
   });
 
-  test('navigation is Russian and surfaces pending AI review count', () => {
+  test('navigation is Russian and surfaces pending AI and concept review counts', () => {
     const app = read('admin/src/App.tsx');
     const css = read('admin/src/index.css');
     expect(app).toContain("label: 'Проверка AI'");
     expect(app).toContain("label: 'Импорт данных'");
     expect(app).toContain('nav-badge');
     expect(app).toContain("status: 'pending', limit: 1");
+    expect(app).toContain('pendingConceptCount');
+    expect(app).toContain("api.aiReviewConcepts({ status: 'pending', limit: 1 })");
+    expect(app).toContain('gbrain:concept-review-pending-count');
     expect(app).toContain('mobile-nav-toggle');
     expect(app).toContain('aria-controls="admin-sidebar"');
     expect(css).toContain('.app.mobile-nav-open .sidebar');
+  });
+
+  test('Concept Review reuses accessible AI Review visual hierarchy', () => {
+    const page = read('admin/src/pages/ConceptReview.tsx');
+    expect(page).toContain('className="ai-review"');
+    expect(page).toContain('className="ai-review-header"');
+    expect(page).toContain('className="ai-review-count"');
+    expect(page).toContain('className={`proposal-row');
+    expect(page).toContain('className="reject"');
+    expect(page).toContain('className="accept"');
+    expect(page).toContain('Ожидают проверки:');
+    expect(page).toContain('Есть русский черновик');
   });
 
   test('admin API fails bounded requests instead of loading forever', () => {
