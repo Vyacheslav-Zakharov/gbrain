@@ -88,6 +88,17 @@ export const api = {
     }
     return apiFetch(`/admin/api/activity/runs?${qs.toString()}`);
   },
+  meetingReviewItems: (params: { status?: string; q?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') qs.set(key, String(value));
+    return apiFetch(`/admin/api/meeting-review/items?${qs.toString()}`);
+  },
+  meetingReviewItem: (id: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}`),
+  meetingReviewManualRevision: (id: string, draft: object) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/revisions/manual`, { method: 'POST', body: JSON.stringify({ draft }) }),
+  meetingReviewLlmRevision: (id: string, field: string, comment: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/revisions/llm`, { method: 'POST', body: JSON.stringify({ field, comment }) }),
+  meetingReviewAccept: (id: string, draft: object) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/accept`, { method: 'POST', body: JSON.stringify({ draft }) }),
+  meetingReviewReject: (id: string, reason?: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  meetingReviewRefresh: () => apiFetch('/admin/api/meeting-review/refresh', { method: 'POST' }),
   aiReviewProposals: (params: { status?: string; q?: string; source_id?: string; limit?: number; offset?: number } = {}) => {
     const qs = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
