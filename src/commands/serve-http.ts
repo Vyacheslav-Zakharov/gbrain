@@ -16,6 +16,8 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import { randomBytes, randomInt, createHash } from 'crypto';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { safeHexEqual } from '../core/timing-safe.ts';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -37,6 +39,7 @@ import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
 import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
+import { validateShellJobParams } from '../core/minions/handlers/shell-validate.ts';
 import {
   computeContentHash,
   validateIngestionEvent,
@@ -84,6 +87,17 @@ import {
   listConceptProposals,
   rejectConceptProposal,
 } from '../core/concept-review.ts';
+import {
+  acceptMeetingReview,
+  attachMeetingReviewJob,
+  createLlmMeetingRevision,
+  createManualMeetingRevision,
+  getMeetingReviewItem,
+  listMeetingReviewItems,
+  rejectMeetingReview,
+  reopenMeetingReviewAfterQueueFailure,
+  type MeetingReviewStatus,
+} from '../core/meeting-review.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -2478,6 +2492,82 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   // ---------------------------------------------------------------------------
   // Admin API endpoints
   // ---------------------------------------------------------------------------
+
+  const meetingReviewQueue = new MinionQueue(engine);
+  const meetingIngestScript = process.env.GBRAIN_MEETING_INGEST_SCRIPT || join(homedir(), 'scripts', 'meeting-ingest.sh');
+  const enqueueMeetingIngest = async (argv: string[], idempotencyKey: string) => {
+    const data = { cwd: homedir(), argv: [meetingIngestScript, ...argv] };
+    validateShellJobParams(data);
+    return meetingReviewQueue.add('shell', data, {
+      max_attempts: 1,
+      timeout_ms: 600_000,
+      idempotency_key: idempotencyKey,
+    }, { allowProtectedSubmit: true });
+  };
+
+  app.get('/admin/api/meeting-review/items', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const statusRaw = String(req.query.status ?? 'pending');
+      const status = ['pending', 'accepted', 'rejected'].includes(statusRaw) ? statusRaw as MeetingReviewStatus : 'pending';
+      res.json(await listMeetingReviewItems({
+        status,
+        query: typeof req.query.q === 'string' ? req.query.q : undefined,
+        limit: Number(req.query.limit ?? 100),
+      }));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.get('/admin/api/meeting-review/items/:id', requireAdmin, async (req: Request, res: Response) => {
+    try { res.json(await getMeetingReviewItem(String(req.params.id))); }
+    catch (error) { sendReviewError(res, error); }
+  });
+
+  app.post('/admin/api/meeting-review/items/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try { res.json(await createManualMeetingRevision(String(req.params.id), req.body?.draft, adminActor(req))); }
+    catch (error) { sendReviewError(res, error); }
+  });
+
+  app.post('/admin/api/meeting-review/items/:id/revisions/llm', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await createLlmMeetingRevision(
+        String(req.params.id),
+        String(req.body?.field ?? 'canonical_markdown') as 'canonical_markdown' | 'shared_markdown' | 'split_markdown',
+        String(req.body?.comment ?? ''),
+        adminActor(req),
+      ));
+    } catch (error) { sendReviewError(res, error); }
+  });
+
+  app.post('/admin/api/meeting-review/items/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    const id = String(req.params.id);
+    const actor = adminActor(req);
+    try {
+      await acceptMeetingReview(id, req.body?.draft, actor);
+      try {
+        const job = await enqueueMeetingIngest(['--wait-lock', '--apply', '--ids', id], `meeting-review:${id}:accepted-v1`);
+        const item = await attachMeetingReviewJob(id, job.id, actor);
+        res.status(202).json({ item, job_id: job.id });
+      } catch (queueError) {
+        await reopenMeetingReviewAfterQueueFailure(id, queueError instanceof Error ? queueError.message : String(queueError), actor);
+        throw queueError;
+      }
+    } catch (error) { sendReviewError(res, error); }
+  });
+
+  app.post('/admin/api/meeting-review/items/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try { res.json(await rejectMeetingReview(String(req.params.id), String(req.body?.reason ?? ''), adminActor(req))); }
+    catch (error) { sendReviewError(res, error); }
+  });
+
+  app.post('/admin/api/meeting-review/refresh', requireAdmin, requireAdminSameOrigin, express.json(), async (_req: Request, res: Response) => {
+    try {
+      const slot = new Date().toISOString().slice(0, 16);
+      const job = await enqueueMeetingIngest(['--dry-run', '--limit', '50'], `meeting-review:refresh:${slot}`);
+      res.status(202).json({ job_id: job.id });
+    } catch (error) { sendReviewError(res, error); }
+  });
 
   app.get('/admin/api/ai-review/proposals', requireAdmin, async (req: Request, res: Response) => {
     try {
