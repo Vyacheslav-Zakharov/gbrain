@@ -41,4 +41,14 @@ describe('AI Review admin failure UX', () => {
     expect(source).toContain('setTotal(0);');
     expect(source).toContain('setSelected(null);');
   });
+
+  test('Meeting Review uses the shared review-console visual hierarchy', () => {
+    const source = readFileSync(new URL('../admin/src/pages/MeetingReview.tsx', import.meta.url), 'utf8');
+    expect(source).toContain('className={`proposal-row');
+    expect(source).toContain('className="detail-title"');
+    expect(source).toContain('className="review-form"');
+    expect(source).toContain('className="reject"');
+    expect(source).toContain('className="accept"');
+    expect(source).toContain("setMobileDetail(true)");
+  });
 });

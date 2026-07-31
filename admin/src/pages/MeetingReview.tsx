@@ -44,6 +44,7 @@ export function MeetingReviewPage() {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [mobileDetail, setMobileDetail] = useState(false);
   const detailRequest = useRef(0);
 
   const load = useCallback(async () => {
@@ -69,7 +70,12 @@ export function MeetingReviewPage() {
 
   const original = useMemo(() => ({ ...EMPTY_DRAFT, ...(detail?.item.draft || {}) }), [detail]);
   const dirty = useMemo(() => JSON.stringify(original) !== JSON.stringify(draft), [original, draft]);
-  const choose = (id: string) => { if (dirty && !confirm('Отменить несохранённые изменения?')) return; setSelected(id); };
+  const choose = (id: string) => {
+    if (dirty && !confirm('Отменить несохранённые изменения?')) return;
+    setSelected(id);
+    setMobileDetail(true);
+    setError('');
+  };
 
   const revise = async () => {
     if (!selected || !comment.trim()) return;
@@ -108,29 +114,38 @@ export function MeetingReviewPage() {
     catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setBusy(''); }
   };
 
-  return <div className="ai-review">
-    <header className="ai-review-header"><div><h1>Проверка встреч</h1><p>Preview не публикуется. Принятие фиксирует проверенный Markdown и ставит controlled ingest в Minions.</p></div><div className="ai-review-count">{total} · {STATUS_LABELS[status].toLowerCase()}</div></header>
+  return <div className="ai-review meeting-review">
+    <header className="ai-review-header"><div><h1>Проверка встреч</h1><p>Предпросмотр не публикуется. Принятие фиксирует проверенный Markdown и ставит управляемый импорт в очередь Minions.</p></div><div className="ai-review-count">{status === 'pending' ? `Ожидают проверки: ${total}` : `${STATUS_LABELS[status]}: ${total}`}</div></header>
     <div className="ai-review-toolbar">
-      <div className="ai-review-tabs">{(['pending', 'accepted', 'rejected'] as Status[]).map(value => <button key={value} className={status === value ? 'active' : ''} onClick={() => { if (!dirty || confirm('Отменить несохранённые изменения?')) { setStatus(value); setSelected(null); } }}>{STATUS_LABELS[value]}</button>)}</div>
-      <input aria-label="Поиск встреч" placeholder="Поиск" value={query} onChange={e => setQuery(e.target.value)} />
-      <button disabled={Boolean(busy)} onClick={refresh}>Обновить preview</button>
+      <div className="ai-review-tabs" role="group" aria-label="Статус встреч">{(['pending', 'accepted', 'rejected'] as Status[]).map(value => <button type="button" key={value} className={status === value ? 'active' : ''} onClick={() => { if (!dirty || confirm('Отменить несохранённые изменения?')) { setStatus(value); setSelected(null); setMobileDetail(false); } }}>{STATUS_LABELS[value]}</button>)}</div>
+      <input aria-label="Поиск встреч" placeholder="Поиск по теме, дате или источнику" value={query} onChange={e => { setSelected(null); setMobileDetail(false); setQuery(e.target.value); }} />
+      <button type="button" disabled={Boolean(busy)} onClick={refresh}>{busy === 'refresh' ? 'Обновляем…' : 'Обновить предпросмотр'}</button>
     </div>
-    {error && <div className="ai-review-error">{error}</div>}
-    {notice && <div className="ai-review-receipt">{notice}</div>}
-    <div className="ai-review-grid">
-      <div className="proposal-list">{rows.map(row => <button key={row.id} className={selected === row.id ? 'selected' : ''} onClick={() => choose(row.id)}><b>{row.date} · {row.topic}</b><small>{row.source} · {row.id}{row.job_id ? ` · job #${row.job_id}` : ''}</small></button>)}</div>
-      <div className="proposal-detail">{detail ? <>
-        <h2>{detail.item.topic}</h2><p><code>{detail.item.source}:{detail.item.slug}</code></p>
-        <p>{detail.item.route_reason}</p>
-        {(detail.item.needs_review.length > 0 || detail.item.created_stubs.length > 0) && <details open><summary>Safety gate</summary><pre>{JSON.stringify({ needs_review: detail.item.needs_review, planned_stubs: detail.item.created_stubs }, null, 2)}</pre></details>}
-        <div className="ai-review-tabs">{(Object.keys(FIELD_LABELS) as DraftField[]).map(value => <button key={value} disabled={!draft[value] && value !== 'canonical_markdown'} className={field === value ? 'active' : ''} onClick={() => setField(value)}>{FIELD_LABELS[value]}</button>)}</div>
-        <textarea rows={28} value={draft[field]} disabled={detail.item.status !== 'pending'} onChange={e => setDraft(current => ({ ...current, [field]: e.target.value }))} />
+    {error && <div className="ai-review-error" role="alert"><span>{error}</span><button type="button" onClick={() => setError('')} aria-label="Закрыть сообщение">×</button></div>}
+    {notice && <div className="receipt" role="status">{notice}</div>}
+    <div className={`ai-review-grid ${mobileDetail ? 'show-detail' : ''}`}>
+      <section className="proposal-list" aria-label="Очередь встреч">
+        {rows.length === 0 && <div className="empty-state"><strong>В этом статусе встреч нет</strong><span>Измените фильтр или поисковый запрос.</span></div>}
+        {rows.map(row => <button type="button" key={row.id} className={`proposal-row ${selected === row.id ? 'selected' : ''}`} onClick={() => choose(row.id)}>
+          <div className="proposal-row-top"><span>{row.date}</span><span>{row.source}</span><span>{STATUS_LABELS[row.status]}</span></div>
+          <strong>{row.topic}</strong>
+          <div className="proposal-row-preview">{row.route_reason || 'Маршрут импорта будет показан в карточке встречи.'}</div>
+          <div className="proposal-row-meta">{row.slug}{row.job_id ? ` · job #${row.job_id}` : ''}</div>
+        </button>)}
+      </section>
+      <section className="proposal-detail" aria-label="Карточка встречи">{detail ? <>
+        <button type="button" className="mobile-back" onClick={() => setMobileDetail(false)}>← К очереди</button>
+        <div className="detail-title"><div><span className={`status-pill ${detail.item.status}`}>{STATUS_LABELS[detail.item.status]}</span> <strong>{detail.item.topic}</strong></div><code>{detail.item.source}:{detail.item.slug}</code></div>
+        <div className="concept-evidence-summary"><strong>Маршрут импорта</strong><span>{detail.item.route_reason}</span></div>
+        {(detail.item.needs_review.length > 0 || detail.item.created_stubs.length > 0) && <details className="source-context" open><summary>Проверка безопасности</summary><pre>{JSON.stringify({ needs_review: detail.item.needs_review, planned_stubs: detail.item.created_stubs }, null, 2)}</pre></details>}
+        <div className="ai-review-tabs meeting-document-tabs" role="group" aria-label="Документ встречи">{(Object.keys(FIELD_LABELS) as DraftField[]).map(value => <button type="button" key={value} disabled={!draft[value] && value !== 'canonical_markdown'} className={field === value ? 'active' : ''} onClick={() => setField(value)}>{FIELD_LABELS[value]}</button>)}</div>
+        <div className="review-form"><label>{FIELD_LABELS[field]}<textarea rows={22} value={draft[field]} disabled={detail.item.status !== 'pending'} onChange={e => setDraft(current => ({ ...current, [field]: e.target.value }))} /></label></div>
         {detail.item.status === 'pending' && <>
-          <div className="llm-revision"><textarea rows={3} placeholder="Комментарий для LLM: что исправить в выбранном документе" value={comment} onChange={e => setComment(e.target.value)} /><button disabled={Boolean(busy) || !comment.trim()} onClick={revise}>Создать LLM revision</button></div>
-          <div className="review-actions"><button disabled={Boolean(busy)} onClick={reject}>Отклонить</button><button className="primary" disabled={Boolean(busy) || !draft.canonical_markdown.trim()} onClick={accept}>Принять и поставить ingest</button></div>
+          <div className="llm-box"><label>Комментарий для LLM — публикации не будет<textarea rows={3} placeholder="Что исправить в выбранном документе" value={comment} onChange={e => setComment(e.target.value)} /></label><button type="button" disabled={Boolean(busy) || !comment.trim()} onClick={revise}>{busy === 'llm' ? 'Готовим черновик…' : 'Создать LLM revision'}</button></div>
+          <div className="review-actions"><button type="button" className="reject" disabled={Boolean(busy)} onClick={reject}>{busy === 'reject' ? 'Отклоняем…' : 'Отклонить'}</button><button type="button" className="accept" disabled={Boolean(busy) || !draft.canonical_markdown.trim()} onClick={accept}>{busy === 'accept' ? 'Ставим в очередь…' : 'Принять и поставить импорт'}</button></div>
         </>}
-        <details><summary>История ({detail.revisions.length} revisions / {detail.events.length} events)</summary><pre>{JSON.stringify({ revisions: detail.revisions, events: detail.events }, null, 2)}</pre></details>
-      </> : <p>Выберите встречу для проверки.</p>}</div>
+        <details className="source-context"><summary>История ({detail.revisions.length} revisions / {detail.events.length} events)</summary><pre>{JSON.stringify({ revisions: detail.revisions, events: detail.events }, null, 2)}</pre></details>
+      </> : <div className="empty-state"><strong>Выберите встречу</strong><span>Документы, маршрут и действия появятся здесь.</span></div>}</section>
     </div>
   </div>;
 }
