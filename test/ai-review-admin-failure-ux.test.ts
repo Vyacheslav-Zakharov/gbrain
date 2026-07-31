@@ -50,5 +50,10 @@ describe('AI Review admin failure UX', () => {
     expect(source).toContain('className="reject"');
     expect(source).toContain('className="accept"');
     expect(source).toContain("setMobileDetail(true)");
+    expect(source).toContain('setMobileDetail(false)');
+    expect(source).toContain("dirty && !confirm('Отменить несохранённые изменения?')");
+    expect(source).toContain('clearSelection(); await load();');
+    expect(source).toContain('aria-live="polite"');
+    expect(source).toContain('Загружаем встречи…');
   });
 });

@@ -35,7 +35,7 @@ export function MeetingReviewPage() {
   const [status, setStatus] = useState<Status>('pending');
   const [query, setQuery] = useState('');
   const [rows, setRows] = useState<Item[]>([]);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
@@ -45,14 +45,24 @@ export function MeetingReviewPage() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [mobileDetail, setMobileDetail] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const listRequest = useRef(0);
   const detailRequest = useRef(0);
 
   const load = useCallback(async () => {
+    const request = ++listRequest.current;
+    setLoading(true);
     try {
       const data = await api.meetingReviewItems({ status, q: query, limit: 200 });
-      setRows(data.rows || []); setTotal(data.total || 0); setError('');
+      if (request !== listRequest.current) return;
+      setRows(data.rows || []); setTotal(Number(data.total || 0)); setError('');
       if (selected && !(data.rows || []).some((row: Item) => row.id === selected)) setSelected(null);
-    } catch (e) { setRows([]); setTotal(0); setError(e instanceof Error ? e.message : String(e)); }
+    } catch (e) {
+      if (request !== listRequest.current) return;
+      setRows([]); setTotal(0); setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (request === listRequest.current) setLoading(false);
+    }
   }, [status, query, selected]);
 
   const loadDetail = useCallback(async (id: string) => {
@@ -70,6 +80,14 @@ export function MeetingReviewPage() {
 
   const original = useMemo(() => ({ ...EMPTY_DRAFT, ...(detail?.item.draft || {}) }), [detail]);
   const dirty = useMemo(() => JSON.stringify(original) !== JSON.stringify(draft), [original, draft]);
+  const clearSelection = () => {
+    detailRequest.current += 1;
+    setSelected(null);
+    setDetail(null);
+    setDraft(EMPTY_DRAFT);
+    setComment('');
+    setMobileDetail(false);
+  };
   const choose = (id: string) => {
     if (dirty && !confirm('Отменить несохранённые изменения?')) return;
     setSelected(id);
@@ -95,7 +113,7 @@ export function MeetingReviewPage() {
       if (dirty) await api.meetingReviewManualRevision(selected, draft);
       const result = await api.meetingReviewAccept(selected, draft);
       setNotice(`Встреча принята. Minions job #${result.job_id} поставлен в очередь.`);
-      await load(); setSelected(null);
+      clearSelection(); await load();
     } catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setBusy(''); }
   };
 
@@ -104,7 +122,7 @@ export function MeetingReviewPage() {
     const reason = prompt('Причина отклонения (необязательно):');
     if (reason === null) return;
     setBusy('reject'); setError('');
-    try { await api.meetingReviewReject(selected, reason); await load(); setSelected(null); }
+    try { await api.meetingReviewReject(selected, reason); clearSelection(); await load(); }
     catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setBusy(''); }
   };
 
@@ -115,17 +133,18 @@ export function MeetingReviewPage() {
   };
 
   return <div className="ai-review meeting-review">
-    <header className="ai-review-header"><div><h1>Проверка встреч</h1><p>Предпросмотр не публикуется. Принятие фиксирует проверенный Markdown и ставит управляемый импорт в очередь Minions.</p></div><div className="ai-review-count">{status === 'pending' ? `Ожидают проверки: ${total}` : `${STATUS_LABELS[status]}: ${total}`}</div></header>
+    <header className="ai-review-header"><div><h1>Проверка встреч</h1><p>Предпросмотр не публикуется. Принятие фиксирует проверенный Markdown и ставит управляемый импорт в очередь Minions.</p></div><div className="ai-review-count" aria-live="polite" aria-busy={total === null}>{status === 'pending' ? `Ожидают проверки: ${total ?? '…'}` : `${STATUS_LABELS[status]}: ${total ?? '…'}`}</div></header>
     <div className="ai-review-toolbar">
-      <div className="ai-review-tabs" role="group" aria-label="Статус встреч">{(['pending', 'accepted', 'rejected'] as Status[]).map(value => <button type="button" key={value} className={status === value ? 'active' : ''} onClick={() => { if (!dirty || confirm('Отменить несохранённые изменения?')) { setStatus(value); setSelected(null); setMobileDetail(false); } }}>{STATUS_LABELS[value]}</button>)}</div>
-      <input aria-label="Поиск встреч" placeholder="Поиск по теме, дате или источнику" value={query} onChange={e => { setSelected(null); setMobileDetail(false); setQuery(e.target.value); }} />
+      <div className="ai-review-tabs" role="group" aria-label="Статус встреч">{(['pending', 'accepted', 'rejected'] as Status[]).map(value => <button type="button" key={value} className={status === value ? 'active' : ''} onClick={() => { if (!dirty || confirm('Отменить несохранённые изменения?')) { clearSelection(); setRows([]); setTotal(null); setStatus(value); } }}>{STATUS_LABELS[value]}</button>)}</div>
+      <input aria-label="Поиск встреч" placeholder="Поиск по теме, дате или источнику" value={query} onChange={e => { if (dirty && !confirm('Отменить несохранённые изменения?')) return; clearSelection(); setRows([]); setTotal(null); setQuery(e.target.value); }} />
       <button type="button" disabled={Boolean(busy)} onClick={refresh}>{busy === 'refresh' ? 'Обновляем…' : 'Обновить предпросмотр'}</button>
     </div>
     {error && <div className="ai-review-error" role="alert"><span>{error}</span><button type="button" onClick={() => setError('')} aria-label="Закрыть сообщение">×</button></div>}
     {notice && <div className="receipt" role="status">{notice}</div>}
     <div className={`ai-review-grid ${mobileDetail ? 'show-detail' : ''}`}>
       <section className="proposal-list" aria-label="Очередь встреч">
-        {rows.length === 0 && <div className="empty-state"><strong>В этом статусе встреч нет</strong><span>Измените фильтр или поисковый запрос.</span></div>}
+        {loading && <div className="empty-state" aria-busy="true"><span className="loading-spinner" />Загружаем встречи…</div>}
+        {!loading && rows.length === 0 && <div className="empty-state"><strong>В этом статусе встреч нет</strong><span>Измените фильтр или поисковый запрос.</span></div>}
         {rows.map(row => <button type="button" key={row.id} className={`proposal-row ${selected === row.id ? 'selected' : ''}`} onClick={() => choose(row.id)}>
           <div className="proposal-row-top"><span>{row.date}</span><span>{row.source}</span><span>{STATUS_LABELS[row.status]}</span></div>
           <strong>{row.topic}</strong>

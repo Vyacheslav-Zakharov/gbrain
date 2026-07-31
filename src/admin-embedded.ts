@@ -7,7 +7,7 @@
 // the request path the express handler sees to (resolved-path, mime).
 
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
-import A_0_assets_index_Ja6EPCdV_js from '../admin/dist/assets/index-Ja6EPCdV.js' with { type: 'file' };
+import A_0_assets_index_D6B06DP3_js from '../admin/dist/assets/index-D6B06DP3.js' with { type: 'file' };
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
 import A_1_assets_index_aZaHWrR__css from '../admin/dist/assets/index-aZaHWrR-.css' with { type: 'file' };
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
@@ -19,7 +19,7 @@ export interface AdminAsset {
 }
 
 export const ADMIN_ASSETS: Record<string, AdminAsset> = {
-  "/admin/assets/index-Ja6EPCdV.js": { path: A_0_assets_index_Ja6EPCdV_js as unknown as string, mime: "application/javascript; charset=utf-8" },
+  "/admin/assets/index-D6B06DP3.js": { path: A_0_assets_index_D6B06DP3_js as unknown as string, mime: "application/javascript; charset=utf-8" },
   "/admin/assets/index-aZaHWrR-.css": { path: A_1_assets_index_aZaHWrR__css as unknown as string, mime: "text/css; charset=utf-8" },
   "/admin/index.html": { path: A_2_index_html as unknown as string, mime: "text/html; charset=utf-8" },
 };
