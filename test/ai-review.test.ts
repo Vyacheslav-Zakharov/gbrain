@@ -130,7 +130,7 @@ describe('AI review canonical acceptance', () => {
     const newer = await engine.executeRaw<{ id: number }>(
       `INSERT INTO take_proposals
          (source_id,page_slug,content_hash,prompt_version,proposal_run_id,claim_hash,claim_text,kind,holder,weight,domain,model_id)
-       SELECT source_id,page_slug,'newer-content','test-v2','run-newer',claim_hash,claim_text,kind,holder,weight,domain,model_id
+       SELECT source_id,page_slug,'newer-content','test-v2','run-newer','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',claim_text,kind,holder,weight,domain,model_id
          FROM take_proposals WHERE id=$1
        RETURNING id`,
       [deferredId],
@@ -143,6 +143,62 @@ describe('AI review canonical acceptance', () => {
       [deferredId, newer[0].id],
     );
     expect(states.map(row => row.status)).toEqual(['deferred', 'pending']);
+  });
+
+  test('restore treats whitespace, empty, and null domains as one identity across mixed hashes', async () => {
+    const deferredId = await seedProposal();
+    await deferTakeProposal(engine, deferredId, 'admin-test', 'capacity');
+    await engine.executeRaw(
+      `UPDATE take_proposals
+          SET claim_hash='0123456789abcdef0123456789abcdef', domain='   '
+        WHERE id=$1`,
+      [deferredId],
+    );
+    const pending = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO take_proposals
+         (source_id,page_slug,content_hash,prompt_version,proposal_run_id,claim_hash,claim_text,kind,holder,weight,domain,model_id)
+       SELECT source_id,page_slug,'blank-domain-content','test-v3','run-blank-domain',
+              'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+              claim_text,kind,holder,weight,NULL,model_id
+         FROM take_proposals WHERE id=$1
+       RETURNING id`,
+      [deferredId],
+    );
+
+    await expect(restoreTakeProposalToPending(engine, deferredId, 'admin-test', 'mixed-domain rollback'))
+      .rejects.toMatchObject({ code: 'newer_pending_exists' });
+    const states = await engine.executeRaw<{ id: number; status: string }>(
+      `SELECT id, status FROM take_proposals WHERE id IN ($1,$2) ORDER BY id`,
+      [deferredId, pending[0].id],
+    );
+    expect(states.map(row => row.status)).toEqual(['deferred', 'pending']);
+  });
+
+  test('producer suppresses terminal history even when the stored row uses the legacy MD5 hash contract', async () => {
+    const id = await seedProposal();
+    await engine.executeRaw(`UPDATE take_proposals SET claim_hash='0123456789abcdef0123456789abcdef' WHERE id=$1`, [id]);
+    await rejectTakeProposal(engine, id, 'admin-test', 'confirmed generic low-value claim');
+    const proposal: ProposedTake = {
+      claim_text: 'Supported bounded claim 1', kind: 'take', holder: 'world', weight: 0.7, domain: 'testing',
+    };
+    const ctx: OperationContext = {
+      engine,
+      config: {} as never,
+      logger: { info() {}, warn() {}, error() {} } as never,
+      dryRun: false,
+      remote: false,
+      sourceId: 'review-test',
+    };
+    const result = await runPhaseProposeTakes(ctx, {
+      promptVersion: 'future-governed-v2',
+      extractor: async () => [proposal],
+    });
+    expect((result.details as Record<string, unknown>).proposals_inserted).toBe(0);
+    expect((result.details as Record<string, unknown>).proposals_suppressed).toBe(1);
+    const rows = await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM take_proposals WHERE source_id='review-test' AND page_slug='notes/review-source'`,
+    );
+    expect(rows.map(row => row.status)).toEqual(['rejected']);
   });
 
   test('producer replaces a restored old revision and leaves other claims independent', async () => {

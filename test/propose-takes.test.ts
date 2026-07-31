@@ -19,6 +19,7 @@ import {
   runPhaseProposeTakes,
   parseExtractorOutput,
   contentHash,
+  proposalClaimHash,
   hasCompleteFence,
   extractExistingTakesForDedup,
   PROPOSE_TAKES_PROMPT_VERSION,
@@ -33,6 +34,8 @@ import type { Page } from '../src/core/types.ts';
 test('take extractor preserves source meaning but returns claim text in Russian', () => {
   expect(EXTRACT_TAKES_PROMPT).toContain('claim_text на русском языке');
   expect(EXTRACT_TAKES_PROMPT).toContain('Не переводите имена собственные');
+  expect(EXTRACT_TAKES_PROMPT).toContain('REJECTED CLAIMS FOR THIS PAGE');
+  expect(EXTRACT_TAKES_PROMPT).toContain('Do NOT recreate an exact or semantically equivalent rejected claim');
 });
 
 // ─── Mock engine ────────────────────────────────────────────────────
@@ -46,6 +49,8 @@ function buildMockEngine(opts: {
   pages: Page[];
   existingProposals?: Set<string>; // page-level scan keys retained for compatibility
   insertConflicts?: number;
+  history?: Array<{ id: number; status: string; content_hash: string; prompt_version: string; claim_hash: string }>;
+  rejectedClaims?: Array<{ proposal_id: number; claim: string; reason: string }>;
 }): { engine: BrainEngine; captured: CapturedSql[]; transactionAttempts: () => number } {
   const captured: CapturedSql[] = [];
   const scans = opts.existingProposals ?? new Set<string>();
@@ -74,6 +79,12 @@ function buildMockEngine(opts: {
         if (scans.has(key)) return [];
         scans.add(key);
         return [{ id: scans.size } as unknown as T];
+      }
+      if (sql.includes('tp.id AS proposal_id') && sql.includes("tp.status='rejected'")) {
+        return (opts.rejectedClaims ?? []) as unknown as T[];
+      }
+      if (sql.includes('SELECT id, status, content_hash, prompt_version, claim_hash') && sql.includes('claim_text = $3')) {
+        return (opts.history ?? []) as unknown as T[];
       }
       if (sql.includes('INSERT INTO take_proposals')) {
         if (remainingInsertConflicts > 0) {
@@ -198,6 +209,12 @@ describe('contentHash', () => {
   test('different input produces different hash', () => {
     expect(contentHash('a')).not.toBe(contentHash('b'));
   });
+});
+
+test('proposalClaimHash normalizes absent, empty, and whitespace-only domains to one identity', () => {
+  const base: ProposedTake = { claim_text: 'Claim', kind: 'take', holder: 'brain', weight: 0.7 };
+  expect(proposalClaimHash(base)).toBe(proposalClaimHash({ ...base, domain: '' }));
+  expect(proposalClaimHash(base)).toBe(proposalClaimHash({ ...base, domain: '   ' }));
 });
 
 // ─── hasCompleteFence ───────────────────────────────────────────────
@@ -341,6 +358,22 @@ describe('runPhaseProposeTakes — phase integration', () => {
     expect((result.details as Record<string, unknown>).cache_misses).toBe(0);
   });
 
+  test('Russian governed rollout reuses a completed scan from ru-v1', async () => {
+    const body = 'A page already processed by the prior Russian-output prompt.';
+    const pages = [buildPage({ slug: 'wiki/rollout-safe-ru', body })];
+    const ch = contentHash(body);
+    const existing = new Set([`default|wiki/rollout-safe-ru|${ch}|v0.36.1.1-ru-v1`]);
+    const { engine } = buildMockEngine({ pages, existingProposals: existing });
+    let extractorCalled = false;
+    const result = await runPhaseProposeTakes(buildCtx(engine), {
+      extractor: async () => { extractorCalled = true; return []; },
+    });
+
+    expect(extractorCalled).toBe(false);
+    expect((result.details as Record<string, unknown>).cache_hits).toBe(1);
+    expect((result.details as Record<string, unknown>).cache_misses).toBe(0);
+  });
+
   test('persists every distinct claim returned for one page', async () => {
     const pages = [buildPage({ slug: 'wiki/multi', body: 'Two gradeable claims.' })];
     const { engine, captured } = buildMockEngine({ pages });
@@ -385,6 +418,54 @@ New prose appended here.`;
 
     expect(Array.isArray(receivedExistingTakes)).toBe(true);
     expect((receivedExistingTakes as Array<{ claim: string }>)[0]?.claim).toBe('Already captured claim');
+  });
+
+  test('passes page-scoped rejected claims and reason codes to the extractor', async () => {
+    const pages = [buildPage({ slug: 'wiki/governed', body: 'A page with prior reviewed noise.' })];
+    const rejectedClaims = [{ proposal_id: 41, claim: 'Generic rejected statement', reason: 'generic_low_value' }];
+    const { engine } = buildMockEngine({ pages, rejectedClaims });
+    let received: unknown;
+    await runPhaseProposeTakes(buildCtx(engine), {
+      promptVersion: 'governed-context-test',
+      extractor: async ({ rejectedClaims: rows }) => { received = rows; return []; },
+    });
+    expect(received).toEqual(rejectedClaims);
+  });
+
+  for (const status of ['accepted', 'rejected', 'deferred'] as const) {
+    test(`does not recreate an exact ${status} claim after content and prompt changes`, async () => {
+      const proposal: ProposedTake = { claim_text: 'Reviewed claim must stay closed', kind: 'take', holder: 'brain', weight: 0.7 };
+      const pages = [buildPage({ slug: `wiki/terminal-${status}`, body: 'Materially refreshed page body.' })];
+      const { engine, captured } = buildMockEngine({
+        pages,
+        history: [{ id: 9, status, content_hash: 'old-content', prompt_version: 'old-prompt', claim_hash: 'legacy-md5-does-not-equal-current-sha' }],
+      });
+      const result = await runPhaseProposeTakes(buildCtx(engine), {
+        promptVersion: 'new-prompt',
+        extractor: async () => [proposal],
+      });
+      expect((result.details as Record<string, unknown>).proposals_inserted).toBe(0);
+      expect((result.details as Record<string, unknown>).proposals_suppressed).toBe(1);
+      expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(0);
+      const lookup = captured.find(c => c.sql.includes('claim_text = $3'));
+      expect(lookup?.params.slice(2, 7)).toEqual([proposal.claim_text, proposal.kind, proposal.holder, proposal.weight, '']);
+    });
+  }
+
+  test('does not silently reopen an exact claim whose only history is superseded', async () => {
+    const proposal: ProposedTake = { claim_text: 'Superseded historical claim', kind: 'take', holder: 'brain', weight: 0.6 };
+    const claimHash = proposalClaimHash(proposal);
+    const pages = [buildPage({ slug: 'wiki/superseded-history', body: 'Updated source text.' })];
+    const { engine } = buildMockEngine({
+      pages,
+      history: [{ id: 10, status: 'superseded', content_hash: 'old-content', prompt_version: 'old-prompt', claim_hash: claimHash }],
+    });
+    const result = await runPhaseProposeTakes(buildCtx(engine), {
+      promptVersion: 'new-prompt',
+      extractor: async () => [proposal],
+    });
+    expect((result.details as Record<string, unknown>).proposals_inserted).toBe(0);
+    expect((result.details as Record<string, unknown>).proposals_suppressed).toBe(1);
   });
 
   test('extractor throw on a single page logs warning + phase continues', async () => {

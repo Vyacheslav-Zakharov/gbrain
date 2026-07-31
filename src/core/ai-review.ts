@@ -9,7 +9,7 @@ import {
   normalizeWeightForStorage,
   upsertTakeRow,
 } from './takes-fence.ts';
-import { contentHash } from './cycle/propose-takes.ts';
+import { contentHash, proposalClaimHash } from './cycle/propose-takes.ts';
 import { writePageThrough, type WriteThroughResult } from './write-through.ts';
 import { readFile } from 'node:fs/promises';
 
@@ -348,7 +348,14 @@ async function transitionTakeProposalStatus(
   const cleanReason = reason?.trim() || null;
   if (cleanReason && cleanReason.length > 1000) throw new Error('reason must be at most 1000 characters');
   const identity = await loadProposal(engine, proposalId);
-  return withPageLock(`ai-review-claim:${identity.source_id}:${identity.page_slug}:${identity.claim_hash}`, async () => {
+  const identityLockHash = proposalClaimHash({
+    claim_text: identity.claim_text,
+    kind: identity.kind as 'fact' | 'take' | 'bet' | 'hunch',
+    holder: identity.holder,
+    weight: identity.weight,
+    domain: identity.domain ?? undefined,
+  });
+  return withPageLock(`ai-review-claim:${identity.source_id}:${identity.page_slug}:${identityLockHash}`, async () => {
     try {
       return await engine.transaction(async tx => {
       const proposal = await loadProposal(tx, proposalId);
@@ -359,11 +366,22 @@ async function transitionTakeProposalStatus(
         const competing = await tx.executeRaw<{ id: number }>(
           `SELECT id
              FROM take_proposals
-            WHERE source_id = $1 AND page_slug = $2 AND claim_hash = $3
-              AND status = 'pending' AND id <> $4
+            WHERE source_id = $1 AND page_slug = $2
+              AND claim_text = $3 AND kind = $4 AND holder = $5 AND weight = $6
+              AND COALESCE(NULLIF(BTRIM(domain), ''), '') = COALESCE(NULLIF(BTRIM($7), ''), '')
+              AND status = 'pending' AND id <> $8
             ORDER BY proposed_at DESC, id DESC
             LIMIT 1`,
-          [proposal.source_id, proposal.page_slug, proposal.claim_hash, proposalId],
+          [
+            proposal.source_id,
+            proposal.page_slug,
+            proposal.claim_text,
+            proposal.kind,
+            proposal.holder,
+            proposal.weight,
+            proposal.domain ?? '',
+            proposalId,
+          ],
         );
         if (competing[0]) {
           throw new ReviewConflictError(
