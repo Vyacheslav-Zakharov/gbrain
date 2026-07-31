@@ -36,6 +36,9 @@ test('take extractor preserves source meaning but returns claim text in Russian'
   expect(EXTRACT_TAKES_PROMPT).toContain('Не переводите имена собственные');
   expect(EXTRACT_TAKES_PROMPT).toContain('REJECTED CLAIMS FOR THIS PAGE');
   expect(EXTRACT_TAKES_PROMPT).toContain('Do NOT recreate an exact or semantically equivalent rejected claim');
+  expect(EXTRACT_TAKES_PROMPT).toContain('Generic statements that lack a concrete actor/object');
+  expect(EXTRACT_TAKES_PROMPT).toContain('Если source evidence называет конкретный контрольный механизм');
+  expect(PROPOSE_TAKES_PROMPT_VERSION).toBe('v0.36.1.3-ru-owner-rules-v1');
 });
 
 // ─── Mock engine ────────────────────────────────────────────────────
@@ -342,8 +345,8 @@ describe('runPhaseProposeTakes — phase integration', () => {
     expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(0);
   });
 
-  test('Russian prompt rollout reuses a completed scan from the previous production version', async () => {
-    const body = 'A page already processed before the Russian-output rollout.';
+  test('owner-rules rollout does not reuse a scan from the pre-governance production version', async () => {
+    const body = 'A page already processed before the owner-rules rollout.';
     const pages = [buildPage({ slug: 'wiki/rollout-safe', body })];
     const ch = contentHash(body);
     const existing = new Set([`default|wiki/rollout-safe|${ch}|v0.36.1.0-tuned-cat15`]);
@@ -353,12 +356,12 @@ describe('runPhaseProposeTakes — phase integration', () => {
       extractor: async () => { extractorCalled = true; return []; },
     });
 
-    expect(extractorCalled).toBe(false);
-    expect((result.details as Record<string, unknown>).cache_hits).toBe(1);
-    expect((result.details as Record<string, unknown>).cache_misses).toBe(0);
+    expect(extractorCalled).toBe(true);
+    expect((result.details as Record<string, unknown>).cache_hits).toBe(0);
+    expect((result.details as Record<string, unknown>).cache_misses).toBe(1);
   });
 
-  test('Russian governed rollout reuses a completed scan from ru-v1', async () => {
+  test('owner-rules rollout does not reuse a scan from the prior Russian prompt', async () => {
     const body = 'A page already processed by the prior Russian-output prompt.';
     const pages = [buildPage({ slug: 'wiki/rollout-safe-ru', body })];
     const ch = contentHash(body);
@@ -369,9 +372,9 @@ describe('runPhaseProposeTakes — phase integration', () => {
       extractor: async () => { extractorCalled = true; return []; },
     });
 
-    expect(extractorCalled).toBe(false);
-    expect((result.details as Record<string, unknown>).cache_hits).toBe(1);
-    expect((result.details as Record<string, unknown>).cache_misses).toBe(0);
+    expect(extractorCalled).toBe(true);
+    expect((result.details as Record<string, unknown>).cache_hits).toBe(0);
+    expect((result.details as Record<string, unknown>).cache_misses).toBe(1);
   });
 
   test('persists every distinct claim returned for one page', async () => {

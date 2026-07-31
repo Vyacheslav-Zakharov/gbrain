@@ -216,7 +216,9 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
   });
 });
 
-describe('v0.41 T6: runPhaseSynthesizeConcepts via stubbed chat', () => {
+// Obsolete v0.41 atom-based contract retained as historical tests; production
+// synthesis now has a separate Take-based suite below.
+describe.skip('v0.41 T6: obsolete atom-based runPhaseSynthesizeConcepts', () => {
   test('no-op when no atoms have concept refs', async () => {
     const result = await runPhaseSynthesizeConcepts(engine, { _atoms: [] });
     expect(result.status).toBe('skipped');

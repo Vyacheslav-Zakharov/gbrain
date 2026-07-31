@@ -5909,6 +5909,15 @@ export const MIGRATIONS: Migration[] = [
         WHERE status = 'pending';
     `,
   },
+  {
+    version: 134,
+    name: 'concept_proposals_source_takes',
+    idempotent: true,
+    sql: `
+      ALTER TABLE concept_proposals
+        ADD COLUMN IF NOT EXISTS source_takes JSONB NOT NULL DEFAULT '[]'::jsonb;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

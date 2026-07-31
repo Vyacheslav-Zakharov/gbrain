@@ -1,30 +1,16 @@
-// v0.41.19.0 — T4 of ops-fix-wave.
-//
-// Pins that synthesize_concepts wires its progress reporter inside the
-// concept-group loop (one tick per concept written). Cycle.ts owns
-// start/finish; phase only ticks.
-
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
-import { runPhaseSynthesizeConcepts } from '../../src/core/cycle/synthesize-concepts.ts';
+import { runPhaseSynthesizeConcepts, type CanonicalTakeInput } from '../../src/core/cycle/synthesize-concepts.ts';
 import { resetPgliteState } from '../helpers/reset-pglite.ts';
 import type { ProgressReporter } from '../../src/core/progress.ts';
 import type { ChatResult, ChatOpts } from '../../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
-
-beforeAll(async () => {
-  engine = new PGLiteEngine();
-  await engine.connect({});
-  await engine.initSchema();
-}, 60000);
-
-afterAll(async () => {
-  await engine.disconnect();
-});
-
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60000);
+afterAll(async () => { await engine.disconnect(); });
 beforeEach(async () => {
   await resetPgliteState(engine);
+  await engine.executeRaw(`INSERT INTO sources (id,name,archived) VALUES ('shared','Shared',false) ON CONFLICT (id) DO UPDATE SET archived=false`);
 });
 
 function makeMockReporter(): {
@@ -35,62 +21,52 @@ function makeMockReporter(): {
   const reporter: ProgressReporter = {
     start: () => { events.push({ kind: 'start' }); },
     tick: (_n, note) => { events.push({ kind: 'tick', note }); },
-    heartbeat: (note) => { events.push({ kind: 'heartbeat', note }); },
-    finish: (note) => { events.push({ kind: 'finish', note }); },
+    heartbeat: note => { events.push({ kind: 'heartbeat', note }); },
+    finish: note => { events.push({ kind: 'finish', note }); },
     child: () => reporter,
   };
   return { reporter, events };
 }
 
-function stubChat(text: string): (o: ChatOpts) => Promise<ChatResult> {
-  return async (_o: ChatOpts) => ({
-    text,
-    blocks: [{ type: 'text', text }],
-    stopReason: 'end',
-    usage: { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 },
-    model: 'anthropic:claude-sonnet-4-6',
-    providerId: 'anthropic',
-  });
+function take(id: number): CanonicalTakeInput {
+  return { id, page_id: 100 + id, source_id: 'shared', page_slug: `notes/${id}`, claim: `Русский тезис ${id}`, kind: 'take', holder: 'brain', weight: 0.8, source: `manual:${id}` };
 }
 
-describe('synthesize_concepts progress wiring (T4)', () => {
-  test('phase does NOT call start or finish', async () => {
+function stubChat(groups: number): (o: ChatOpts) => Promise<ChatResult> {
+  return async (_o: ChatOpts) => {
+    const rows = Array.from({ length: groups }, (_, i) => ({
+      slug: `concept-${i + 1}`,
+      title_ru: `Концепция ${i + 1}`,
+      summary_ru: `Русское описание концепции ${i + 1} сохраняет конкретные механизмы и не расширяет исходные подтверждённые тезисы.`,
+      take_ids: [i * 2 + 1, i * 2 + 2],
+    }));
+    const text = JSON.stringify(rows);
+    return {
+      text, blocks: [{ type: 'text', text }], stopReason: 'end',
+      usage: { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-sonnet-4-6', providerId: 'anthropic',
+    };
+  };
+}
+
+describe('Take-based synthesize_concepts progress wiring', () => {
+  test('phase does not call start or finish', async () => {
     const { reporter, events } = makeMockReporter();
-    await runPhaseSynthesizeConcepts(engine, {
-      _atoms: [
-        // T3 tier (2 atoms): no LLM, deterministic narrative
-        { slug: 'atoms/a1', concept_refs: ['concepts/x'], body: 'b1', title: 'A1' },
-        { slug: 'atoms/a2', concept_refs: ['concepts/x'], body: 'b2', title: 'A2' },
-      ],
-      _chat: stubChat('narrative text'),
-      progress: reporter,
-    });
-    expect(events.filter(e => e.kind === 'start').length).toBe(0);
-    expect(events.filter(e => e.kind === 'finish').length).toBe(0);
+    await runPhaseSynthesizeConcepts(engine, { _takes: [take(1), take(2)], _chat: stubChat(1), progress: reporter });
+    expect(events.filter(e => e.kind === 'start')).toHaveLength(0);
+    expect(events.filter(e => e.kind === 'finish')).toHaveLength(0);
   });
 
-  test('one tick per concept group written', async () => {
+  test('one tick per validated concept group', async () => {
     const { reporter, events } = makeMockReporter();
-    await runPhaseSynthesizeConcepts(engine, {
-      _atoms: [
-        { slug: 'atoms/a1', concept_refs: ['concepts/x'], body: 'b1', title: 'A1' },
-        { slug: 'atoms/a2', concept_refs: ['concepts/x'], body: 'b2', title: 'A2' },
-        { slug: 'atoms/a3', concept_refs: ['concepts/y'], body: 'b3', title: 'A3' },
-        { slug: 'atoms/a4', concept_refs: ['concepts/y'], body: 'b4', title: 'A4' },
-      ],
-      _chat: stubChat('narrative text'),
-      progress: reporter,
-    });
+    await runPhaseSynthesizeConcepts(engine, { _takes: [take(1), take(2), take(3), take(4)], _chat: stubChat(2), progress: reporter });
     const ticks = events.filter(e => e.kind === 'tick');
-    // Two concept groups, each ≥2 atoms → both qualify for synthesis
-    expect(ticks.length).toBe(2);
+    expect(ticks).toHaveLength(2);
     expect(ticks[0].note).toMatch(/proposals/);
   });
 
-  test('no progress wiring required — opts.progress is optional', async () => {
-    const result = await runPhaseSynthesizeConcepts(engine, {
-      _atoms: [],
-    });
-    expect(result.phase).toBe('synthesize_concepts');
+  test('progress remains optional', async () => {
+    const output = await runPhaseSynthesizeConcepts(engine, { _takes: [] });
+    expect(output.phase).toBe('synthesize_concepts');
   });
 });
