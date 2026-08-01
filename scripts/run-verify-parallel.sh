@@ -43,6 +43,7 @@ CHECKS=(
   "check:progress"
   "check:test-isolation"
   "check:wasm"
+  "check:pglite-compiled"
   "check:admin-build"
   "check:admin-scope-drift"
   "check:cli-exec"

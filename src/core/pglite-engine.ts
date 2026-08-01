@@ -24,6 +24,7 @@ import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
+import { prepareEmbeddedPgliteRuntime } from './pglite-embedded-assets.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
   Chunk, ChunkInput, StaleChunkRow, StalePageRow,
@@ -272,11 +273,19 @@ export class PGLiteEngine implements BrainEngine {
     // why the CLI's exit paths read gbrain's own verdict
     // (cli-force-exit.ts currentExitCode), never ambient process.exitCode.
     try {
+      const embeddedRuntime = await prepareEmbeddedPgliteRuntime();
       this._db = await preservingProcessExitCode(() =>
         PGlite.create({
           dataDir,
           loadDataDir,
-          extensions: { vector, pg_trgm },
+          ...(embeddedRuntime
+            ? {
+                fsBundle: embeddedRuntime.fsBundle,
+                pgliteWasmModule: embeddedRuntime.pgliteWasmModule,
+                initdbWasmModule: embeddedRuntime.initdbWasmModule,
+                extensions: embeddedRuntime.extensions,
+              }
+            : { extensions: { vector, pg_trgm } }),
         }),
       );
     } catch (err) {

@@ -3965,18 +3965,20 @@ iteration's residuals.
 
 **Discovered:** v0.25.0 ship, 2026-04-25.
 
-### Fix `bun build --compile` WASM embedding for PGLite
-**What:** Submit PR to oven-sh/bun fixing WASM file embedding in `bun build --compile` (issue oven-sh/bun#15032).
+### Upstream Bun support for package-relative WASM assets
+**Status:** Mitigated in GBrain. `src/core/pglite-embedded-assets.ts` explicitly embeds the PGLite data/WASM/extension assets, compiles the WASM modules from Bun VFS, and materializes extension archives into a private content-addressed runtime cache. `scripts/check-pglite-compiled.sh` proves standalone `init` + reopen. The upstream Bun issue remains useful for removing this application-level workaround.
 
-**Why:** PGLite's WASM files (~3MB) can't be embedded in the compiled binary. Users who install via `bun install -g gbrain` are fine (WASM resolves from node_modules), but the compiled binary can't use PGLite. Jarred Sumner (Bun founder, YC W22) would likely be receptive.
+**What:** Submit PR to oven-sh/bun fixing transparent WASM/file embedding in `bun build --compile` (issue oven-sh/bun#15032).
 
-**Pros:** Single-binary distribution includes PGLite. No sidecar files needed.
+**Why:** Generic packages using `new URL(..., import.meta.url)` still cannot assume that non-code assets are readable through Node `fs` inside a compiled Bun VFS. GBrain now works around this explicitly, but an upstream fix would benefit all WASM-dependent packages.
+
+**Pros:** Removes GBrain's explicit asset-import/materialization workaround and fixes the same class for other standalone Bun applications.
 
 **Cons:** Requires understanding Bun's bundler internals. May be a large PR.
 
-**Context:** Issue has been open since Nov 2024. The root cause is that `bun build --compile` generates virtual filesystem paths (`/$bunfs/root/...`) that PGLite can't resolve. Multiple users have reported this. A fix would benefit any WASM-dependent package, not just PGLite.
+**Context:** Issue has been open since Nov 2024. `bun build --compile` rewrites package-relative assets to `/$bunfs/root/...`, while Node-style `fs` consumers cannot read those virtual paths transparently. Multiple users have reported this. GBrain's workaround is covered locally; the upstream issue remains broader ecosystem work.
 
-**Depends on:** PGLite engine shipping (to have a real use case for the PR).
+**Depends on:** None for GBrain shipping; standalone PGLite is now covered by the application-level guard.
 
 ### Runtime MCP access control
 **What:** Add sender identity checking to MCP operations. Brain ops return filtered data based on access tier (Full/Work/Family/None).
