@@ -105,7 +105,10 @@ interface WorkerFailure {
 }
 
 const moduleRequire = createRequire(import.meta.url);
-const PGLITE_MODULE_PATH = moduleRequire.resolve('@electric-sql/pglite');
+function resolvePgliteModulePath(): string | undefined {
+  try { return moduleRequire.resolve('@electric-sql/pglite'); }
+  catch { return undefined; }
+}
 
 const TRANSFORM_WORKER_SRC = String.raw`
 const { parentPort, workerData } = require('node:worker_threads');
@@ -267,7 +270,13 @@ export async function executeSourceTransform(
   }
   const rowLimit = Math.max(1, Math.floor(opts.rowLimit ?? DEFAULT_TRANSFORM_ROW_CAP));
   const timeoutMs = Math.max(1, Math.floor(opts.timeoutMs ?? DEFAULT_TRANSFORM_TIMEOUT_MS));
-  const rows = await runTransformWorker({ sources, sql: config.sql, rowLimit, timeoutMs, pgliteModulePath: PGLITE_MODULE_PATH });
+  const rows = await runTransformWorker({
+    sources,
+    sql: config.sql,
+    rowLimit,
+    timeoutMs,
+    pgliteModulePath: resolvePgliteModulePath(),
+  });
   const keyField = config.primary_key_field || (rows.some(r => r.id !== undefined) ? 'id' : undefined);
   const updatedField = config.updated_at_field || (rows.some(r => r.updated_at !== undefined) ? 'updated_at' : undefined);
   const records = rows.map((row) => {

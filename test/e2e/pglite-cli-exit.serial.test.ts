@@ -49,8 +49,9 @@ const BIN_CACHE = join(REPO_ROOT, 'test', '.cache');
 const SHIM_PATH = join(BIN_CACHE, 'gbrain-pglite-exit-shim.sh');
 
 beforeAll(() => {
-  // Same shim pattern as claw-test e2e: bun --compile can't bundle
-  // PGLite's pglite.data, so we delegate to `bun run src/cli.ts`.
+  // Keep this subprocess test on the source CLI for speed; the compiled
+  // PGLite runtime and embedded assets have a dedicated full-binary guard in
+  // scripts/check-pglite-compiled.sh.
   mkdirSync(BIN_CACHE, { recursive: true });
   const shim = `#!/bin/sh\nexec bun run "${join(REPO_ROOT, 'src', 'cli.ts')}" "$@"\n`;
   writeFileSync(SHIM_PATH, shim, 'utf-8');
