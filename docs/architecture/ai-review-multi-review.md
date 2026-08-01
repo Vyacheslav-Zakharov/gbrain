@@ -78,7 +78,7 @@ a still-pending proposal escalates as `publication_interrupted` for inspection.
 ## Tables
 
 Created by `src/schema.sql` (fresh installs), mirrored in
-`src/core/pglite-schema.ts`, and added to existing brains by migration 132
+`src/core/pglite-schema.ts`, and added to existing brains by migration 135
 (`ai_review_multi_reviewer`).
 
 - **`ai_review_rounds`** — one row per governance round. Partial unique index

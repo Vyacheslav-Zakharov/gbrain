@@ -321,15 +321,15 @@ export function AIReviewPage() {
 
             <div className="review-form">
               <label className={diff.includes('claim_text') ? 'changed' : ''}>Текст утверждения
-                <textarea value={draft.claim_text} onChange={e => updateDraft('claim_text', e.target.value)} rows={4} disabled={detail.proposal.status !== 'pending'} />
+                <textarea value={draft.claim_text} onChange={e => updateDraft('claim_text', e.target.value)} rows={4} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} />
               </label>
               <div className="field-grid">
-                <label className={diff.includes('kind') ? 'changed' : ''}>Тип<input value={draft.kind} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('kind', e.target.value)} /></label>
-                <label className={diff.includes('holder') ? 'changed' : ''}>Владелец<input value={draft.holder} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('holder', e.target.value)} /></label>
-                <label className={diff.includes('weight') ? 'changed' : ''}>Вес уверенности<input type="number" min="0" max="1" step="0.05" value={draft.weight} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('weight', Number(e.target.value))} /></label>
-                <label className={diff.includes('domain') ? 'changed' : ''}>Область<input value={draft.domain} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('domain', e.target.value)} /></label>
-                <label className={diff.includes('since_date') ? 'changed' : ''}>Действует с<input value={draft.since_date} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('since_date', e.target.value)} placeholder="ГГГГ-ММ-ДД" /></label>
-                <label className={diff.includes('source') ? 'changed' : ''}>Дополнительный источник<input value={draft.source} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('source', e.target.value)} placeholder="Необязательно; ссылка или примечание" /></label>
+                <label className={diff.includes('kind') ? 'changed' : ''}>Тип<input value={draft.kind} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('kind', e.target.value)} /></label>
+                <label className={diff.includes('holder') ? 'changed' : ''}>Владелец<input value={draft.holder} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('holder', e.target.value)} /></label>
+                <label className={diff.includes('weight') ? 'changed' : ''}>Вес уверенности<input type="number" min="0" max="1" step="0.05" value={draft.weight} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('weight', Number(e.target.value))} /></label>
+                <label className={diff.includes('domain') ? 'changed' : ''}>Область<input value={draft.domain} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('domain', e.target.value)} /></label>
+                <label className={diff.includes('since_date') ? 'changed' : ''}>Действует с<input value={draft.since_date} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('since_date', e.target.value)} placeholder="ГГГГ-ММ-ДД" /></label>
+                <label className={diff.includes('source') ? 'changed' : ''}>Дополнительный источник<input value={draft.source} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('source', e.target.value)} placeholder="Необязательно; ссылка или примечание" /></label>
               </div>
             </div>
 
@@ -338,7 +338,7 @@ export function AIReviewPage() {
               <pre>{diffText}</pre>
             </div>}
 
-            {detail.proposal.status === 'pending' && <div className="llm-box">
+            {detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className="llm-box">
               <label>Попросить LLM изменить только текст — метаданные сохраняются
                 <textarea value={llmComment} onChange={e => setLlmComment(e.target.value)} rows={3} placeholder="Например: переведи на русский, уточни или сократи…" />
               </label>
@@ -361,7 +361,7 @@ export function AIReviewPage() {
               <button className="accept" onClick={accept} disabled={busy !== null}>{busy === 'accept' ? 'Записываем и проверяем…' : diff.length ? 'Принять изменённый черновик' : 'Принять'}</button>
             </div>}
 
-            {(detail.proposal.status === 'deferred' || detail.proposal.status === 'rejected') && <div className="review-actions">
+            {(detail.proposal.status === 'deferred' || detail.proposal.status === 'rejected') && !detail.review_governance?.managed && <div className="review-actions">
               <button onClick={restore} disabled={busy !== null}>{busy === 'restore' ? 'Восстанавливаем…' : 'Вернуть в ожидающие'}</button>
             </div>}
 

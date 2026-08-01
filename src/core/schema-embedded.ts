@@ -1585,6 +1585,7 @@ CREATE TABLE IF NOT EXISTS concept_proposals (
                                   CHECK (status IN ('pending','accepted','rejected','superseded','deferred')),
   proposed_markdown   TEXT        NOT NULL,
   source_atoms        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  source_takes        JSONB       NOT NULL DEFAULT '[]'::jsonb,
   model_id            TEXT        NOT NULL,
   version             INTEGER     NOT NULL DEFAULT 1,
   proposed_at         TIMESTAMPTZ NOT NULL DEFAULT now(),

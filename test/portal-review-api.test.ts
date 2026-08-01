@@ -16,6 +16,8 @@ import { isReviewRoute, REVIEW_ROUTE } from '../portal/src/review-route.ts';
 const serveSource = await Bun.file(new URL('../src/commands/serve-http.ts', import.meta.url)).text();
 const portalApiSource = await Bun.file(new URL('../portal/src/api.ts', import.meta.url)).text();
 const adminApiSource = await Bun.file(new URL('../admin/src/api.ts', import.meta.url)).text();
+const adminTakeReviewSource = await Bun.file(new URL('../admin/src/pages/AIReview.tsx', import.meta.url)).text();
+const adminConceptReviewSource = await Bun.file(new URL('../admin/src/pages/ConceptReview.tsx', import.meta.url)).text();
 const roundsSource = await Bun.file(new URL('../src/core/ai-review-rounds.ts', import.meta.url)).text();
 
 describe('portal reviewer routes', () => {
@@ -131,12 +133,24 @@ describe('admin round routes', () => {
     expect(adminApiSource).toContain("reviewRoundFinalize: (id: number, action: 'accepted' | 'rejected', reason: string)");
   });
 
-  test('legacy direct accept and reject routes cannot bypass a managed review round', () => {
+  test('legacy direct take mutation routes cannot bypass a managed review round', () => {
     expect(serveSource).toContain("await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));");
     expect(serveSource).toContain("await assertDirectAdminReviewAllowed('concept_proposal', Number(req.params.id));");
-    expect((serveSource.match(/assertDirectAdminReviewAllowed\('take_proposal'/g) ?? [])).toHaveLength(2);
+    // accept, reject, defer, and restore are all blocked once governance owns
+    // the proposal lifecycle.
+    expect((serveSource.match(/assertDirectAdminReviewAllowed\('take_proposal'/g) ?? [])).toHaveLength(4);
     expect((serveSource.match(/assertDirectAdminReviewAllowed\('concept_proposal'/g) ?? [])).toHaveLength(2);
     expect(serveSource).toContain("'managed_by_review_round'");
+  });
+
+  test('managed proposals hide legacy edit, revise, defer, restore, accept, and reject controls', () => {
+    expect(adminTakeReviewSource).toContain("detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className=\"llm-box\">");
+    expect(adminTakeReviewSource).toContain("detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className=\"review-actions\">");
+    expect(adminTakeReviewSource).toContain("(detail.proposal.status === 'deferred' || detail.proposal.status === 'rejected') && !detail.review_governance?.managed");
+    expect(adminTakeReviewSource).toContain("disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed}");
+    expect(adminConceptReviewSource).toContain("detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className=\"llm-box\">");
+    expect(adminConceptReviewSource).toContain("detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className=\"review-actions\">");
+    expect(adminConceptReviewSource).toContain("disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed}");
   });
 });
 
