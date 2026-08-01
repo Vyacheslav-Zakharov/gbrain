@@ -18,7 +18,7 @@ const MAX_MEMBERSHIPS_PER_TAKE = 3;
 const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const CYRILLIC_RE = /[А-Яа-яЁё]/;
 
-export const SYNTHESIZE_CONCEPTS_PROMPT_VERSION = 'synthesize-concepts-from-takes-v3-ru';
+export const SYNTHESIZE_CONCEPTS_PROMPT_VERSION = 'synthesize-concepts-from-takes-v4-ru-terminal-dedup';
 
 export interface CanonicalTakeInput {
   id: number;
@@ -47,8 +47,53 @@ export interface SynthesizeConceptsOpts {
   _chat?: typeof gatewayChat;
   /** Test seam: exact canonical Takes snapshot; suppresses the DB query. */
   _takes?: CanonicalTakeInput[];
+  /** Test seam: occupied Take IDs from pending/accepted/rejected Concept proposals. */
+  _occupiedTakeIdsBySource?: Record<string, number[]>;
   /** Historical test-only seam; ignored by the Take-based implementation. */
   _atoms?: unknown[];
+}
+
+interface ConceptProposalProvenanceRow {
+  source_id: string;
+  source_takes: unknown;
+}
+
+function takeIdsFromProvenance(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const ids = value.flatMap(row => {
+    if (!row || typeof row !== 'object') return [];
+    const id = Number((row as Record<string, unknown>).id);
+    return Number.isSafeInteger(id) && id > 0 ? [id] : [];
+  });
+  return [...new Set(ids)].sort((a, b) => a - b);
+}
+
+export function buildOccupiedTakeIdsBySource(
+  rows: ConceptProposalProvenanceRow[],
+): Map<string, Set<number>> {
+  const result = new Map<string, Set<number>>();
+  for (const row of rows) {
+    if (!row.source_id) continue;
+    const ids = result.get(row.source_id) ?? new Set<number>();
+    for (const id of takeIdsFromProvenance(row.source_takes)) ids.add(id);
+    result.set(row.source_id, ids);
+  }
+  return result;
+}
+
+async function loadOccupiedTakeIdsBySource(
+  engine: BrainEngine,
+  sourceId?: string,
+): Promise<Map<string, Set<number>>> {
+  const rows = await engine.executeRaw<ConceptProposalProvenanceRow>(
+    `SELECT source_id, source_takes
+       FROM concept_proposals
+      WHERE status IN ('pending','accepted','rejected')
+        AND source_takes IS NOT NULL
+        ${sourceId ? 'AND source_id = $1' : ''}`,
+    sourceId ? [sourceId] : [],
+  );
+  return buildOccupiedTakeIdsBySource(rows);
 }
 
 const SYNTH_PROMPT = `Ты группируешь только подтверждённые canonical Takes одного source_id в проверяемые концепции.
@@ -64,6 +109,8 @@ const SYNTH_PROMPT = `Ты группируешь только подтверж�
 - не объединяй разные субъекты, scope, модальность или существенные условия только из-за общей темы;
 - сохраняй конкретные механизмы контроля и причинные ограничения;
 - не превращай прогноз или bet в установленный факт;
+- каждый объект обязан содержать хотя бы один Take ID, которого нет в ALREADY_REVIEWED_OR_PENDING_TAKE_IDS;
+- не переформулируй и не перегруппировывай концепцию только из уже рассмотренных или ожидающих проверки Takes;
 - не более 20 концепций; один Take может входить максимум в три концепции;
 - slug уникален и соответствует ^[a-z0-9]+(?:-[a-z0-9]+)*$.
 Если доказательной группы нет, верни [].`;
@@ -164,6 +211,26 @@ export async function runPhaseSynthesizeConcepts(
     };
   }
 
+  let occupiedTakeIdsBySource: Map<string, Set<number>>;
+  if (opts._occupiedTakeIdsBySource !== undefined) {
+    occupiedTakeIdsBySource = new Map(
+      Object.entries(opts._occupiedTakeIdsBySource).map(([sourceId, ids]) => [
+        sourceId,
+        new Set(ids.filter(id => Number.isSafeInteger(id) && id > 0)),
+      ]),
+    );
+  } else {
+    try {
+      occupiedTakeIdsBySource = await loadOccupiedTakeIdsBySource(engine);
+    } catch (err) {
+      return {
+        phase: 'synthesize_concepts', status: 'warn', duration_ms: 0,
+        summary: 'synthesize_concepts: Concept proposal provenance query failed',
+        details: { reason: 'concept_history_query_failed', error: err instanceof Error ? err.message : String(err) },
+      };
+    }
+  }
+
   const bySource = new Map<string, CanonicalTakeInput[]>();
   for (const take of takes) {
     const id = Number(take.id);
@@ -180,6 +247,9 @@ export async function runPhaseSynthesizeConcepts(
   const tierCounts = { T1: 0, T2: 0, T3: 0, T4: 0 };
   let conceptsWritten = 0;
   let groupsFound = 0;
+  let groupsSkippedTerminalProvenance = 0;
+  let sourcesSkippedTerminalProvenance = 0;
+  let occupiedTakesSeen = 0;
   let validationRetries = 0;
   let estimatedSpendUsd = 0;
   let lastYieldMs = Date.now();
@@ -192,6 +262,13 @@ export async function runPhaseSynthesizeConcepts(
 
   for (const [sourceId, sourceTakes] of [...bySource.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     if (sourceTakes.length < 2) continue;
+    const occupiedAtStart = occupiedTakeIdsBySource.get(sourceId) ?? new Set<number>();
+    const occupiedInSource = sourceTakes.filter(t => occupiedAtStart.has(t.id)).length;
+    occupiedTakesSeen += occupiedInSource;
+    if (occupiedInSource === sourceTakes.length) {
+      sourcesSkippedTerminalProvenance++;
+      continue;
+    }
     if (estimatedSpendUsd >= DEFAULT_BUDGET_USD) {
       failures.push({ source_id: sourceId, error: 'budget_exhausted' });
       continue;
@@ -199,7 +276,7 @@ export async function runPhaseSynthesizeConcepts(
     let groups: TakeConceptGroup[] = [];
     try {
       const input = sourceTakes.map(t => ({ id: t.id, page_slug: t.page_slug, claim: t.claim, kind: t.kind, holder: t.holder, weight: t.weight }));
-      const userContent = `SOURCE_ID: ${sourceId}\n<UNTRUSTED_TAKES_JSON>\n${JSON.stringify(input)}\n</UNTRUSTED_TAKES_JSON>`;
+      const userContent = `SOURCE_ID: ${sourceId}\nALREADY_REVIEWED_OR_PENDING_TAKE_IDS: ${JSON.stringify([...occupiedAtStart].sort((a, b) => a - b))}\n<UNTRUSTED_TAKES_JSON>\n${JSON.stringify(input)}\n</UNTRUSTED_TAKES_JSON>`;
       let response = await chat({
         system: SYNTH_PROMPT,
         messages: [{ role: 'user', content: userContent }],
@@ -225,6 +302,19 @@ export async function runPhaseSynthesizeConcepts(
       failures.push({ source_id: sourceId, error: err instanceof Error ? err.message : String(err) });
       continue;
     }
+
+    let occupiedLatest = occupiedAtStart;
+    if (opts._occupiedTakeIdsBySource === undefined && groups.length > 0) {
+      try {
+        occupiedLatest = (await loadOccupiedTakeIdsBySource(engine, sourceId)).get(sourceId) ?? new Set<number>();
+      } catch (err) {
+        failures.push({ source_id: sourceId, error: `concept_history_refresh_failed: ${err instanceof Error ? err.message : String(err)}` });
+        continue;
+      }
+    }
+    const groupsBeforeHistoryFilter = groups.length;
+    groups = groups.filter(group => group.take_ids.some(id => !occupiedLatest.has(id)));
+    groupsSkippedTerminalProvenance += groupsBeforeHistoryFilter - groups.length;
 
     const takeMap = new Map(sourceTakes.map(t => [t.id, t]));
     for (const group of groups) {
@@ -302,6 +392,9 @@ export async function runPhaseSynthesizeConcepts(
       tier_counts: tierCounts, groups_found: groupsFound, takes_seen: takes.length,
       sources_seen: bySource.size, failures, estimated_spend_usd: estimatedSpendUsd,
       validation_retries: validationRetries,
+      occupied_takes_seen: occupiedTakesSeen,
+      sources_skipped_terminal_provenance: sourcesSkippedTerminalProvenance,
+      groups_skipped_terminal_provenance: groupsSkippedTerminalProvenance,
       budget_usd: DEFAULT_BUDGET_USD, dry_run: opts.dryRun ?? false,
       prompt_version: SYNTHESIZE_CONCEPTS_PROMPT_VERSION,
     },

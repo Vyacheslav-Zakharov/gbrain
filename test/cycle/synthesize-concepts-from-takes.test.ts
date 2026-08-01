@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import {
+  buildOccupiedTakeIdsBySource,
   parseTakeGroupsResponse,
   runPhaseSynthesizeConcepts,
   SYNTHESIZE_CONCEPTS_PROMPT_VERSION,
@@ -64,6 +65,56 @@ describe('Take-based Russian concept synthesis', () => {
       { slug: 'foreign-id', title_ru: 'Чужой идентификатор', summary_ru: summary, take_ids: [1, 99] },
     ]), takes);
     expect(parsed).toEqual([{ slug: 'valid-concept', title_ru: 'Валидная концепция', summary_ru: summary, take_ids: [1, 2] }]);
+  });
+
+  test('builds source-isolated occupied Take sets from terminal proposal provenance', () => {
+    const occupied = buildOccupiedTakeIdsBySource([
+      { source_id: 'shared', source_takes: [{ id: 1 }, { id: '2' }, { id: 1 }] },
+      { source_id: 'hidden', source_takes: [{ id: 1 }, { id: 'bad' }] },
+      { source_id: 'shared', source_takes: null },
+    ]);
+    expect([...occupied.get('shared') ?? []].sort((a, b) => a - b)).toEqual([1, 2]);
+    expect([...occupied.get('hidden') ?? []]).toEqual([1]);
+  });
+
+  test('skips a fully occupied source before the LLM call', async () => {
+    let calls = 0;
+    const chat = async (_opts: ChatOpts) => { calls++; throw new Error('must not be called'); };
+    const output = await runPhaseSynthesizeConcepts(engine, {
+      _takes: [take(1), take(2)],
+      _occupiedTakeIdsBySource: { shared: [1, 2] },
+      _chat: chat as typeof import('../../src/core/ai/gateway.ts').chat,
+      dryRun: true,
+    });
+    expect(calls).toBe(0);
+    expect(output.details?.concepts_written).toBe(0);
+    expect(output.details?.sources_skipped_terminal_provenance).toBe(1);
+    expect(output.details?.occupied_takes_seen).toBe(2);
+    expect(output.details?.estimated_spend_usd).toBe(0);
+  });
+
+  test('drops old-evidence-only regrouping but permits a group containing a novel Take', async () => {
+    const chat = async (_opts: ChatOpts) => result(JSON.stringify([
+      {
+        slug: 'old-only', title_ru: 'Старая перегруппировка',
+        summary_ru: 'Эта концепция только переформулирует ранее рассмотренные тезисы и не содержит нового доказательного материала.',
+        take_ids: [1, 2],
+      },
+      {
+        slug: 'new-evidence', title_ru: 'Концепция с новым тезисом',
+        summary_ru: 'Эта концепция добавляет новый подтверждённый тезис к ранее известному механизму и поэтому требует отдельной проверки.',
+        take_ids: [2, 3],
+      },
+    ]));
+    const output = await runPhaseSynthesizeConcepts(engine, {
+      _takes: [take(1), take(2), take(3)],
+      _occupiedTakeIdsBySource: { shared: [1, 2] },
+      _chat: chat as typeof import('../../src/core/ai/gateway.ts').chat,
+      dryRun: true,
+    });
+    expect(output.details?.groups_found).toBe(1);
+    expect(output.details?.concepts_written).toBe(1);
+    expect(output.details?.groups_skipped_terminal_provenance).toBe(1);
   });
 
   test('normalizes PostgreSQL bigint and numeric string values before validation', async () => {
