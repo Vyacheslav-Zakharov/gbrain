@@ -1,0 +1,221 @@
+import { describe, expect, test } from 'bun:test';
+import {
+  aggregateRound,
+  resolveMandatoryReviewers,
+  resolveRoundDeadlineHours,
+  DEFAULT_ROUND_DEADLINE_HOURS,
+  type AggregationVote,
+  type ReviewerPermissionMap,
+} from '../src/core/ai-review-aggregation.ts';
+import { rejectReasonsFor, validateRejectReason } from '../src/core/ai-review-reasons.ts';
+
+const PERMS: ReviewerPermissionMap = {
+  'owner@example.test': { source_id: 'owner-area', federated_read: ['shared'], federated_write: ['internal-it'] },
+  'head@example.test': { source_id: 'head', federated_read: ['shared', 'internal-it'], federated_write: ['internal-it'] },
+  'reader@example.test': { source_id: 'reader', federated_read: ['internal-it'], federated_write: [] },
+  'personal@example.test': { source_id: 'personal', federated_read: ['shared'], federated_write: ['personal'] },
+  'former@example.test': { source_id: 'former', federated_write: ['internal-it'], active: false },
+  'suspended@example.test': { source_id: 'suspended', federated_write: ['internal-it'], disabled: true },
+};
+
+function assignments(...emails: string[]) {
+  return emails.map((email, index) => ({ assignment_id: index + 1, reviewer_email: email }));
+}
+
+function vote(assignmentId: number, email: string, decision: 'approve' | 'reject', extra: Partial<AggregationVote> = {}): AggregationVote {
+  return { assignment_id: assignmentId, actor_email: email, decision, voter_kind: 'portal_user', active: true, ...extra };
+}
+
+describe('reviewer ACL resolution', () => {
+  test('every configured active user with write access to a shared source is mandatory', () => {
+    const { reviewers, policyKind } = resolveMandatoryReviewers(PERMS, 'internal-it');
+    expect(reviewers.map(r => r.email)).toEqual(['head@example.test', 'owner@example.test']);
+    expect(policyKind).toBe('shared');
+    expect(reviewers.every(r => r.weight === 1)).toBe(true);
+  });
+
+  test('read-only grants and deactivated users are never assigned', () => {
+    const emails = resolveMandatoryReviewers(PERMS, 'internal-it').reviewers.map(r => r.email);
+    expect(emails).not.toContain('reader@example.test');
+    expect(emails).not.toContain('former@example.test');
+    expect(emails).not.toContain('suspended@example.test');
+  });
+
+  test('a personal source assigns only its owner and reports the personal policy', () => {
+    const { reviewers, policyKind } = resolveMandatoryReviewers(PERMS, 'personal');
+    expect(reviewers.map(r => r.email)).toEqual(['personal@example.test']);
+    expect(reviewers[0]!.ownsSource).toBe(true);
+    expect(policyKind).toBe('personal');
+  });
+
+  test('a personal source shared with a second writer still assigns only its owner', () => {
+    const shared = resolveMandatoryReviewers(
+      { ...PERMS, 'deputy@example.test': { source_id: 'deputy', federated_write: ['personal'] } },
+      'personal',
+    );
+    expect(shared.reviewers.map(r => r.email)).toEqual(['personal@example.test']);
+    expect(shared.policyKind).toBe('personal');
+  });
+
+  test('an explicitly shared source includes delegated writers even with one direct owner', () => {
+    const shared = resolveMandatoryReviewers(
+      { ...PERMS, 'deputy@example.test': { source_id: 'deputy', federated_write: ['personal'] } },
+      'personal',
+      { policyKind: 'shared' },
+    );
+    expect(shared.reviewers.map(r => r.email)).toEqual(['deputy@example.test', 'personal@example.test']);
+    expect(shared.policyKind).toBe('shared');
+  });
+
+  test('an unknown source resolves to zero reviewers rather than a default', () => {
+    expect(resolveMandatoryReviewers(PERMS, 'internal-nobody').reviewers).toEqual([]);
+    expect(resolveMandatoryReviewers(PERMS, '').reviewers).toEqual([]);
+  });
+
+  test('emails normalize and deduplicate case-insensitively', () => {
+    const { reviewers } = resolveMandatoryReviewers({ 'Owner@Example.Test': { source_id: 'x', federated_write: ['x'] } }, 'x');
+    expect(reviewers.map(r => r.email)).toEqual(['owner@example.test']);
+  });
+});
+
+describe('round aggregation', () => {
+  const dueAtMs = 2_000;
+
+  test('unanimous approve auto-accepts', () => {
+    const result = aggregateRound({
+      assignments: assignments('a@x.test', 'b@x.test'),
+      votes: [vote(1, 'a@x.test', 'approve'), vote(2, 'b@x.test', 'approve')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('auto_accept');
+    expect(result.reason).toBe('unanimous_approve');
+    expect(result.approvals).toBe(2);
+  });
+
+  test('unanimous reject auto-rejects', () => {
+    const result = aggregateRound({
+      assignments: assignments('a@x.test', 'b@x.test'),
+      votes: [vote(1, 'a@x.test', 'reject'), vote(2, 'b@x.test', 'reject')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('auto_reject');
+    expect(result.reason).toBe('unanimous_reject');
+  });
+
+  test('a single vote finalizes a one-reviewer (personal) round', () => {
+    expect(aggregateRound({
+      assignments: assignments('solo@x.test'),
+      votes: [vote(1, 'solo@x.test', 'approve')],
+      dueAtMs, nowMs: 1_000,
+    }).verdict).toBe('auto_accept');
+  });
+
+  test('disagreement after all votes escalates instead of taking a majority', () => {
+    const result = aggregateRound({
+      assignments: assignments('a@x.test', 'b@x.test', 'c@x.test'),
+      votes: [vote(1, 'a@x.test', 'approve'), vote(2, 'b@x.test', 'approve'), vote(3, 'c@x.test', 'reject')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('escalate');
+    expect(result.reason).toBe('disagreement');
+    expect(result.approvals).toBe(2);
+    expect(result.rejections).toBe(1);
+  });
+
+  test('an incomplete round stays open before the deadline', () => {
+    const result = aggregateRound({
+      assignments: assignments('a@x.test', 'b@x.test'),
+      votes: [vote(1, 'a@x.test', 'approve')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('open');
+    expect(result.missing).toEqual(['b@x.test']);
+  });
+
+  test('non-response past the deadline escalates and is never counted as reject', () => {
+    const result = aggregateRound({
+      assignments: assignments('a@x.test', 'b@x.test'),
+      votes: [vote(1, 'a@x.test', 'approve')],
+      dueAtMs, nowMs: 2_001,
+    });
+    expect(result.verdict).toBe('escalate');
+    expect(result.reason).toBe('deadline_missed');
+    expect(result.rejections).toBe(0);
+    expect(result.missing).toEqual(['b@x.test']);
+  });
+
+  test('zero reviewers fails closed to escalation, never to accept', () => {
+    const result = aggregateRound({ assignments: [], votes: [], dueAtMs, nowMs: 1_000 });
+    expect(result.verdict).toBe('escalate');
+    expect(result.reason).toBe('no_reviewers');
+  });
+
+  test('system-authored votes cannot drive auto-finalize', () => {
+    const result = aggregateRound({
+      assignments: assignments('a@x.test', 'b@x.test'),
+      votes: [vote(1, 'a@x.test', 'approve'), vote(2, 'b@x.test', 'approve', { voter_kind: 'system' })],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('open');
+    expect(result.approvals).toBe(1);
+    expect(result.missing).toEqual(['b@x.test']);
+  });
+
+  test('a vote whose actor does not match its frozen assignment is ignored', () => {
+    const result = aggregateRound({
+      assignments: assignments('a@x.test'),
+      votes: [vote(1, 'impostor@x.test', 'approve')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('open');
+    expect(result.voted).toBe(0);
+  });
+
+  test('superseded votes do not count twice', () => {
+    const result = aggregateRound({
+      assignments: assignments('a@x.test'),
+      votes: [vote(1, 'a@x.test', 'reject', { active: false }), vote(1, 'a@x.test', 'approve')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('auto_accept');
+    expect(result.rejections).toBe(0);
+  });
+});
+
+describe('deadline resolution', () => {
+  test('defaults to 72 hours and clamps garbage', () => {
+    expect(resolveRoundDeadlineHours(undefined)).toBe(DEFAULT_ROUND_DEADLINE_HOURS);
+    expect(resolveRoundDeadlineHours('not-a-number')).toBe(DEFAULT_ROUND_DEADLINE_HOURS);
+    expect(resolveRoundDeadlineHours(-5)).toBe(DEFAULT_ROUND_DEADLINE_HOURS);
+    expect(resolveRoundDeadlineHours('24')).toBe(24);
+    expect(resolveRoundDeadlineHours(100_000)).toBe(24 * 30);
+  });
+});
+
+describe('reject reason taxonomy', () => {
+  test('take deck excludes concept-only codes', () => {
+    const codes = rejectReasonsFor('take_proposal').map(r => r.code);
+    expect(codes).toContain('unsupported_by_sources');
+    expect(codes).not.toContain('weak_synthesis');
+    expect(rejectReasonsFor('concept_proposal').map(r => r.code)).toContain('weak_synthesis');
+  });
+
+  test('a reject without a code is refused', () => {
+    expect(validateRejectReason('take_proposal', '', null).error).toBe('reason_code_required');
+    expect(validateRejectReason('take_proposal', 'made_up', null).error).toBe('reason_code_unknown');
+    expect(validateRejectReason('take_proposal', 'weak_synthesis', 'x').error).toBe('reason_code_unknown');
+  });
+
+  test('codes that demand a comment refuse an empty one', () => {
+    expect(validateRejectReason('take_proposal', 'other', '   ').error).toBe('reason_comment_required');
+    expect(validateRejectReason('take_proposal', 'contradicts_evidence', '').error).toBe('reason_comment_required');
+    expect(validateRejectReason('take_proposal', 'other', 'Дубль записи из 2024 года').ok).toBe(true);
+  });
+
+  test('optional-comment codes pass without a comment and cap the length', () => {
+    const ok = validateRejectReason('take_proposal', 'outdated', undefined);
+    expect(ok.ok).toBe(true);
+    expect(ok.comment).toBeNull();
+    expect(validateRejectReason('take_proposal', 'outdated', 'x'.repeat(2_001)).error).toBe('reason_comment_too_long');
+  });
+});

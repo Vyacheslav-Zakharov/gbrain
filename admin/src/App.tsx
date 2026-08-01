@@ -10,9 +10,10 @@ import { SourceIngestPage } from './pages/SourceIngest';
 import { AIReviewPage } from './pages/AIReview';
 import { ConceptReviewPage } from './pages/ConceptReview';
 import { MeetingReviewPage } from './pages/MeetingReview';
+import { ReviewRoundsPage } from './pages/ReviewRounds';
 import { api } from './api';
 
-type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'ai-review' | 'concept-review' | 'meeting-review' | 'jobs' | 'activity' | 'source-ingest';
+type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'ai-review' | 'concept-review' | 'meeting-review' | 'review-rounds' | 'jobs' | 'activity' | 'source-ingest';
 
 const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: string }> = [
   { page: 'dashboard', label: 'Обзор', icon: '▣' },
@@ -22,6 +23,7 @@ const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: stri
   { page: 'ai-review', label: 'Проверка AI', icon: '✓' },
   { page: 'concept-review', label: 'Проверка концепций', icon: '◇' },
   { page: 'meeting-review', label: 'Проверка встреч', icon: '◫' },
+  { page: 'review-rounds', label: 'Коллективная проверка', icon: '⚖' },
   { page: 'jobs', label: 'Задания', icon: '⚙' },
   { page: 'activity', label: 'Активность', icon: '◫' },
   { page: 'source-ingest', label: 'Импорт данных', icon: '⇄' },
@@ -30,7 +32,7 @@ const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: stri
 function getPage(): Page {
   const hash = window.location.hash.replace(/^#/, '') || 'dashboard';
   const topLevel = hash.split('/')[0];
-  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'ai-review', 'concept-review', 'meeting-review', 'jobs', 'activity', 'source-ingest'].includes(topLevel)) return topLevel as Page;
+  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'ai-review', 'concept-review', 'meeting-review', 'review-rounds', 'jobs', 'activity', 'source-ingest'].includes(topLevel)) return topLevel as Page;
   return 'dashboard';
 }
 
@@ -183,6 +185,7 @@ export function App() {
         {page === 'ai-review' && <AIReviewPage />}
         {page === 'concept-review' && <ConceptReviewPage />}
         {page === 'meeting-review' && <MeetingReviewPage />}
+        {page === 'review-rounds' && <ReviewRoundsPage />}
         {page === 'jobs' && <JobsWatchPage />}
         {page === 'activity' && <ActivityPage />}
         {page === 'source-ingest' && <SourceIngestPage />}

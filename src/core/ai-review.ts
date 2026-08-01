@@ -291,7 +291,7 @@ export async function rejectTakeProposal(
   reason?: string,
 ): Promise<ReviewMutationResult> {
   const identity = await loadProposal(engine, proposalId);
-  return withPageLock(`ai-review-claim:${identity.source_id}:${identity.page_slug}:${identity.claim_hash}`, async () => {
+  return withPageLock(identity.page_slug, async () => {
     return engine.transaction(async tx => {
       const proposal = await loadProposal(tx, proposalId);
       if (proposal.status !== 'pending') throw new ReviewConflictError('proposal is no longer pending', 'stale_status');
@@ -427,7 +427,7 @@ export async function acceptTakeProposal(
   revisionId?: number,
 ): Promise<ReviewMutationResult> {
   const identity = await loadProposal(engine, proposalId);
-  return withPageLock(`ai-review:${identity.source_id}:${identity.page_slug}`, async () => {
+  return withPageLock(identity.page_slug, async () => {
     const proposal = await loadProposal(engine, proposalId);
     if (proposal.status !== 'pending') throw new ReviewConflictError('proposal is no longer pending', 'stale_status');
     const draft = validateDraft(input ?? proposalToDraft(proposal));
@@ -482,14 +482,42 @@ export async function acceptTakeProposal(
       await writePageThrough(engine, proposal.page_slug, { sourceId: proposal.source_id });
       throw new ReviewConflictError(`canonical file write/read-back failed: ${writeError}`, 'file_write_failed');
     }
-    const updated = await engine.executeRaw<TakeProposalRow>(
-      `UPDATE take_proposals
-          SET status = 'accepted', acted_at = now(), acted_by = $2, promoted_row_num = $3
-        WHERE id = $1 AND status = 'pending'
-        RETURNING *`,
-      [proposalId, actor, appended.rowNum],
-    );
-    if (!updated[0]) {
+    let updatedRow: TakeProposalRow;
+    try {
+      updatedRow = await engine.transaction(async (tx) => {
+        const updated = await tx.executeRaw<TakeProposalRow>(
+          `UPDATE take_proposals
+              SET status = 'accepted', acted_at = now(), acted_by = $2, promoted_row_num = $3
+            WHERE id = $1 AND status = 'pending'
+            RETURNING *`,
+          [proposalId, actor, appended.rowNum],
+        );
+        if (!updated[0]) throw new ReviewConflictError('proposal changed concurrently', 'concurrent_change');
+        if (revisionId) {
+          await tx.executeRaw(
+            `UPDATE ai_review_revisions SET status = 'applied', decided_at = now()
+              WHERE id = $1 AND target_type = 'take_proposal' AND target_id = $2 AND status = 'draft'`,
+            [revisionId, proposalId],
+          );
+        }
+        await tx.executeRaw(
+          `INSERT INTO ai_review_events
+             (target_type, target_id, action, actor, previous_state, new_state, details)
+           VALUES ('take_proposal', $1, 'accept', $2, $3::text::jsonb, $4::text::jsonb, $5::text::jsonb)`,
+          [
+            proposalId,
+            actor,
+            JSON.stringify({ status: proposal.status, draft: proposalToDraft(proposal) }),
+            JSON.stringify({ status: 'accepted', promoted_row_num: appended.rowNum, draft }),
+            JSON.stringify({ revision_id: revisionId ?? null, publication: publicationReceipt(writeResult) }),
+          ],
+        );
+        return updated[0];
+      });
+    } catch (error) {
+      // The canonical file was written before the DB transition. If the atomic
+      // proposal+revision+audit transaction fails, restore the exact source so
+      // a pending proposal never points at already-published content.
       await importFromContent(engine, proposal.page_slug, originalMarkdown, {
         sourceId: proposal.source_id,
         noEmbed: true,
@@ -497,30 +525,12 @@ export async function acceptTakeProposal(
         source_uri: `take-proposal:${proposal.id}`,
         ingested_via: 'admin-ai-review',
       });
-      await writePageThrough(engine, proposal.page_slug, { sourceId: proposal.source_id });
-      throw new ReviewConflictError('proposal changed concurrently', 'concurrent_change');
+      const rollbackWrite = await writePageThrough(engine, proposal.page_slug, { sourceId: proposal.source_id });
+      await verifyFileReceipt(rollbackWrite, `take-proposal:${proposal.id}:rollback`);
+      throw error;
     }
-    if (revisionId) {
-      await engine.executeRaw(
-        `UPDATE ai_review_revisions SET status = 'applied', decided_at = now()
-          WHERE id = $1 AND target_type = 'take_proposal' AND target_id = $2 AND status = 'draft'`,
-        [revisionId, proposalId],
-      );
-    }
-    await engine.executeRaw(
-      `INSERT INTO ai_review_events
-         (target_type, target_id, action, actor, previous_state, new_state, details)
-       VALUES ('take_proposal', $1, 'accept', $2, $3::text::jsonb, $4::text::jsonb, $5::text::jsonb)`,
-      [
-        proposalId,
-        actor,
-        JSON.stringify({ status: proposal.status, draft: proposalToDraft(proposal) }),
-        JSON.stringify({ status: 'accepted', promoted_row_num: appended.rowNum, draft }),
-        JSON.stringify({ revision_id: revisionId ?? null, publication: publicationReceipt(writeResult) }),
-      ],
-    );
     return {
-      proposal: { ...proposal, ...updated[0] },
+      proposal: { ...proposal, ...updatedRow },
       publication: publicationReceipt(writeResult),
     };
   });

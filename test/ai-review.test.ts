@@ -259,6 +259,19 @@ describe('AI review canonical acceptance', () => {
     );
     expect(different).toHaveLength(1);
   });
+
+  test('canonical take content is restored when the accept audit cannot commit', async () => {
+    const id = await seedProposal();
+    await engine.executeRaw(`ALTER TABLE ai_review_events ADD CONSTRAINT test_block_take_accept CHECK (action <> 'accept')`);
+    try {
+      await expect(acceptTakeProposal(engine, id, undefined, 'admin-test')).rejects.toThrow();
+    } finally {
+      await engine.executeRaw(`ALTER TABLE ai_review_events DROP CONSTRAINT test_block_take_accept`);
+    }
+    const proposal = await engine.executeRaw<{ status: string }>(`SELECT status FROM take_proposals WHERE id=$1`, [id]);
+    expect(proposal[0]!.status).toBe('pending');
+    expect(readFileSync(join(dir, 'notes/review-source.md'), 'utf8')).not.toContain('gbrain:takes:begin');
+  });
 });
 
 describe('Concept review canonical acceptance', () => {
@@ -289,5 +302,18 @@ describe('Concept review canonical acceptance', () => {
     await expect(acceptConceptProposal(engine, id, undefined, 'admin-test')).rejects.toMatchObject({ code: 'stale_destination' });
     const page = await engine.getPage('concepts/theme', { sourceId: 'review-test' });
     expect(page?.compiled_truth).toContain('Human canonical content');
+  });
+
+  test('new concept content is removed when the accept audit cannot commit', async () => {
+    const id = await seedConcept();
+    await engine.executeRaw(`ALTER TABLE ai_review_events ADD CONSTRAINT test_block_concept_accept CHECK (action <> 'accept')`);
+    try {
+      await expect(acceptConceptProposal(engine, id, undefined, 'admin-test')).rejects.toThrow();
+    } finally {
+      await engine.executeRaw(`ALTER TABLE ai_review_events DROP CONSTRAINT test_block_concept_accept`);
+    }
+    const proposal = await engine.executeRaw<{ status: string }>(`SELECT status FROM concept_proposals WHERE id=$1`, [id]);
+    expect(proposal[0]!.status).toBe('pending');
+    expect(await engine.getPage('concepts/theme', { sourceId: 'review-test' })).toBeNull();
   });
 });

@@ -7,6 +7,11 @@ export interface PortalSession {
   email: string;
   isAdmin: boolean;
   readOnly: true;
+  /**
+   * Server-derived capability flag. It only decides whether the reviewer
+   * entry point renders; every review endpoint re-checks identity and ACL.
+   */
+  canReview?: boolean;
 }
 
 export interface TreeEntry {

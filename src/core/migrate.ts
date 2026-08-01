@@ -5918,6 +5918,78 @@ export const MIGRATIONS: Migration[] = [
         ADD COLUMN IF NOT EXISTS source_takes JSONB NOT NULL DEFAULT '[]'::jsonb;
     `,
   },
+  {
+    version: 135,
+    name: 'ai_review_multi_reviewer',
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS ai_review_rounds (
+        id                     BIGSERIAL   PRIMARY KEY,
+        target_type            TEXT        NOT NULL CHECK (target_type IN ('take_proposal','concept_proposal')),
+        target_id              BIGINT      NOT NULL,
+        source_id              TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+        proposal_snapshot_hash TEXT        NOT NULL,
+        policy_kind            TEXT        NOT NULL CHECK (policy_kind IN ('personal','shared')),
+        status                 TEXT        NOT NULL DEFAULT 'open'
+                                           CHECK (status IN ('open','escalated','finalizing','finalized','cancelled')),
+        outcome                TEXT        CHECK (outcome IN ('accepted','rejected')),
+        escalation_reason      TEXT,
+        round_version          INTEGER     NOT NULL DEFAULT 1,
+        opened_by              TEXT        NOT NULL,
+        opened_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+        due_at                 TIMESTAMPTZ NOT NULL,
+        closed_at              TIMESTAMPTZ,
+        finalized_by           TEXT,
+        finalized_at           TIMESTAMPTZ,
+        finalizing_at          TIMESTAMPTZ,
+        finalized_mode         TEXT        CHECK (finalized_mode IN ('auto_unanimous','admin_override')),
+        final_reason           TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS ai_review_rounds_active_idx
+        ON ai_review_rounds (target_type, target_id)
+        WHERE status IN ('open','escalated','finalizing');
+      CREATE INDEX IF NOT EXISTS ai_review_rounds_status_due_idx
+        ON ai_review_rounds (status, due_at);
+
+      CREATE TABLE IF NOT EXISTS ai_review_assignments (
+        id                BIGSERIAL    PRIMARY KEY,
+        round_id          BIGINT       NOT NULL REFERENCES ai_review_rounds(id) ON DELETE CASCADE,
+        reviewer_email    TEXT         NOT NULL,
+        owns_source       BOOLEAN      NOT NULL DEFAULT false,
+        weight            NUMERIC(4,2) NOT NULL DEFAULT 1,
+        status            TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','voted')),
+        assigned_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
+        details_opened_at TIMESTAMPTZ,
+        UNIQUE (round_id, reviewer_email)
+      );
+      CREATE INDEX IF NOT EXISTS ai_review_assignments_reviewer_idx
+        ON ai_review_assignments (reviewer_email, status);
+
+      CREATE TABLE IF NOT EXISTS ai_review_votes (
+        id                     BIGSERIAL   PRIMARY KEY,
+        round_id               BIGINT      NOT NULL REFERENCES ai_review_rounds(id) ON DELETE CASCADE,
+        assignment_id          BIGINT      NOT NULL REFERENCES ai_review_assignments(id) ON DELETE CASCADE,
+        decision               TEXT        NOT NULL CHECK (decision IN ('approve','reject')),
+        reason_code            TEXT,
+        comment                TEXT,
+        voter_kind             TEXT        NOT NULL DEFAULT 'portal_user'
+                                           CHECK (voter_kind IN ('portal_user','system')),
+        actor_email            TEXT        NOT NULL,
+        proposal_snapshot_hash TEXT        NOT NULL,
+        idempotency_key        TEXT        NOT NULL,
+        active                 BOOLEAN     NOT NULL DEFAULT true,
+        created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+        superseded_at          TIMESTAMPTZ,
+        CHECK (decision <> 'reject' OR reason_code IS NOT NULL)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS ai_review_votes_active_idx
+        ON ai_review_votes (assignment_id) WHERE active = true;
+      CREATE UNIQUE INDEX IF NOT EXISTS ai_review_votes_idempotency_idx
+        ON ai_review_votes (assignment_id, idempotency_key);
+      CREATE INDEX IF NOT EXISTS ai_review_votes_round_idx
+        ON ai_review_votes (round_id, created_at DESC);
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

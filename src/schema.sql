@@ -1593,6 +1593,84 @@ CREATE INDEX IF NOT EXISTS concept_proposals_pending_idx
   ON concept_proposals (source_id, status, proposed_at DESC)
   WHERE status = 'pending';
 
+-- ============================================================
+-- Multi-reviewer AI Review (rounds / assignments / votes)
+-- ============================================================
+-- A round is the governance wrapper around ONE immutable proposal. Assignments
+-- freeze at round creation: every configured active Portal user with write
+-- access to the proposal's source is mandatory. Unanimity auto-finalizes
+-- through the existing guarded publisher; disagreement or a missed deadline
+-- escalates to Admin. See docs/architecture/ai-review-multi-review.md.
+CREATE TABLE IF NOT EXISTS ai_review_rounds (
+  id                     BIGSERIAL   PRIMARY KEY,
+  target_type            TEXT        NOT NULL CHECK (target_type IN ('take_proposal','concept_proposal')),
+  target_id              BIGINT      NOT NULL,
+  source_id              TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  proposal_snapshot_hash TEXT        NOT NULL,
+  policy_kind            TEXT        NOT NULL CHECK (policy_kind IN ('personal','shared')),
+  status                 TEXT        NOT NULL DEFAULT 'open'
+                                     CHECK (status IN ('open','escalated','finalizing','finalized','cancelled')),
+  outcome                TEXT        CHECK (outcome IN ('accepted','rejected')),
+  escalation_reason      TEXT,
+  round_version          INTEGER     NOT NULL DEFAULT 1,
+  opened_by              TEXT        NOT NULL,
+  opened_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  due_at                 TIMESTAMPTZ NOT NULL,
+  closed_at              TIMESTAMPTZ,
+  finalized_by           TEXT,
+  finalized_at           TIMESTAMPTZ,
+  finalizing_at          TIMESTAMPTZ,
+  finalized_mode         TEXT        CHECK (finalized_mode IN ('auto_unanimous','admin_override')),
+  final_reason           TEXT
+);
+-- One live round per proposal. Closed rounds may accumulate for the audit trail.
+CREATE UNIQUE INDEX IF NOT EXISTS ai_review_rounds_active_idx
+  ON ai_review_rounds (target_type, target_id)
+  WHERE status IN ('open','escalated','finalizing');
+CREATE INDEX IF NOT EXISTS ai_review_rounds_status_due_idx
+  ON ai_review_rounds (status, due_at);
+
+CREATE TABLE IF NOT EXISTS ai_review_assignments (
+  id                BIGSERIAL    PRIMARY KEY,
+  round_id          BIGINT       NOT NULL REFERENCES ai_review_rounds(id) ON DELETE CASCADE,
+  reviewer_email    TEXT         NOT NULL,
+  owns_source       BOOLEAN      NOT NULL DEFAULT false,
+  weight            NUMERIC(4,2) NOT NULL DEFAULT 1,
+  status            TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','voted')),
+  assigned_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  details_opened_at TIMESTAMPTZ,
+  UNIQUE (round_id, reviewer_email)
+);
+CREATE INDEX IF NOT EXISTS ai_review_assignments_reviewer_idx
+  ON ai_review_assignments (reviewer_email, status);
+
+-- Append-only. A changed vote supersedes the prior row; nothing is deleted.
+-- voter_kind exists so that a non-human row can never reach the aggregator's
+-- auto-finalize path (model/audit output must not accept a proposal).
+CREATE TABLE IF NOT EXISTS ai_review_votes (
+  id                     BIGSERIAL   PRIMARY KEY,
+  round_id               BIGINT      NOT NULL REFERENCES ai_review_rounds(id) ON DELETE CASCADE,
+  assignment_id          BIGINT      NOT NULL REFERENCES ai_review_assignments(id) ON DELETE CASCADE,
+  decision               TEXT        NOT NULL CHECK (decision IN ('approve','reject')),
+  reason_code            TEXT,
+  comment                TEXT,
+  voter_kind             TEXT        NOT NULL DEFAULT 'portal_user'
+                                     CHECK (voter_kind IN ('portal_user','system')),
+  actor_email            TEXT        NOT NULL,
+  proposal_snapshot_hash TEXT        NOT NULL,
+  idempotency_key        TEXT        NOT NULL,
+  active                 BOOLEAN     NOT NULL DEFAULT true,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  superseded_at          TIMESTAMPTZ,
+  CHECK (decision <> 'reject' OR reason_code IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ai_review_votes_active_idx
+  ON ai_review_votes (assignment_id) WHERE active = true;
+CREATE UNIQUE INDEX IF NOT EXISTS ai_review_votes_idempotency_idx
+  ON ai_review_votes (assignment_id, idempotency_key);
+CREATE INDEX IF NOT EXISTS ai_review_votes_round_idx
+  ON ai_review_votes (round_id, created_at DESC);
+
 -- take_grade_cache: grade_takes verdict cache. Composite PK on
 -- (take_id, prompt_version, judge_model_id, evidence_signature) means
 -- prompt edits OR evidence changes cleanly invalidate prior verdicts.
@@ -1719,6 +1797,10 @@ BEGIN
     ALTER TABLE take_proposals ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_grade_cache ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_nudge_log ENABLE ROW LEVEL SECURITY;
+    -- Multi-reviewer AI Review governance tables
+    ALTER TABLE ai_review_rounds ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ai_review_assignments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ai_review_votes ENABLE ROW LEVEL SECURITY;
     -- v0.26 OAuth 2.1 tables
     ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
     ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;

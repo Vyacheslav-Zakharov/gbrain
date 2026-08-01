@@ -30,6 +30,7 @@ type Detail = {
   revisions: Array<Record<string, unknown>>;
   events: Array<Record<string, unknown>>;
   active_draft?: { revision_id: number; proposed_markdown: string } | null;
+  review_governance?: { managed: boolean; state: string; round_id: number | null; round_status: string | null };
 };
 
 function markdownTitle(markdown: string, fallback: string): string {
@@ -262,11 +263,13 @@ export function ConceptReviewPage() {
 
             <div className="review-form">
               <label>Проверяемый черновик Markdown
-                <textarea rows={22} value={markdown} disabled={detail.proposal.status !== 'pending'} onChange={event => { setMarkdown(event.target.value); setRevision(undefined); }} />
+                <textarea rows={22} value={markdown} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={event => { setMarkdown(event.target.value); setRevision(undefined); }} />
               </label>
             </div>
 
-            {detail.proposal.status === 'pending' && <div className="llm-box">
+            {detail.review_governance?.managed && <div className="receipt">Это предложение управляется коллективной проверкой{detail.review_governance.round_id ? ` (раунд #${detail.review_governance.round_id})` : ''}. <a href="#review-rounds">Открыть голоса и решение</a>.</div>}
+
+            {detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className="llm-box">
               <label>Комментарий для LLM — публикации не будет
                 <textarea rows={3} value={llmComment} onChange={event => setLlmComment(event.target.value)} />
               </label>
@@ -274,11 +277,11 @@ export function ConceptReviewPage() {
               {revision && <span>Активный черновик revision #{revision}; проверьте его перед принятием.</span>}
             </div>}
 
-            {detail.proposal.status === 'pending' && <label className="overwrite-option"><input type="checkbox" checked={overwrite} onChange={event => setOverwrite(event.target.checked)} /> Разрешить перезапись только если целевая страница была создана вручную или изменилась после генерации</label>}
+            {detail.proposal.status === 'pending' && !detail.review_governance?.managed && <label className="overwrite-option"><input type="checkbox" checked={overwrite} onChange={event => setOverwrite(event.target.checked)} /> Разрешить перезапись только если целевая страница была создана вручную или изменилась после генерации</label>}
 
             {actionError && <div className="ai-review-inline-error" role="alert"><span>{actionError}</span><button type="button" onClick={() => setActionError('')} aria-label="Закрыть сообщение">×</button></div>}
 
-            {detail.proposal.status === 'pending' && <div className="review-actions">
+            {detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className="review-actions">
               <button type="button" className="reject" disabled={busy !== null} onClick={reject}>{busy === 'reject' ? 'Отклоняем…' : 'Отклонить'}</button>
               <button type="button" className="accept" disabled={busy !== null || !markdown.trim()} onClick={accept}>{busy === 'accept' ? 'Публикуем и проверяем…' : 'Принять и опубликовать'}</button>
             </div>}
