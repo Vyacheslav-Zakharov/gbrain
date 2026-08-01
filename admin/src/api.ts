@@ -108,6 +108,18 @@ export const api = {
   aiReviewReject: (id: number, reason?: string) => apiFetch(`/admin/api/ai-review/proposals/${id}/reject`, {
     method: 'POST', body: JSON.stringify({ reason }),
   }),
+  // Multi-reviewer rounds. Finalize is available only for escalated rounds and
+  // always carries a mandatory override reason (revalidated server-side).
+  reviewRounds: (params: { status?: string; limit?: number; offset?: number } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') qs.set(key, String(value));
+    return apiFetch(`/admin/api/ai-review/rounds?${qs.toString()}`);
+  },
+  reviewRound: (id: number) => apiFetch(`/admin/api/ai-review/rounds/${id}`),
+  reviewRoundFinalize: (id: number, action: 'accepted' | 'rejected', reason: string) =>
+    apiFetch(`/admin/api/ai-review/rounds/${id}/finalize`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
+  reviewRoundOpen: (target_type: string, target_id: number) =>
+    apiFetch('/admin/api/ai-review/rounds', { method: 'POST', body: JSON.stringify({ target_type, target_id }) }),
   aiReviewConcepts: (params: { status?: string; q?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') qs.set(key, String(value));

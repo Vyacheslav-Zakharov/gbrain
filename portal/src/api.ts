@@ -6,6 +6,21 @@ import type {
   SearchResult,
   TreeResponse,
 } from './types';
+import type {
+  ReviewDeckCard,
+  ReviewItemDetail,
+  ReviewRejectReason,
+  ReviewSummary,
+  ReviewVoteResponse,
+} from './review/types';
+
+/** Machine-stable code from the review API, carried alongside the message. */
+export class ReviewApiError extends Error {
+  constructor(message: string, public readonly code: string, public readonly status: number) {
+    super(message);
+    this.name = 'ReviewApiError';
+  }
+}
 
 async function requestJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
@@ -55,4 +70,34 @@ export const portalApi = {
   context: (source: string, path: string, signal?: AbortSignal) =>
     requestJson<ContextResponse>(`/portal/api/context?${qs({ source, path })}`, signal),
   downloadUrl: (source: string, path: string) => `/portal/download?${qs({ source, path })}`,
+  reviewSummary: () => requestJson<ReviewSummary>('/portal/api/review/summary'),
+  reviewDeck: (limit = 10, signal?: AbortSignal) =>
+    requestJson<{ cards: ReviewDeckCard[]; total: number }>(`/portal/api/review/deck?${qs({ limit: String(limit) })}`, signal),
+  reviewItem: (assignmentId: number, signal?: AbortSignal) =>
+    requestJson<{ item: ReviewItemDetail; reasons: ReviewRejectReason[] }>(`/portal/api/review/items/${assignmentId}`, signal),
+  /**
+   * The idempotency key belongs to ONE user attempt: a retry after a network
+   * error replays the same key so a double-tap can never become two votes.
+   */
+  reviewVote: async (
+    assignmentId: number,
+    body: { decision: 'approve' | 'reject'; reason_code?: string; comment?: string; proposal_snapshot_hash: string },
+    idempotencyKey: string,
+  ): Promise<ReviewVoteResponse> => {
+    const response = await fetch(`/portal/api/review/items/${assignmentId}/vote`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify(body),
+    });
+    if (response.status === 401) {
+      window.location.assign('/login');
+      throw new ReviewApiError('Требуется вход', 'unauthenticated', 401);
+    }
+    const payload = await response.json().catch(() => ({})) as { error?: string; message?: string };
+    if (!response.ok) {
+      throw new ReviewApiError(payload.message || `HTTP ${response.status}`, payload.error || 'unknown', response.status);
+    }
+    return payload as unknown as ReviewVoteResponse;
+  },
 };

@@ -7,7 +7,12 @@ type Row = {
   proposed_markdown: string; source_atoms: Array<{ source_id: string; slug: string; title?: string }>;
   current_page_body?: string | null; destination_content_hash?: string | null;
 };
-type Detail = { proposal: Row; revisions: Array<Record<string, unknown>>; events: Array<Record<string, unknown>> };
+type Detail = {
+  proposal: Row;
+  revisions: Array<Record<string, unknown>>;
+  events: Array<Record<string, unknown>>;
+  review_governance?: { managed: boolean; state: string; round_id: number | null; round_status: string | null };
+};
 
 export function ConceptReviewPage() {
   const [status, setStatus] = useState('pending');
@@ -79,7 +84,8 @@ export function ConceptReviewPage() {
         {detail.proposal.current_page_body && <details><summary>Текущая каноническая страница</summary><pre>{detail.proposal.current_page_body}</pre></details>}
         <details><summary>Исходное AI-предложение</summary><pre>{detail.proposal.proposed_markdown}</pre></details>
         <textarea rows={24} value={markdown} disabled={detail.proposal.status !== 'pending'} onChange={e => { setMarkdown(e.target.value); setRevision(undefined); }} />
-        {detail.proposal.status === 'pending' && <><label><input type="checkbox" checked={overwrite} onChange={e => setOverwrite(e.target.checked)} /> Разрешить перезапись, если целевая страница создана вручную или изменилась после генерации предложения</label><div className="review-actions"><button disabled={busy} onClick={askLlm}>Создать LLM revision</button><button disabled={busy} onClick={reject}>Отклонить</button><button className="primary" disabled={busy} onClick={accept}>Принять и опубликовать</button></div></>}
+        {detail.review_governance?.managed && <div className="receipt">Это предложение управляется коллективной проверкой{detail.review_governance.round_id ? ` (раунд #${detail.review_governance.round_id})` : ''}. <a href="#review-rounds">Открыть голоса и решение</a>.</div>}
+        {detail.proposal.status === 'pending' && !detail.review_governance?.managed && <><label><input type="checkbox" checked={overwrite} onChange={e => setOverwrite(e.target.checked)} /> Разрешить перезапись, если целевая страница создана вручную или изменилась после генерации предложения</label><div className="review-actions"><button disabled={busy} onClick={askLlm}>Создать LLM revision</button><button disabled={busy} onClick={reject}>Отклонить</button><button className="primary" disabled={busy} onClick={accept}>Принять и опубликовать</button></div></>}
       </> : <p>Выберите предложение концепции</p>}</div>
     </div>
   </div>;

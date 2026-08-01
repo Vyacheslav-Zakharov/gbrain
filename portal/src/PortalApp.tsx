@@ -4,6 +4,7 @@ import { fallbackTitle, renderMarkdown, type OutlineItem } from './markdown';
 import { buildPortalHref, isPreviewable, parentPath, parsePortalLocation } from './navigation';
 import { isGlobalSearchShortcut } from './keyboard';
 import { keepExplorerOpenAfterFolderNavigation } from './mobile-navigation';
+import { REVIEW_ROUTE } from './review-route';
 import type {
   Backlink,
   ContextResponse,
@@ -406,6 +407,7 @@ export function PortalApp() {
           <kbd>Ctrl K</kbd>
         </button>
         <div className="topbar-actions">
+          {session?.canReview && <a className="quiet-link" href={REVIEW_ROUTE}>Оценка знаний</a>}
           {session?.isAdmin && <a className="quiet-link" href="/admin/">Администрирование</a>}
           <span className="read-only-badge">Только чтение</span>
           <button className="quiet-link logout-link" onClick={() => void portalApi.logout().finally(() => window.location.assign('/login'))}>Выйти</button>

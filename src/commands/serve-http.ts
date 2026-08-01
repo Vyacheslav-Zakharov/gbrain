@@ -84,6 +84,23 @@ import {
   listConceptProposals,
   rejectConceptProposal,
 } from '../core/concept-review.ts';
+import {
+  adminFinalizeRound,
+  castReviewerVote,
+  ensurePendingReviewRounds,
+  escalateOverdueRounds,
+  getReviewRoundDetail,
+  getReviewerItem,
+  listReviewRounds,
+  listReviewerDeck,
+  openReviewRound,
+  resolveReviewCutoverAtFromConfig,
+  reviewerSummary,
+  type ReviewerScope,
+  type RoundStatus,
+} from '../core/ai-review-rounds.ts';
+import { rejectReasonsFor } from '../core/ai-review-reasons.ts';
+import type { ReviewerPermissionMap } from '../core/ai-review-aggregation.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -700,6 +717,46 @@ const getUserPermissions = async (email: string) => {
     };
   }
 };
+/**
+ * The WHOLE permission map, used only by multi-reviewer AI Review to freeze a
+ * round's mandatory-reviewer list. Read-only; a parse failure returns `{}` so
+ * round creation fails closed with `no_reviewers` instead of guessing.
+ */
+const loadUserPermissionsMap = (): ReviewerPermissionMap => {
+  const configPath = userPermissionsPath();
+  try {
+    if (!require('fs').existsSync(configPath)) return {};
+    const parsed = JSON.parse(require('fs').readFileSync(configPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as ReviewerPermissionMap;
+  } catch (err) {
+    console.error(`[GBrain] Failed to read ${configPath} for review reviewer resolution:`, err);
+    return {};
+  }
+};
+
+/**
+ * Source ids this user may currently WRITE to. Re-read per request so a
+ * revoked grant immediately closes the reviewer surface, even for an
+ * assignment that was frozen while the grant was still live.
+ */
+const getWriteSourceIdsForUser = async (email: string): Promise<string[]> => {
+  const map = loadUserPermissionsMap();
+  const normalized = String(email || '').trim().toLowerCase();
+  const entry = Object.entries(map).find(([key]) => String(key).trim().toLowerCase() === normalized)?.[1];
+  // Review authorization is strict: unlike the general Portal onboarding path,
+  // it never invents an implicit personal grant for an absent/deactivated user.
+  if (!entry || entry.active === false || entry.disabled === true) return [];
+  const ids = new Set<string>();
+  const personal = String(entry.source_id ?? '').trim();
+  if (personal) ids.add(personal);
+  for (const raw of Array.isArray(entry.federated_write) ? entry.federated_write : []) {
+    const id = String(raw ?? '').trim();
+    if (id) ids.add(id);
+  }
+  return Array.from(ids);
+};
+
 const managedAreaById = (areaId: string) => managedAccessAreas.find((a) => a.id === areaId);
 const managedSourceIdForArea = (areaId: string) => managedAreaById(areaId)?.sourceId || null;
 
@@ -1493,6 +1550,9 @@ if (portalDevAssets) {
   });
 }
 app.get(['/portal', '/portal/'], requirePortalPage, sendPortalIndex);
+// Reviewer workspace. Same SPA bundle, selected client-side by pathname, so
+// the knowledge explorer and the review deck share one asset pipeline.
+app.get(['/portal/review', '/portal/review/'], requirePortalPage, sendPortalIndex);
 
 app.use('/portal/api', (_req: Request, res: Response, next: NextFunction) => {
   res.setHeader('Cache-Control', 'private, no-store');
@@ -1505,14 +1565,225 @@ app.use('/portal/download', (_req: Request, res: Response, next: NextFunction) =
   next();
 });
 
-app.get('/portal/api/session', (req: any, res: any) => {
+app.get('/portal/api/session', async (req: any, res: any) => {
   const userEmail = requirePortalUser(req, res);
   if (!userEmail) return;
+  const normalized = String(userEmail).trim().toLowerCase();
+  // canReview is a capability, NOT a permission grant: it only decides whether
+  // the reviewer nav entry renders. Every review endpoint re-derives identity
+  // and ACL server-side regardless of what the browser believes.
+  const configured = Object.keys(loadUserPermissionsMap()).some(k => String(k).trim().toLowerCase() === normalized);
+  const writeSources = configured ? await getWriteSourceIdsForUser(normalized).catch(() => []) : [];
   res.json({
     email: userEmail,
-    isAdmin: adminEmails.has(String(userEmail).trim().toLowerCase()),
+    isAdmin: adminEmails.has(normalized),
     readOnly: true,
+    canReview: configured && writeSources.length > 0,
   });
+});
+
+// ---------------------------------------------------------------------------
+// Portal reviewer API (multi-reviewer AI Review)
+// ---------------------------------------------------------------------------
+// Every handler derives the actor from the opaque Portal session and the ACL
+// from user_permissions.json. Nothing here reads an actor, reviewer list, or
+// source grant out of the request body — a browser cannot widen its own scope.
+
+const reviewErrorStatus: Record<string, number> = {
+  not_found: 404,
+  unauthenticated: 401,
+  foreign_assignment: 403,
+  source_access_revoked: 403,
+  round_closed: 409,
+  round_escalated: 409,
+  round_already_open: 409,
+  stale_proposal: 409,
+  stale_status: 409,
+  concurrent_vote: 409,
+  concurrent_finalization: 409,
+  round_not_escalated: 409,
+  no_reviewers: 422,
+  invalid_decision: 422,
+  invalid_action: 422,
+  invalid_target_id: 422,
+  unsupported_target_type: 422,
+  override_reason_required: 422,
+  reason_code_required: 422,
+  reason_code_unknown: 422,
+  reason_comment_required: 422,
+  reason_comment_too_long: 422,
+  file_write_failed: 503,
+};
+
+function sendReviewRoundError(res: express.Response, error: unknown): void {
+  if (error instanceof ReviewConflictError) {
+    res.status(reviewErrorStatus[error.code] ?? 409).json({ error: error.code, message: error.message });
+    return;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  res.status(500).json({ error: 'review_round_failed', message });
+}
+
+/** Mirrors requireAdminSameOrigin: a reviewer vote is a state change. */
+function requirePortalSameOrigin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const fetchSite = req.get('sec-fetch-site');
+  if (fetchSite && fetchSite !== 'same-origin') {
+    res.status(403).json({ error: 'cross_site_review_mutation_rejected' });
+    return;
+  }
+  const origin = req.get('origin');
+  if (origin) {
+    try {
+      if (new URL(origin).origin !== `${req.protocol}://${req.get('host')}`) {
+        res.status(403).json({ error: 'cross_origin_review_mutation_rejected' });
+        return;
+      }
+    } catch {
+      res.status(403).json({ error: 'invalid_origin' });
+      return;
+    }
+  } else if (fetchSite !== 'same-origin') {
+    res.status(403).json({ error: 'missing_same_origin_evidence' });
+    return;
+  }
+  next();
+}
+
+const reviewerScopeFor = async (email: string): Promise<ReviewerScope> => ({
+  email: String(email).trim().toLowerCase(),
+  allowedWriteSources: await getWriteSourceIdsForUser(String(email).trim().toLowerCase()),
+});
+
+let reviewAssignmentSyncInFlight: ReturnType<typeof ensurePendingReviewRounds> | null = null;
+const synchronizePendingReviewAssignments = () => {
+  if (reviewAssignmentSyncInFlight) return reviewAssignmentSyncInFlight;
+  reviewAssignmentSyncInFlight = ensurePendingReviewRounds(engine, {
+    permissions: loadUserPermissionsMap(),
+    actor: 'system:assignment-sync',
+    limit: 100,
+  }).finally(() => {
+    reviewAssignmentSyncInFlight = null;
+  });
+  return reviewAssignmentSyncInFlight;
+};
+
+type ProposalReviewGovernance = {
+  managed: boolean;
+  state: 'legacy_manual' | 'pending_assignment' | 'round';
+  round_id: number | null;
+  round_status: RoundStatus | null;
+};
+const proposalReviewGovernance = async (
+  targetType: 'take_proposal' | 'concept_proposal',
+  targetId: number,
+): Promise<ProposalReviewGovernance> => {
+  const proposalTable = targetType === 'take_proposal' ? 'take_proposals' : 'concept_proposals';
+  const proposals = await engine.executeRaw<{ status: string; proposed_at: string }>(
+    `SELECT status, proposed_at::text AS proposed_at FROM ${proposalTable} WHERE id = $1`,
+    [targetId],
+  );
+  if (!proposals[0]) throw new ReviewConflictError('proposal not found', 'not_found');
+  const rounds = await engine.executeRaw<{ id: number; status: RoundStatus }>(
+    `SELECT id, status FROM ai_review_rounds
+      WHERE target_type = $1 AND target_id = $2
+        AND status IN ('open','escalated','finalizing')
+      ORDER BY id DESC LIMIT 1`,
+    [targetType, targetId],
+  );
+  if (rounds[0]) {
+    return { managed: true, state: 'round', round_id: Number(rounds[0].id), round_status: rounds[0].status };
+  }
+  const cutoverAt = await resolveReviewCutoverAtFromConfig(engine);
+  const managed = proposals[0].status === 'pending'
+    && Date.parse(proposals[0].proposed_at) > Date.parse(cutoverAt);
+  return {
+    managed,
+    state: managed ? 'pending_assignment' : 'legacy_manual',
+    round_id: null,
+    round_status: null,
+  };
+};
+const assertDirectAdminReviewAllowed = async (
+  targetType: 'take_proposal' | 'concept_proposal',
+  targetId: number,
+): Promise<void> => {
+  const governance = await proposalReviewGovernance(targetType, targetId);
+  if (governance.managed) {
+    throw new ReviewConflictError(
+      governance.round_id
+        ? `proposal is governed by review round ${governance.round_id}`
+        : 'proposal is waiting for mandatory reviewer assignment',
+      'managed_by_review_round',
+    );
+  }
+};
+
+app.get('/portal/api/review/summary', async (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  try {
+    await synchronizePendingReviewAssignments();
+    const scope = await reviewerScopeFor(userEmail);
+    res.json({ ...await reviewerSummary(engine, scope), reasons: rejectReasonsFor('take_proposal') });
+  } catch (error) {
+    sendReviewRoundError(res, error);
+  }
+});
+
+app.get('/portal/api/review/deck', async (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  try {
+    await synchronizePendingReviewAssignments();
+    const scope = await reviewerScopeFor(userEmail);
+    const targetTypeRaw = String(req.query.type ?? '');
+    const deck = await listReviewerDeck(engine, scope, {
+      limit: Number(req.query.limit ?? 10),
+      targetType: targetTypeRaw === 'take_proposal' || targetTypeRaw === 'concept_proposal' ? targetTypeRaw : undefined,
+    });
+    res.json(deck);
+  } catch (error) {
+    sendReviewRoundError(res, error);
+  }
+});
+
+app.get('/portal/api/review/items/:assignmentId', async (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  try {
+    const scope = await reviewerScopeFor(userEmail);
+    const item = await getReviewerItem(engine, scope, Number(req.params.assignmentId), { markDetailsOpened: true });
+    res.json({ item, reasons: rejectReasonsFor(item.target_type) });
+  } catch (error) {
+    sendReviewRoundError(res, error);
+  }
+});
+
+app.post('/portal/api/review/items/:assignmentId/vote', requirePortalSameOrigin, express.json({ limit: '32kb' }), async (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  try {
+    const scope = await reviewerScopeFor(userEmail);
+    const result = await castReviewerVote(engine, scope, {
+      assignmentId: Number(req.params.assignmentId),
+      decision: req.body?.decision,
+      reasonCode: req.body?.reason_code,
+      comment: req.body?.comment,
+      proposalSnapshotHash: req.body?.proposal_snapshot_hash,
+      idempotencyKey: req.get('idempotency-key') || req.body?.idempotency_key,
+    });
+    // Blind until closure: a reviewer learns only their own decision and
+    // whether the round is still collecting votes.
+    res.json({
+      decision: result.vote.decision,
+      replayed: result.replayed,
+      round_status: result.round.status,
+      outcome: result.round.status === 'finalized' ? result.round.outcome : null,
+      publication_pending: Boolean(result.finalizationError),
+    });
+  } catch (error) {
+    sendReviewRoundError(res, error);
+  }
 });
 
 app.get("/portal/api/sources", async (req: any, res: any) => {
@@ -2452,7 +2723,11 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.get('/admin/api/ai-review/proposals/:id', requireAdmin, async (req: Request, res: Response) => {
     try {
-      res.json(await getTakeProposalReview(engine, Number(req.params.id)));
+      const id = Number(req.params.id);
+      res.json({
+        ...await getTakeProposalReview(engine, id),
+        review_governance: await proposalReviewGovernance('take_proposal', id),
+      });
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -2482,6 +2757,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/proposals/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
+      await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));
       res.json(await acceptTakeProposal(
         engine,
         Number(req.params.id),
@@ -2496,9 +2772,72 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/proposals/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
+      await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));
       res.json(await rejectTakeProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
     } catch (error) {
       sendReviewError(res, error);
+    }
+  });
+
+  // --- Multi-reviewer rounds -------------------------------------------------
+  // Admin sees named votes and can finalize ONLY an escalated round, with a
+  // mandatory override reason. Open rounds belong to their reviewers.
+
+  app.post('/admin/api/ai-review/rounds', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await openReviewRound(engine, {
+        targetType: String(req.body?.target_type ?? 'take_proposal'),
+        targetId: Number(req.body?.target_id),
+        permissions: loadUserPermissionsMap(),
+        actor: adminActor(req),
+        deadlineHours: req.body?.deadline_hours,
+      }));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/rounds', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      await synchronizePendingReviewAssignments();
+      const statusRaw = String(req.query.status ?? 'escalated');
+      const allowed = ['open', 'escalated', 'finalizing', 'finalized', 'cancelled', 'active'];
+      res.json(await listReviewRounds(engine, {
+        status: (allowed.includes(statusRaw) ? statusRaw : 'escalated') as RoundStatus | 'active',
+        limit: Number(req.query.limit ?? 50),
+        offset: Number(req.query.offset ?? 0),
+      }));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/rounds/:id', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      res.json(await getReviewRoundDetail(engine, Number(req.params.id)));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/rounds/:id/finalize', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await adminFinalizeRound(engine, {
+        roundId: Number(req.params.id),
+        actor: adminActor(req),
+        action: String(req.body?.action ?? ''),
+        reason: req.body?.reason,
+      }));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/rounds/sweep', requireAdmin, requireAdminSameOrigin, express.json(), async (_req: Request, res: Response) => {
+    try {
+      res.json(await escalateOverdueRounds(engine));
+    } catch (error) {
+      sendReviewRoundError(res, error);
     }
   });
 
@@ -2516,7 +2855,11 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.get('/admin/api/ai-review/concepts/:id', requireAdmin, async (req: Request, res: Response) => {
     try {
-      res.json(await getConceptProposalReview(engine, Number(req.params.id)));
+      const id = Number(req.params.id);
+      res.json({
+        ...await getConceptProposalReview(engine, id),
+        review_governance: await proposalReviewGovernance('concept_proposal', id),
+      });
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -2540,6 +2883,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/concepts/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
+      await assertDirectAdminReviewAllowed('concept_proposal', Number(req.params.id));
       res.json(await acceptConceptProposal(engine, Number(req.params.id), req.body?.proposed_markdown, adminActor(req), {
         revisionId: typeof req.body?.revision_id === 'number' ? req.body.revision_id : undefined,
         allowOverwriteExisting: req.body?.allow_overwrite_existing === true,
@@ -2551,6 +2895,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/concepts/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
+      await assertDirectAdminReviewAllowed('concept_proposal', Number(req.params.id));
       res.json(await rejectConceptProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
     } catch (error) {
       sendReviewError(res, error);
@@ -4684,6 +5029,23 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   // Start server
   // ---------------------------------------------------------------------------
   const clientCount = await sql`SELECT count(*)::int as count FROM oauth_clients`;
+
+  // Assignment is a governance queue, not Autopilot: it performs no model
+  // generation and no canonical mutation. The bounded synchronizer only opens
+  // review rounds for proposals created after the durable cutover timestamp.
+  const reviewAssignmentTimer = setInterval(() => {
+    void synchronizePendingReviewAssignments().then(result => {
+      if (result.opened > 0 || result.failed.length > 0) {
+        console.error(`[AI Review] assignment sync: opened=${result.opened} failed=${result.failed.length}`);
+      }
+    }).catch(error => {
+      console.error('[AI Review] assignment sync failed:', error instanceof Error ? error.message : String(error));
+    });
+  }, 60_000);
+  reviewAssignmentTimer.unref();
+  void synchronizePendingReviewAssignments().catch(error => {
+    console.error('[AI Review] initial assignment sync failed:', error instanceof Error ? error.message : String(error));
+  });
 
   app.listen(port, bind, () => {
     console.error(`

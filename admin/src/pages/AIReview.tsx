@@ -43,6 +43,12 @@ interface DetailPayload {
   proposal: Proposal;
   revisions: Array<Record<string, unknown>>;
   events: Array<Record<string, unknown>>;
+  review_governance?: {
+    managed: boolean;
+    state: 'legacy_manual' | 'pending_assignment' | 'round';
+    round_id: number | null;
+    round_status: string | null;
+  };
 }
 
 function asDraft(p: Proposal): Draft {
@@ -297,7 +303,14 @@ export function AIReviewPage() {
 
             {actionError && <div className="ai-review-inline-error" role="alert"><span>{actionError}</span><button onClick={() => setActionError(null)} aria-label="Закрыть сообщение">×</button></div>}
 
-            {detail.proposal.status === 'pending' && <div className="review-actions">
+            {detail.review_governance?.managed && (
+          <div className="receipt">
+            Это предложение управляется коллективной проверкой
+            {detail.review_governance.round_id ? ` (раунд #${detail.review_governance.round_id})` : ''}.
+            {' '}<a href="#review-rounds">Открыть голоса и решение</a>.
+          </div>
+        )}
+        {detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className="review-actions">
               <button className="reject" onClick={reject} disabled={busy !== null}>{busy === 'reject' ? 'Отклоняем…' : 'Отклонить'}</button>
               <button className="accept" onClick={accept} disabled={busy !== null}>{busy === 'accept' ? 'Записываем и проверяем…' : diff.length ? 'Принять изменённый черновик' : 'Принять'}</button>
             </div>}
