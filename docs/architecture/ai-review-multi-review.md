@@ -170,9 +170,9 @@ synchronization remains an explicit side effect of opening the review deck.
   `Esc` closes details or the reason sheet without voting.
 - `prefers-reduced-motion` drops the transform/spring; an `aria-live` region
   announces "Голос сохранён" and every error.
-- Concept cards derive their visible title from the proposed Markdown
-  frontmatter/heading and show a body excerpt; they never fall back to only an
-  opaque target slug when proposal text exists. Details label the source area,
+- Concept cards derive their visible title from the proposed Markdown frontmatter
+  first (a body heading is fallback only) and show a body excerpt; they never
+  fall back to only an opaque target slug when proposal text exists. Details label the source area,
   source page slug/title and proposal timestamp before the source document or
   proposed concept body. Concept details also list same-source take claims used
   for synthesis; cross-source take references stay hidden unless represented in
@@ -186,10 +186,12 @@ synchronization remains an explicit side effect of opening the review deck.
 
 Approve and reject are staged in the browser for **15 seconds** before the vote
 request is sent. The card stays visible, every other decision control is
-disabled, and an explicit countdown button cancels the staged request. Closing
-or reloading the page during this window is fail-closed: no vote was sent. Once
-the timer expires the existing server idempotency and immediate personal/shared
-finalization semantics apply; the UI never promises undo after submission.
+disabled, and an explicit countdown button cancels the staged request. A late
+Details response is discarded after staging, and the cancel handler refuses to
+claim success once submission has started. Closing or reloading the page during
+this window is fail-closed: no vote was sent. Once the timer expires the
+existing server idempotency and immediate personal/shared finalization semantics
+apply; the UI never promises undo after submission.
 
 ## Admin UI
 

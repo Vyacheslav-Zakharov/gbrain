@@ -2,7 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { portalApi, ReviewApiError } from '../api';
 import { keyToIntent, prefersReducedMotion, type GestureIntent } from './gestures';
 import { reasonsForTarget, reviewErrorMessage } from './reasons';
-import { createUndoDeadline, REVIEW_UNDO_WINDOW_MS, undoSecondsRemaining } from './undo';
+import {
+  canCancelPendingDecision,
+  createUndoDeadline,
+  REVIEW_UNDO_WINDOW_MS,
+  shouldApplyDetailsResponse,
+  undoSecondsRemaining,
+} from './undo';
 import { RejectReasonSheet } from './RejectReasonSheet';
 import { SwipeCard } from './SwipeCard';
 import type { PortalSession } from '../types';
@@ -40,6 +46,8 @@ export function ReviewApp() {
   const [undoSeconds, setUndoSeconds] = useState(REVIEW_UNDO_WINDOW_MS / 1_000);
   const reducedMotion = useMemo(prefersReducedMotion, []);
   const committingVote = useRef(false);
+  const pendingVoteRef = useRef<PendingVote | null>(null);
+  const detailsRequestId = useRef(0);
   // One key per user ATTEMPT: a retry after a network error replays the same
   // key, so a flaky connection can never produce two votes.
   const attemptKey = useRef(newIdempotencyKey());
@@ -121,7 +129,7 @@ export function ReviewApp() {
   const stageVote = useCallback((decision: 'approve' | 'reject', reasonCode?: string, comment?: string) => {
     if (!card || busy || pendingVote) return;
     const deadlineMs = createUndoDeadline();
-    setPendingVote({
+    const pending: PendingVote = {
       assignmentId: card.assignment_id,
       decision,
       reasonCode,
@@ -129,7 +137,10 @@ export function ReviewApp() {
       proposalSnapshotHash: card.proposal_snapshot_hash,
       idempotencyKey: attemptKey.current,
       deadlineMs,
-    });
+    };
+    pendingVoteRef.current = pending;
+    detailsRequestId.current += 1;
+    setPendingVote(pending);
     setUndoSeconds(undoSecondsRemaining(deadlineMs));
     setDetails(null);
     setSheetOpen(false);
@@ -138,11 +149,12 @@ export function ReviewApp() {
   }, [busy, card, pendingVote]);
 
   const cancelPendingVote = useCallback(() => {
-    if (!pendingVote || busy) return;
+    if (!canCancelPendingDecision(Boolean(pendingVoteRef.current), committingVote.current)) return;
+    pendingVoteRef.current = null;
     setPendingVote(null);
     setUndoSeconds(REVIEW_UNDO_WINDOW_MS / 1_000);
     setAnnouncement('Решение отменено и не было отправлено.');
-  }, [busy, pendingVote]);
+  }, []);
 
   useEffect(() => {
     if (!pendingVote) return;
@@ -152,6 +164,7 @@ export function ReviewApp() {
       setUndoSeconds(remaining);
       if (remaining === 0 && !committed) {
         committed = true;
+        pendingVoteRef.current = null;
         setPendingVote(current => current === pendingVote ? null : current);
         void commitVote(pendingVote);
       }
@@ -163,10 +176,13 @@ export function ReviewApp() {
 
   const openDetails = useCallback(async () => {
     if (!card || busy || pendingVote) return;
+    const requestId = ++detailsRequestId.current;
     try {
       const response = await portalApi.reviewItem(card.assignment_id);
+      if (!shouldApplyDetailsResponse(requestId, detailsRequestId.current, Boolean(pendingVoteRef.current))) return;
       setDetails(response.item);
     } catch (err) {
+      if (!shouldApplyDetailsResponse(requestId, detailsRequestId.current, Boolean(pendingVoteRef.current))) return;
       const code = err instanceof ReviewApiError ? err.code : undefined;
       setError(reviewErrorMessage(code, err instanceof Error ? err.message : 'Не удалось открыть подробности'));
     }

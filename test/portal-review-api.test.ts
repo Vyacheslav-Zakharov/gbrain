@@ -35,6 +35,7 @@ describe('portal reviewer routes', () => {
     expect(portalAppSource).toContain('portalApi.reviewSummary()');
     expect(portalAppSource).toContain('review-nav-count');
     expect(portalAppSource).toContain('REVIEW_ROUTE');
+    expect(portalAppSource).toContain('review-nav-icon');
   });
 
   test('the polled summary is read-only while deck opening may synchronize assignments', () => {

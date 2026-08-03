@@ -7,3 +7,15 @@ export function createUndoDeadline(nowMs = Date.now()): number {
 export function undoSecondsRemaining(deadlineMs: number, nowMs = Date.now()): number {
   return Math.max(0, Math.ceil((deadlineMs - nowMs) / 1_000));
 }
+
+export function canCancelPendingDecision(hasPending: boolean, isCommitting: boolean): boolean {
+  return hasPending && !isCommitting;
+}
+
+export function shouldApplyDetailsResponse(
+  requestId: number,
+  currentRequestId: number,
+  hasPendingDecision: boolean,
+): boolean {
+  return requestId === currentRequestId && !hasPendingDecision;
+}

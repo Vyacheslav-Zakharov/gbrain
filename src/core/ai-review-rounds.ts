@@ -211,8 +211,8 @@ export function conceptProposalPresentation(
   const lines = body.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   const headingIndex = lines.findIndex(line => /^#{1,6}\s+/.test(line));
   const heading = headingIndex >= 0 ? lines[headingIndex]!.replace(/^#{1,6}\s+/, '').trim() : '';
-  const headline = heading
-    || (frontmatterTitle ? unquoteYamlScalar(frontmatterTitle) : '')
+  const headline = (frontmatterTitle ? unquoteYamlScalar(frontmatterTitle) : '')
+    || heading
     || pageTitle
     || pageSlug;
   const previewBody = lines.filter((_line, index) => index !== headingIndex).join('\n');

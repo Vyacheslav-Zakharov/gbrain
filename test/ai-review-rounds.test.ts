@@ -10,6 +10,7 @@ import {
   adminFinalizeRound,
   aggregateRoundById,
   castReviewerVote,
+  conceptProposalPresentation,
   ensurePendingReviewRounds,
   escalateOverdueRounds,
   getReviewRoundDetail,
@@ -230,6 +231,14 @@ describe('automatic assignment synchronization', () => {
 });
 
 describe('reviewer deck and ACL', () => {
+  test('concept frontmatter title takes precedence over body section headings', () => {
+    expect(conceptProposalPresentation(
+      `---\ntitle: "Контроль рисков"\n---\n\nВводный текст.\n\n## Причины\n\nПодробности.`,
+      null,
+      'concepts/risk-control',
+    )).toMatchObject({ headline: 'Контроль рисков' });
+  });
+
   test('a reviewer sees only their own pending assignments and no other votes', async () => {
     const id = await seedTakeProposal();
     await openTeamRound(id);

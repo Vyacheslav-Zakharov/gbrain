@@ -117,6 +117,7 @@ kbd { border: 1px solid var(--border-strong); border-radius: 5px; padding: 2px 6
   white-space: nowrap;
 }
 .review-nav-link:hover { border-color: rgba(116, 149, 255, .58); background: rgba(116, 149, 255, .16); }
+.review-nav-icon { display: inline-grid; place-items: center; width: 18px; height: 18px; color: var(--accent); font-weight: 800; }
 .review-nav-count {
   display: inline-grid;
   place-items: center;
@@ -336,7 +337,7 @@ kbd { border: 1px solid var(--border-strong); border-radius: 5px; padding: 2px 6
   .topbar-actions { padding: 0; gap: 2px; }
   .quiet-link, .read-only-badge { display: none; }
   .review-nav-link { min-height: 32px; padding: 0 7px; }
-  .review-nav-link > span { display: none; }
+  .review-nav-link > span:not(.review-nav-icon) { display: none; }
   .workspace { grid-column: 1; grid-row: 2; }
   .explorer, .context-panel { position: fixed; z-index: 80; top: 0; bottom: 0; width: min(340px, 88vw); transform: translateX(-105%); transition: transform .18s ease; box-shadow: var(--shadow-lg); }
   .explorer { left: 0; }

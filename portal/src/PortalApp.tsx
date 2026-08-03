@@ -441,6 +441,7 @@ export function PortalApp() {
               href={REVIEW_ROUTE}
               aria-label={`Оценка знаний${reviewPending === null ? '' : `: ${reviewPending} ожидают проверки`}`}
             >
+              <span className="review-nav-icon" aria-hidden="true">✓</span>
               <span>Оценка знаний</span>
               {reviewPending !== null && <strong className="review-nav-count">{reviewPending}</strong>}
             </a>
