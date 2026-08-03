@@ -4,6 +4,7 @@ import { PORTAL_ASSET_COUNT, PORTAL_ASSETS, PORTAL_INDEX_HTML } from '../src/por
 const serveSource = await Bun.file(new URL('../src/commands/serve-http.ts', import.meta.url)).text();
 const oauthSource = await Bun.file(new URL('../src/core/oauth-provider.ts', import.meta.url)).text();
 const portalAppSource = await Bun.file(new URL('../portal/src/PortalApp.tsx', import.meta.url)).text();
+const adminAppSource = await Bun.file(new URL('../admin/src/App.tsx', import.meta.url)).text();
 
 describe('portal SPA contract', () => {
   test('ships an embedded index, JavaScript, and CSS bundle', () => {
@@ -44,6 +45,13 @@ describe('portal SPA contract', () => {
     expect(oauthSource).not.toContain('cookies?.session_user');
     expect(serveSource).not.toContain('res.cookie("session_user"');
     expect(serveSource).not.toContain("const portalEmail = typeof cookies.session_user");
+  });
+
+  test('admin sign-out-everywhere completes the backing Portal and Keycloak logout', () => {
+    expect(adminAppSource).toContain("form.action = '/logout'");
+    expect(adminAppSource).toContain("form.method = 'POST'");
+    expect(adminAppSource).toContain('finally');
+    expect(adminAppSource).not.toContain("navigate('login');");
   });
 
   test('ships browser containment and private caching headers', () => {

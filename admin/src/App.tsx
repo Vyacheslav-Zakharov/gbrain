@@ -36,6 +36,15 @@ function getPage(): Page {
   return 'dashboard';
 }
 
+function submitPortalLogout() {
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = '/logout';
+  form.hidden = true;
+  document.body.appendChild(form);
+  form.submit();
+}
+
 export function App() {
   const [page, setPage] = useState<Page>(getPage);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('gbrain-admin-sidebar-collapsed') === '1');
@@ -114,10 +123,9 @@ export function App() {
     }
     try {
       await api.signOutEverywhere();
-    } catch {
-      // Even if the call fails, push to login — cookie is likely already invalid.
+    } finally {
+      submitPortalLogout();
     }
-    navigate('login');
   };
 
   return (
