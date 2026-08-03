@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { portalApi, ReviewApiError } from '../api';
 import { keyToIntent, prefersReducedMotion, type GestureIntent } from './gestures';
 import { reasonsForTarget, reviewErrorMessage } from './reasons';
+import { createUndoDeadline, REVIEW_UNDO_WINDOW_MS, undoSecondsRemaining } from './undo';
 import { RejectReasonSheet } from './RejectReasonSheet';
 import { SwipeCard } from './SwipeCard';
 import type { PortalSession } from '../types';
@@ -12,6 +13,16 @@ function newIdempotencyKey(): string {
   const cryptoRef = globalThis.crypto;
   if (cryptoRef && 'randomUUID' in cryptoRef) return cryptoRef.randomUUID();
   return `${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+}
+
+interface PendingVote {
+  assignmentId: number;
+  decision: 'approve' | 'reject';
+  reasonCode?: string;
+  comment?: string;
+  proposalSnapshotHash: string;
+  idempotencyKey: string;
+  deadlineMs: number;
 }
 
 export function ReviewApp() {
@@ -25,7 +36,10 @@ export function ReviewApp() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [details, setDetails] = useState<ReviewItemDetail | null>(null);
   const [announcement, setAnnouncement] = useState('');
+  const [pendingVote, setPendingVote] = useState<PendingVote | null>(null);
+  const [undoSeconds, setUndoSeconds] = useState(REVIEW_UNDO_WINDOW_MS / 1_000);
   const reducedMotion = useMemo(prefersReducedMotion, []);
+  const committingVote = useRef(false);
   // One key per user ATTEMPT: a retry after a network error replays the same
   // key, so a flaky connection can never produce two votes.
   const attemptKey = useRef(newIdempotencyKey());
@@ -64,15 +78,21 @@ export function ReviewApp() {
     attemptKey.current = newIdempotencyKey();
   }, []);
 
-  const submitVote = useCallback(async (decision: 'approve' | 'reject', reasonCode?: string, comment?: string) => {
-    if (!card || busy) return;
+  const commitVote = useCallback(async (pending: PendingVote) => {
+    if (committingVote.current) return;
+    committingVote.current = true;
     setBusy(true);
     setError('');
     try {
       const result = await portalApi.reviewVote(
-        card.assignment_id,
-        { decision, reason_code: reasonCode, comment, proposal_snapshot_hash: card.proposal_snapshot_hash },
-        attemptKey.current,
+        pending.assignmentId,
+        {
+          decision: pending.decision,
+          reason_code: pending.reasonCode,
+          comment: pending.comment,
+          proposal_snapshot_hash: pending.proposalSnapshotHash,
+        },
+        pending.idempotencyKey,
       );
       setAnnouncement(
         result.round_status === 'finalized'
@@ -93,12 +113,56 @@ export function ReviewApp() {
         dropCard();
       }
     } finally {
+      committingVote.current = false;
       setBusy(false);
     }
-  }, [busy, card, dropCard]);
+  }, [dropCard]);
+
+  const stageVote = useCallback((decision: 'approve' | 'reject', reasonCode?: string, comment?: string) => {
+    if (!card || busy || pendingVote) return;
+    const deadlineMs = createUndoDeadline();
+    setPendingVote({
+      assignmentId: card.assignment_id,
+      decision,
+      reasonCode,
+      comment,
+      proposalSnapshotHash: card.proposal_snapshot_hash,
+      idempotencyKey: attemptKey.current,
+      deadlineMs,
+    });
+    setUndoSeconds(undoSecondsRemaining(deadlineMs));
+    setDetails(null);
+    setSheetOpen(false);
+    setError('');
+    setAnnouncement(`Решение подготовлено. Его можно отменить в течение ${REVIEW_UNDO_WINDOW_MS / 1_000} секунд.`);
+  }, [busy, card, pendingVote]);
+
+  const cancelPendingVote = useCallback(() => {
+    if (!pendingVote || busy) return;
+    setPendingVote(null);
+    setUndoSeconds(REVIEW_UNDO_WINDOW_MS / 1_000);
+    setAnnouncement('Решение отменено и не было отправлено.');
+  }, [busy, pendingVote]);
+
+  useEffect(() => {
+    if (!pendingVote) return;
+    let committed = false;
+    const tick = () => {
+      const remaining = undoSecondsRemaining(pendingVote.deadlineMs);
+      setUndoSeconds(remaining);
+      if (remaining === 0 && !committed) {
+        committed = true;
+        setPendingVote(current => current === pendingVote ? null : current);
+        void commitVote(pendingVote);
+      }
+    };
+    tick();
+    const timer = window.setInterval(tick, 200);
+    return () => window.clearInterval(timer);
+  }, [commitVote, pendingVote]);
 
   const openDetails = useCallback(async () => {
-    if (!card || busy) return;
+    if (!card || busy || pendingVote) return;
     try {
       const response = await portalApi.reviewItem(card.assignment_id);
       setDetails(response.item);
@@ -106,13 +170,13 @@ export function ReviewApp() {
       const code = err instanceof ReviewApiError ? err.code : undefined;
       setError(reviewErrorMessage(code, err instanceof Error ? err.message : 'Не удалось открыть подробности'));
     }
-  }, [busy, card]);
+  }, [busy, card, pendingVote]);
 
   const handleIntent = useCallback((intent: GestureIntent) => {
-    if (intent === 'approve') void submitVote('approve');
-    else if (intent === 'reject') setSheetOpen(true);
+    if (intent === 'approve') stageVote('approve');
+    else if (intent === 'reject' && !pendingVote) setSheetOpen(true);
     else if (intent === 'details') void openDetails();
-  }, [openDetails, submitVote]);
+  }, [openDetails, pendingVote, stageVote]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -121,7 +185,7 @@ export function ReviewApp() {
         if (event.key === 'Escape') { event.preventDefault(); setDetails(null); }
         return;
       }
-      if (sheetOpen) return;
+      if (sheetOpen || pendingVote) return;
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
 
@@ -132,7 +196,7 @@ export function ReviewApp() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [card, details, handleIntent, sheetOpen]);
+  }, [card, details, handleIntent, pendingVote, sheetOpen]);
 
   return (
     <div className={`review-app ${reducedMotion ? 'reduced-motion' : ''}`}>
@@ -161,18 +225,27 @@ export function ReviewApp() {
               card={card}
               position={reviewed + 1}
               total={total}
-              busy={busy}
+              busy={busy || Boolean(pendingVote)}
               reducedMotion={reducedMotion}
               onIntent={handleIntent}
             />
+            {pendingVote && (
+              <div className="review-undo" role="status" aria-live="polite">
+                <span>
+                  {pendingVote.decision === 'approve' ? 'Подтверждение' : 'Отклонение'} будет отправлено через{' '}
+                  <strong>{undoSeconds} сек.</strong>
+                </span>
+                <button type="button" disabled={busy} onClick={cancelPendingVote}>Отменить решение</button>
+              </div>
+            )}
             <div className="review-actions">
-              <button type="button" className="review-btn danger" disabled={busy} onClick={() => setSheetOpen(true)}>
+              <button type="button" className="review-btn danger" disabled={busy || Boolean(pendingVote)} onClick={() => setSheetOpen(true)}>
                 Отклонить
               </button>
-              <button type="button" className="review-btn ghost" disabled={busy} onClick={() => void openDetails()}>
+              <button type="button" className="review-btn ghost" disabled={busy || Boolean(pendingVote)} onClick={() => void openDetails()}>
                 Детали
               </button>
-              <button type="button" className="review-btn approve" disabled={busy} onClick={() => void submitVote('approve')}>
+              <button type="button" className="review-btn approve" disabled={busy || Boolean(pendingVote)} onClick={() => stageVote('approve')}>
                 {busy ? 'Сохраняем…' : 'Подтвердить'}
               </button>
             </div>
@@ -187,8 +260,41 @@ export function ReviewApp() {
       {details && (
         <div className="review-sheet-backdrop" role="presentation" onClick={event => { if (event.target === event.currentTarget) setDetails(null); }}>
           <div className="review-sheet" role="dialog" aria-modal="true" aria-labelledby="review-details-title">
-            <h2 id="review-details-title" className="review-sheet-title">{details.page_title || details.page_slug}</h2>
-            <pre className="review-details-body">{details.detail}</pre>
+            <h2 id="review-details-title" className="review-sheet-title">{details.headline}</h2>
+            <section className="review-provenance" aria-labelledby="review-provenance-title">
+              <h3 id="review-provenance-title">
+                {details.target_type === 'take_proposal' ? 'Источник утверждения' : 'Происхождение концепции'}
+              </h3>
+              <dl>
+                <div><dt>Область</dt><dd>{details.provenance.source_id}</dd></div>
+                <div>
+                  <dt>{details.target_type === 'take_proposal' ? 'Документ' : 'Целевая страница'}</dt>
+                  <dd>{details.provenance.page_title || details.provenance.page_slug}</dd>
+                </div>
+                <div><dt>Путь</dt><dd>{details.provenance.page_slug}</dd></div>
+                <div><dt>Предложено</dt><dd>{new Date(details.provenance.proposed_at).toLocaleString('ru-RU')}</dd></div>
+              </dl>
+              {details.target_type === 'concept_proposal' && details.provenance.supporting_sources.length > 0 && (
+                <div className="review-supporting-sources">
+                  <h4>Утверждения-основания</h4>
+                  <ul>
+                    {details.provenance.supporting_sources.map((source, index) => (
+                      <li key={`${source.source_id}:${source.page_slug}:${index}`}>
+                        {source.claim && <span>{source.claim}</span>}
+                        <code>{source.source_id} · {source.page_slug}</code>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {details.target_type === 'concept_proposal' && details.evidence_count === 0 && details.provenance.supporting_sources.length === 0 && (
+                <p className="review-provenance-warning">Фрагменты-основания для этой концепции не были сохранены.</p>
+              )}
+            </section>
+            <h3 className="review-details-heading">
+              {details.target_type === 'take_proposal' ? 'Текст исходного документа' : 'Текст предлагаемой концепции'}
+            </h3>
+            <pre className="review-details-body">{details.detail || 'Исходный текст не найден.'}</pre>
             <div className="review-sheet-actions">
               <button type="button" className="review-btn ghost" onClick={() => setDetails(null)}>Закрыть</button>
             </div>
@@ -201,7 +307,7 @@ export function ReviewApp() {
           reasons={reasons}
           busy={busy}
           onCancel={() => setSheetOpen(false)}
-          onConfirm={(reasonCode, comment) => void submitVote('reject', reasonCode, comment)}
+          onConfirm={(reasonCode, comment) => stageVote('reject', reasonCode, comment)}
         />
       )}
     </div>

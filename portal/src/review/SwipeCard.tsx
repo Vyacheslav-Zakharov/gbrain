@@ -109,6 +109,7 @@ export function SwipeCard({ card, position, total, busy, reducedMotion, onIntent
         <span className="review-chip muted">{card.source_id}</span>
       </div>
       <p className="review-card-headline">{card.headline}</p>
+      {card.preview && <p className="review-card-preview">{card.preview}</p>}
       <dl className="review-card-facts">
         <div><dt>Фрагментов-подтверждений</dt><dd>{card.evidence_count}</dd></div>
         <div><dt>Срок</dt><dd>{dueLabel(card.due_at)}</dd></div>

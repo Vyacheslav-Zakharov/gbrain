@@ -95,10 +95,26 @@ interface ProposalIdentity {
   status: string;
   snapshot_hash: string;
   headline: string;
+  preview: string;
   page_title: string | null;
   detail: string;
   evidence_count: number;
   proposed_at: string;
+  provenance: ReviewProvenance;
+}
+
+export interface ReviewProvenance {
+  source_id: string;
+  page_slug: string;
+  page_title: string | null;
+  proposed_at: string;
+  proposal_run_id: string | null;
+  model_id: string | null;
+  supporting_sources: Array<{
+    source_id: string;
+    page_slug: string;
+    claim: string | null;
+  }>;
 }
 
 const TARGET_TYPES: ReviewTargetType[] = ['take_proposal', 'concept_proposal'];
@@ -174,6 +190,35 @@ function firstLines(markdown: string, count: number): string {
     .join('\n');
 }
 
+function unquoteYamlScalar(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2 && ((trimmed.startsWith("'") && trimmed.endsWith("'"))
+    || (trimmed.startsWith('"') && trimmed.endsWith('"')))) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+/** Human-readable title + body excerpt for a not-yet-published concept page. */
+export function conceptProposalPresentation(
+  markdown: string,
+  pageTitle: string | null,
+  pageSlug: string,
+): { headline: string; preview: string } {
+  const frontmatter = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  const frontmatterTitle = frontmatter?.[1]?.match(/^title:\s*(.+)$/m)?.[1];
+  const body = markdown.replace(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '');
+  const lines = body.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const headingIndex = lines.findIndex(line => /^#{1,6}\s+/.test(line));
+  const heading = headingIndex >= 0 ? lines[headingIndex]!.replace(/^#{1,6}\s+/, '').trim() : '';
+  const headline = heading
+    || (frontmatterTitle ? unquoteYamlScalar(frontmatterTitle) : '')
+    || pageTitle
+    || pageSlug;
+  const previewBody = lines.filter((_line, index) => index !== headingIndex).join('\n');
+  return { headline, preview: firstLines(previewBody, 4).slice(0, 1_200) };
+}
+
 async function recordEvent(
   engine: BrainEngine,
   round: Pick<ReviewRoundRow, 'id' | 'target_type' | 'target_id'>,
@@ -209,9 +254,11 @@ async function loadProposalIdentity(
       source_id: string; page_slug: string; status: string; content_hash: string;
       claim_text: string; kind: string; holder: string; weight: number; domain: string | null;
       page_title: string | null; page_body: string | null; proposed_at: string;
+      proposal_run_id: string | null; model_id: string | null;
     }>(
       `SELECT tp.source_id, tp.page_slug, tp.status, tp.content_hash, tp.claim_text, tp.kind,
-              tp.holder, tp.weight, tp.domain, tp.proposed_at::text AS proposed_at,
+              tp.holder, tp.weight, tp.domain, tp.proposal_run_id, tp.model_id,
+              tp.proposed_at::text AS proposed_at,
               p.title AS page_title, p.compiled_truth AS page_body
          FROM take_proposals tp
          LEFT JOIN pages p ON p.source_id = tp.source_id AND p.slug = tp.page_slug AND p.deleted_at IS NULL
@@ -226,18 +273,30 @@ async function loadProposalIdentity(
       status: row.status,
       snapshot_hash: row.content_hash,
       headline: row.claim_text,
+      preview: '',
       page_title: row.page_title,
       detail: (row.page_body ?? '').slice(0, 8000),
       evidence_count: row.page_body ? 1 : 0,
       proposed_at: row.proposed_at,
+      provenance: {
+        source_id: row.source_id,
+        page_slug: row.page_slug,
+        page_title: row.page_title,
+        proposed_at: row.proposed_at,
+        proposal_run_id: row.proposal_run_id,
+        model_id: row.model_id,
+        supporting_sources: [{ source_id: row.source_id, page_slug: row.page_slug, claim: row.claim_text }],
+      },
     };
   }
   const rows = await engine.executeRaw<{
     source_id: string; page_slug: string; status: string; source_content_hash: string;
-    proposed_markdown: string; source_atoms: unknown; page_title: string | null; proposed_at: string;
+    proposed_markdown: string; source_atoms: unknown; source_takes: unknown; page_title: string | null; proposed_at: string;
+    proposal_run_id: string | null; model_id: string | null;
   }>(
-    `SELECT cp.source_id, cp.page_slug, cp.status, cp.source_content_hash, cp.proposed_markdown,
-            cp.source_atoms, cp.proposed_at::text AS proposed_at, p.title AS page_title
+    `SELECT cp.source_id, cp.page_slug, cp.status, cp.source_content_hash,
+            cp.proposed_markdown, cp.source_atoms, cp.source_takes, cp.proposal_run_id, cp.model_id,
+            cp.proposed_at::text AS proposed_at, p.title AS page_title
        FROM concept_proposals cp
        LEFT JOIN pages p ON p.source_id = cp.source_id AND p.slug = cp.page_slug AND p.deleted_at IS NULL
       WHERE cp.id = $1`,
@@ -246,16 +305,41 @@ async function loadProposalIdentity(
   const row = rows[0];
   if (!row) throw new ReviewConflictError('concept proposal not found', 'not_found');
   const atoms = Array.isArray(row.source_atoms) ? row.source_atoms : [];
+  const sourceTakes = Array.isArray(row.source_takes) ? row.source_takes : [];
+  const supportingSources = sourceTakes.flatMap(value => {
+    if (!value || typeof value !== 'object') return [];
+    const candidate = value as Record<string, unknown>;
+    const sourceId = typeof candidate.source_id === 'string' ? candidate.source_id : '';
+    const pageSlug = typeof candidate.page_slug === 'string' ? candidate.page_slug : '';
+    // Review access to the proposal target does not imply cross-source read access.
+    if (sourceId !== row.source_id || !pageSlug) return [];
+    return [{
+      source_id: sourceId,
+      page_slug: pageSlug,
+      claim: typeof candidate.claim === 'string' ? candidate.claim : null,
+    }];
+  });
+  const presentation = conceptProposalPresentation(row.proposed_markdown, row.page_title, row.page_slug);
   return {
     source_id: row.source_id,
     page_slug: row.page_slug,
     status: row.status,
     snapshot_hash: row.source_content_hash,
-    headline: row.page_title || row.page_slug,
+    headline: presentation.headline,
+    preview: presentation.preview,
     page_title: row.page_title,
     detail: row.proposed_markdown.slice(0, 40_000),
     evidence_count: atoms.length,
     proposed_at: row.proposed_at,
+    provenance: {
+      source_id: row.source_id,
+      page_slug: row.page_slug,
+      page_title: row.page_title,
+      proposed_at: row.proposed_at,
+      proposal_run_id: row.proposal_run_id,
+      model_id: row.model_id,
+      supporting_sources: supportingSources,
+    },
   };
 }
 
@@ -709,6 +793,7 @@ export interface DeckCard {
   page_slug: string;
   page_title: string | null;
   headline: string;
+  preview: string;
   evidence_count: number;
   proposal_snapshot_hash: string;
   due_at: string;
@@ -808,6 +893,7 @@ export async function listReviewerDeck(
         page_slug: proposal.page_slug,
         page_title: proposal.page_title,
         headline: proposal.headline,
+        preview: proposal.preview,
         evidence_count: proposal.evidence_count,
         proposal_snapshot_hash: proposal.snapshot_hash,
         due_at: row.due_at,
@@ -828,6 +914,7 @@ export async function listReviewerDeck(
 
 export interface ReviewerItemDetail extends DeckCard {
   detail: string;
+  provenance: ReviewProvenance;
 }
 
 export async function getReviewerItem(
@@ -854,6 +941,7 @@ export async function getReviewerItem(
     page_slug: proposal.page_slug,
     page_title: proposal.page_title,
     headline: proposal.headline,
+    preview: proposal.preview,
     evidence_count: proposal.evidence_count,
     proposal_snapshot_hash: proposal.snapshot_hash,
     due_at: ctx.round.due_at,
@@ -861,6 +949,7 @@ export async function getReviewerItem(
     policy_kind: ctx.round.policy_kind,
     details_opened: Boolean(ctx.assignment.details_opened_at) || Boolean(opts.markDetailsOpened),
     detail: proposal.detail,
+    provenance: proposal.provenance,
   };
 }
 

@@ -16,6 +16,7 @@ export interface ReviewDeckCard {
   page_slug: string;
   page_title: string | null;
   headline: string;
+  preview: string;
   evidence_count: number;
   proposal_snapshot_hash: string;
   due_at: string;
@@ -26,6 +27,19 @@ export interface ReviewDeckCard {
 
 export interface ReviewItemDetail extends ReviewDeckCard {
   detail: string;
+  provenance: {
+    source_id: string;
+    page_slug: string;
+    page_title: string | null;
+    proposed_at: string;
+    proposal_run_id: string | null;
+    model_id: string | null;
+    supporting_sources: Array<{
+      source_id: string;
+      page_slug: string;
+      claim: string | null;
+    }>;
+  };
 }
 
 export interface ReviewSummary {

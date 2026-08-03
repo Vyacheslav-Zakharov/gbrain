@@ -155,8 +155,11 @@ Admin detail endpoint.
 
 `portal/src/review/` renders at `/portal/review`; `portal/src/main.tsx` selects
 it by pathname so the knowledge explorer and the deck share one bundle without
-sharing state. The nav entry appears only when the session reports `canReview`
-(server-derived; it gates the link, never the endpoints).
+sharing state. The prominent top-right nav entry appears only when the session
+reports `canReview` (server-derived; it gates the link, never the endpoints) and
+shows the caller's live pending count from `/portal/api/review/summary`. The
+summary poll runs on load, focus and every 60 seconds but is read-only; assignment
+synchronization remains an explicit side effect of opening the review deck.
 
 - Right swipe → approve. Left swipe → the mandatory Russian reason sheet
   (nothing is sent until a reason is chosen). Down swipe **from the drag
@@ -167,6 +170,13 @@ sharing state. The nav entry appears only when the session reports `canReview`
   `Esc` closes details or the reason sheet without voting.
 - `prefers-reduced-motion` drops the transform/spring; an `aria-live` region
   announces "Голос сохранён" and every error.
+- Concept cards derive their visible title from the proposed Markdown
+  frontmatter/heading and show a body excerpt; they never fall back to only an
+  opaque target slug when proposal text exists. Details label the source area,
+  source page slug/title and proposal timestamp before the source document or
+  proposed concept body. Concept details also list same-source take claims used
+  for synthesis; cross-source take references stay hidden unless represented in
+  the target source, and a proposal with no saved basis says so explicitly.
 - Thresholds live in `portal/src/review/gestures.ts` (72 px, or half that on a
   ≥ 0.5 px/ms flick, with a 1.4× dominant-axis ratio that rejects diagonals).
 - One idempotency key per user ATTEMPT: a retry after a network error replays
@@ -174,9 +184,12 @@ sharing state. The nav entry appears only when the session reports `canReview`
   done. A `stale_proposal` / `round_closed` / `foreign_assignment` response
   drops the card, because it is genuinely no longer this reviewer's to decide.
 
-Undo is deliberately absent: a personal-source vote finalizes immediately, so a
-5-second undo would be a promise the state machine cannot keep. The reason
-sheet is the accident guard for the destructive direction.
+Approve and reject are staged in the browser for **15 seconds** before the vote
+request is sent. The card stays visible, every other decision control is
+disabled, and an explicit countdown button cancels the staged request. Closing
+or reloading the page during this window is fail-closed: no vote was sent. Once
+the timer expires the existing server idempotency and immediate personal/shared
+finalization semantics apply; the UI never promises undo after submission.
 
 ## Admin UI
 
@@ -195,5 +208,5 @@ revalidates both.
 | `test/ai-review-rounds.test.ts` | PGLite end-to-end: creation + freeze, managed shared classification, one-live-round, deck blindness, stale-card starvation, revoked ACL, foreign assignment, payload-bound idempotency, vote supersede with round-version fencing, stale hash, unanimous take/concept publication, personal one-vote finalization, disagreement escalation, publication failure/recovery, deadline sweep, paginated Admin queue and override. |
 | `test/e2e/ai-review-rounds-postgres.test.ts` | Real PostgreSQL with separate pools: transaction-level serialization, same-assignment race, replacement-vs-finalization race, exactly-once publication, BIGSERIAL normalization and JSON-safe Portal/Admin representations. |
 | `test/ai-review.test.ts` | Canonical take/concept publication, proposal+revision+audit atomicity, and canonical-content rollback when the audit transaction is forced to fail. |
-| `test/portal-review-gestures.test.ts` | Gesture classifier thresholds, flick, diagonal rejection, handle-only down swipe, cancel, keyboard parity. |
+| `test/portal-review-gestures.test.ts` + `test/portal-review-undo.test.ts` | Gesture classifier thresholds, flick, diagonal rejection, handle-only down swipe, keyboard parity, and the exact 15-second pre-submit countdown. |
 | `test/portal-review-api.test.ts` | Route wiring: session-derived identity, strict live ACL revocation, no browser-supplied actor/reviewer list, same-origin gating, blind vote response, error→status map, reason-taxonomy parity between server and Portal mirror. |

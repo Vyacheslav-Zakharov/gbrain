@@ -1738,7 +1738,6 @@ app.get('/portal/api/review/summary', async (req: any, res: any) => {
   const userEmail = requirePortalUser(req, res);
   if (!userEmail) return;
   try {
-    await synchronizePendingReviewAssignments();
     const scope = await reviewerScopeFor(userEmail);
     res.json({ ...await reviewerSummary(engine, scope), reasons: rejectReasonsFor('take_proposal') });
   } catch (error) {

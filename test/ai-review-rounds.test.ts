@@ -83,9 +83,12 @@ async function seedConceptProposal(sourceId = TEAM): Promise<number> {
   const markdown = `---\ntype: note\ntitle: Concept\nsynthesized_by: gbrain-test\n---\n\nA synthesized concept body.\n`;
   const rows = await engine.executeRaw<{ id: number }>(
     `INSERT INTO concept_proposals
-       (source_id,page_slug,source_content_hash,prompt_version,proposal_run_id,proposed_markdown,source_atoms,model_id)
-     VALUES ($1,'concepts/new-concept',$2,'test-v1','run-test',$3,'[{"source_id":"x","slug":"y"}]'::jsonb,'stub') RETURNING id`,
-    [sourceId, contentHash(markdown), markdown],
+       (source_id,page_slug,source_content_hash,prompt_version,proposal_run_id,proposed_markdown,source_atoms,source_takes,model_id)
+     VALUES ($1,'concepts/new-concept',$2,'test-v1','run-test',$3,'[{"source_id":"x","slug":"y"}]'::jsonb,$4::jsonb,'stub') RETURNING id`,
+    [sourceId, contentHash(markdown), markdown, JSON.stringify([
+      { source_id: sourceId, page_slug: 'notes/source-concept', claim: 'Source claim' },
+      { source_id: 'other-private-source', page_slug: 'notes/hidden', claim: 'Must not leak' },
+    ])],
   );
   return Number(rows[0]!.id);
 }
@@ -235,6 +238,43 @@ describe('reviewer deck and ACL', () => {
     expect(deck.cards[0]!.headline).toBe('Supported bounded claim');
     expect(JSON.stringify(deck.cards[0])).not.toContain(BORIS);
     expect(await reviewerSummary(engine, scope(ANNA))).toEqual({ pending: 1, escalated_visible: 0 });
+  });
+
+  test('concept cards expose the proposed concept text instead of only the target slug', async () => {
+    const id = await seedConceptProposal();
+    const { assignments } = await openTeamRound(id, 'concept_proposal');
+    const deck = await listReviewerDeck(engine, scope(ANNA));
+    expect(deck.cards).toHaveLength(1);
+    expect(deck.cards[0]).toMatchObject({
+      headline: 'Concept',
+      preview: 'A synthesized concept body.',
+    });
+
+    const item = await getReviewerItem(engine, scope(ANNA), assignmentFor(assignments, ANNA));
+    expect(item.detail).toContain('A synthesized concept body.');
+    expect(item.provenance).toMatchObject({
+      source_id: TEAM,
+      page_slug: 'concepts/new-concept',
+      proposal_run_id: 'run-test',
+      model_id: 'stub',
+      supporting_sources: [
+        { source_id: TEAM, page_slug: 'notes/source-concept', claim: 'Source claim' },
+      ],
+    });
+  });
+
+  test('take details identify the source document and proposal provenance', async () => {
+    const id = await seedTakeProposal();
+    const { assignments } = await openTeamRound(id);
+    const item = await getReviewerItem(engine, scope(ANNA), assignmentFor(assignments, ANNA));
+    expect(item.provenance).toMatchObject({
+      source_id: TEAM,
+      page_slug: 'notes/review-source',
+      page_title: 'Review source',
+      proposal_run_id: 'run-test',
+      model_id: 'stub',
+    });
+    expect(item.detail).toContain('Source prose that supports a bounded claim.');
   });
 
   test('a revoked source grant hides the deck and blocks the detail view', async () => {

@@ -19,6 +19,8 @@ const adminApiSource = await Bun.file(new URL('../admin/src/api.ts', import.meta
 const adminTakeReviewSource = await Bun.file(new URL('../admin/src/pages/AIReview.tsx', import.meta.url)).text();
 const adminConceptReviewSource = await Bun.file(new URL('../admin/src/pages/ConceptReview.tsx', import.meta.url)).text();
 const roundsSource = await Bun.file(new URL('../src/core/ai-review-rounds.ts', import.meta.url)).text();
+const portalAppSource = await Bun.file(new URL('../portal/src/PortalApp.tsx', import.meta.url)).text();
+const reviewAppSource = await Bun.file(new URL('../portal/src/review/ReviewApp.tsx', import.meta.url)).text();
 
 describe('portal reviewer routes', () => {
   test('the reviewer deck is served from the Portal SPA behind the page guard', () => {
@@ -27,6 +29,31 @@ describe('portal reviewer routes', () => {
     expect(isReviewRoute('/portal/review/')).toBe(true);
     expect(isReviewRoute('/portal')).toBe(false);
     expect(REVIEW_ROUTE).toBe('/portal/review');
+  });
+
+  test('the main Portal header exposes a review link with a live pending badge', () => {
+    expect(portalAppSource).toContain('portalApi.reviewSummary()');
+    expect(portalAppSource).toContain('review-nav-count');
+    expect(portalAppSource).toContain('REVIEW_ROUTE');
+  });
+
+  test('the polled summary is read-only while deck opening may synchronize assignments', () => {
+    const summaryRoute = serveSource.slice(
+      serveSource.indexOf("app.get('/portal/api/review/summary'"),
+      serveSource.indexOf("app.get('/portal/api/review/deck'"),
+    );
+    const deckRoute = serveSource.slice(
+      serveSource.indexOf("app.get('/portal/api/review/deck'"),
+      serveSource.indexOf("app.get('/portal/api/review/items/:assignmentId'"),
+    );
+    expect(summaryRoute).not.toContain('synchronizePendingReviewAssignments()');
+    expect(deckRoute).toContain('synchronizePendingReviewAssignments()');
+  });
+
+  test('votes stay client-side for a 15-second undo window before submission', () => {
+    expect(reviewAppSource).toContain('REVIEW_UNDO_WINDOW_MS');
+    expect(reviewAppSource).toContain('Отменить решение');
+    expect(reviewAppSource).toContain('pendingVote');
   });
 
   test('every reviewer endpoint requires a Portal session', () => {

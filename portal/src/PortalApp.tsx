@@ -115,6 +115,7 @@ export function PortalApp() {
   const [recents, setRecents] = useState<RecentDocument[]>([]);
   const [favorites, setFavorites] = useState<RecentDocument[]>([]);
   const [copied, setCopied] = useState(false);
+  const [reviewPending, setReviewPending] = useState<number | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchTriggerRef = useRef<HTMLButtonElement>(null);
   const searchDialogRef = useRef<HTMLDivElement>(null);
@@ -129,6 +130,16 @@ export function PortalApp() {
   const selectedSource = useMemo(() => sources.find((source) => source.id === sourceId), [sources, sourceId]);
   const rendered = useMemo(() => document ? renderMarkdown(document.content, document.title) : { html: '', outline: [] as OutlineItem[] }, [document]);
   const isFavorite = useMemo(() => document ? favorites.some((item) => item.source === document.source && item.path === document.path) : false, [document, favorites]);
+
+  const refreshReviewPending = useCallback(async () => {
+    try {
+      const summary = await portalApi.reviewSummary();
+      setReviewPending(summary.pending);
+    } catch {
+      // The link remains available; a transient count failure must not block Portal navigation.
+      setReviewPending(null);
+    }
+  }, []);
 
   const loadFolder = useCallback(async (nextSource: string, nextFolder: string, push = true) => {
     if (!nextSource) return;
@@ -251,6 +262,21 @@ export function PortalApp() {
       })
       .catch((caught) => setError(caught instanceof Error ? caught.message : 'Не удалось загрузить портал'));
   }, []);
+
+  useEffect(() => {
+    if (!session?.canReview) {
+      setReviewPending(null);
+      return;
+    }
+    void refreshReviewPending();
+    const timer = window.setInterval(() => void refreshReviewPending(), 60_000);
+    const onFocus = () => void refreshReviewPending();
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [refreshReviewPending, session?.canReview]);
 
   useEffect(() => { if (sources.length && storageKeys) void hydrateLocation(true); }, [sources, storageKeys, hydrateLocation]);
   useEffect(() => {
@@ -409,7 +435,16 @@ export function PortalApp() {
           <kbd>Ctrl K</kbd>
         </button>
         <div className="topbar-actions">
-          {session?.canReview && <a className="quiet-link" href={REVIEW_ROUTE}>Оценка знаний</a>}
+          {session?.canReview && (
+            <a
+              className="review-nav-link"
+              href={REVIEW_ROUTE}
+              aria-label={`Оценка знаний${reviewPending === null ? '' : `: ${reviewPending} ожидают проверки`}`}
+            >
+              <span>Оценка знаний</span>
+              {reviewPending !== null && <strong className="review-nav-count">{reviewPending}</strong>}
+            </a>
+          )}
           {session?.isAdmin && <a className="quiet-link" href="/admin/">Администрирование</a>}
           <span className="read-only-badge">Только чтение</span>
           <button className="quiet-link logout-link" onClick={() => void portalApi.logout().finally(() => window.location.assign('/login'))}>Выйти</button>
