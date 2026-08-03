@@ -48,8 +48,10 @@ describe('portal SPA contract', () => {
   });
 
   test('admin sign-out-everywhere completes the backing Portal and Keycloak logout', () => {
-    expect(adminAppSource).toContain("form.action = '/logout'");
-    expect(adminAppSource).toContain("form.method = 'POST'");
+    expect(adminAppSource).toContain("fetch('/logout'");
+    expect(adminAppSource).toContain("method: 'POST'");
+    expect(adminAppSource).toContain('logout_url');
+    expect(adminAppSource).toContain("window.location.assign(logoutUrl || '/login')");
     expect(adminAppSource).toContain('finally');
     expect(adminAppSource).not.toContain("navigate('login');");
   });

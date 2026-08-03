@@ -36,13 +36,16 @@ function getPage(): Page {
   return 'dashboard';
 }
 
-function submitPortalLogout() {
-  const form = document.createElement('form');
-  form.method = 'POST';
-  form.action = '/logout';
-  form.hidden = true;
-  document.body.appendChild(form);
-  form.submit();
+async function submitPortalLogout(): Promise<string | null> {
+  const response = await fetch('/logout', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok && response.status !== 401) throw new Error(`HTTP ${response.status}`);
+  if (response.status === 204) return null;
+  const body = await response.json().catch(() => ({})) as { logout_url?: unknown };
+  return typeof body.logout_url === 'string' ? body.logout_url : null;
 }
 
 export function App() {
@@ -122,9 +125,10 @@ export function App() {
       return;
     }
     try {
-      await api.signOutEverywhere();
+      await api.signOutEverywhere().catch(() => undefined);
     } finally {
-      submitPortalLogout();
+      const logoutUrl = await submitPortalLogout().catch(() => null);
+      window.location.assign(logoutUrl || '/login');
     }
   };
 
