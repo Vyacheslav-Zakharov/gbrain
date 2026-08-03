@@ -32,10 +32,13 @@ describe('portal SPA contract', () => {
 
   test('uses opaque server-side Portal sessions and never trusts the legacy identity cookie', () => {
     expect(serveSource).toContain('new PortalSessionStore(');
-    expect(serveSource).toContain('portalSessions.issue(email)');
+    expect(serveSource).toContain("portalSessions.issue({ ...identity, authMethod: 'keycloak' })");
     expect(serveSource).toContain('const portalEmail = resolvePortalUser(req, res)');
     expect(serveSource).toContain('res.locals.gbrainPortalUser = portalEmail');
     expect(serveSource).toContain("return res.redirect(`/login?${req.originalUrl.split('?')[1] || ''}`)");
+    expect(serveSource).toContain("app.get(DEFAULT_KEYCLOAK_CALLBACK_PATH");
+    expect(serveSource).toContain("transaction.prompt === 'none'");
+    expect(serveSource).toContain('portalSessions.revalidate(transaction.existingSessionToken, identity)');
     expect(oauthSource).toContain('this.resolveUserSourceGrant(String(portalEmail');
     expect(oauthSource).toContain('OAuth authorization denied: valid Portal user source grant required');
     expect(oauthSource).not.toContain('cookies?.session_user');

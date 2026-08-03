@@ -15,7 +15,7 @@ import type { Request, Response, NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
-import { randomBytes, randomInt, createHash } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { safeHexEqual } from '../core/timing-safe.ts';
@@ -58,7 +58,17 @@ import {
   isPortalFileAllowed,
   portalSessionCookieName,
   resolvePortalPathSecure,
+  type PortalSessionInspection,
 } from '../core/portal-security.ts';
+import {
+  DEFAULT_KEYCLOAK_CALLBACK_PATH,
+  DEFAULT_KEYCLOAK_CLIENT_ID,
+  DEFAULT_KEYCLOAK_ISSUER,
+  KeycloakOidcClient,
+  PortalOidcTransactions,
+  normalizePortalReturnTo,
+  parseAdminFallbackDeadline,
+} from '../core/portal-keycloak-auth.ts';
 import {
   classifyPortalSearchMatch,
   cleanPortalSearchSnippet,
@@ -594,7 +604,13 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   let bootstrapFromEnv: boolean = resolved.fromEnv;
   const bootstrapHash = createHash('sha256').update(bootstrapToken).digest('hex');
   const suppressBootstrapPrint = options.suppressBootstrapToken === true;
-  const adminSessions = new Map<string, number>(); // sessionId → expiresAt
+  type AdminSession = {
+    expiresAt: number;
+    authMethod: 'bootstrap_fallback' | 'magic_link_fallback' | 'keycloak_bridge';
+    backingPortalToken?: string;
+  };
+  const adminSessions = new Map<string, AdminSession>();
+  const adminFallbackDeadline = (): number | null => parseAdminFallbackDeadline(process.env.GBRAIN_ADMIN_FALLBACK_UNTIL);
 
   // SSE clients for live activity feed
   const sseClients = new Set<express.Response>();
@@ -611,11 +627,16 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   const app = express();
   app.set('json replacer', jsonBigIntReplacer);
 
-  const portalSessionTtlMs = 30 * 24 * 60 * 60 * 1000;
+  const portalSessionTtlMs = 8 * 60 * 60 * 1000;
+  const portalRevalidationMs = 5 * 60 * 1000;
   const portalSessions = new PortalSessionStore(
     process.env.GBRAIN_PORTAL_SESSION_FILE || require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'portal_sessions.json'),
     portalSessionTtlMs,
+    portalRevalidationMs,
   );
+  const portalSessionPruneTimer = setInterval(() => portalSessions.prune(), 60 * 60 * 1_000);
+  portalSessionPruneTimer.unref();
+  const portalOidcTransactions = new PortalOidcTransactions();
   const isSecurePortalRequest = (req: express.Request): boolean => req.secure || issuerUrl.protocol === 'https:';
   const portalCookieOptions = (req: express.Request, maxAge = portalSessionTtlMs) => ({
     httpOnly: true,
@@ -624,6 +645,16 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     maxAge,
     path: '/',
   });
+  const portalOidcBindingCookieName = (req: express.Request): string =>
+    isSecurePortalRequest(req) ? '__Host-gbrain_oidc' : 'gbrain_oidc';
+  const portalOidcBrowserBinding = (req: express.Request): string => {
+    const cookies = (req.cookies as Record<string, string> | undefined) || {};
+    return cookies['__Host-gbrain_oidc'] || cookies.gbrain_oidc || '';
+  };
+  const clearPortalOidcBindingCookies = (res: express.Response): void => {
+    res.clearCookie('__Host-gbrain_oidc', { httpOnly: true, secure: true, sameSite: 'lax', path: '/' });
+    res.clearCookie('gbrain_oidc', { httpOnly: true, secure: false, sameSite: 'lax', path: '/' });
+  };
   const portalSessionToken = (req: express.Request): string => {
     const cookies = (req.cookies as Record<string, string> | undefined) || {};
     return cookies.__Host_gbrain_portal || cookies['__Host-gbrain_portal'] || cookies.gbrain_portal || '';
@@ -634,19 +665,25 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     // Remove the legacy unsigned identity cookie during the migration release.
     res.clearCookie('session_user', { httpOnly: true, secure: isSecurePortalRequest(req), sameSite: 'lax', path: '/' });
   };
+  const inspectPortalSession = (req: express.Request): PortalSessionInspection => portalSessions.inspect(portalSessionToken(req));
   const resolvePortalUser = (req: express.Request, res?: express.Response): string | null => {
     const token = portalSessionToken(req);
-    const email = portalSessions.resolve(token);
-    if (!email && res && (token || (req.cookies as Record<string, string> | undefined)?.session_user)) {
+    const inspected = portalSessions.inspect(token);
+    if (inspected.state !== 'valid' && res && inspected.state !== 'revalidation_required'
+      && (token || (req.cookies as Record<string, string> | undefined)?.session_user)) {
       clearPortalSessionCookies(req, res);
     }
-    return email;
+    return inspected.state === 'valid' ? inspected.email || null : null;
   };
-  const issuePortalSession = (req: express.Request, res: express.Response, email: string): void => {
+  const issuePortalSession = (
+    req: express.Request,
+    res: express.Response,
+    identity: { email: string; sub: string },
+  ): void => {
     const oldToken = portalSessionToken(req);
     if (oldToken) portalSessions.revoke(oldToken);
     clearPortalSessionCookies(req, res);
-    const token = portalSessions.issue(email);
+    const token = portalSessions.issue({ ...identity, authMethod: 'keycloak' });
     res.cookie(portalSessionCookieName(isSecurePortalRequest(req)), token, portalCookieOptions(req));
   };
 
@@ -661,10 +698,6 @@ function isAdminEmail(email: string | undefined): boolean {
   if (!email) return false;
   return adminEmails.has(String(email).toLowerCase().trim());
 }
-
-const otpPepper = randomBytes(32).toString('hex');
-const pendingOtps = new Map<string, { codeHash: string; expiresAt: number; attempts: number }>();
-const hashPortalOtp = (email: string, code: string) => createHash('sha256').update(otpPepper).update('\0').update(email).update('\0').update(code).digest('hex');
 
 const userPermissionsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
 const accessRequestsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'access_requests.json');
@@ -1172,21 +1205,6 @@ const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFil
     message: 'Too many magic-link attempts. Wait a minute before trying again.',
   });
 
-  const portalOtpSendRateLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 5,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: 'Слишком много запросов кода. Повторите позже.',
-  });
-  const portalOtpVerifyRateLimiter = rateLimit({
-    windowMs: 10 * 60 * 1000,
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: 'Слишком много попыток входа. Повторите позже.',
-  });
-
   const mcpRateLimiter = rateLimit({
     windowMs: 60 * 1000,
     max: 120,
@@ -1297,6 +1315,19 @@ const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFil
   // (RFC 8414 §3.3). Honor --public-url for production deployments behind
   // reverse proxies / tunnels; default to localhost for dev.
   const issuerUrl = new URL(publicUrl || `http://localhost:${port}`);
+  const portalPublicOrigin = issuerUrl.origin;
+  const keycloakIssuer = DEFAULT_KEYCLOAK_ISSUER;
+  const keycloakClientId = process.env.GBRAIN_KEYCLOAK_CLIENT_ID || DEFAULT_KEYCLOAK_CLIENT_ID;
+  const keycloakClientSecret = process.env.GBRAIN_KEYCLOAK_CLIENT_SECRET || '';
+  let keycloakOidc: KeycloakOidcClient | null = null;
+  if (keycloakClientSecret) {
+    keycloakOidc = new KeycloakOidcClient({
+      issuer: keycloakIssuer,
+      clientId: keycloakClientId,
+      clientSecret: keycloakClientSecret,
+      redirectUri: `${portalPublicOrigin}${DEFAULT_KEYCLOAK_CALLBACK_PATH}`,
+    });
+  }
 
   // F9: cookie `secure` flag honors both the request's TLS state (req.secure
   // is set when express trust-proxy lands an X-Forwarded-Proto: https) AND
@@ -1346,64 +1377,118 @@ const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFil
     next();
   });
 
-const escapePortalHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch] || ch));
-const portalLoginHtml = (title: string, body: string) => `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapePortalHtml(title)}</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(420px,calc(100vw - 32px));padding:28px;background:#242424;border:1px solid #3b3b3b;border-radius:12px}h1{font-size:22px;margin:0 0 10px}.muted{color:#aaa;font-size:14px;line-height:1.45}label{display:block;margin:18px 0 7px}input{width:100%;padding:12px;background:#181818;color:#fff;border:1px solid #555;border-radius:7px;font-size:16px}button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:7px;background:#1677ff;color:#fff;font-weight:700;cursor:pointer}</style></head><body><main class="card">${body}</main></body></html>`;
+  const authNoStore = (_req: Request, res: Response, next: NextFunction): void => {
+    res.set('Cache-Control', 'no-store');
+    res.set('Pragma', 'no-cache');
+    res.set('Referrer-Policy', 'no-referrer');
+    next();
+  };
 
-app.get("/login", (req: any, res: any) => {
-    if (resolvePortalUser(req, res)) return res.redirect("/portal");
-    const oauthQuery = new URLSearchParams(req.query as Record<string, string>).toString();
-    res.type("html").send(portalLoginHtml("Вход в GBrain", `<h1>Вход в GBrain</h1><p class="muted">Введите корпоративный email. Одноразовый код действует 10 минут.</p><form action="/login/send-code" method="POST"><input type="hidden" name="oauth_query" value="${escapePortalHtml(oauthQuery)}"><label for="email">Рабочий email</label><input type="email" id="email" name="email" placeholder="user@avers.kz" autocomplete="email" required><button type="submit">Получить код</button></form>`));
+  const portalLoginRateLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: 30,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: 'Too many login attempts',
   });
 
-  app.post("/login/send-code", portalOtpSendRateLimiter, express.urlencoded({ extended: false }), async (req: any, res: any) => {
-    const email = String(req.body?.email || "").trim().toLowerCase();
-    const oauthQuery = String(req.body?.oauth_query || "");
-    if (!/^[^@\s]+@avers\.kz$/.test(email)) return res.status(400).send("Допускаются только корпоративные адреса @avers.kz");
-    const code = randomInt(100000, 1000000).toString();
-    pendingOtps.set(email, { codeHash: hashPortalOtp(email, code), expiresAt: Date.now() + 10 * 60 * 1000, attempts: 0 });
-    const { spawnSync } = require("child_process");
-    const sent = spawnSync("/home/avers/.gbrain/send_otp.py", [email, code], { encoding: "utf8", timeout: 15000 });
-    if (sent.error || sent.status !== 0) {
-      pendingOtps.delete(email);
-      console.error(`[OTP] Delivery failed for ${email}:`, sent.error?.message || String(sent.stderr || "sender failed").trim());
-      return res.status(500).send("Ошибка при отправке письма с кодом подтверждения.");
-    }
-    res.type("html").send(portalLoginHtml("Подтверждение входа", `<h1>Введите код</h1><p class="muted">Код отправлен на ${escapePortalHtml(email)}.</p><form action="/login/verify-code" method="POST"><input type="hidden" name="email" value="${escapePortalHtml(email)}"><input type="hidden" name="oauth_query" value="${escapePortalHtml(oauthQuery)}"><label for="code">6-значный код</label><input type="text" id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus><button type="submit">Войти</button></form>`));
-  });
+  const beginPortalOidc = async (
+    req: Request,
+    res: Response,
+    input: { returnTo: string; prompt: 'normal' | 'none'; existingSessionToken?: string },
+  ): Promise<string> => {
+    if (!keycloakOidc) throw new Error('keycloak_not_configured');
+    const browserBinding = randomBytes(32).toString('base64url');
+    const transaction = portalOidcTransactions.create({ ...input, browserBinding });
+    const authorizationUrl = await keycloakOidc.authorizationUrl(transaction);
+    res.cookie(portalOidcBindingCookieName(req), browserBinding, portalCookieOptions(req, 10 * 60 * 1_000));
+    return authorizationUrl;
+  };
 
-  app.post("/login/verify-code", portalOtpVerifyRateLimiter, express.urlencoded({ extended: false }), async (req: any, res: any) => {
-    const email = String(req.body?.email || "").trim().toLowerCase();
-    const code = String(req.body?.code || "").trim();
-    const oauthQuery = String(req.body?.oauth_query || "");
-    const saved = pendingOtps.get(email);
-    if (!saved || saved.expiresAt < Date.now()) {
-      pendingOtps.delete(email);
-      return res.status(400).send("Код истёк или не запрашивался. Запросите новый код.");
+  app.get('/login', authNoStore, portalLoginRateLimiter, async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
+    res.set('Referrer-Policy', 'no-referrer');
+    if (!keycloakOidc) return res.status(503).send('Keycloak authentication is not configured');
+    const directReturnTo = typeof req.query.return_to === 'string' ? req.query.return_to : '';
+    const oauthParams = new URLSearchParams();
+    for (const [key, value] of Object.entries(req.query)) {
+      if (key !== 'return_to' && typeof value === 'string') oauthParams.set(key, value);
     }
-    saved.attempts += 1;
-    if (saved.attempts > 5) {
-      pendingOtps.delete(email);
-      return res.status(429).send("Превышено число попыток. Запросите новый код.");
-    }
-    if (!/^\d{6}$/.test(code) || !safeHexEqual(saved.codeHash, hashPortalOtp(email, code))) {
-      return res.status(400).send("Неверный код подтверждения.");
-    }
-    pendingOtps.delete(email);
+    const oauthQuery = oauthParams.toString();
+    const returnTo = normalizePortalReturnTo(directReturnTo || (oauthQuery ? `/authorize?${oauthQuery}` : '/portal'));
+    const inspection = inspectPortalSession(req);
+    if (inspection.state === 'valid') return res.redirect(returnTo);
+    const prompt = inspection.state === 'revalidation_required' ? 'none' : 'normal';
     try {
-      await ensurePortalUserProvisioned(email);
-    } catch (e) {
-      console.error(`[Provision] Failed to provision ${email}:`, e);
-      return res.status(500).send("Не удалось подготовить личную базу GBrain. Обратитесь к администратору.");
+      return res.redirect(await beginPortalOidc(req, res, {
+        returnTo,
+        prompt,
+        existingSessionToken: prompt === 'none' ? portalSessionToken(req) : undefined,
+      }));
+    } catch {
+      return res.status(503).send('Keycloak authentication is temporarily unavailable');
     }
-    issuePortalSession(req, res, email);
-    const oauthParams = new URLSearchParams(oauthQuery);
-    return res.redirect(oauthParams.get("client_id") ? `/authorize?${oauthParams.toString()}` : "/portal");
   });
 
-  app.post('/logout', (req: Request, res: Response) => {
-    portalSessions.revoke(portalSessionToken(req));
+  app.get(DEFAULT_KEYCLOAK_CALLBACK_PATH, authNoStore, portalLoginRateLimiter, async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
+    res.set('Referrer-Policy', 'no-referrer');
+    if (!keycloakOidc) return res.status(503).send('Keycloak authentication is not configured');
+    const browserBinding = portalOidcBrowserBinding(req);
+    clearPortalOidcBindingCookies(res);
+    const transaction = portalOidcTransactions.consume(req.query.state, browserBinding);
+    if (!transaction) return res.status(400).send('Invalid or expired OIDC state');
+
+    // A silent check can legitimately report login_required after the IdP SSO
+    // session expires. Fall back once to the normal authorization flow.
+    if (typeof req.query.error === 'string') {
+      if (transaction.prompt === 'none') {
+        try {
+          return res.redirect(await beginPortalOidc(req, res, { returnTo: transaction.returnTo, prompt: 'normal' }));
+        } catch {
+          return res.status(503).send('Keycloak authentication is temporarily unavailable');
+        }
+      }
+      return res.status(401).send('Keycloak authentication failed');
+    }
+
+    try {
+      const { idToken } = await keycloakOidc.exchangeCode(String(req.query.code || ''), transaction.codeVerifier);
+      const identity = await keycloakOidc.verifyIdToken(idToken, transaction.nonce);
+      await ensurePortalUserProvisioned(identity.email);
+      if (transaction.prompt === 'none' && transaction.existingSessionToken) {
+        if (!portalSessions.revalidate(transaction.existingSessionToken, identity)) {
+          clearPortalSessionCookies(req, res);
+          return res.redirect('/login');
+        }
+      } else {
+        issuePortalSession(req, res, identity);
+      }
+      return res.redirect(transaction.returnTo);
+    } catch (error) {
+      // Never log the code, ID token, access token, refresh token, or claims.
+      console.error('[Portal OIDC] Authentication callback rejected:', error instanceof Error ? error.message : 'unknown_error');
+      clearPortalSessionCookies(req, res);
+      return res.status(401).send('Keycloak identity could not be verified');
+    }
+  });
+
+  app.post('/logout', authNoStore, async (req: Request, res: Response) => {
+    const revokedPortalToken = portalSessionToken(req);
+    portalSessions.revoke(revokedPortalToken);
+    for (const [sessionId, session] of adminSessions) {
+      if (session.authMethod === 'keycloak_bridge' && session.backingPortalToken === revokedPortalToken) {
+        adminSessions.delete(sessionId);
+      }
+    }
     clearPortalSessionCookies(req, res);
-    res.status(204).end();
+    if (!keycloakOidc) return res.status(204).end();
+    try {
+      const logoutUrl = await keycloakOidc.logoutUrl(`${portalPublicOrigin}/login`);
+      return logoutUrl ? res.json({ logout_url: logoutUrl }) : res.status(204).end();
+    } catch {
+      return res.status(204).end();
+    }
   });
 
 app.get("/portal/welcome", async (req: any, res: any) => {
@@ -2567,7 +2652,12 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   // v0.40 D15.5: safeHexEqual extracted to src/core/timing-safe.ts so the new
   // /webhooks/github HMAC verifier reuses the same constant-time compare.
   // POST /admin/login — JSON body with token (for programmatic/UI login)
-  app.post('/admin/login', express.json(), (req, res) => {
+  app.post('/admin/login', authNoStore, express.json(), (req, res) => {
+    const fallbackUntil = adminFallbackDeadline();
+    if (!fallbackUntil) {
+      res.status(410).json({ error: 'admin_fallback_expired' });
+      return;
+    }
     const token = req.body?.token;
     if (!token || typeof token !== 'string') {
       res.status(400).json({ error: 'Token required' });
@@ -2581,10 +2671,10 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
 
     const sessionId = randomBytes(32).toString('hex');
-    const expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
-    adminSessions.set(sessionId, expiresAt);
+    const expiresAt = Math.min(Date.now() + 24 * 60 * 60 * 1000, fallbackUntil);
+    adminSessions.set(sessionId, { expiresAt, authMethod: 'bootstrap_fallback' });
 
-    res.cookie('gbrain_admin', sessionId, adminCookie(req, 24 * 60 * 60 * 1000));
+    res.cookie('gbrain_admin', sessionId, adminCookie(req, expiresAt - Date.now()));
     res.json({ status: 'authenticated' });
   });
 
@@ -2637,7 +2727,12 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   // POST /admin/api/issue-magic-link — agent-callable mint endpoint.
   // Auth: Authorization: Bearer <bootstrapToken>. Returns one-time nonce.
-  app.post('/admin/api/issue-magic-link', express.json(), (req: Request, res: Response) => {
+  app.post('/admin/api/issue-magic-link', authNoStore, express.json(), (req: Request, res: Response) => {
+    const fallbackUntil = adminFallbackDeadline();
+    if (!fallbackUntil) {
+      res.status(410).json({ error: 'admin_fallback_expired' });
+      return;
+    }
     const auth = (req.headers.authorization || '') as string;
     const m = auth.match(/^Bearer\s+(\S+)$/i);
     if (!m) {
@@ -2651,16 +2746,19 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
     pruneExpiredNonces();
     const nonce = randomBytes(32).toString('hex');
-    magicLinkNonces.set(nonce, Date.now() + NONCE_TTL_MS);
+    const nonceExpiresAt = Math.min(Date.now() + NONCE_TTL_MS, fallbackUntil);
+    magicLinkNonces.set(nonce, nonceExpiresAt);
     const baseUrl = publicUrl || `http://localhost:${port}`;
-    res.json({ url: `${baseUrl}/admin/auth/${nonce}`, expires_in: NONCE_TTL_MS / 1000 });
+    res.json({ url: `${baseUrl}/admin/auth/${nonce}`, expires_in: Math.max(0, Math.floor((nonceExpiresAt - Date.now()) / 1000)) });
   });
 
   // GET /admin/auth/:nonce — single-use magic link redemption.
   // Browser hits it, server validates the nonce (exists + unconsumed +
   // unexpired), marks consumed, sets cookie, redirects to dashboard.
   // Rate-limited at 10/min/IP to harden against DoS via bad-token loops.
-  app.get('/admin/auth/:token', adminAuthRateLimiter, (req: Request, res: Response) => {
+  app.get('/admin/auth/:token', authNoStore, adminAuthRateLimiter, (req: Request, res: Response) => {
+    const fallbackUntil = adminFallbackDeadline();
+    if (!fallbackUntil) return res.status(410).send('Admin fallback has expired');
     const nonce = String(req.params.token ?? '');
     pruneExpiredNonces();
 
@@ -2692,10 +2790,10 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     consumedNonces.add(nonce);
 
     const sessionId = randomBytes(32).toString('hex');
-    const sessionExpiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days for magic link
-    adminSessions.set(sessionId, sessionExpiresAt);
+    const sessionExpiresAt = Math.min(Date.now() + 7 * 24 * 60 * 60 * 1000, fallbackUntil);
+    adminSessions.set(sessionId, { expiresAt: sessionExpiresAt, authMethod: 'magic_link_fallback' });
 
-    res.cookie('gbrain_admin', sessionId, adminCookie(req, 7 * 24 * 60 * 60 * 1000));
+    res.cookie('gbrain_admin', sessionId, adminCookie(req, sessionExpiresAt - Date.now()));
     res.redirect('/admin/');
   });
 
@@ -2704,21 +2802,45 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     const cookies = (req.cookies as Record<string, string>) || {};
     const sessionId = cookies.gbrain_admin;
     if (sessionId && adminSessions.has(sessionId)) {
-      const expiresAt = adminSessions.get(sessionId)!;
-      if (Date.now() <= expiresAt) {
-        next();
-        return;
+      const session = adminSessions.get(sessionId)!;
+      const now = Date.now();
+      if (now <= session.expiresAt) {
+        if (session.authMethod !== 'keycloak_bridge') {
+          const fallbackUntil = adminFallbackDeadline();
+          if (fallbackUntil && now <= fallbackUntil) {
+            next();
+            return;
+          }
+        } else if (session.backingPortalToken) {
+          const backingInspection = portalSessions.inspect(session.backingPortalToken);
+          if (backingInspection.state === 'valid' && isAdminEmail(backingInspection.email)) {
+            next();
+            return;
+          }
+        }
       }
       adminSessions.delete(sessionId);
+      res.clearCookie('gbrain_admin', { path: '/admin' });
     }
 
-    // Bridge only a server-resolved opaque Portal session into an admin session.
+    // Bridge only a currently-valid server-resolved Keycloak Portal session.
     // The legacy unsigned session_user cookie is intentionally ignored.
-    const portalEmail = resolvePortalUser(req, res) || '';
+    const backingPortalToken = portalSessionToken(req);
+    const portalInspection = portalSessions.inspect(backingPortalToken);
+    const portalEmail = portalInspection.state === 'valid' ? portalInspection.email || '' : '';
     if (isAdminEmail(portalEmail)) {
       const bridgedSessionId = randomBytes(32).toString('hex');
-      const bridgedTtlMs = 30 * 24 * 60 * 60 * 1000;
-      adminSessions.set(bridgedSessionId, Date.now() + bridgedTtlMs);
+      const freshnessDeadline = (portalInspection.lastValidatedAt || 0) + portalRevalidationMs;
+      const bridgedTtlMs = Math.min(
+        Math.max(0, (portalInspection.expiresAt || 0) - Date.now()),
+        Math.max(0, freshnessDeadline - Date.now()),
+      );
+      if (bridgedTtlMs <= 0) return res.status(401).json({ error: 'Admin authentication required' });
+      adminSessions.set(bridgedSessionId, {
+        expiresAt: Date.now() + bridgedTtlMs,
+        authMethod: 'keycloak_bridge',
+        backingPortalToken,
+      });
       res.cookie('gbrain_admin', bridgedSessionId, adminCookie(req, bridgedTtlMs));
       next();
       return;

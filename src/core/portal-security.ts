@@ -2,11 +2,30 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 
-export interface PortalSessionRecord {
+export type PortalSessionState = 'valid' | 'revalidation_required' | 'expired' | 'revoked';
+export type PortalAuthMethod = 'keycloak' | 'fallback';
+
+export interface PortalSessionIdentity {
   email: string;
+  sub: string;
+  authMethod: PortalAuthMethod;
+}
+
+export interface PortalSessionRecord extends PortalSessionIdentity {
   createdAt: number;
   expiresAt: number;
-  lastUsedAt: number;
+  lastValidatedAt: number;
+  revokedAt?: number;
+}
+
+export interface PortalSessionInspection {
+  state: PortalSessionState;
+  email?: string;
+  sub?: string;
+  authMethod?: PortalAuthMethod;
+  createdAt?: number;
+  expiresAt?: number;
+  lastValidatedAt?: number;
 }
 
 type SessionFile = Record<string, PortalSessionRecord>;
@@ -30,47 +49,78 @@ export class PortalSessionStore {
 
   constructor(
     private readonly filePath: string,
-    private readonly ttlMs = 30 * 24 * 60 * 60 * 1000,
+    private readonly ttlMs = 8 * 60 * 60 * 1000,
+    private readonly revalidationMs = 5 * 60 * 1000,
   ) {
     this.sessions = this.load();
     this.prune(Date.now(), false);
   }
 
-  issue(emailRaw: string, now = Date.now()): string {
-    const email = emailRaw.trim().toLowerCase();
-    if (!/^[^@\s]+@avers\.kz$/.test(email)) throw new Error('invalid_portal_session_email');
+  issue(identityRaw: string | PortalSessionIdentity, now = Date.now()): string {
+    // String form remains for local tests/backward compatibility only. Production
+    // Keycloak callers always supply the stable subject and auth method.
+    const identity: PortalSessionIdentity = typeof identityRaw === 'string'
+      ? { email: identityRaw, sub: `legacy:${identityRaw.trim().toLowerCase()}`, authMethod: 'fallback' }
+      : identityRaw;
+    const email = identity.email.trim().toLowerCase();
+    const sub = identity.sub.trim();
+    if (!/^[^@\s]+@avers\.kz$/.test(email) || !sub) throw new Error('invalid_portal_session_identity');
+    if (identity.authMethod !== 'keycloak' && identity.authMethod !== 'fallback') throw new Error('invalid_portal_auth_method');
     const token = randomBytes(32).toString('hex');
     this.sessions[hashPortalSessionToken(token)] = {
       email,
+      sub,
+      authMethod: identity.authMethod,
       createdAt: now,
       expiresAt: now + this.ttlMs,
-      lastUsedAt: now,
+      lastValidatedAt: now,
     };
     this.persist();
     return token;
   }
 
-  resolve(tokenRaw: unknown, now = Date.now()): string | null {
+  inspect(tokenRaw: unknown, now = Date.now()): PortalSessionInspection {
     const token = typeof tokenRaw === 'string' ? tokenRaw : '';
-    if (!TOKEN_RE.test(token)) return null;
-    const key = hashPortalSessionToken(token);
-    const record = this.sessions[key];
-    if (!record) return null;
-    if (record.expiresAt <= now) {
-      delete this.sessions[key];
-      this.persist();
-      return null;
-    }
-    record.lastUsedAt = now;
-    return record.email;
+    if (!TOKEN_RE.test(token)) return { state: 'revoked' };
+    const record = this.sessions[hashPortalSessionToken(token)];
+    if (!record || record.revokedAt) return { state: 'revoked' };
+    const result = {
+      email: record.email,
+      sub: record.sub,
+      authMethod: record.authMethod,
+      createdAt: record.createdAt,
+      expiresAt: record.expiresAt,
+      lastValidatedAt: record.lastValidatedAt,
+    };
+    if (record.expiresAt <= now) return { state: 'expired', ...result };
+    if (record.lastValidatedAt + this.revalidationMs <= now) return { state: 'revalidation_required', ...result };
+    return { state: 'valid', ...result };
   }
 
-  revoke(tokenRaw: unknown): boolean {
+  resolve(tokenRaw: unknown, now = Date.now()): string | null {
+    const inspected = this.inspect(tokenRaw, now);
+    return inspected.state === 'valid' ? inspected.email || null : null;
+  }
+
+  revalidate(tokenRaw: unknown, identityRaw: Pick<PortalSessionIdentity, 'email' | 'sub'>, now = Date.now()): boolean {
+    const token = typeof tokenRaw === 'string' ? tokenRaw : '';
+    if (!TOKEN_RE.test(token)) return false;
+    const record = this.sessions[hashPortalSessionToken(token)];
+    if (!record || record.authMethod !== 'keycloak' || record.revokedAt || record.expiresAt <= now) return false;
+    const email = identityRaw.email.trim().toLowerCase();
+    if (record.email !== email || record.sub !== identityRaw.sub.trim()) return false;
+    record.lastValidatedAt = now;
+    this.persist();
+    return true;
+  }
+
+  revoke(tokenRaw: unknown, now = Date.now()): boolean {
     const token = typeof tokenRaw === 'string' ? tokenRaw : '';
     if (!TOKEN_RE.test(token)) return false;
     const key = hashPortalSessionToken(token);
-    if (!this.sessions[key]) return false;
-    delete this.sessions[key];
+    const record = this.sessions[key];
+    if (!record || record.revokedAt) return false;
+    record.revokedAt = now;
     this.persist();
     return true;
   }
@@ -78,7 +128,11 @@ export class PortalSessionStore {
   prune(now = Date.now(), persist = true): number {
     let removed = 0;
     for (const [key, record] of Object.entries(this.sessions)) {
-      if (!record || typeof record.email !== 'string' || !Number.isFinite(record.expiresAt) || record.expiresAt <= now) {
+      if (!record || typeof record.email !== 'string' || typeof record.sub !== 'string'
+        || !Number.isFinite(record.createdAt) || !Number.isFinite(record.expiresAt)
+        || !Number.isFinite(record.lastValidatedAt)
+        || record.expiresAt <= now || !!record.revokedAt
+        || (record.authMethod !== 'keycloak' && record.authMethod !== 'fallback')) {
         delete this.sessions[key];
         removed += 1;
       }

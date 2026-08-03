@@ -51,9 +51,12 @@ function qs(values: Record<string, string>): string {
 }
 
 export const portalApi = {
-  logout: async () => {
-    const response = await fetch('/logout', { method: 'POST', credentials: 'same-origin' });
+  logout: async (): Promise<string | null> => {
+    const response = await fetch('/logout', { method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json' } });
     if (!response.ok && response.status !== 401) throw new Error(`HTTP ${response.status}`);
+    if (response.status === 204) return null;
+    const body = await response.json().catch(() => ({})) as { logout_url?: unknown };
+    return typeof body.logout_url === 'string' ? body.logout_url : null;
   },
   session: () => requestJson<PortalSession>('/portal/api/session'),
   sources: async () => (await requestJson<{ sources: PortalSource[] }>('/portal/api/sources')).sources,

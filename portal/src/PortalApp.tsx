@@ -448,7 +448,7 @@ export function PortalApp() {
           )}
           {session?.isAdmin && <a className="quiet-link" href="/admin/">Администрирование</a>}
           <span className="read-only-badge">Только чтение</span>
-          <button className="quiet-link logout-link" onClick={() => void portalApi.logout().finally(() => window.location.assign('/login'))}>Выйти</button>
+          <button className="quiet-link logout-link" onClick={() => void portalApi.logout().then((logoutUrl) => window.location.assign(logoutUrl || '/login')).catch(() => window.location.assign('/login'))}>Выйти</button>
           <button className="icon-button mobile-only" onClick={() => setContextOpen(true)} aria-label="Открыть контекст"><Icon name="panel" /></button>
         </div>
       </header>
