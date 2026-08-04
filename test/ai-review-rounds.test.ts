@@ -31,6 +31,7 @@ let dir = '';
 const TEAM = 'internal-review';
 const ANNA = 'anna@example.test';
 const BORIS = 'boris@example.test';
+const CAROL = 'carol@example.test';
 const SOLO = 'solo@example.test';
 
 const PERMS: ReviewerPermissionMap = {
@@ -38,6 +39,10 @@ const PERMS: ReviewerPermissionMap = {
   [BORIS]: { source_id: 'boris', federated_read: ['shared', TEAM], federated_write: [TEAM] },
   'viewer@example.test': { source_id: 'viewer', federated_read: [TEAM], federated_write: [] },
   [SOLO]: { source_id: 'solo-area', federated_read: ['shared'], federated_write: ['solo-area'] },
+};
+const QUORUM_PERMS: ReviewerPermissionMap = {
+  ...PERMS,
+  [CAROL]: { source_id: 'carol', federated_read: ['shared', TEAM], federated_write: [TEAM] },
 };
 
 function scope(email: string, sources: string[] = [TEAM]): ReviewerScope {
@@ -96,6 +101,10 @@ async function seedConceptProposal(sourceId = TEAM): Promise<number> {
 
 async function openTeamRound(targetId: number, targetType: 'take_proposal' | 'concept_proposal' = 'take_proposal', nowMs?: number) {
   return openReviewRound(engine, { targetType, targetId, permissions: PERMS, actor: 'admin-test', nowMs });
+}
+
+async function openQuorumRound(targetId: number, targetType: 'take_proposal' | 'concept_proposal' = 'take_proposal', nowMs?: number) {
+  return openReviewRound(engine, { targetType, targetId, permissions: QUORUM_PERMS, actor: 'admin-test', nowMs });
 }
 
 function assignmentFor(assignments: Array<{ id: number; reviewer_email: string }>, email: string): number {
@@ -498,21 +507,40 @@ describe('auto-finalization', () => {
     expect(file).toContain('Supported bounded claim');
   });
 
-  test('unanimous approval by every assigned reviewer accepts the proposal', async () => {
+  test('two unanimous shared votes wait for an Admin facilitator', async () => {
     const id = await seedTakeProposal();
     const { assignments } = await openTeamRound(id);
+    await castReviewerVote(engine, scope(ANNA), {
+      assignmentId: assignmentFor(assignments, ANNA), decision: 'approve',
+    });
+    const second = await castReviewerVote(engine, scope(BORIS), {
+      assignmentId: assignmentFor(assignments, BORIS), decision: 'approve',
+    });
+    expect(second.round).toMatchObject({ status: 'escalated', escalation_reason: 'facilitator_required' });
+    const finalized = await adminFinalizeRound(engine, {
+      roundId: Number(second.round.id), action: 'accepted', actor: 'facilitator@example.test', reason: 'Подтверждено фасилитатором',
+    });
+    expect(finalized.round).toMatchObject({ status: 'finalized', outcome: 'accepted', finalized_mode: 'admin_override' });
+  });
+
+  test('a strict majority of three shared reviewers accepts before the last vote', async () => {
+    const id = await seedTakeProposal();
+    const { assignments } = await openQuorumRound(id);
     const first = await castReviewerVote(engine, scope(ANNA), { assignmentId: assignmentFor(assignments, ANNA), decision: 'approve' });
     expect(first.round.status).toBe('open');
     const second = await castReviewerVote(engine, scope(BORIS), { assignmentId: assignmentFor(assignments, BORIS), decision: 'approve' });
     expect(second.round.status).toBe('finalized');
     expect(second.round.outcome).toBe('accepted');
+    expect(second.round.finalized_mode).toBe('auto_quorum');
+    const detail = await getReviewRoundDetail(engine, Number(second.round.id));
+    expect(detail.quorum).toBe(2);
     const proposal = await engine.executeRaw<{ status: string }>(`SELECT status FROM take_proposals WHERE id=$1`, [id]);
     expect(proposal[0]!.status).toBe('accepted');
   });
 
-  test('unanimous rejection rejects through the guarded publisher and leaves the page untouched', async () => {
+  test('a strict rejection majority rejects before the last vote', async () => {
     const id = await seedTakeProposal();
-    const { assignments } = await openTeamRound(id);
+    const { assignments } = await openQuorumRound(id);
     await castReviewerVote(engine, scope(ANNA), {
       assignmentId: assignmentFor(assignments, ANNA), decision: 'reject', reasonCode: 'outdated',
     });
@@ -520,15 +548,16 @@ describe('auto-finalization', () => {
       assignmentId: assignmentFor(assignments, BORIS), decision: 'reject', reasonCode: 'duplicate',
     });
     expect(final.round.outcome).toBe('rejected');
+    expect(final.round.finalized_mode).toBe('auto_quorum');
     const proposal = await engine.executeRaw<{ status: string }>(`SELECT status FROM take_proposals WHERE id=$1`, [id]);
     expect(proposal[0]!.status).toBe('rejected');
     const page = await engine.getPage('notes/review-source', { sourceId: TEAM });
     expect(page!.compiled_truth).not.toContain('gbrain:takes:begin');
   });
 
-  test('a unanimous concept round publishes through the concept publisher', async () => {
+  test('a concept quorum publishes through the concept publisher', async () => {
     const id = await seedConceptProposal();
-    const { assignments } = await openTeamRound(id, 'concept_proposal');
+    const { assignments } = await openQuorumRound(id, 'concept_proposal');
     await castReviewerVote(engine, scope(ANNA), { assignmentId: assignmentFor(assignments, ANNA), decision: 'approve' });
     const final = await castReviewerVote(engine, scope(BORIS), { assignmentId: assignmentFor(assignments, BORIS), decision: 'approve' });
     expect(final.round.outcome).toBe('accepted');
@@ -536,7 +565,7 @@ describe('auto-finalization', () => {
     expect(proposal[0]!.status).toBe('accepted');
   });
 
-  test('disagreement escalates and never publishes', async () => {
+  test('two shared reviewers always escalate to the facilitator after voting', async () => {
     const id = await seedTakeProposal();
     const { assignments } = await openTeamRound(id);
     await castReviewerVote(engine, scope(ANNA), { assignmentId: assignmentFor(assignments, ANNA), decision: 'approve' });
@@ -544,7 +573,7 @@ describe('auto-finalization', () => {
       assignmentId: assignmentFor(assignments, BORIS), decision: 'reject', reasonCode: 'contradicts_evidence', comment: 'Противоречит акту',
     });
     expect(final.round.status).toBe('escalated');
-    expect(final.round.escalation_reason).toBe('disagreement');
+    expect(final.round.escalation_reason).toBe('facilitator_required');
     const proposal = await engine.executeRaw<{ status: string }>(`SELECT status FROM take_proposals WHERE id=$1`, [id]);
     expect(proposal[0]!.status).toBe('pending');
   });
@@ -566,7 +595,7 @@ describe('auto-finalization', () => {
 
   test('only one of two concurrent finalizations publishes', async () => {
     const id = await seedTakeProposal();
-    const { assignments } = await openTeamRound(id);
+    const { assignments } = await openQuorumRound(id);
     await castReviewerVote(engine, scope(ANNA), { assignmentId: assignmentFor(assignments, ANNA), decision: 'approve' });
     const borisAssignment = assignmentFor(assignments, BORIS);
     const results = await Promise.allSettled([
@@ -587,7 +616,7 @@ describe('auto-finalization', () => {
 
   test('a publication failure does not become a finalized success', async () => {
     const id = await seedTakeProposal();
-    const { assignments } = await openTeamRound(id);
+    const { assignments } = await openQuorumRound(id);
     await castReviewerVote(engine, scope(ANNA), { assignmentId: assignmentFor(assignments, ANNA), decision: 'approve' });
     // Mutate the canonical page so the publisher's stale-source guard fires.
     await importFromContent(engine, 'notes/review-source',
@@ -646,6 +675,27 @@ describe('interrupted finalization recovery', () => {
 });
 
 describe('deadline escalation', () => {
+  test('the reconciliation sweep finalizes a previously stranded quorum and reports its round id', async () => {
+    const id = await seedTakeProposal();
+    const { round, assignments } = await openQuorumRound(id);
+    for (const [email, key] of [[ANNA, 'historical-a'], [BORIS, 'historical-b']] as const) {
+      await engine.executeRaw(
+        `INSERT INTO ai_review_votes
+           (round_id, assignment_id, decision, voter_kind, actor_email, proposal_snapshot_hash, idempotency_key)
+         VALUES ($1, $2, 'approve', 'portal_user', $3, $4, $5)`,
+        [round.id, assignmentFor(assignments, email), email, round.proposal_snapshot_hash, key],
+      );
+    }
+
+    const sweep = await escalateOverdueRounds(engine);
+    expect(sweep.finalized).toBe(1);
+    expect(sweep.roundIds).toContain(Number(round.id));
+    const detail = await getReviewRoundDetail(engine, Number(round.id));
+    expect(detail.round).toMatchObject({ status: 'finalized', outcome: 'accepted', finalized_mode: 'auto_quorum' });
+    const finalized = detail.events.find(event => event.action === 'round_finalized');
+    expect((finalized?.details as { voters?: string[] }).voters?.sort()).toEqual([ANNA, BORIS]);
+  });
+
   test('missing votes past the deadline escalate without counting as reject', async () => {
     const openedAt = Date.now() - 100 * 3_600_000;
     const id = await seedTakeProposal();
@@ -675,10 +725,10 @@ describe('deadline escalation', () => {
     expect(await engine.executeRaw(`SELECT id FROM ai_review_votes`)).toHaveLength(0);
   });
 
-  test('a sweep never turns a complete unanimous round into an escalation', async () => {
+  test('a sweep leaves a completed two-reviewer round in the facilitator queue', async () => {
     const openedAt = Date.now() - 100 * 3_600_000;
     const id = await seedTakeProposal();
-    const { assignments } = await openTeamRound(id, 'take_proposal', openedAt);
+    const { round, assignments } = await openTeamRound(id, 'take_proposal', openedAt);
     for (const email of [ANNA, BORIS]) {
       await castReviewerVote(engine, scope(email), {
         assignmentId: assignmentFor(assignments, email), decision: 'approve', nowMs: openedAt + 1_000,
@@ -686,6 +736,8 @@ describe('deadline escalation', () => {
     }
     const swept = await escalateOverdueRounds(engine);
     expect(swept.escalated).toBe(0);
+    const detail = await getReviewRoundDetail(engine, Number(round.id));
+    expect(detail.round).toMatchObject({ status: 'escalated', escalation_reason: 'facilitator_required' });
   });
 });
 
@@ -699,9 +751,11 @@ describe('admin escalation queue', () => {
     });
     const list = await listReviewRounds(engine, { status: 'escalated' });
     expect(list.rounds).toHaveLength(1);
+    expect(list.rounds[0]!.quorum).toBeNull();
     expect(list.rounds[0]!.approvals).toBe(1);
     expect(list.rounds[0]!.rejections).toBe(1);
     const detail = await getReviewRoundDetail(engine, Number(round.id));
+    expect(detail.quorum).toBeNull();
     expect(detail.matrix.map(m => m.reviewer_email)).toEqual([ANNA, BORIS]);
     expect(detail.matrix.find(m => m.reviewer_email === BORIS)!.reason_code).toBe('other');
     expect(detail.matrix.find(m => m.reviewer_email === BORIS)!.comment).toBe('Не согласен');

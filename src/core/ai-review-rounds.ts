@@ -36,7 +36,7 @@ import { createHash } from 'node:crypto';
 
 export type RoundStatus = 'open' | 'escalated' | 'finalizing' | 'finalized' | 'cancelled';
 export type RoundOutcome = 'accepted' | 'rejected';
-export type FinalizeMode = 'auto_unanimous' | 'admin_override';
+export type FinalizeMode = 'auto_unanimous' | 'auto_quorum' | 'admin_override';
 
 export const ROUND_DEADLINE_CONFIG_KEY = 'ai_review.round_deadline_hours';
 export const ROUND_CUTOVER_CONFIG_KEY = 'ai_review.multi_reviewer_cutover_at';
@@ -596,7 +596,7 @@ export async function aggregateRoundById(
   const { assignments, votes } = await loadAggregationInputs(engine, roundId);
   return {
     round,
-    aggregate: aggregateRound({ assignments, votes, dueAtMs: Date.parse(round.due_at), nowMs }),
+    aggregate: aggregateRound({ assignments, votes, policyKind: round.policy_kind, dueAtMs: Date.parse(round.due_at), nowMs }),
   };
 }
 
@@ -674,7 +674,7 @@ async function finalizeRoundInternal(
 
   const publisherActor = opts.mode === 'admin_override'
     ? `review-round:${round.id}:override:${opts.actor}`
-    : `review-round:${round.id}:unanimous`;
+    : `review-round:${round.id}:${opts.mode === 'auto_quorum' ? 'quorum' : 'personal'}`;
 
   let publication: unknown;
   try {
@@ -690,9 +690,9 @@ async function finalizeRoundInternal(
       publication = (result as { publication?: unknown }).publication ?? null;
     }
   } catch (error) {
-    // A durable unanimous vote must never fall back to an invisible open
-    // round: nobody has another vote to cast, so it would otherwise remain
-    // stuck forever. Surface the failed canonical mutation to Admin while
+    // A durable automatic verdict must never fall back to an invisible open
+    // round: the decisive vote has already been recorded, so it could otherwise
+    // remain stuck forever. Surface the failed canonical mutation to Admin while
     // preserving every vote and the publisher error in the audit ledger.
     await engine.transaction(async (tx) => {
       await tx.executeRaw(
@@ -737,8 +737,8 @@ async function finalizeRoundInternal(
 }
 
 /**
- * Apply the aggregation verdict to a round: auto-finalize on unanimity,
- * escalate on disagreement / missed deadline, otherwise leave it open.
+ * Apply the aggregation verdict to a round: auto-finalize a personal-owner
+ * vote or a shared strict-majority quorum; otherwise escalate or stay open.
  */
 async function settleRound(
   engine: BrainEngine,
@@ -749,19 +749,34 @@ async function settleRound(
   // version makes every verdict claim conditional on the current vote epoch.
   round = await loadRound(engine, round.id);
   const { assignments, votes } = await loadAggregationInputs(engine, round.id);
-  const aggregate = aggregateRound({ assignments, votes, dueAtMs: Date.parse(round.due_at), nowMs });
+  const aggregate = aggregateRound({ assignments, votes, policyKind: round.policy_kind, dueAtMs: Date.parse(round.due_at), nowMs });
   if (round.status !== 'open') return { round, aggregate, finalization: null, finalizationError: null };
 
   if (aggregate.verdict === 'escalate') {
     return { round: await markEscalated(engine, round, aggregate.reason, 'system'), aggregate, finalization: null, finalizationError: null };
   }
   if (aggregate.verdict === 'auto_accept' || aggregate.verdict === 'auto_reject') {
-    const voters = assignments.map(a => a.reviewer_email);
+    const winningDecision = aggregate.verdict === 'auto_accept' ? 'approve' : 'reject';
+    const assignmentById = new Map(assignments.map(assignment => [assignment.assignment_id, assignment]));
+    const voters = Array.from(new Set(votes
+      .filter(vote => {
+        const assignment = assignmentById.get(vote.assignment_id);
+        return Boolean(
+          vote.active
+          && vote.voter_kind === 'portal_user'
+          && vote.decision === winningDecision
+          && assignment
+          && normalizeEmail(vote.actor_email) === normalizeEmail(assignment.reviewer_email),
+        );
+      })
+      .map(vote => normalizeEmail(vote.actor_email))));
+    const automaticMode: FinalizeMode = round.policy_kind === 'personal' ? 'auto_unanimous' : 'auto_quorum';
+    const automaticActor = round.policy_kind === 'personal' ? 'system:personal-owner' : 'system:quorum';
     try {
       const finalization = await finalizeRoundInternal(engine, round, {
         action: aggregate.verdict === 'auto_accept' ? 'accepted' : 'rejected',
-        mode: 'auto_unanimous',
-        actor: 'system:unanimous',
+        mode: automaticMode,
+        actor: automaticActor,
         reason: null,
         voters,
       });
@@ -1288,9 +1303,9 @@ export async function recoverInterruptedFinalizations(
 }
 
 /**
- * Deadline sweep. Rounds whose votes are incomplete past `due_at` escalate to
- * Admin; a round that already has every vote settles normally (a sweep must
- * never turn a completed unanimous round into an escalation).
+ * Reconciliation + deadline sweep. Every open round is re-aggregated so a
+ * quorum reached under a newly deployed policy cannot remain stranded. Missing
+ * votes escalate only after `due_at`; already-reached quorums settle normally.
  */
 export async function escalateOverdueRounds(
   engine: BrainEngine,
@@ -1301,18 +1316,20 @@ export async function escalateOverdueRounds(
     nowMs,
     staleAfterMs: opts.finalizingStaleAfterMs,
   });
-  const due = await engine.executeRaw<ReviewRoundRow>(
-    `SELECT * FROM ai_review_rounds WHERE status = 'open' AND due_at <= $1 ORDER BY id`,
-    [new Date(nowMs).toISOString()],
+  const open = await engine.executeRaw<ReviewRoundRow>(
+    `SELECT * FROM ai_review_rounds WHERE status = 'open' ORDER BY due_at ASC, id ASC`,
   );
   const roundIds: number[] = [...recovered.roundIds];
   let escalated = recovered.escalated;
   let finalized = recovered.finalized;
-  for (const rawRound of due) {
+  for (const rawRound of open) {
     const round = normalizeRoundRow(rawRound);
     const settled = await settleRound(engine, round, nowMs);
     if (settled.round.status === 'escalated') { escalated += 1; roundIds.push(Number(round.id)); }
-    else if (settled.round.status === 'finalized') finalized += 1;
+    else if (settled.round.status === 'finalized') {
+      finalized += 1;
+      roundIds.push(Number(round.id));
+    }
   }
   return { escalated, finalized, roundIds };
 }
@@ -1324,6 +1341,7 @@ export interface AdminRoundSummary {
   assigned: number;
   approvals: number;
   rejections: number;
+  quorum: number | null;
   missing: string[];
 }
 
@@ -1348,7 +1366,7 @@ export async function listReviewRounds(
   for (const rawRound of rows) {
     const round = normalizeRoundRow(rawRound);
     const { assignments, votes } = await loadAggregationInputs(engine, Number(round.id));
-    const aggregate = aggregateRound({ assignments, votes, dueAtMs: Date.parse(round.due_at), nowMs });
+    const aggregate = aggregateRound({ assignments, votes, policyKind: round.policy_kind, dueAtMs: Date.parse(round.due_at), nowMs });
     const proposal = await loadProposalIdentity(engine, round.target_type, Number(round.target_id)).catch(() => null);
     rounds.push({
       round,
@@ -1357,6 +1375,7 @@ export async function listReviewRounds(
       assigned: aggregate.assigned,
       approvals: aggregate.approvals,
       rejections: aggregate.rejections,
+      quorum: aggregate.quorum,
       missing: aggregate.missing,
     });
   }
@@ -1393,7 +1412,7 @@ export async function getReviewRoundDetail(
   const nowMs = opts.nowMs ?? Date.now();
   const round = await loadRound(engine, roundId);
   const { assignments, votes } = await loadAggregationInputs(engine, roundId);
-  const aggregate = aggregateRound({ assignments, votes, dueAtMs: Date.parse(round.due_at), nowMs });
+  const aggregate = aggregateRound({ assignments, votes, policyKind: round.policy_kind, dueAtMs: Date.parse(round.due_at), nowMs });
   const proposal = await loadProposalIdentity(engine, round.target_type, Number(round.target_id)).catch(() => null);
 
   const matrixRows = await engine.executeRaw<{
@@ -1426,6 +1445,7 @@ export async function getReviewRoundDetail(
     assigned: aggregate.assigned,
     approvals: aggregate.approvals,
     rejections: aggregate.rejections,
+    quorum: aggregate.quorum,
     missing: aggregate.missing,
     matrix: matrixRows.map(row => ({
       reviewer_email: row.reviewer_email,

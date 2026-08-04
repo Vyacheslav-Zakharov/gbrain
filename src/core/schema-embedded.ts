@@ -1624,7 +1624,7 @@ CREATE TABLE IF NOT EXISTS ai_review_rounds (
   finalized_by           TEXT,
   finalized_at           TIMESTAMPTZ,
   finalizing_at          TIMESTAMPTZ,
-  finalized_mode         TEXT        CHECK (finalized_mode IN ('auto_unanimous','admin_override')),
+  finalized_mode         TEXT        CHECK (finalized_mode IN ('auto_unanimous','auto_quorum','admin_override')),
   final_reason           TEXT
 );
 -- One live round per proposal. Closed rounds may accumulate for the audit trail.

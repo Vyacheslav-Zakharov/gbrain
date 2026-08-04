@@ -21,15 +21,22 @@ locks, stale-source checks, file read-back and rollback stay in one place.
    assigned. Delegated `federated_write` never turns another user into a
    mandatory reviewer of a personal area. The owner's single vote finalizes
    the round with no Admin step.
-3. **Equal weight, unanimity only.** Every reviewer carries weight 1. A round
-   auto-finalizes ONLY when every assigned reviewer voted the same way. There
-   is no majority, no quorum shortcut, no weighted tie-break.
-4. **Escalation.** Disagreement after all votes, or missing votes past the
-   deadline, escalates to Admin. **Non-response is never counted as reject.**
-5. **Admin.** Sees named votes, reason codes, comments and counts. Can
-   finalize ONLY an escalated round, and only with a mandatory override reason
+3. **Equal weight, strict-majority quorum for groups.** Every reviewer carries
+   weight 1. When a shared source has more than two frozen reviewers, either
+   decision auto-finalizes as soon as it reaches `floor(N / 2) + 1` votes,
+   where `N` is the full frozen reviewer count. This is symmetric for accept
+   and reject; it is never a majority of only those who happened to vote.
+4. **Facilitation and escalation.** Shared rounds with one or two reviewers do
+   not auto-finalize: after all available votes they move to Admin with
+   `facilitator_required`. A completed tie for an even group, or missing votes
+   past the deadline, also escalates. **Non-response is never counted as
+   reject.**
+5. **Admin.** Sees named votes, reason codes, comments, counts and the quorum
+   threshold (or a plain facilitator label for shared `N≤2`). Can finalize ONLY
+   an escalated round, and only with a mandatory override reason
    (≥ 8 characters), recorded in the audit ledger.
-6. **Human-only auto-finalize.** A vote counts toward unanimity only when it is
+6. **Human-only auto-finalize.** A vote counts toward a personal decision or
+   shared quorum only when it is
    the active vote of an assignment in that round, `voter_kind='portal_user'`,
    and its `actor_email` matches the frozen assignment. Model or audit output
    can never carry a proposal to accepted.
@@ -49,10 +56,10 @@ auto-accept.
 ## State machine
 
 ```text
-                         (all voted, unanimous)
+                         (personal owner | shared strict-majority quorum)
   open ─────────────────────────────────────────────► finalizing ──► finalized
    │                                                       │  (publisher OK)
-   │  (disagreement | deadline_missed | stale_proposal)     │
+   │  (facilitator_required | disagreement | deadline_missed)│
    ▼                                                       │ (publisher failed)
 escalated ──(admin finalize + reason)──► finalizing ───────┘
    ▲                                                       │
@@ -63,8 +70,8 @@ escalated ──(admin finalize + reason)──► finalizing ──────
 | From | To | Trigger | Guard |
 |---|---|---|---|
 | `open` | `open` | vote cast, round incomplete | assignment belongs to caller; source ACL live; round not overdue |
-| `open` | `finalizing` | every assigned reviewer voted the same way | CAS on `(id, status, round_version)` |
-| `open` | `escalated` | disagreement, or deadline swept with missing votes | — |
+| `open` | `finalizing` | personal owner vote, or shared `N>2` reaches strict-majority quorum | CAS on `(id, status, round_version)` |
+| `open` | `escalated` | shared `N≤2` finished voting, completed tie, or deadline swept with missing votes | — |
 | `escalated` | `finalizing` | Admin finalize | escalated only; override reason ≥ 8 chars |
 | `finalizing` | `finalized` | guarded publisher succeeded | proposal still `pending`, snapshot hash unchanged |
 | `finalizing` | `escalated` | publisher threw | `publication_failed` event recorded; canonical outcome is not reported as finalized |
@@ -79,7 +86,8 @@ a still-pending proposal escalates as `publication_interrupted` for inspection.
 
 Created by `src/schema.sql` (fresh installs), mirrored in
 `src/core/pglite-schema.ts`, and added to existing brains by migration 135
-(`ai_review_multi_reviewer`).
+(`ai_review_multi_reviewer`). Migration 136 adds the auditable
+`finalized_mode='auto_quorum'` value.
 
 - **`ai_review_rounds`** — one row per governance round. Partial unique index
   `(target_type, target_id) WHERE status IN ('open','escalated','finalizing')`
@@ -115,8 +123,8 @@ with missing votes escalates. Two things drive the sweep: the Admin round list
 late vote escalates the round and returns `round_escalated` instead of landing
 silently, so the sweeper and a straggler can never race.
 
-A sweep never converts a COMPLETE unanimous round into an escalation; it
-re-aggregates first.
+A sweep re-aggregates first, so a reached quorum finalizes rather than becoming
+a deadline escalation.
 
 ## HTTP surface
 
@@ -206,8 +214,8 @@ revalidates both.
 
 | File | Covers |
 |---|---|
-| `test/ai-review-aggregation.test.ts` | ACL resolution (explicit shared, personal owner-only, delegated write, read-only, deactivated, unknown source), unanimity, disagreement, deadline non-response, zero reviewers, system-vote rejection, superseded votes, deadline clamping, reason taxonomy. |
-| `test/ai-review-rounds.test.ts` | PGLite end-to-end: creation + freeze, managed shared classification, one-live-round, deck blindness, stale-card starvation, revoked ACL, foreign assignment, payload-bound idempotency, vote supersede with round-version fencing, stale hash, unanimous take/concept publication, personal one-vote finalization, disagreement escalation, publication failure/recovery, deadline sweep, paginated Admin queue and override. |
+| `test/ai-review-aggregation.test.ts` | ACL resolution (explicit shared, personal owner-only, delegated write, read-only, deactivated, unknown source), strict-majority accept/reject quorum, facilitator requirement for `N≤2`, tie/deadline escalation, zero reviewers, system-vote rejection, superseded votes, deadline clamping, reason taxonomy. |
+| `test/ai-review-rounds.test.ts` | PGLite end-to-end: creation + freeze, managed shared classification, one-live-round, deck blindness, stale-card starvation, revoked ACL, foreign assignment, payload-bound idempotency, vote supersede with round-version fencing, stale hash, quorum take/concept publication, personal one-vote finalization, facilitator/Admin path, publication failure/recovery, deadline sweep, paginated Admin queue and override. |
 | `test/e2e/ai-review-rounds-postgres.test.ts` | Real PostgreSQL with separate pools: transaction-level serialization, same-assignment race, replacement-vs-finalization race, exactly-once publication, BIGSERIAL normalization and JSON-safe Portal/Admin representations. |
 | `test/ai-review.test.ts` | Canonical take/concept publication, proposal+revision+audit atomicity, and canonical-content rollback when the audit transaction is forced to fail. |
 | `test/portal-review-gestures.test.ts` + `test/portal-review-undo.test.ts` | Gesture classifier thresholds, flick, diagonal rejection, handle-only down swipe, keyboard parity, and the exact 15-second pre-submit countdown. |

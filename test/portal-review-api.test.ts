@@ -18,6 +18,7 @@ const portalApiSource = await Bun.file(new URL('../portal/src/api.ts', import.me
 const adminApiSource = await Bun.file(new URL('../admin/src/api.ts', import.meta.url)).text();
 const adminTakeReviewSource = await Bun.file(new URL('../admin/src/pages/AIReview.tsx', import.meta.url)).text();
 const adminConceptReviewSource = await Bun.file(new URL('../admin/src/pages/ConceptReview.tsx', import.meta.url)).text();
+const adminRoundReviewSource = await Bun.file(new URL('../admin/src/pages/ReviewRounds.tsx', import.meta.url)).text();
 const roundsSource = await Bun.file(new URL('../src/core/ai-review-rounds.ts', import.meta.url)).text();
 const portalAppSource = await Bun.file(new URL('../portal/src/PortalApp.tsx', import.meta.url)).text();
 const reviewAppSource = await Bun.file(new URL('../portal/src/review/ReviewApp.tsx', import.meta.url)).text();
@@ -136,6 +137,14 @@ describe('portal reviewer routes', () => {
 });
 
 describe('admin round routes', () => {
+  test('the facilitator queue uses a plain Russian label', () => {
+    expect(adminRoundReviewSource).toContain("facilitator_required: 'Требуется решение фасилитатора'");
+    expect(adminRoundReviewSource).toContain("round.finalized_mode === 'auto_quorum'");
+    expect(adminRoundReviewSource).toContain("return ' автоматически по кворуму'");
+    expect(adminRoundReviewSource).toContain("round.policy_kind === 'personal'");
+    expect(adminRoundReviewSource).not.toContain("finalized_mode === 'admin_override' ? ' администратором' : ' единогласно'");
+  });
+
   test('round management is admin-gated and mutations are same-origin gated', () => {
     expect(serveSource).toContain("app.get('/admin/api/ai-review/rounds', requireAdmin,");
     expect(serveSource).toContain("app.get('/admin/api/ai-review/rounds/:id', requireAdmin,");

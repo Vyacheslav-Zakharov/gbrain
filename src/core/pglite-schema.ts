@@ -878,7 +878,7 @@ CREATE TABLE IF NOT EXISTS ai_review_rounds (
   finalized_by           TEXT,
   finalized_at           TIMESTAMPTZ,
   finalizing_at          TIMESTAMPTZ,
-  finalized_mode         TEXT        CHECK (finalized_mode IN ('auto_unanimous','admin_override')),
+  finalized_mode         TEXT        CHECK (finalized_mode IN ('auto_unanimous','auto_quorum','admin_override')),
   final_reason           TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ai_review_rounds_active_idx

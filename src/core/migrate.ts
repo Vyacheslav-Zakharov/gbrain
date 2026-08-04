@@ -5990,6 +5990,18 @@ export const MIGRATIONS: Migration[] = [
         ON ai_review_votes (round_id, created_at DESC);
     `,
   },
+  {
+    version: 136,
+    name: 'ai_review_quorum_finalize_mode',
+    idempotent: true,
+    sql: `
+      ALTER TABLE ai_review_rounds
+        DROP CONSTRAINT IF EXISTS ai_review_rounds_finalized_mode_check;
+      ALTER TABLE ai_review_rounds
+        ADD CONSTRAINT ai_review_rounds_finalized_mode_check
+        CHECK (finalized_mode IN ('auto_unanimous','auto_quorum','admin_override'));
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

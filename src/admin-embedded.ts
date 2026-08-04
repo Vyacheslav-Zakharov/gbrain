@@ -7,9 +7,9 @@
 // the request path the express handler sees to (resolved-path, mime).
 
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
-import A_0_assets_index_DAEkTF_W_css from '../admin/dist/assets/index-DAEkTF_W.css' with { type: 'file' };
+import A_0_assets_index_CKozeMnL_js from '../admin/dist/assets/index-CKozeMnL.js' with { type: 'file' };
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
-import A_1_assets_index_z0VHwdVr_js from '../admin/dist/assets/index-z0VHwdVr.js' with { type: 'file' };
+import A_1_assets_index_DAEkTF_W_css from '../admin/dist/assets/index-DAEkTF_W.css' with { type: 'file' };
 // @ts-ignore — type: 'file' is Bun ESM, not in lib.d.ts
 import A_2_index_html from '../admin/dist/index.html' with { type: 'file' };
 
@@ -19,8 +19,8 @@ export interface AdminAsset {
 }
 
 export const ADMIN_ASSETS: Record<string, AdminAsset> = {
-  "/admin/assets/index-DAEkTF_W.css": { path: A_0_assets_index_DAEkTF_W_css as unknown as string, mime: "text/css; charset=utf-8" },
-  "/admin/assets/index-z0VHwdVr.js": { path: A_1_assets_index_z0VHwdVr_js as unknown as string, mime: "application/javascript; charset=utf-8" },
+  "/admin/assets/index-CKozeMnL.js": { path: A_0_assets_index_CKozeMnL_js as unknown as string, mime: "application/javascript; charset=utf-8" },
+  "/admin/assets/index-DAEkTF_W.css": { path: A_1_assets_index_DAEkTF_W_css as unknown as string, mime: "text/css; charset=utf-8" },
   "/admin/index.html": { path: A_2_index_html as unknown as string, mime: "text/html; charset=utf-8" },
 };
 

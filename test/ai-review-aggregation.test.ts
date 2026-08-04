@@ -26,6 +26,14 @@ function vote(assignmentId: number, email: string, decision: 'approve' | 'reject
   return { assignment_id: assignmentId, actor_email: email, decision, voter_kind: 'portal_user', active: true, ...extra };
 }
 
+type RoundInput = Parameters<typeof aggregateRound>[0];
+function aggregateShared(input: Omit<RoundInput, 'policyKind'>) {
+  return aggregateRound({ ...input, policyKind: 'shared' });
+}
+function aggregatePersonal(input: Omit<RoundInput, 'policyKind'>) {
+  return aggregateRound({ ...input, policyKind: 'personal' });
+}
+
 describe('reviewer ACL resolution', () => {
   test('every configured active user with write access to a shared source is mandatory', () => {
     const { reviewers, policyKind } = resolveMandatoryReviewers(PERMS, 'internal-it');
@@ -81,49 +89,84 @@ describe('reviewer ACL resolution', () => {
 describe('round aggregation', () => {
   const dueAtMs = 2_000;
 
-  test('unanimous approve auto-accepts', () => {
-    const result = aggregateRound({
+  test('two shared reviewers require the facilitator even when unanimous', () => {
+    const result = aggregateShared({
       assignments: assignments('a@x.test', 'b@x.test'),
       votes: [vote(1, 'a@x.test', 'approve'), vote(2, 'b@x.test', 'approve')],
       dueAtMs, nowMs: 1_000,
     });
-    expect(result.verdict).toBe('auto_accept');
-    expect(result.reason).toBe('unanimous_approve');
+    expect(result.verdict).toBe('escalate');
+    expect(result.reason).toBe('facilitator_required');
     expect(result.approvals).toBe(2);
   });
 
-  test('unanimous reject auto-rejects', () => {
-    const result = aggregateRound({
-      assignments: assignments('a@x.test', 'b@x.test'),
-      votes: [vote(1, 'a@x.test', 'reject'), vote(2, 'b@x.test', 'reject')],
+  test('one reviewer on an explicitly shared source still requires the facilitator', () => {
+    const result = aggregateShared({
+      assignments: assignments('a@x.test'),
+      votes: [vote(1, 'a@x.test', 'approve')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('escalate');
+    expect(result.reason).toBe('facilitator_required');
+  });
+
+  test('strict majority of all shared reviewers auto-accepts without waiting for every vote', () => {
+    const result = aggregateShared({
+      assignments: assignments('a@x.test', 'b@x.test', 'c@x.test'),
+      votes: [vote(1, 'a@x.test', 'approve'), vote(2, 'b@x.test', 'approve')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('auto_accept');
+    expect(result.reason).toBe('quorum_approve');
+    expect(result.quorum).toBe(2);
+  });
+
+  test('strict majority of all shared reviewers auto-rejects symmetrically', () => {
+    const result = aggregateShared({
+      assignments: assignments('a@x.test', 'b@x.test', 'c@x.test', 'd@x.test'),
+      votes: [vote(1, 'a@x.test', 'reject'), vote(2, 'b@x.test', 'reject'), vote(3, 'c@x.test', 'reject')],
       dueAtMs, nowMs: 1_000,
     });
     expect(result.verdict).toBe('auto_reject');
-    expect(result.reason).toBe('unanimous_reject');
+    expect(result.reason).toBe('quorum_reject');
+    expect(result.quorum).toBe(3);
+  });
+
+  test('half of an even shared reviewer set is not a quorum', () => {
+    const result = aggregateShared({
+      assignments: assignments('a@x.test', 'b@x.test', 'c@x.test', 'd@x.test'),
+      votes: [vote(1, 'a@x.test', 'approve'), vote(2, 'b@x.test', 'approve')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result.verdict).toBe('open');
+    expect(result.quorum).toBe(3);
   });
 
   test('a single vote finalizes a one-reviewer (personal) round', () => {
-    expect(aggregateRound({
+    expect(aggregatePersonal({
       assignments: assignments('solo@x.test'),
       votes: [vote(1, 'solo@x.test', 'approve')],
       dueAtMs, nowMs: 1_000,
     }).verdict).toBe('auto_accept');
   });
 
-  test('disagreement after all votes escalates instead of taking a majority', () => {
-    const result = aggregateRound({
-      assignments: assignments('a@x.test', 'b@x.test', 'c@x.test'),
-      votes: [vote(1, 'a@x.test', 'approve'), vote(2, 'b@x.test', 'approve'), vote(3, 'c@x.test', 'reject')],
+  test('a completed even shared tie escalates to the facilitator', () => {
+    const result = aggregateShared({
+      assignments: assignments('a@x.test', 'b@x.test', 'c@x.test', 'd@x.test'),
+      votes: [
+        vote(1, 'a@x.test', 'approve'), vote(2, 'b@x.test', 'approve'),
+        vote(3, 'c@x.test', 'reject'), vote(4, 'd@x.test', 'reject'),
+      ],
       dueAtMs, nowMs: 1_000,
     });
     expect(result.verdict).toBe('escalate');
     expect(result.reason).toBe('disagreement');
     expect(result.approvals).toBe(2);
-    expect(result.rejections).toBe(1);
+    expect(result.rejections).toBe(2);
   });
 
   test('an incomplete round stays open before the deadline', () => {
-    const result = aggregateRound({
+    const result = aggregateShared({
       assignments: assignments('a@x.test', 'b@x.test'),
       votes: [vote(1, 'a@x.test', 'approve')],
       dueAtMs, nowMs: 1_000,
@@ -133,7 +176,7 @@ describe('round aggregation', () => {
   });
 
   test('non-response past the deadline escalates and is never counted as reject', () => {
-    const result = aggregateRound({
+    const result = aggregateShared({
       assignments: assignments('a@x.test', 'b@x.test'),
       votes: [vote(1, 'a@x.test', 'approve')],
       dueAtMs, nowMs: 2_001,
@@ -145,13 +188,13 @@ describe('round aggregation', () => {
   });
 
   test('zero reviewers fails closed to escalation, never to accept', () => {
-    const result = aggregateRound({ assignments: [], votes: [], dueAtMs, nowMs: 1_000 });
+    const result = aggregateShared({ assignments: [], votes: [], dueAtMs, nowMs: 1_000 });
     expect(result.verdict).toBe('escalate');
     expect(result.reason).toBe('no_reviewers');
   });
 
   test('system-authored votes cannot drive auto-finalize', () => {
-    const result = aggregateRound({
+    const result = aggregateShared({
       assignments: assignments('a@x.test', 'b@x.test'),
       votes: [vote(1, 'a@x.test', 'approve'), vote(2, 'b@x.test', 'approve', { voter_kind: 'system' })],
       dueAtMs, nowMs: 1_000,
@@ -162,7 +205,7 @@ describe('round aggregation', () => {
   });
 
   test('a vote whose actor does not match its frozen assignment is ignored', () => {
-    const result = aggregateRound({
+    const result = aggregateShared({
       assignments: assignments('a@x.test'),
       votes: [vote(1, 'impostor@x.test', 'approve')],
       dueAtMs, nowMs: 1_000,
@@ -172,7 +215,7 @@ describe('round aggregation', () => {
   });
 
   test('superseded votes do not count twice', () => {
-    const result = aggregateRound({
+    const result = aggregatePersonal({
       assignments: assignments('a@x.test'),
       votes: [vote(1, 'a@x.test', 'reject', { active: false }), vote(1, 'a@x.test', 'approve')],
       dueAtMs, nowMs: 1_000,

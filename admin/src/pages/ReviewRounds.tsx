@@ -12,6 +12,8 @@ const STATUS_TABS: Array<{ value: RoundStatus | 'active'; label: string }> = [
 ];
 
 const ESCALATION_LABELS: Record<string, string> = {
+  facilitator_required: 'Требуется решение фасилитатора',
+  invalid_personal_reviewer_count: 'Ошибка состава проверяющих личной области',
   disagreement: 'Расхождение голосов',
   deadline_missed: 'Истёк срок голосования',
   stale_proposal: 'Предложение изменилось',
@@ -21,6 +23,15 @@ const ESCALATION_LABELS: Record<string, string> = {
 };
 
 const DECISION_LABELS: Record<string, string> = { approve: 'Подтвердил', reject: 'Отклонил' };
+
+function finalizationLabel(round: Round): string {
+  if (round.finalized_mode === 'admin_override') return ' администратором';
+  if (round.finalized_mode === 'auto_quorum') return ' автоматически по кворуму';
+  if (round.finalized_mode === 'auto_unanimous' && round.policy_kind === 'personal') {
+    return ' владельцем личной области';
+  }
+  return ' единогласно';
+}
 
 interface Round {
   id: number;
@@ -45,6 +56,7 @@ interface RoundSummary {
   assigned: number;
   approvals: number;
   rejections: number;
+  quorum: number | null;
   missing: string[];
 }
 
@@ -137,8 +149,9 @@ export function ReviewRoundsPage() {
         <div>
           <h1>Коллективная проверка</h1>
           <p>
-            Единогласное решение назначенных проверяющих применяется автоматически.
-            Сюда попадают расхождения, пропущенные сроки и ошибки безопасной публикации.
+            В личной области решение владельца применяется автоматически. В общей области
+            с тремя и более проверяющими решение принимается по строгому большинству.
+            Для одного-двух проверяющих и спорных случаев требуется фасилитатор.
           </p>
         </div>
         <div className="ai-review-count">
@@ -189,6 +202,9 @@ export function ReviewRoundsPage() {
                 <span className="round-tally approve">за {item.approvals}</span>
                 <span className="round-tally reject">против {item.rejections}</span>
                 <span className="round-tally muted">без ответа {item.missing.length}</span>
+                <span className="round-tally muted">
+                  {item.quorum === null ? 'решает фасилитатор' : `кворум ${item.quorum} из ${item.assigned}`}
+                </span>
                 {item.round.escalation_reason && (
                   <span className="round-tally escalated">
                     {ESCALATION_LABELS[item.round.escalation_reason] || item.round.escalation_reason}
@@ -267,7 +283,7 @@ export function ReviewRoundsPage() {
                   <strong>Решение принято</strong>
                   <p className="round-note">
                     {selected.round.outcome === 'accepted' ? 'Подтверждено' : 'Отклонено'}
-                    {selected.round.finalized_mode === 'admin_override' ? ' администратором' : ' единогласно'}
+                    {finalizationLabel(selected.round)}
                     {selected.round.finalized_by ? ` (${selected.round.finalized_by})` : ''}.
                   </p>
                   {selected.round.final_reason && <p className="round-note">Причина: {selected.round.final_reason}</p>}

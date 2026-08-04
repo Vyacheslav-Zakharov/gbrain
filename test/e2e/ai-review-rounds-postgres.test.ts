@@ -24,9 +24,11 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const TEAM = 'internal-review-pg';
 const ANNA = 'anna-pg@example.test';
 const BORIS = 'boris-pg@example.test';
+const CAROL = 'carol-pg@example.test';
 const PERMISSIONS: ReviewerPermissionMap = {
   [ANNA]: { source_id: 'anna-pg', federated_read: [TEAM], federated_write: [TEAM] },
   [BORIS]: { source_id: 'boris-pg', federated_read: [TEAM], federated_write: [TEAM] },
+  [CAROL]: { source_id: 'carol-pg', federated_read: [TEAM], federated_write: [TEAM] },
 };
 const describePg = hasDatabase() ? describe : describe.skip;
 
@@ -175,9 +177,10 @@ describePg('multi-review voting on separate Postgres pools', () => {
       expect(active.get(ANNA)).toBe('approve');
       expect(active.get(BORIS)).toBe('approve');
     } else {
-      expect(detail.round.status).toBe('escalated');
+      expect(detail.round.status).toBe('open');
       expect(active.get(ANNA)).toBe('reject');
       expect(active.get(BORIS)).toBe('approve');
+      expect(active.get(CAROL)).toBeNull();
     }
     const proposal = await engineA.executeRaw<{ status: string }>(`SELECT status FROM take_proposals WHERE id=$1`, [proposalId]);
     expect(proposal[0]!.status).toBe(detail.round.status === 'finalized' ? 'accepted' : 'pending');
