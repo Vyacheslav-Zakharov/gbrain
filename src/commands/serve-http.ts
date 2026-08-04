@@ -54,6 +54,16 @@ import { sourceIngestConnectorDescriptors } from '../core/source-ingest/connecto
 import { getSourceConnector } from '../core/source-ingest/connectors/fake.ts';
 import { recordSourceConnectorTest } from '../core/source-ingest/catalog.ts';
 import {
+  applyManagedPortalGrants,
+  commitAccessControlJsonTransaction,
+  normalizeRequestGrantDecisions,
+  portalAccessRequestVersion,
+  portalPermissionsVersion,
+  recoverAccessControlJsonTransaction,
+  validatePortalEmail,
+  writeJsonAtomically,
+} from '../core/portal-access-control-json.ts';
+import {
   PortalSessionStore,
   isPortalFileAllowed,
   portalSessionCookieName,
@@ -607,9 +617,12 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   type AdminSession = {
     expiresAt: number;
     authMethod: 'bootstrap_fallback' | 'magic_link_fallback' | 'keycloak_bridge';
+    actor: string;
     backingPortalToken?: string;
   };
   const adminSessions = new Map<string, AdminSession>();
+  const fallbackAdminActor = (method: 'bootstrap' | 'magic-link', sessionId: string): string =>
+    `${method}-fallback:${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}`;
   const adminFallbackDeadline = (): number | null => parseAdminFallbackDeadline(process.env.GBRAIN_ADMIN_FALLBACK_UNTIL);
 
   // SSE clients for live activity feed
@@ -736,17 +749,20 @@ const internalAccessAreas = [
 ];
 const managedAccessAreas = [sharedAccessArea, ...internalAccessAreas];
 const getUserPermissions = async (email: string) => {
+  recoverAccessControlTransactionLocal();
   const configPath = require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
   try {
-    let data: any = {};
+    let data: Record<string, PortalUserPermissions> = {};
     if (require('fs').existsSync(configPath)) {
-      data = JSON.parse(require('fs').readFileSync(configPath, 'utf8'));
+      data = loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(configPath);
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('access_control_store_invalid');
     }
     if (data[email]) {
+      portalPermissionsVersion(data[email]);
       return {
-        source_id: data[email].source_id || 'shared',
-        federated_read: data[email].federated_read || ['shared'],
-        federated_write: data[email].federated_write || [data[email].source_id].filter(Boolean)
+        source_id: data[email].source_id || '',
+        federated_read: data[email].federated_read || [],
+        federated_write: data[email].federated_write || []
       };
     } else {
       const emailPrefix = email.split('@')[0].trim().toLowerCase();
@@ -760,8 +776,8 @@ const getUserPermissions = async (email: string) => {
   } catch (err) {
     console.error(`[GBrain] Failed to read ${configPath}:`, err);
     return {
-      source_id: 'shared',
-      federated_read: ['shared'],
+      source_id: '',
+      federated_read: [],
       federated_write: []
     };
   }
@@ -772,6 +788,7 @@ const getUserPermissions = async (email: string) => {
  * round creation fails closed with `no_reviewers` instead of guessing.
  */
 const loadUserPermissionsMap = (): ReviewerPermissionMap => {
+  recoverAccessControlTransactionLocal();
   const configPath = userPermissionsPath();
   try {
     if (!require('fs').existsSync(configPath)) return {};
@@ -859,6 +876,7 @@ type PortalUserPermissions = {
 };
 
 const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, reasonRaw: unknown): Promise<void> => {
+    recoverAccessControlTransactionLocal();
     const selected = normalizeAccessRequestValues(rawValues);
     if (selected.length === 0)
       return;
@@ -898,19 +916,8 @@ const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, 
     }).filter((row): row is PortalAccessRow => row !== null);
     if (requests.length === 0)
       return;
-    const fs = require("fs");
-    const path = require("path");
-    const requestPath = path.join(process.env.HOME || "/home/avers", ".gbrain", "access_requests.json");
-    let data: PortalAccessRequest[] = [];
-    try {
-      if (fs.existsSync(requestPath)) {
-        const parsed = JSON.parse(fs.readFileSync(requestPath, "utf8"));
-        if (Array.isArray(parsed))
-          data = parsed;
-      }
-    } catch (e3) {
-      console.error("[Auth] Error reading access_requests.json:", e3);
-    }
+    const requestPath = accessRequestsPath();
+    const data = readAccessRequestsStrict();
     const request2 = {
       id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       email: userEmail,
@@ -922,7 +929,7 @@ const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, 
       approved_at: null
     };
     data.push(request2);
-    fs.writeFileSync(requestPath, JSON.stringify(data, null, 2), "utf8");
+    writeJsonFileLocal(requestPath, data);
     console.log(`[Auth] Saved access request ${request2.id} for ${userEmail}`);
     try {
       const body2 = [
@@ -995,10 +1002,29 @@ const loadJsonFileLocal = <T>(filePath: string, fallback: T): T => {
     }
   }
 
-const writeJsonFileLocal = (filePath: string, value: unknown): void => {
+const loadJsonFileStrictLocal = <T>(filePath: string): T => {
     const fs = require("fs");
-    fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+    if (!fs.existsSync(filePath)) throw new Error('access_control_store_missing');
+    try {
+      return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+    } catch (error) {
+      console.error(`[GBrain] Failed to parse access-control store ${filePath}:`, error);
+      throw new Error('access_control_store_invalid');
+    }
   }
+
+const writeJsonFileLocal = (filePath: string, value: unknown): void => {
+    writeJsonAtomically(filePath, value);
+  }
+
+const accessControlTransactionPaths = () => ({
+    permissionsPath: userPermissionsPath(),
+    requestsPath: accessRequestsPath(),
+    journalPath: require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'access_control_transaction.json'),
+  });
+
+const recoverAccessControlTransactionLocal = (): boolean => recoverAccessControlJsonTransaction(accessControlTransactionPaths());
+recoverAccessControlTransactionLocal();
 
 const personalSourceIdFromEmail = (email: string): string => {
     const prefix = String(email || "").split("@")[0].trim().toLowerCase();
@@ -1093,8 +1119,13 @@ const ensurePortalUserProvisioned = async (emailRaw: string) => {
     }
 
     const permsPath = userPermissionsPath();
-    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(permsPath, {});
+    recoverAccessControlTransactionLocal();
+    const perms = fs.existsSync(permsPath)
+      ? loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(permsPath)
+      : {};
+    if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
     const existing = perms[email] || { source_id: sourceId, federated_read: [], federated_write: [] };
+    if (perms[email]) portalPermissionsVersion(existing);
     existing.source_id = existing.source_id || sourceId;
     const read = new Set(Array.isArray(existing.federated_read) ? existing.federated_read : []);
     const write = new Set(Array.isArray(existing.federated_write) ? existing.federated_write : []);
@@ -1113,12 +1144,21 @@ const ensurePortalUserProvisioned = async (emailRaw: string) => {
       schedulePersonalSourceSync(sourceId);
   }
 
-const readAccessRequests = (): PortalAccessRequest[] => {
-    const data = loadJsonFileLocal<PortalAccessRequest[]>(accessRequestsPath(), []);
-    return Array.isArray(data) ? data : [];
+const readAccessRequests = (): PortalAccessRequest[] => readAccessRequestsStrict();
+
+const readAccessRequestsStrict = (): PortalAccessRequest[] => {
+    recoverAccessControlTransactionLocal();
+    const requestPath = accessRequestsPath();
+    if (!require('fs').existsSync(requestPath)) return [];
+    const data = loadJsonFileStrictLocal<PortalAccessRequest[]>(requestPath);
+    if (!Array.isArray(data)) throw new Error('access_control_store_invalid');
+    return data;
   }
 
-const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFileLocal(accessRequestsPath(), items);
+const writeAccessRequests = (items: PortalAccessRequest[]): void => {
+    recoverAccessControlTransactionLocal();
+    writeJsonFileLocal(accessRequestsPath(), items);
+  };
 
 
 
@@ -2475,47 +2515,121 @@ function requestedLabel(a){return a.write?'чтение+запись':(a.read?'�
 function renderPendingRows(r){return '<table class="grant-table"><thead><tr><th>Область</th><th>Source</th><th>Запрошено</th><th>Дать чтение</th><th>Дать запись</th></tr></thead><tbody>'+((r.requests||[]).map((a,i)=>'<tr><td>'+esc(a.area)+'</td><td><code>'+esc(a.source_id||'')+'</code></td><td>'+esc(requestedLabel(a))+'</td><td><input class="grant-read" type="checkbox" data-index="'+i+'" '+((a.read||a.write)?'checked':'')+'></td><td><input class="grant-write" type="checkbox" data-index="'+i+'" '+(a.write?'checked':'')+'></td></tr>').join(''))+'</tbody></table>'}
 function renderDecidedRows(r){const approved=(r.approved_requests||[]).map(a=>'<div class="approved-list">✓ '+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</div>').join('');const denied=(r.denied_requests||[]).map(a=>'<div class="denied">\xD7 '+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</div>').join('');if(approved||denied)return '<div style="margin-top:10px">'+approved+denied+'</div>';return '<div style="margin-top:10px">'+((r.requests||[]).map(a=>'<span>'+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</span>').join('<br>'))+'</div>'}
 function collectGrants(card){const grants=[];card.querySelectorAll('tbody tr').forEach(row=>{const idx=Number(row.querySelector('input').dataset.index);const read=row.querySelector('.grant-read').checked;const write=row.querySelector('.grant-write').checked;grants.push({index:idx,read:read||write,write})});return grants}
-function renderReq(r){const pending=r.status==='pending';const rows=pending?renderPendingRows(r):renderDecidedRows(r);const actions=pending?'<div class="actions"><button class="btn js-decision" data-id="'+esc(r.id)+'" data-action="approve">Утвердить выбранные права</button><button class="btn gray js-check-all" type="button">Отметить всё как запрошено</button><button class="btn gray js-clear" type="button">Снять все галочки</button><button class="btn red js-decision" data-id="'+esc(r.id)+'" data-action="reject">Отклонить всё</button></div>':'';return '<div class="card" data-request-id="'+esc(r.id)+'"><h3>'+esc(r.email)+' <span class="status-'+esc(r.status)+'">'+esc(r.status)+'</span></h3><div class="muted">'+esc(r.id)+' \xB7 '+esc(r.requested_at||'')+'</div>'+rows+'<pre>'+esc(r.reason||'(причина не указана)')+'</pre>'+actions+(r.decided_at?'<div class="muted">Решение: '+esc(r.decided_at)+' \xB7 '+esc(r.decided_by||'')+'</div>':'')+'</div>'}
+function renderReq(r){const pending=r.status==='pending';const rows=pending?renderPendingRows(r):renderDecidedRows(r);const actions=pending?'<div class="actions"><button class="btn js-decision" data-id="'+esc(r.id)+'" data-action="approve">Утвердить выбранные права</button><button class="btn gray js-check-all" type="button">Отметить всё как запрошено</button><button class="btn gray js-clear" type="button">Снять все галочки</button><button class="btn red js-decision" data-id="'+esc(r.id)+'" data-action="reject">Отклонить всё</button></div>':'';return '<div class="card" data-request-id="'+esc(r.id)+'" data-version="'+esc(r.version||'')+'"><h3>'+esc(r.email)+' <span class="status-'+esc(r.status)+'">'+esc(r.status)+'</span></h3><div class="muted">'+esc(r.id)+' \xB7 '+esc(r.requested_at||'')+'</div>'+rows+'<pre>'+esc(r.reason||'(причина не указана)')+'</pre>'+actions+(r.decided_at?'<div class="muted">Решение: '+esc(r.decided_at)+' \xB7 '+esc(r.decided_by||'')+'</div>':'')+'</div>'}
 function bindCard(card){card.querySelectorAll('.grant-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=card.querySelector('.grant-read[data-index="'+w.dataset.index+'"]');if(r)r.checked=true}});card.querySelectorAll('.grant-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=card.querySelector('.grant-write[data-index="'+r.dataset.index+'"]');if(w)w.checked=false}});const all=card.querySelector('.js-check-all');if(all)all.onclick=()=>{card.querySelectorAll('tbody tr').forEach(row=>{const read=row.querySelector('.grant-read');const write=row.querySelector('.grant-write');read.checked=true;write.checked=row.children[2].textContent.includes('запись')})};const clear=card.querySelector('.js-clear');if(clear)clear.onclick=()=>{card.querySelectorAll('input[type="checkbox"]').forEach(i=>i.checked=false)}}
 async function load(){try{const data=await api('/admin/api/access-requests');document.getElementById('list').innerHTML=data.requests.map(renderReq).join('')||'<div class="card muted">Заявок нет</div>';document.querySelectorAll('.card').forEach(bindCard);document.querySelectorAll('.js-decision').forEach(b=>b.onclick=()=>decide(b))}catch(e){document.getElementById('list').innerHTML='<div class="card">Ошибка: '+esc(e.message)+'</div>'}}
-async function decide(button){const id=button.dataset.id,action=button.dataset.action;const card=button.closest('.card');if(action==='approve'){const grants=collectGrants(card);const selected=grants.filter(g=>g.read||g.write).length;if(!selected){alert('Не выбрано ни одного права. Если нужно отказать полностью, нажмите \xABОтклонить всё\xBB.');return}if(!confirm('Утвердить выбранные права? Неотмеченные пункты будут записаны как невыданные.'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants})})}else{if(!confirm('Отклонить заявку полностью?'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})}await load()}
+async function decide(button){const id=button.dataset.id,action=button.dataset.action;const card=button.closest('.card');const expected_version=card.dataset.version||'';if(action==='approve'){const grants=collectGrants(card);const selected=grants.filter(g=>g.read||g.write).length;if(!selected){alert('Не выбрано ни одного права. Если нужно отказать полностью, нажмите \xABОтклонить всё\xBB.');return}if(!confirm('Утвердить выбранные права? Неотмеченные пункты будут записаны как невыданные.'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants,expected_version})})}else{if(!confirm('Отклонить заявку полностью?'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_version})})}await load()}
 load();
 </script></body></html>`);
   });
   app.get("/admin/api/access-requests", requireAdmin, (_req: any, res: any) => {
-    const requests = readAccessRequests().sort((a, b) => String(b.requested_at || "").localeCompare(String(a.requested_at || "")));
-    res.json({ requests });
+    try {
+      const requests = readAccessRequestsStrict()
+        .sort((a, b) => String(b.requested_at || "").localeCompare(String(a.requested_at || "")))
+        .map(request => ({ ...request, version: portalAccessRequestVersion(request) }));
+      res.json({ requests });
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+    }
   });
-  app.post("/admin/api/access-requests/:id/approve", requireAdmin, express.json(), (req: any, res: any) => {
+  app.post("/admin/api/access-requests/:id/approve", requireAdmin, requireAdminSameOrigin, express.json(), (req: any, res: any) => {
     const id = String(req.params.id || "");
-    const requests = readAccessRequests();
+    let requests: PortalAccessRequest[];
+    try {
+      requests = readAccessRequestsStrict();
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+      return;
+    }
     const item = requests.find((r4) => r4.id === id);
     if (!item) {
       res.status(404).json({ error: "Request not found" });
+      return;
+    }
+    const expectedVersion = typeof req.body?.expected_version === 'string' ? req.body.expected_version : '';
+    if (!expectedVersion) {
+      res.status(400).json({ error: 'expected_version_required' });
+      return;
+    }
+    if (portalAccessRequestVersion(item) !== expectedVersion) {
+      res.status(409).json({ error: 'request_changed' });
       return;
     }
     if (item.status !== "pending") {
       res.status(400).json({ error: "Request is not pending" });
       return;
     }
-    const requestedRows = Array.isArray(item.requests) ? item.requests : [];
-    const rawGrants: Array<{ index?: unknown; read?: unknown; write?: unknown }> | null = Array.isArray(req.body?.grants) ? req.body.grants : null;
-    const selectedRows = requestedRows.map((row, index): PortalAccessRow | null => {
-      const grant = rawGrants ? rawGrants.find((g8) => Number(g8?.index) === index) : row;
-      const write2 = !!grant?.write && !!row.write;
-      const read2 = (!!grant?.read || write2) && (!!row.read || !!row.write);
+    let subjectEmail: string;
+    try {
+      subjectEmail = validatePortalEmail(item.email);
+    } catch {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    if (subjectEmail !== item.email) {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    if (!Array.isArray(item.requests) || item.requests.length === 0) {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    const requestedRows = item.requests;
+    if (requestedRows.some(row => !row || typeof row !== 'object' || typeof row.read !== 'boolean' || typeof row.write !== 'boolean' || (!row.read && !row.write))) {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    let grantDecisions: Array<{ index: number; read: boolean; write: boolean }>;
+    try {
+      grantDecisions = normalizeRequestGrantDecisions(requestedRows, req.body?.grants);
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'invalid_request_grants' });
+      return;
+    }
+    const allowedRequestedSources = new Set(managedAccessAreas.map(area => area.sourceId));
+    const resolvedRequestedRows = requestedRows.map((row): PortalAccessRow | null => {
       const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
-      if (!sourceId) return null;
-      return { area: row.area, source_id: sourceId, read: read2, write: write2, requested_read: !!row.read, requested_write: !!row.write };
-    }).filter((row): row is PortalAccessRow => row !== null && (row.read || row.write));
+      if (!sourceId || !allowedRequestedSources.has(sourceId)) return null;
+      return { area: row.area, source_id: sourceId, read: !!row.read || !!row.write, write: !!row.write };
+    });
+    if (resolvedRequestedRows.some(row => row === null)) {
+      res.status(400).json({ error: 'unknown_requested_source' });
+      return;
+    }
+    const resolvedSourceIds = (resolvedRequestedRows as PortalAccessRow[]).map(row => row.source_id);
+    if (new Set(resolvedSourceIds).size !== resolvedSourceIds.length) {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    const selectedRows = (resolvedRequestedRows as PortalAccessRow[]).map((row, index): PortalAccessRow | null => {
+      const grant = grantDecisions[index];
+      if (!grant.read && !grant.write) return null;
+      return { ...row, read: grant.read, write: grant.write, requested_read: !!row.read, requested_write: !!row.write };
+    }).filter((row): row is PortalAccessRow => row !== null);
     if (selectedRows.length === 0) {
       res.status(400).json({ error: "No permissions selected. Reject the request if nothing should be granted." });
       return;
     }
     const permsPath = userPermissionsPath();
-    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(permsPath, {});
-    const defaultSource = String(item.email || "").split("@")[0].replace(/[^a-z0-9]/g, "-");
-    const user = perms[item.email] || { source_id: defaultSource, federated_read: [defaultSource, "shared"], federated_write: [defaultSource] };
+    let perms: Record<string, PortalUserPermissions>;
+    try {
+      perms = loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(permsPath);
+      if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+      return;
+    }
+    const defaultSource = personalSourceIdFromEmail(subjectEmail);
+    const existingUser = perms[subjectEmail];
+    if (existingUser) {
+      try {
+        portalPermissionsVersion(existingUser);
+      } catch {
+        res.status(503).json({ error: 'access_control_store_invalid' });
+        return;
+      }
+    }
+    const user = existingUser || { source_id: defaultSource, federated_read: [defaultSource, "shared"], federated_write: [defaultSource] };
     const read = new Set(Array.isArray(user.federated_read) ? user.federated_read : []);
     const write = new Set(Array.isArray(user.federated_write) ? user.federated_write : []);
     if (user.source_id)
@@ -2530,8 +2644,7 @@ load();
     }
     user.federated_read = Array.from(read).filter(Boolean);
     user.federated_write = Array.from(write).filter(Boolean);
-    perms[item.email] = user;
-    writeJsonFileLocal(permsPath, perms);
+    perms[subjectEmail] = user;
     const selectedBySource = new Map(selectedRows.map((row) => [row.source_id, row]));
     const deniedRows = requestedRows.map((row): PortalAccessRow | null => {
       const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
@@ -2546,30 +2659,50 @@ load();
     const fullyApproved = deniedRows.length === 0 && selectedRows.length === requestedRows.length;
     item.status = fullyApproved ? "approved" : "approved_partial";
     item.decided_at = new Date().toISOString();
-    item.decided_by = resolvePortalUser(req) || "admin";
+    item.decided_by = String(res.locals.gbrainAdminActor || 'admin-session-unattributed');
     item.approved_at = item.decided_at;
     item.approved_by = item.decided_by;
     item.approved_requests = selectedRows.map((row) => ({ area: row.area, source_id: row.source_id, read: row.read, write: row.write }));
     item.denied_requests = deniedRows;
-    writeAccessRequests(requests);
+    commitAccessControlJsonTransaction(accessControlTransactionPaths(), perms, requests);
     res.json({ approved: true, partial: item.status === "approved_partial", permissions: user, approved_requests: item.approved_requests, denied_requests: item.denied_requests });
   });
-  app.post("/admin/api/access-requests/:id/reject", requireAdmin, express.json(), (req: any, res: any) => {
+  app.post("/admin/api/access-requests/:id/reject", requireAdmin, requireAdminSameOrigin, express.json(), (req: any, res: any) => {
     const id = String(req.params.id || "");
-    const requests = readAccessRequests();
+    let requests: PortalAccessRequest[];
+    try {
+      requests = readAccessRequestsStrict();
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+      return;
+    }
     const item = requests.find((r4) => r4.id === id);
     if (!item) {
       res.status(404).json({ error: "Request not found" });
+      return;
+    }
+    const expectedVersion = typeof req.body?.expected_version === 'string' ? req.body.expected_version : '';
+    if (!expectedVersion) {
+      res.status(400).json({ error: 'expected_version_required' });
+      return;
+    }
+    if (portalAccessRequestVersion(item) !== expectedVersion) {
+      res.status(409).json({ error: 'request_changed' });
       return;
     }
     if (item.status !== "pending") {
       res.status(400).json({ error: "Request is not pending" });
       return;
     }
+    const rejectionReason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 1000) : '';
+    if (!rejectionReason) {
+      res.status(400).json({ error: 'rejection_reason_required' });
+      return;
+    }
     item.status = "rejected";
     item.decided_at = new Date().toISOString();
-    item.decided_by = "admin";
-    item.rejection_reason = String(req.body?.reason || "").slice(0, 1000);
+    item.decided_by = String(res.locals.gbrainAdminActor || 'admin-session-unattributed');
+    item.rejection_reason = rejectionReason;
     writeAccessRequests(requests);
     res.json({ rejected: true });
   });
@@ -2582,46 +2715,79 @@ load();
 body{margin:0;background:#101014;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}.wrap{max-width:1320px;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;cursor:pointer}.btn.gray{background:#444}.muted{color:#aaa;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:18px;background:#1d1d24;border:1px solid #333;border-radius:10px;overflow:hidden}th,td{border-bottom:1px solid #333;padding:8px;text-align:center;vertical-align:middle}th{color:#bbb;font-weight:600;background:#181820;position:sticky;top:0}td.email{text-align:left;white-space:nowrap}td.source{text-align:left;color:#aaa;font-size:12px}input[type=checkbox]{transform:scale(1.1)}.cell{display:flex;gap:6px;justify-content:center;align-items:center}.r{color:#8cc8ff}.w{color:#ffd479}.saved{color:#91e091;margin-left:10px}.err{color:#ff9c9c;margin-left:10px}</style></head><body><div class="wrap"><div class="top"><div><h1>Права пользователей GBrain</h1><div class="muted">Таблица читает и меняет <code>~/.gbrain/user_permissions.json</code>. R = чтение, W = запись.</div></div><div><a class="btn gray" href="/admin/access-requests">Заявки</a> <a class="btn gray" href="/admin/">Админ-панель</a></div></div><div id="msg" class="muted"></div><div id="root">Загрузка...</div></div><script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()}
-function render(data){const areas=data.areas||[];const users=data.users||[];let html='<table><thead><tr><th>Пользователь</th><th>Личная область</th>'+areas.map(a=>'<th>'+esc(a.label)+'<br><span class="muted">'+esc(a.sourceId)+'</span></th>').join('')+'<th></th></tr></thead><tbody>';for(const u of users){html+='<tr data-email="'+esc(u.email)+'"><td class="email">'+esc(u.email)+'</td><td class="source"><code>'+esc(u.source_id||'')+'</code></td>'+areas.map(a=>{const r=(u.federated_read||[]).includes(a.sourceId);const w=(u.federated_write||[]).includes(a.sourceId);return '<td><div class="cell"><label class="r">R <input class="p-read" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(r?'checked':'')+'></label><label class="w">W <input class="p-write" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(w?'checked':'')+'></label></div></td>'}).join('')+'<td><button class="btn save">Сохранить</button></td></tr>'}html+='</tbody></table>';document.getElementById('root').innerHTML=html;document.querySelectorAll('tr[data-email]').forEach(bindRow)}
-function bindRow(row){row.querySelectorAll('.p-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=row.querySelector('.p-read[data-source="'+w.dataset.source+'"]');if(r)r.checked=true}});row.querySelectorAll('.p-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');if(w)w.checked=false}});row.querySelector('.save').onclick=async()=>{const email=row.dataset.email;const grants=[];row.querySelectorAll('.p-read').forEach(r=>{const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');grants.push({source_id:r.dataset.source,read:r.checked||w.checked,write:w.checked})});const msg=document.getElementById('msg');msg.className='muted';msg.textContent='Сохранение...';try{await api('/admin/api/permissions/'+encodeURIComponent(email),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants})});msg.className='saved';msg.textContent='Сохранено: '+email}catch(e){msg.className='err';msg.textContent='Ошибка: '+e.message}}}
+function render(data){const areas=data.areas||[];const users=data.users||[];let html='<table><thead><tr><th>Пользователь</th><th>Личная область</th>'+areas.map(a=>'<th>'+esc(a.label)+'<br><span class="muted">'+esc(a.sourceId)+'</span></th>').join('')+'<th></th></tr></thead><tbody>';for(const u of users){html+='<tr data-email="'+esc(u.email)+'" data-version="'+esc(u.version||'')+'"><td class="email">'+esc(u.email)+'</td><td class="source"><code>'+esc(u.source_id||'')+'</code></td>'+areas.map(a=>{const r=(u.federated_read||[]).includes(a.sourceId);const w=(u.federated_write||[]).includes(a.sourceId);return '<td><div class="cell"><label class="r">R <input class="p-read" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(r?'checked':'')+'></label><label class="w">W <input class="p-write" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(w?'checked':'')+'></label></div></td>'}).join('')+'<td><button class="btn save">Сохранить</button></td></tr>'}html+='</tbody></table>';document.getElementById('root').innerHTML=html;document.querySelectorAll('tr[data-email]').forEach(bindRow)}
+function bindRow(row){row.querySelectorAll('.p-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=row.querySelector('.p-read[data-source="'+w.dataset.source+'"]');if(r)r.checked=true}});row.querySelectorAll('.p-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');if(w)w.checked=false}});row.querySelector('.save').onclick=async()=>{const email=row.dataset.email;const grants=[];row.querySelectorAll('.p-read').forEach(r=>{const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');grants.push({source_id:r.dataset.source,read:r.checked||w.checked,write:w.checked})});const msg=document.getElementById('msg');msg.className='muted';msg.textContent='Сохранение...';try{const result=await api('/admin/api/permissions/'+encodeURIComponent(email),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants,expected_version:row.dataset.version||''})});row.dataset.version=result.version||'';msg.className='saved';msg.textContent='Сохранено: '+email}catch(e){msg.className='err';msg.textContent='Ошибка: '+e.message}}}
 async function load(){try{render(await api('/admin/api/permissions'))}catch(e){document.getElementById('root').innerHTML='<div class="err">'+esc(e.message)+'</div>'}}load();
 </script></body></html>`);
   });
 
   app.get('/admin/api/permissions', requireAdmin, (_req: Request, res: Response) => {
-    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(userPermissionsPath(), {});
-    const users = Object.entries(perms).sort(([a], [b]) => a.localeCompare(b)).map(([email, p]: any) => ({
-      email,
-      source_id: p?.source_id || '',
-      federated_read: Array.isArray(p?.federated_read) ? p.federated_read : [],
-      federated_write: Array.isArray(p?.federated_write) ? p.federated_write : [],
-    }));
-    res.json({ areas: managedAccessAreas, users });
+    try {
+      recoverAccessControlTransactionLocal();
+      const perms = loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(userPermissionsPath());
+      if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
+      const users = Object.entries(perms).sort(([a], [b]) => a.localeCompare(b)).map(([email, p]: any) => ({
+        email,
+        source_id: p?.source_id || '',
+        federated_read: Array.isArray(p?.federated_read) ? p.federated_read : [],
+        federated_write: Array.isArray(p?.federated_write) ? p.federated_write : [],
+        version: portalPermissionsVersion(p),
+      }));
+      res.json({ areas: managedAccessAreas, users });
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+    }
   });
 
-  app.post('/admin/api/permissions/:email', requireAdmin, express.json(), (req: Request, res: Response) => {
-    const email = String(req.params.email || '').toLowerCase();
-    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(userPermissionsPath(), {});
+  app.post('/admin/api/permissions/:email', requireAdmin, requireAdminSameOrigin, express.json(), (req: Request, res: Response) => {
+    let email: string;
+    try {
+      email = validatePortalEmail(req.params.email);
+    } catch {
+      res.status(400).json({ error: 'invalid_portal_email' });
+      return;
+    }
+    let perms: Record<string, PortalUserPermissions>;
+    try {
+      recoverAccessControlTransactionLocal();
+      perms = loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(userPermissionsPath());
+      if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+      return;
+    }
     const user = perms[email];
     if (!user) { res.status(404).json({ error: 'User not found' }); return; }
-    const allowedManaged = new Set(managedAccessAreas.map(a => a.sourceId));
-    const grants = Array.isArray(req.body?.grants) ? req.body.grants : [];
-    const read = new Set<string>(Array.isArray(user.federated_read) ? user.federated_read.filter((x: string) => !allowedManaged.has(x)) : []);
-    const write = new Set<string>(Array.isArray(user.federated_write) ? user.federated_write.filter((x: string) => !allowedManaged.has(x)) : []);
-    if (user.source_id) { read.add(user.source_id); write.add(user.source_id); }
-    for (const grant of grants) {
-      const sourceId = String(grant?.source_id || '');
-      if (!allowedManaged.has(sourceId)) continue;
-      const canWrite = !!grant.write;
-      const canRead = !!grant.read || canWrite;
-      if (canRead) read.add(sourceId);
-      if (canWrite) write.add(sourceId);
+    const expectedVersion = typeof req.body?.expected_version === 'string' ? req.body.expected_version : '';
+    if (!expectedVersion) { res.status(400).json({ error: 'expected_version_required' }); return; }
+    try {
+      const beforeVersion = portalPermissionsVersion(user);
+      if (beforeVersion !== expectedVersion) {
+        res.status(409).json({ error: 'permissions_changed' });
+        return;
+      }
+      const managedSourceIds = managedAccessAreas.map(area => area.sourceId);
+      const updated = applyManagedPortalGrants(user, req.body?.grants, managedSourceIds);
+      const afterVersion = portalPermissionsVersion(updated);
+      perms[email] = updated;
+      writeJsonFileLocal(userPermissionsPath(), perms);
+      console.info('[AccessControl]', JSON.stringify({
+        action: 'permissions_changed',
+        actor: String(res.locals.gbrainAdminActor || 'admin-session-unattributed'),
+        subject_email: email,
+        before_version: beforeVersion,
+        after_version: afterVersion,
+        changed_at: new Date().toISOString(),
+      }));
+      res.json({ ok: true, user: updated, version: afterVersion });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'invalid_grants';
+      if (code === 'invalid_permissions_shape' || code === 'personal_source_required' || code === 'write_without_read') {
+        res.status(503).json({ error: 'access_control_store_invalid' });
+        return;
+      }
+      res.status(400).json({ error: code });
     }
-    user.federated_read = Array.from(read).filter(Boolean);
-    user.federated_write = Array.from(write).filter(Boolean);
-    perms[email] = user;
-    writeJsonFileLocal(userPermissionsPath(), perms);
-    res.json({ ok: true, user });
   });
   // OAuth authorization must be bound to the same opaque, server-side Portal
   // session used by the rest of the application. Never let the SDK issue an
@@ -2672,7 +2838,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
     const sessionId = randomBytes(32).toString('hex');
     const expiresAt = Math.min(Date.now() + 24 * 60 * 60 * 1000, fallbackUntil);
-    adminSessions.set(sessionId, { expiresAt, authMethod: 'bootstrap_fallback' });
+    adminSessions.set(sessionId, { expiresAt, authMethod: 'bootstrap_fallback', actor: fallbackAdminActor('bootstrap', sessionId) });
 
     res.cookie('gbrain_admin', sessionId, adminCookie(req, expiresAt - Date.now()));
     res.json({ status: 'authenticated' });
@@ -2791,7 +2957,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
     const sessionId = randomBytes(32).toString('hex');
     const sessionExpiresAt = Math.min(Date.now() + 7 * 24 * 60 * 60 * 1000, fallbackUntil);
-    adminSessions.set(sessionId, { expiresAt: sessionExpiresAt, authMethod: 'magic_link_fallback' });
+    adminSessions.set(sessionId, { expiresAt: sessionExpiresAt, authMethod: 'magic_link_fallback', actor: fallbackAdminActor('magic-link', sessionId) });
 
     res.cookie('gbrain_admin', sessionId, adminCookie(req, sessionExpiresAt - Date.now()));
     res.redirect('/admin/');
@@ -2808,12 +2974,14 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         if (session.authMethod !== 'keycloak_bridge') {
           const fallbackUntil = adminFallbackDeadline();
           if (fallbackUntil && now <= fallbackUntil) {
+            res.locals.gbrainAdminActor = session.actor;
             next();
             return;
           }
         } else if (session.backingPortalToken) {
           const backingInspection = portalSessions.inspect(session.backingPortalToken);
           if (backingInspection.state === 'valid' && isAdminEmail(backingInspection.email)) {
+            res.locals.gbrainAdminActor = session.actor;
             next();
             return;
           }
@@ -2839,9 +3007,11 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       adminSessions.set(bridgedSessionId, {
         expiresAt: Date.now() + bridgedTtlMs,
         authMethod: 'keycloak_bridge',
+        actor: portalEmail,
         backingPortalToken,
       });
       res.cookie('gbrain_admin', bridgedSessionId, adminCookie(req, bridgedTtlMs));
+      res.locals.gbrainAdminActor = portalEmail;
       next();
       return;
     }

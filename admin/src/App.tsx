@@ -11,9 +11,10 @@ import { AIReviewPage } from './pages/AIReview';
 import { ConceptReviewPage } from './pages/ConceptReview';
 import { MeetingReviewPage } from './pages/MeetingReview';
 import { ReviewRoundsPage } from './pages/ReviewRounds';
+import { AccessControlPage } from './pages/AccessControl';
 import { api } from './api';
 
-type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'ai-review' | 'concept-review' | 'meeting-review' | 'review-rounds' | 'jobs' | 'activity' | 'source-ingest';
+type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'ai-review' | 'concept-review' | 'meeting-review' | 'review-rounds' | 'jobs' | 'activity' | 'source-ingest' | 'access-control';
 
 const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: string }> = [
   { page: 'dashboard', label: 'Обзор', icon: '▣' },
@@ -26,13 +27,14 @@ const NAV_ITEMS: Array<{ page: Exclude<Page, 'login'>; label: string; icon: stri
   { page: 'review-rounds', label: 'Коллективная проверка', icon: '⚖' },
   { page: 'jobs', label: 'Задания', icon: '⚙' },
   { page: 'activity', label: 'Активность', icon: '◫' },
+  { page: 'access-control', label: 'Доступы', icon: '⌁' },
   { page: 'source-ingest', label: 'Импорт данных', icon: '⇄' },
 ];
 
 function getPage(): Page {
   const hash = window.location.hash.replace(/^#/, '') || 'dashboard';
   const topLevel = hash.split('/')[0];
-  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'ai-review', 'concept-review', 'meeting-review', 'review-rounds', 'jobs', 'activity', 'source-ingest'].includes(topLevel)) return topLevel as Page;
+  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'ai-review', 'concept-review', 'meeting-review', 'review-rounds', 'jobs', 'activity', 'source-ingest', 'access-control'].includes(topLevel)) return topLevel as Page;
   return 'dashboard';
 }
 
@@ -159,10 +161,12 @@ export function App() {
           </button>
         </div>
         <div className="sidebar-nav">
-          {NAV_ITEMS.map(item => <a
+          {NAV_ITEMS.map(item => <button
             key={item.page}
+            type="button"
             className={`nav-item ${page === item.page ? 'active' : ''}`}
             onClick={() => navigate(item.page)}
+            aria-current={page === item.page ? 'page' : undefined}
             title={item.label}
           >
             <span className="nav-icon" aria-hidden="true">{item.icon}</span>
@@ -176,7 +180,7 @@ export function App() {
             {item.page === 'meeting-review' && pendingMeetingCount !== null && pendingMeetingCount > 0 && (
               <span className="nav-badge" aria-label={`${pendingMeetingCount} встреч ожидают проверки`}>{pendingMeetingCount}</span>
             )}
-          </a>)}
+          </button>)}
         </div>
         <div className="sidebar-footer">
           <button
@@ -200,6 +204,7 @@ export function App() {
         {page === 'review-rounds' && <ReviewRoundsPage />}
         {page === 'jobs' && <JobsWatchPage />}
         {page === 'activity' && <ActivityPage />}
+        {page === 'access-control' && <AccessControlPage />}
         {page === 'source-ingest' && <SourceIngestPage />}
       </main>
     </div>

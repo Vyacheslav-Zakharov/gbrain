@@ -89,14 +89,19 @@ body {
 
 .nav-item {
   display: flex;
+  width: 100%;
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
   color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  border-left: 3px solid transparent;
+  text-align: left;
   text-decoration: none;
+  font: inherit;
   font-size: 13px;
   cursor: pointer;
-  border-left: 3px solid transparent;
   transition: all 0.15s;
   white-space: nowrap;
 }
@@ -511,6 +516,39 @@ label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
 .mobile-nav-toggle,
 .mobile-nav-backdrop { display: none; }
 
+/* Access control */
+.access-control-page { max-width: 1600px; margin: 0 auto; }
+.access-control-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.access-control-heading .page-title { margin-bottom: 4px; }
+.access-control-subtitle, .access-control-count, .access-control-personal { color: var(--text-secondary); font-size: 12px; }
+.access-control-tabs { margin-top: 20px; border-bottom: 1px solid #262638; }
+.access-control-tabs .tab { appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; color: var(--text-secondary); }
+.access-control-tabs .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.access-control-alert { margin: 12px 0; padding: 10px 12px; border: 1px solid #35354a; border-radius: 6px; background: var(--bg-secondary); }
+.access-control-alert-error { border-color: rgba(239,68,68,.55); color: #fca5a5; }
+.access-control-alert-success { border-color: rgba(34,197,94,.55); color: #86efac; }
+.access-control-toolbar { display: flex; align-items: center; gap: 16px; margin: 16px 0; }
+.access-control-toolbar input { max-width: 420px; }
+.access-control-table-wrap { overflow-x: auto; border: 1px solid #262638; border-radius: 8px; background: var(--bg-secondary); }
+.access-control-table { min-width: 1180px; }
+.access-control-table th small { display: block; margin-top: 3px; color: var(--text-muted); font: 10px var(--font-mono); text-transform: none; }
+.access-control-table td { vertical-align: middle; }
+.access-control-table code, .access-request-row code { display: block; color: var(--text-secondary); font: 11px var(--font-mono); }
+.access-control-grants { display: flex; align-items: center; justify-content: center; gap: 10px; }
+.access-control-grants label { display: inline-flex; align-items: center; gap: 4px; margin: 0; color: var(--text-secondary); }
+.access-control-grants input { width: auto; accent-color: var(--accent); }
+.access-request-list { display: grid; gap: 12px; }
+.access-request-card { padding: 16px; border: 1px solid #262638; border-radius: 8px; background: var(--bg-secondary); }
+.access-request-header, .access-request-row, .access-request-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.access-request-reason { margin: 12px 0; padding: 10px; border-radius: 6px; background: var(--bg-primary); color: var(--text-secondary); white-space: pre-wrap; }
+.access-request-grants { margin: 12px 0; border-top: 1px solid #262638; }
+.access-request-row { padding: 10px 0; border-bottom: 1px solid #262638; }
+.access-request-actions { justify-content: flex-end; margin-top: 14px; }
+.access-control-admin-info { max-width: 760px; padding: 18px; border: 1px solid #262638; border-radius: 8px; background: var(--bg-secondary); }
+.access-control-admin-info h2 { margin: 0 0 8px; font-size: 16px; }
+.access-control-admin-info p + h2 { margin-top: 20px; }
+.access-control-admin-info p { color: var(--text-secondary); }
+
 @media (max-width: 900px) {
   .source-ingest-layout { grid-template-columns: minmax(0, 1fr) !important; }
   .source-ingest-layout > aside {
@@ -594,4 +632,11 @@ label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
   .activity-run-row > span:nth-child(4) { grid-column: 2; grid-row: 2; }
   .activity-run-row > span:nth-child(5) { grid-column: 2; grid-row: 3; text-align: right; }
   .activity-run-row > span:nth-child(6) { grid-column: 2; grid-row: 1; }
+  .access-control-heading, .access-control-toolbar, .access-request-header, .access-request-row { align-items: stretch; flex-direction: column; }
+  .access-control-heading .btn { align-self: flex-start; }
+  .access-control-tabs { overflow-x: auto; }
+  .access-control-tabs .tab { white-space: nowrap; }
+  .access-control-table { min-width: 1050px; }
+  .access-request-actions { align-items: stretch; flex-direction: column; }
+  .access-request-actions .btn { width: 100%; }
 }
