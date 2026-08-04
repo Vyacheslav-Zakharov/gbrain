@@ -29,10 +29,35 @@ export function adminApiErrorMessage(body: unknown, status: number): string {
   return `HTTP ${status}`;
 }
 
+export function shouldStartPortalAdminRevalidation(body: unknown): boolean {
+  return Boolean(
+    body
+    && typeof body === 'object'
+    && (body as { error?: unknown }).error === 'portal_revalidation_required',
+  );
+}
+
+async function handleAdminUnauthorized(res: Response): Promise<never> {
+  const body = await res.json().catch(() => ({}));
+  if (shouldStartPortalAdminRevalidation(body)) {
+    // The Portal session is still alive; refresh its signed Keycloak identity
+    // through a same-origin, top-level OIDC round trip. The server uses
+    // prompt=none for this exact state and falls back to interactive login only
+    // when the upstream Keycloak SSO session has actually ended.
+    window.location.assign('/login?return_to=%2Fadmin%2F');
+    throw new Error('Portal revalidation required');
+  }
+
+  // Real unauthorized states (missing/revoked/no-role/fallback) must not enter
+  // an automatic redirect loop.
+  window.location.hash = '#login';
+  throw new Error('Unauthorized');
+}
+
 // v0.26.3 trust model (D11 + D12): the admin UI does NOT cache the
-// bootstrap token in browser JS state. On 401, redirect to login —
-// no auto-reauth via saved token, no localStorage/sessionStorage read.
-// The HttpOnly cookie set by /admin/login is the only session credential.
+// bootstrap token in browser JS state. Generic 401 responses still go to the
+// local login screen. Only the server-classified Keycloak freshness boundary
+// starts a top-level prompt=none revalidation; no browser token cache is read.
 async function apiFetch(path: string, options?: RequestInit) {
   const res = await fetchWithTimeout(`${BASE}${path}`, {
     ...options,
@@ -40,9 +65,7 @@ async function apiFetch(path: string, options?: RequestInit) {
     headers: { 'Content-Type': 'application/json', ...options?.headers },
   });
   if (res.status === 401) {
-    // No token cache to retry from. Redirect to login.
-    window.location.hash = '#login';
-    throw new Error('Unauthorized');
+    await handleAdminUnauthorized(res);
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -55,8 +78,7 @@ async function apiFetch(path: string, options?: RequestInit) {
 async function apiFetchText(path: string) {
   const res = await fetchWithTimeout(`${BASE}${path}`, { credentials: 'same-origin' });
   if (res.status === 401) {
-    window.location.hash = '#login';
-    throw new Error('Unauthorized');
+    await handleAdminUnauthorized(res);
   }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();

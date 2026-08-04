@@ -74,6 +74,7 @@ import {
   resolvePortalAdminAuthMode,
   resolvePortalAdminDecision,
 } from '../core/portal-admin-rbac.ts';
+import { portalAdminAuthFailurePayload } from '../core/portal-admin-http.ts';
 import {
   DEFAULT_KEYCLOAK_CALLBACK_PATH,
   DEFAULT_KEYCLOAK_CLIENT_ID,
@@ -740,6 +741,14 @@ const resolveAdminFromPortalInspection = (inspection: PortalSessionInspection) =
   }
   return { ...decision, email };
 };
+const wasPortalAdminAuthorized = (inspection: PortalSessionInspection): boolean => (
+  resolvePortalAdminDecision(adminAuthMode, {
+    authMethod: inspection.authMethod,
+    authorizationVersion: inspection.authorizationVersion,
+    keycloakRole: inspection.isAdmin === true,
+    emailAllowlisted: isAdminEmail(inspection.email),
+  }).authorized
+);
 
 const userPermissionsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
 const accessRequestsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'access_requests.json');
@@ -3034,7 +3043,13 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         Math.max(0, (portalInspection.expiresAt || 0) - Date.now()),
         Math.max(0, freshnessDeadline - Date.now()),
       );
-      if (bridgedTtlMs <= 0) return res.status(401).json({ error: 'Admin authentication required' });
+      if (bridgedTtlMs <= 0) {
+        const boundaryInspection = portalSessions.inspect(backingPortalToken);
+        return res.status(401).json(portalAdminAuthFailurePayload(
+          boundaryInspection,
+          wasPortalAdminAuthorized(boundaryInspection),
+        ));
+      }
       adminSessions.set(bridgedSessionId, {
         expiresAt: Date.now() + bridgedTtlMs,
         authMethod: 'keycloak_bridge',
@@ -3047,7 +3062,10 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       return;
     }
 
-    res.status(401).json({ error: 'Admin authentication required' });
+    res.status(401).json(portalAdminAuthFailurePayload(
+      portalInspection,
+      wasPortalAdminAuthorized(portalInspection),
+    ));
   }
 
   function requireAdminSameOrigin(req: express.Request, res: express.Response, next: express.NextFunction) {
