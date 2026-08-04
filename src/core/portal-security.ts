@@ -1,17 +1,22 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { PORTAL_ADMIN_AUTHORIZATION_VERSION } from './portal-admin-rbac.ts';
 
 export type PortalSessionState = 'valid' | 'revalidation_required' | 'expired' | 'revoked';
 export type PortalAuthMethod = 'keycloak' | 'fallback';
+export const PORTAL_AUTHORIZATION_VERSION = PORTAL_ADMIN_AUTHORIZATION_VERSION;
 
 export interface PortalSessionIdentity {
   email: string;
   sub: string;
   authMethod: PortalAuthMethod;
+  isAdmin: boolean;
 }
 
-export interface PortalSessionRecord extends PortalSessionIdentity {
+export interface PortalSessionRecord extends Omit<PortalSessionIdentity, 'isAdmin'> {
+  isAdmin?: boolean;
+  authorizationVersion?: number;
   createdAt: number;
   expiresAt: number;
   lastValidatedAt: number;
@@ -23,6 +28,8 @@ export interface PortalSessionInspection {
   email?: string;
   sub?: string;
   authMethod?: PortalAuthMethod;
+  isAdmin?: boolean;
+  authorizationVersion?: number;
   createdAt?: number;
   expiresAt?: number;
   lastValidatedAt?: number;
@@ -60,17 +67,20 @@ export class PortalSessionStore {
     // String form remains for local tests/backward compatibility only. Production
     // Keycloak callers always supply the stable subject and auth method.
     const identity: PortalSessionIdentity = typeof identityRaw === 'string'
-      ? { email: identityRaw, sub: `legacy:${identityRaw.trim().toLowerCase()}`, authMethod: 'fallback' }
+      ? { email: identityRaw, sub: `legacy:${identityRaw.trim().toLowerCase()}`, authMethod: 'fallback', isAdmin: false }
       : identityRaw;
     const email = identity.email.trim().toLowerCase();
     const sub = identity.sub.trim();
     if (!/^[^@\s]+@avers\.kz$/.test(email) || !sub) throw new Error('invalid_portal_session_identity');
     if (identity.authMethod !== 'keycloak' && identity.authMethod !== 'fallback') throw new Error('invalid_portal_auth_method');
+    if (typeof identity.isAdmin !== 'boolean') throw new Error('invalid_portal_admin_projection');
     const token = randomBytes(32).toString('hex');
     this.sessions[hashPortalSessionToken(token)] = {
       email,
       sub,
       authMethod: identity.authMethod,
+      isAdmin: identity.authMethod === 'keycloak' && identity.isAdmin,
+      authorizationVersion: PORTAL_AUTHORIZATION_VERSION,
       createdAt: now,
       expiresAt: now + this.ttlMs,
       lastValidatedAt: now,
@@ -84,10 +94,17 @@ export class PortalSessionStore {
     if (!TOKEN_RE.test(token)) return { state: 'revoked' };
     const record = this.sessions[hashPortalSessionToken(token)];
     if (!record || record.revokedAt) return { state: 'revoked' };
+    const authorizationVersion = record.authorizationVersion === PORTAL_AUTHORIZATION_VERSION
+      ? PORTAL_AUTHORIZATION_VERSION
+      : 0;
     const result = {
       email: record.email,
       sub: record.sub,
       authMethod: record.authMethod,
+      isAdmin: record.authMethod === 'keycloak'
+        && authorizationVersion === PORTAL_AUTHORIZATION_VERSION
+        && record.isAdmin === true,
+      authorizationVersion,
       createdAt: record.createdAt,
       expiresAt: record.expiresAt,
       lastValidatedAt: record.lastValidatedAt,
@@ -102,13 +119,15 @@ export class PortalSessionStore {
     return inspected.state === 'valid' ? inspected.email || null : null;
   }
 
-  revalidate(tokenRaw: unknown, identityRaw: Pick<PortalSessionIdentity, 'email' | 'sub'>, now = Date.now()): boolean {
+  revalidate(tokenRaw: unknown, identityRaw: Pick<PortalSessionIdentity, 'email' | 'sub' | 'isAdmin'>, now = Date.now()): boolean {
     const token = typeof tokenRaw === 'string' ? tokenRaw : '';
     if (!TOKEN_RE.test(token)) return false;
     const record = this.sessions[hashPortalSessionToken(token)];
     if (!record || record.authMethod !== 'keycloak' || record.revokedAt || record.expiresAt <= now) return false;
     const email = identityRaw.email.trim().toLowerCase();
-    if (record.email !== email || record.sub !== identityRaw.sub.trim()) return false;
+    if (record.email !== email || record.sub !== identityRaw.sub.trim() || typeof identityRaw.isAdmin !== 'boolean') return false;
+    record.isAdmin = identityRaw.isAdmin;
+    record.authorizationVersion = PORTAL_AUTHORIZATION_VERSION;
     record.lastValidatedAt = now;
     this.persist();
     return true;

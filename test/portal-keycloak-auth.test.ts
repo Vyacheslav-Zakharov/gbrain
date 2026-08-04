@@ -32,7 +32,7 @@ describe('Portal Keycloak identity policy', () => {
       issuer: ISSUER,
       clientId: CLIENT_ID,
       nonce: 'nonce-123',
-    })).toEqual({ sub: 'user-123', email: 'alice-example@avers.kz' });
+    })).toEqual({ sub: 'user-123', email: 'alice-example@avers.kz', isAdmin: false });
 
     for (const overrides of [
       { iss: 'https://evil.example/realms/avers' },
@@ -50,6 +50,34 @@ describe('Portal Keycloak identity policy', () => {
         nonce: 'nonce-123',
       })).toThrow();
     }
+  });
+
+  test('derives Admin only from the exact signed client role claim', () => {
+    const policy = { issuer: ISSUER, clientId: CLIENT_ID, nonce: 'nonce-123' };
+    expect(validatePortalIdentityClaims(baseClaims({
+      resource_access: { [CLIENT_ID]: { roles: ['gbrain-admin'] } },
+    }), policy).isAdmin).toBeTrue();
+
+    for (const claims of [
+      { realm_access: { roles: ['gbrain-admin'] } },
+      { resource_access: { 'other-client': { roles: ['gbrain-admin'] } } },
+      { resource_access: { [CLIENT_ID]: { roles: 'gbrain-admin' } } },
+      { resource_access: { [CLIENT_ID]: { roles: ['GBrain-Admin'] } } },
+      { resource_access: { [CLIENT_ID]: { roles: ['gbrain-admin '] } } },
+      { resource_access: { [CLIENT_ID]: null } },
+      { resource_access: { [CLIENT_ID]: { roles: ['gbrain-admin', 7] } } },
+    ]) {
+      expect(validatePortalIdentityClaims(baseClaims(claims), policy).isAdmin).toBeFalse();
+    }
+
+    expect(validatePortalIdentityClaims(baseClaims({
+      aud: 'other-client',
+      azp: 'other-client',
+      resource_access: {
+        'other-client': { roles: ['gbrain-admin'] },
+        [CLIENT_ID]: { roles: ['gbrain-admin'] },
+      },
+    }), { ...policy, clientId: 'other-client' }).isAdmin).toBeFalse();
   });
 
   test('binds state, nonce and PKCE S256 in single-use in-memory transactions', () => {
@@ -86,7 +114,9 @@ describe('Portal Keycloak identity policy', () => {
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const jwk = await exportJWK(publicKey);
     jwk.kid = 'test-key';
-    const idToken = await new SignJWT(baseClaims())
+    const idToken = await new SignJWT(baseClaims({
+      resource_access: { [CLIENT_ID]: { roles: ['gbrain-admin'] } },
+    }))
       .setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
       .setIssuedAt()
       .setExpirationTime('5m')
@@ -117,7 +147,7 @@ describe('Portal Keycloak identity policy', () => {
       fetchFn,
     });
     await expect(client.verifyIdToken(idToken, 'nonce-123')).resolves.toEqual({
-      sub: 'user-123', email: 'alice-example@avers.kz',
+      sub: 'user-123', email: 'alice-example@avers.kz', isAdmin: true,
     });
     await expect(client.verifyIdToken(idToken, 'wrong')).rejects.toThrow();
 

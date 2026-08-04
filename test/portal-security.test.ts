@@ -38,14 +38,16 @@ describe('PortalSessionStore', () => {
   test('exposes valid, revalidation_required, expired and revoked without sliding expiry', () => {
     const root = fixture();
     const store = new PortalSessionStore(join(root, 'sessions.json'), 8 * 60 * 60 * 1_000, 5 * 60 * 1_000);
-    const token = store.issue({ email: 'user@avers.kz', sub: 'keycloak-subject', authMethod: 'keycloak' }, 100);
-    expect(store.inspect(token, 200)).toMatchObject({ state: 'valid', email: 'user@avers.kz', lastValidatedAt: 100 });
+    const token = store.issue({ email: 'user@avers.kz', sub: 'keycloak-subject', authMethod: 'keycloak', isAdmin: false }, 100);
+    expect(store.inspect(token, 200)).toMatchObject({ state: 'valid', email: 'user@avers.kz', lastValidatedAt: 100, isAdmin: false, authorizationVersion: 1 });
     expect(store.inspect(token, 5 * 60 * 1_000 + 101)).toMatchObject({ state: 'revalidation_required' });
-    expect(store.revalidate(token, { email: 'user@avers.kz', sub: 'keycloak-subject' }, 5 * 60 * 1_000 + 102)).toBeTrue();
-    expect(store.inspect(token, 5 * 60 * 1_000 + 103)).toMatchObject({ state: 'valid' });
+    expect(store.revalidate(token, { email: 'user@avers.kz', sub: 'keycloak-subject', isAdmin: true }, 5 * 60 * 1_000 + 102)).toBeTrue();
+    expect(store.inspect(token, 5 * 60 * 1_000 + 103)).toMatchObject({ state: 'valid', isAdmin: true, authorizationVersion: 1 });
+    expect(store.revalidate(token, { email: 'user@avers.kz', sub: 'keycloak-subject', isAdmin: false }, 5 * 60 * 1_000 + 104)).toBeTrue();
+    expect(store.inspect(token, 5 * 60 * 1_000 + 105)).toMatchObject({ state: 'valid', isAdmin: false, authorizationVersion: 1 });
     expect(store.inspect(token, 8 * 60 * 60 * 1_000 + 101)).toMatchObject({ state: 'expired' });
 
-    const revoked = store.issue({ email: 'user@avers.kz', sub: 'keycloak-subject', authMethod: 'keycloak' }, 200);
+    const revoked = store.issue({ email: 'user@avers.kz', sub: 'keycloak-subject', authMethod: 'keycloak', isAdmin: false }, 200);
     expect(store.revoke(revoked)).toBeTrue();
     expect(store.inspect(revoked, 201)).toMatchObject({ state: 'revoked' });
     expect(store.inspect('0'.repeat(64), 201)).toMatchObject({ state: 'revoked' });
@@ -55,19 +57,40 @@ describe('PortalSessionStore', () => {
     const root = fixture();
     const file = join(root, 'sessions.json');
     const store = new PortalSessionStore(file);
-    store.issue({ email: 'user@avers.kz', sub: 'keycloak-subject', authMethod: 'keycloak' }, 100);
+    store.issue({ email: 'user@avers.kz', sub: 'keycloak-subject', authMethod: 'keycloak', isAdmin: false }, 100);
     const persisted = await Bun.file(file).text();
     expect(persisted).not.toContain('access_token');
     expect(persisted).not.toContain('refresh_token');
     expect(persisted).toContain('keycloak-subject');
   });
 
+  test('old session records stay Portal-readable but cannot inherit Admin before revalidation', () => {
+    const root = fixture();
+    const file = join(root, 'sessions.json');
+    const token = 'a'.repeat(64);
+    const now = Date.now();
+    writeFileSync(file, JSON.stringify({
+      [hashPortalSessionToken(token)]: {
+        email: 'user@avers.kz', sub: 'keycloak-subject', authMethod: 'keycloak',
+        createdAt: now - 100, expiresAt: now + 10_000, lastValidatedAt: now - 100,
+      },
+    }));
+    const store = new PortalSessionStore(file, 20_000, 5_000);
+    expect(store.inspect(token, now)).toMatchObject({
+      state: 'valid', isAdmin: false, authorizationVersion: 0,
+    });
+    expect(store.revalidate(token, { email: 'user@avers.kz', sub: 'keycloak-subject', isAdmin: true }, now + 1)).toBeTrue();
+    expect(store.inspect(token, now + 2)).toMatchObject({
+      state: 'valid', isAdmin: true, authorizationVersion: 1,
+    });
+  });
+
   test('prunes expired and revoked records from persistent storage', async () => {
     const root = fixture();
     const file = join(root, 'sessions.json');
     const store = new PortalSessionStore(file, 50, 10);
-    store.issue({ email: 'alice-example@avers.kz', sub: 'person-1', authMethod: 'keycloak' }, 100);
-    const revoked = store.issue({ email: 'bob-example@avers.kz', sub: 'person-2', authMethod: 'keycloak' }, 100);
+    store.issue({ email: 'alice-example@avers.kz', sub: 'person-1', authMethod: 'keycloak', isAdmin: false }, 100);
+    const revoked = store.issue({ email: 'bob-example@avers.kz', sub: 'person-2', authMethod: 'keycloak', isAdmin: false }, 100);
     expect(store.revoke(revoked, 110)).toBeTrue();
     expect(store.prune(151)).toBe(2);
     const persisted = await Bun.file(file).text();

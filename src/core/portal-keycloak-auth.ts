@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createLocalJWKSet, jwtVerify, type JWTPayload, type JSONWebKeySet } from 'jose';
+import { PORTAL_ADMIN_CLIENT_ROLE } from './portal-admin-rbac.ts';
 
 export const DEFAULT_KEYCLOAK_ISSUER = 'https://auth.avb.kz/realms/avers';
 export const DEFAULT_KEYCLOAK_CLIENT_ID = 'gbrain-portal';
@@ -8,6 +9,7 @@ export const DEFAULT_KEYCLOAK_CALLBACK_PATH = '/auth/keycloak/callback';
 export interface PortalOidcIdentity {
   sub: string;
   email: string;
+  isAdmin: boolean;
 }
 
 export interface PortalOidcPolicy {
@@ -126,7 +128,18 @@ export function validatePortalIdentityClaims(payload: JWTPayload, policy: Portal
   if (!Number.isFinite(payload.exp)) throw new Error('oidc_missing_exp');
   if (payload.email_verified !== true) throw new Error('oidc_email_not_verified');
   if (!/^[^@\s]+@avers\.kz$/.test(email)) throw new Error('oidc_email_not_allowed');
-  return { sub, email };
+  const resourceAccess = payload.resource_access;
+  const clientAccess = policy.clientId === DEFAULT_KEYCLOAK_CLIENT_ID
+    && resourceAccess && typeof resourceAccess === 'object' && !Array.isArray(resourceAccess)
+    ? (resourceAccess as Record<string, unknown>)[DEFAULT_KEYCLOAK_CLIENT_ID]
+    : undefined;
+  const rolesRaw = clientAccess && typeof clientAccess === 'object' && !Array.isArray(clientAccess)
+    ? (clientAccess as Record<string, unknown>).roles
+    : undefined;
+  const roles = Array.isArray(rolesRaw) && rolesRaw.every((role) => typeof role === 'string')
+    ? rolesRaw as string[]
+    : [];
+  return { sub, email, isAdmin: roles.includes(PORTAL_ADMIN_CLIENT_ROLE) };
 }
 
 export function parseAdminFallbackDeadline(value: string | undefined, now = Date.now()): number | null {

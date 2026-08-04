@@ -71,6 +71,10 @@ import {
   type PortalSessionInspection,
 } from '../core/portal-security.ts';
 import {
+  resolvePortalAdminAuthMode,
+  resolvePortalAdminDecision,
+} from '../core/portal-admin-rbac.ts';
+import {
   DEFAULT_KEYCLOAK_CALLBACK_PATH,
   DEFAULT_KEYCLOAK_CLIENT_ID,
   DEFAULT_KEYCLOAK_ISSUER,
@@ -691,7 +695,7 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   const issuePortalSession = (
     req: express.Request,
     res: express.Response,
-    identity: { email: string; sub: string },
+    identity: { email: string; sub: string; isAdmin: boolean },
   ): void => {
     const oldToken = portalSessionToken(req);
     if (oldToken) portalSessions.revoke(oldToken);
@@ -711,6 +715,31 @@ function isAdminEmail(email: string | undefined): boolean {
   if (!email) return false;
   return adminEmails.has(String(email).toLowerCase().trim());
 }
+const adminAuthMode = resolvePortalAdminAuthMode(process.env.GBRAIN_ADMIN_AUTH_MODE);
+const loggedAdminRbacMismatches = new Set<string>();
+const resolveAdminFromPortalInspection = (inspection: PortalSessionInspection) => {
+  const email = inspection.state === 'valid' ? inspection.email || '' : '';
+  const decision = resolvePortalAdminDecision(adminAuthMode, {
+    authMethod: inspection.authMethod,
+    authorizationVersion: inspection.authorizationVersion,
+    keycloakRole: inspection.isAdmin === true,
+    emailAllowlisted: isAdminEmail(email),
+  });
+  if (email && decision.mismatch) {
+    const mismatchKey = `${email}:${decision.emailAdmin}:${decision.keycloakAdmin}`;
+    if (!loggedAdminRbacMismatches.has(mismatchKey)) {
+      loggedAdminRbacMismatches.add(mismatchKey);
+      console.info('[Admin RBAC]', JSON.stringify({
+        event: 'authority_mismatch',
+        mode: adminAuthMode,
+        actor: email,
+        email_admin: decision.emailAdmin,
+        keycloak_admin: decision.keycloakAdmin,
+      }));
+    }
+  }
+  return { ...decision, email };
+};
 
 const userPermissionsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
 const accessRequestsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'access_requests.json');
@@ -1717,7 +1746,7 @@ app.get('/portal/api/session', async (req: any, res: any) => {
   const writeSources = configured ? await getWriteSourceIdsForUser(normalized).catch(() => []) : [];
   res.json({
     email: userEmail,
-    isAdmin: adminEmails.has(normalized),
+    isAdmin: resolveAdminFromPortalInspection(inspectPortalSession(req)).authorized,
     readOnly: true,
     canReview: configured && writeSources.length > 0,
   });
@@ -2980,8 +3009,9 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
           }
         } else if (session.backingPortalToken) {
           const backingInspection = portalSessions.inspect(session.backingPortalToken);
-          if (backingInspection.state === 'valid' && isAdminEmail(backingInspection.email)) {
-            res.locals.gbrainAdminActor = session.actor;
+          const adminDecision = resolveAdminFromPortalInspection(backingInspection);
+          if (backingInspection.state === 'valid' && adminDecision.authorized) {
+            res.locals.gbrainAdminActor = adminDecision.email;
             next();
             return;
           }
@@ -2995,8 +3025,9 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     // The legacy unsigned session_user cookie is intentionally ignored.
     const backingPortalToken = portalSessionToken(req);
     const portalInspection = portalSessions.inspect(backingPortalToken);
-    const portalEmail = portalInspection.state === 'valid' ? portalInspection.email || '' : '';
-    if (isAdminEmail(portalEmail)) {
+    const adminDecision = resolveAdminFromPortalInspection(portalInspection);
+    const portalEmail = adminDecision.email;
+    if (portalInspection.state === 'valid' && adminDecision.authorized) {
       const bridgedSessionId = randomBytes(32).toString('hex');
       const freshnessDeadline = (portalInspection.lastValidatedAt || 0) + portalRevalidationMs;
       const bridgedTtlMs = Math.min(
