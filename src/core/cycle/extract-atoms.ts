@@ -198,8 +198,10 @@ export function atomSourcePolicyViolation(
   atom: ExtractedAtom,
   source: string,
 ): AtomSourcePolicyViolation | null {
-  if (!atom.source_quote) return 'source_quote_missing';
-  if (atom.source_quote.length > 200) return 'source_quote_too_long';
+  if (!atom.source_quote || atom.source_quote.trim().length === 0) {
+    return 'source_quote_missing';
+  }
+  if (Array.from(atom.source_quote).length > 200) return 'source_quote_too_long';
   if (!source.includes(atom.source_quote)) {
     return 'source_quote_not_verbatim';
   }
@@ -567,13 +569,14 @@ export async function runPhaseExtractAtoms(
     }
 
     const originLabel = item.kind === 'transcript' ? item.filePath : item.slug;
+    const sourceExcerpt = item.content.slice(0, 50_000);
     try {
       const result = await chat({
         system: EXTRACT_PROMPT,
         messages: [
           {
             role: 'user',
-            content: `Source: ${originLabel}\n\n---\n\n${item.content.slice(0, 50_000)}`,
+            content: `Source: ${originLabel}\n\n---\n\n${sourceExcerpt}`,
           },
         ],
         maxTokens: 2000,
@@ -590,7 +593,7 @@ export async function runPhaseExtractAtoms(
       const parsedAtoms = parseAtomsResponse(result.text);
       const policyViolations = new Map<AtomSourcePolicyViolation, number>();
       const atoms = parsedAtoms.filter((atom) => {
-        const violation = atomSourcePolicyViolation(atom, item.content);
+        const violation = atomSourcePolicyViolation(atom, sourceExcerpt);
         if (!violation) return true;
         atomsPolicyRejected++;
         policyViolations.set(violation, (policyViolations.get(violation) ?? 0) + 1);

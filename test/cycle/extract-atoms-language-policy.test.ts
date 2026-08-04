@@ -144,6 +144,15 @@ describe('extract_atoms source-language and quotation policy', () => {
     });
     expect(atomSourcePolicyViolation(missing, russianSource)).toBe('source_quote_missing');
 
+    const whitespaceOnly = atom({
+      title: 'Подготовка отопления лаборатории',
+      atom_type: 'insight',
+      body: 'Отопление лаборатории следует подготовить до холодов.',
+      lesson: 'Инфраструктурные работы нужно планировать заранее.',
+      source_quote: ' \n\t ',
+    });
+    expect(atomSourcePolicyViolation(whitespaceOnly, `${russianSource} \n\t `)).toBe('source_quote_missing');
+
     const translated = atom({
       title: 'Подготовка отопления лаборатории',
       atom_type: 'insight',
@@ -163,7 +172,7 @@ describe('extract_atoms source-language and quotation policy', () => {
     expect(atomSourcePolicyViolation(punctuationChanged, russianSource)).toBe('source_quote_not_verbatim');
   });
 
-  test('rejects a quote longer than the 200-character prompt contract', () => {
+  test('rejects quotes over 200 Unicode characters without splitting astral characters', () => {
     const quote = 'A'.repeat(201);
     expect(atomSourcePolicyViolation(atom({
       title: 'A sufficiently long source quotation',
@@ -172,6 +181,24 @@ describe('extract_atoms source-language and quotation policy', () => {
       lesson: 'Keep provenance excerpts concise.',
       source_quote: quote,
     }), `${quote} trailing source context`)).toBe('source_quote_too_long');
+
+    const boundary = '🔥'.repeat(200);
+    expect(atomSourcePolicyViolation(atom({
+      title: 'Technical status symbols',
+      atom_type: 'quote',
+      body: 'The source consists of technical status symbols.',
+      lesson: 'Count Unicode code points rather than UTF-16 code units.',
+      source_quote: boundary,
+    }), boundary)).toBeNull();
+
+    const overBoundary = '🔥'.repeat(201);
+    expect(atomSourcePolicyViolation(atom({
+      title: 'Too many technical status symbols',
+      atom_type: 'quote',
+      body: 'The source exceeds the quotation limit.',
+      lesson: 'Enforce the declared two-hundred-character maximum.',
+      source_quote: overBoundary,
+    }), overBoundary)).toBe('source_quote_too_long');
   });
 
   test('prompt pins the language rule and valid Cyrillic titles produce a non-empty stable slug', async () => {
@@ -229,6 +256,44 @@ describe('extract_atoms source-language and quotation policy', () => {
     expect(rows[0].source_quote).toBe('команда решила подготовить отопление лаборатории до наступления холодов');
     expect(rows[0].lesson).toBe('Инфраструктурные работы следует завершать до наступления холодов.');
     expect(rows[0].extracted_by).toBe('extract_atoms-source-language-v1');
+  });
+
+  test('validates quotes against the exact 50K source excerpt sent to the model', async () => {
+    const visibleSource = 'The visible source discusses preventive heating maintenance. '.repeat(1_000);
+    const hiddenQuote = 'This sentence exists only after the model-visible source excerpt.';
+    const fullSource = `${visibleSource}${hiddenQuote}`;
+    expect(visibleSource.length).toBeGreaterThan(50_000);
+
+    const response = JSON.stringify([{
+      title: 'Hidden source claim',
+      atom_type: 'insight',
+      body: 'A claim from outside the model-visible excerpt must not be accepted.',
+      lesson: 'Validate provenance against the exact prompt payload.',
+      source_quote: hiddenQuote,
+    }]);
+    const chat = async (): Promise<ChatResult> => ({
+      text: response,
+      blocks: [{ type: 'text', text: response }],
+      stopReason: 'end',
+      usage: { input_tokens: 100, output_tokens: 100, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-haiku-4-5',
+      providerId: 'anthropic',
+    });
+
+    const result = await runPhaseExtractAtoms(engine, {
+      sourceId: 'default',
+      _transcripts: [{ filePath: '/long-source.txt', content: fullSource, contentHash: 'prompt-excerpt-boundary' }],
+      _pages: [],
+      _chat: chat as typeof import('../../src/core/ai/gateway.ts').chat,
+    });
+
+    expect(result.status).toBe('warn');
+    expect(result.details?.atoms_extracted).toBe(0);
+    expect(result.details?.atoms_policy_rejected).toBe(1);
+    const rows = await engine.executeRaw<{ count: number }>(
+      `SELECT COUNT(*)::int AS count FROM pages WHERE type = 'atom'`,
+    );
+    expect(rows[0].count).toBe(0);
   });
 
   test('localized titles that retain the same ASCII fragment get distinct slugs', async () => {
