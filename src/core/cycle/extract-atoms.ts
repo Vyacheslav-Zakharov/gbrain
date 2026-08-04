@@ -44,6 +44,7 @@
 // sourceId arg — atoms always wrote to 'default' regardless of source,
 // which made the NOT EXISTS guard ineffective on federated brains.
 
+import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import type { PhaseResult } from '../cycle.ts';
 import type { GBrainConfig } from '../config.ts';
@@ -112,7 +113,7 @@ export interface ExtractAtomsOpts {
   progress?: ProgressReporter;
 }
 
-interface ExtractedAtom {
+export interface ExtractedAtom {
   title: string;
   atom_type: typeof ATOM_TYPES[number];
   body: string;
@@ -139,9 +140,82 @@ source_quote (verbatim ≤200 chars), lesson (one sentence), virality_score
 (0-100), emotional_register (one of: shocking, inspiring, funny, sobering,
 practical, controversial)}.
 
+LANGUAGE AND QUOTATION POLICY (mandatory):
+  - Detect the source's primary natural language from the source content.
+  - title, body, and lesson MUST use the source's primary natural language.
+    Do not default to English just because these instructions are in English.
+  - concepts and enum values remain technical identifiers in the formats above.
+  - source_quote MUST be copied character-for-character as one contiguous
+    substring of the source, including original case, punctuation, and spelling.
+  - Never translate, paraphrase, summarize, autocorrect, or restyle source_quote.
+  - If no suitable verbatim quote of at most 200 characters exists, omit the atom.
+
 atom_type MUST be one of: ${ATOM_TYPES.join(', ')}.
 
 Output ONLY the JSON array, no prose.`;
+
+type DominantScript = 'cyrillic' | 'latin' | 'unknown';
+export type AtomSourcePolicyViolation =
+  | 'generated_language_mismatch'
+  | 'source_quote_missing'
+  | 'source_quote_too_long'
+  | 'source_quote_not_verbatim';
+
+function dominantScript(text: string, minLetters = 12): DominantScript {
+  const cyrillic = text.match(/\p{Script=Cyrillic}/gu)?.length ?? 0;
+  const latin = text.match(/\p{Script=Latin}/gu)?.length ?? 0;
+  const letters = cyrillic + latin;
+  if (letters < minLetters) return 'unknown';
+  const dominantFloor = Math.min(8, minLetters);
+  if (cyrillic >= dominantFloor && cyrillic >= latin * 2) return 'cyrillic';
+  if (latin >= dominantFloor && latin >= cyrillic * 2) return 'latin';
+  return 'unknown';
+}
+
+const LANGUAGE_NEUTRAL_TECHNICAL_IDENTIFIERS = new Set([
+  'AI', 'API', 'BI', 'CD', 'CI', 'CPU', 'CRM', 'DB', 'ERP', 'GPU', 'HTTP',
+  'HTTPS', 'IT', 'KPI', 'LLM', 'ML', 'OKR', 'QA', 'SLA', 'SQL', 'UI', 'UX',
+]);
+
+function generatedFieldScript(text: string): DominantScript {
+  // A small closed set of common technical identifiers is language-neutral.
+  // Do not exempt arbitrary uppercase words: PLAN/UPDATE are natural-language
+  // content and must still be rejected for a Cyrillic source.
+  const withoutTechnicalIdentifiers = text.replace(
+    /\b[A-Z][A-Z0-9._:/+-]{1,}\b/g,
+    (token) => LANGUAGE_NEUTRAL_TECHNICAL_IDENTIFIERS.has(token) ? ' ' : token,
+  );
+  return dominantScript(withoutTechnicalIdentifiers, 3);
+}
+
+/**
+ * Deterministic enforcement for the parts of the LLM contract that can be
+ * verified without another model call. Clearly Cyrillic-vs-Latin mismatches
+ * are rejected; mixed-script/short sources stay prompt-governed to avoid
+ * false positives on multilingual material. Quotes are always exact-match.
+ */
+export function atomSourcePolicyViolation(
+  atom: ExtractedAtom,
+  source: string,
+): AtomSourcePolicyViolation | null {
+  if (!atom.source_quote) return 'source_quote_missing';
+  if (atom.source_quote.length > 200) return 'source_quote_too_long';
+  if (!source.includes(atom.source_quote)) {
+    return 'source_quote_not_verbatim';
+  }
+
+  const quoteScript = generatedFieldScript(atom.source_quote);
+  const sourceScript = quoteScript === 'unknown' ? dominantScript(source) : quoteScript;
+  if (sourceScript === 'unknown') return null;
+  const generatedFields = [atom.title, atom.body, ...(atom.lesson ? [atom.lesson] : [])];
+  for (const field of generatedFields) {
+    const fieldScript = generatedFieldScript(field);
+    if (fieldScript !== 'unknown' && fieldScript !== sourceScript) {
+      return 'generated_language_mismatch';
+    }
+  }
+  return null;
+}
 
 interface DiscoveredPage {
   slug: string;
@@ -441,6 +515,7 @@ export async function runPhaseExtractAtoms(
         pages_processed: 0,
         pages_total: 0,
         duplicates_skipped: 0,
+        atoms_policy_rejected: 0,
         failures: [],
         estimated_spend_usd: 0,
         budget_usd: DEFAULT_BUDGET_USD,
@@ -455,6 +530,7 @@ export async function runPhaseExtractAtoms(
   let pagesProcessed = 0;
   let transcriptsSkipped = 0;
   let pagesSkipped = 0;
+  let atomsPolicyRejected = 0;
   const failures: Array<{ source: string; error: string }> = [];
   let estimatedSpendUsd = 0;
   const budgetCap = DEFAULT_BUDGET_USD;
@@ -511,7 +587,24 @@ export async function runPhaseExtractAtoms(
       estimatedSpendUsd +=
         (result.usage.input_tokens * 0.8 + result.usage.output_tokens * 4.0) / 1_000_000;
 
-      const atoms = parseAtomsResponse(result.text);
+      const parsedAtoms = parseAtomsResponse(result.text);
+      const policyViolations = new Map<AtomSourcePolicyViolation, number>();
+      const atoms = parsedAtoms.filter((atom) => {
+        const violation = atomSourcePolicyViolation(atom, item.content);
+        if (!violation) return true;
+        atomsPolicyRejected++;
+        policyViolations.set(violation, (policyViolations.get(violation) ?? 0) + 1);
+        return false;
+      });
+      if (parsedAtoms.length > 0 && atoms.length === 0) {
+        const reasons = [...policyViolations.entries()]
+          .map(([reason, count]) => `${reason}:${count}`)
+          .join(',');
+        failures.push({
+          source: originLabel,
+          error: `all atoms rejected by source policy (${reasons})`,
+        });
+      }
       if (atoms.length === 0) {
         if (item.kind === 'transcript') transcriptsProcessed++;
         else pagesProcessed++;
@@ -545,7 +638,7 @@ export async function runPhaseExtractAtoms(
                 ...(atom.virality_score !== undefined && { virality_score: atom.virality_score }),
                 ...(atom.emotional_register && { emotional_register: atom.emotional_register }),
                 extracted_at: new Date().toISOString(),
-                extracted_by: 'extract_atoms-v0.41.2.1',
+                extracted_by: 'extract_atoms-source-language-v1',
               },
               timeline: '',
             },
@@ -622,6 +715,7 @@ export async function runPhaseExtractAtoms(
       pages_total: pages.length,
       pages_skipped_budget: pagesSkipped,
       duplicates_skipped: duplicatesSkipped,
+      atoms_policy_rejected: atomsPolicyRejected,
       failures,
       estimated_spend_usd: estimatedSpendUsd,
       budget_usd: budgetCap,
@@ -702,11 +796,15 @@ function todayDate(): string {
 }
 
 function slugify(s: string): string {
-  return s
+  const ascii = s
     .toLowerCase()
     .replace(/[^a-z0-9\s-]/g, '')
     .trim()
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
     .slice(0, 60);
+  const digest = createHash('sha256').update(s).digest('hex').slice(0, 12);
+  const containsNonAscii = /[^\u0000-\u007f]/.test(s);
+  if (ascii && !containsNonAscii) return ascii;
+  return ascii ? `${ascii}-${digest}` : `atom-${digest}`;
 }

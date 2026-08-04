@@ -35,19 +35,28 @@ beforeEach(async () => {
 });
 
 function stubChat(text: string, opts: { input_tokens?: number; output_tokens?: number } = {}): (o: ChatOpts) => Promise<ChatResult> {
-  return async (_o: ChatOpts) => ({
-    text,
-    blocks: [{ type: 'text', text }],
-    stopReason: 'end',
-    usage: {
-      input_tokens: opts.input_tokens ?? 500,
-      output_tokens: opts.output_tokens ?? 200,
-      cache_read_tokens: 0,
-      cache_creation_tokens: 0,
-    },
-    model: 'anthropic:claude-haiku-4-5',
-    providerId: 'anthropic',
-  });
+  return async (o: ChatOpts) => {
+    const prompt = typeof o.messages.at(-1)?.content === 'string' ? o.messages.at(-1)!.content as string : '';
+    const source = prompt.split('\n\n---\n\n')[1] ?? '';
+    const atoms = JSON.parse(text) as Array<Record<string, unknown>>;
+    const responseText = JSON.stringify(atoms.map((atom) => ({
+      ...atom,
+      source_quote: atom.source_quote ?? source.slice(0, 80),
+    })));
+    return {
+      text: responseText,
+      blocks: [{ type: 'text', text: responseText }],
+      stopReason: 'end',
+      usage: {
+        input_tokens: opts.input_tokens ?? 500,
+        output_tokens: opts.output_tokens ?? 200,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+      },
+      model: 'anthropic:claude-haiku-4-5',
+      providerId: 'anthropic',
+    };
+  };
 }
 
 describe('v0.41 T5: parseAtomsResponse', () => {
@@ -165,7 +174,7 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
       callCount++;
       if (callCount === 1) throw new Error('rate limit');
       return {
-        text: `[{"title":"t","atom_type":"insight","body":"b"}]`,
+        text: `[{"title":"t","atom_type":"insight","body":"b","source_quote":"b"}]`,
         blocks: [],
         stopReason: 'end' as const,
         usage: { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 },
