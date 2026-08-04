@@ -37,14 +37,48 @@ export function shouldStartPortalAdminRevalidation(body: unknown): boolean {
   );
 }
 
+export type PortalAdminRevalidationFence = {
+  claim(): boolean;
+  started(): boolean;
+};
+
+export function createPortalAdminRevalidationFence(): PortalAdminRevalidationFence {
+  let navigationStarted = false;
+  return {
+    claim: () => {
+      if (navigationStarted) return false;
+      navigationStarted = true;
+      return true;
+    },
+    started: () => navigationStarted,
+  };
+}
+
+export type PortalAdminUnauthorizedAction = 'revalidate' | 'wait' | 'login';
+
+export function portalAdminUnauthorizedAction(
+  body: unknown,
+  fence: PortalAdminRevalidationFence,
+): PortalAdminUnauthorizedAction {
+  if (shouldStartPortalAdminRevalidation(body)) {
+    return fence.claim() ? 'revalidate' : 'wait';
+  }
+  return fence.started() ? 'wait' : 'login';
+}
+
+const portalAdminRevalidationFence = createPortalAdminRevalidationFence();
+
 async function handleAdminUnauthorized(res: Response): Promise<never> {
   const body = await res.json().catch(() => ({}));
-  if (shouldStartPortalAdminRevalidation(body)) {
-    // The Portal session is still alive; refresh its signed Keycloak identity
-    // through a same-origin, top-level OIDC round trip. The server uses
-    // prompt=none for this exact state and falls back to interactive login only
-    // when the upstream Keycloak SSO session has actually ended.
+  const action = portalAdminUnauthorizedAction(body, portalAdminRevalidationFence);
+
+  if (action === 'revalidate') {
+    // Concurrent Admin loads can all cross the same freshness boundary. Claim
+    // one navigation before creating an OIDC transaction so later 401 handlers
+    // cannot overwrite its browser-binding cookie or switch to local #login.
     window.location.assign('/login?return_to=%2Fadmin%2F');
+  }
+  if (action !== 'login') {
     throw new Error('Portal revalidation required');
   }
 
