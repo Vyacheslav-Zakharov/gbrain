@@ -184,7 +184,7 @@ synchronization remains an explicit side effect of opening the review deck.
   or quorum effect. Reloading restores server order.
 - **Не могу оценить** stages an `abstain` vote. It marks that assignment
   processed but supports neither side; exhausted no-quorum rounds go to the
-  facilitator. This action uses the same 15-second cancellation window.
+  facilitator. This action uses the same 5-second cancellation window.
 - `prefers-reduced-motion` drops the transform/spring; an `aria-live` region
   announces "Голос сохранён" and every error.
 - Concept cards derive their visible title from the proposed Markdown frontmatter
@@ -227,5 +227,5 @@ revalidates both.
 | `test/ai-review-rounds.test.ts` | PGLite end-to-end: creation + freeze, managed shared classification, one-live-round, deck blindness, stale-card starvation, revoked ACL, foreign assignment, payload-bound idempotency, vote supersede with round-version fencing, stale hash, quorum take/concept publication, personal one-vote finalization, facilitator/Admin path, publication failure/recovery, deadline sweep, paginated Admin queue and override. |
 | `test/e2e/ai-review-rounds-postgres.test.ts` | Real PostgreSQL with separate pools: transaction-level serialization, same-assignment race, replacement-vs-finalization race, exactly-once publication, BIGSERIAL normalization and JSON-safe Portal/Admin representations. |
 | `test/ai-review.test.ts` | Canonical take/concept publication, proposal+revision+audit atomicity, and canonical-content rollback when the audit transaction is forced to fail. |
-| `test/portal-review-gestures.test.ts` + `test/portal-review-undo.test.ts` | Gesture classifier thresholds, flick, diagonal rejection, handle-only down swipe, keyboard parity, and the exact 15-second pre-submit countdown. |
+| `test/portal-review-gestures.test.ts` + `test/portal-review-undo.test.ts` | Gesture classifier thresholds, flick, diagonal rejection, handle-only down swipe, keyboard parity, and the exact 5-second pre-submit countdown. |
 | `test/portal-review-api.test.ts` | Route wiring: session-derived identity, strict live ACL revocation, no browser-supplied actor/reviewer list, same-origin gating, blind vote response, error→status map, reason-taxonomy parity between server and Portal mirror. |

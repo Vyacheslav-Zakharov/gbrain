@@ -59,7 +59,7 @@ export function RejectReasonSheet({ reasons, busy, onCancel, onConfirm }: Props)
         <textarea
           id="review-comment"
           className="review-comment"
-          rows={3}
+          rows={4}
           maxLength={2000}
           value={comment}
           onChange={event => setComment(event.target.value)}

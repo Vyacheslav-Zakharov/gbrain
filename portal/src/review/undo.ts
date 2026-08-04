@@ -1,4 +1,4 @@
-export const REVIEW_UNDO_WINDOW_MS = 15_000;
+export const REVIEW_UNDO_WINDOW_MS = 5_000;
 
 export function createUndoDeadline(nowMs = Date.now()): number {
   return nowMs + REVIEW_UNDO_WINDOW_MS;

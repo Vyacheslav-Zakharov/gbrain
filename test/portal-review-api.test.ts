@@ -22,6 +22,8 @@ const adminRoundReviewSource = await Bun.file(new URL('../admin/src/pages/Review
 const roundsSource = await Bun.file(new URL('../src/core/ai-review-rounds.ts', import.meta.url)).text();
 const portalAppSource = await Bun.file(new URL('../portal/src/PortalApp.tsx', import.meta.url)).text();
 const reviewAppSource = await Bun.file(new URL('../portal/src/review/ReviewApp.tsx', import.meta.url)).text();
+const reviewSheetSource = await Bun.file(new URL('../portal/src/review/RejectReasonSheet.tsx', import.meta.url)).text();
+const reviewCssSource = await Bun.file(new URL('../portal/src/review/review.css', import.meta.url)).text();
 
 describe('portal reviewer routes', () => {
   test('the reviewer deck is served from the Portal SPA behind the page guard', () => {
@@ -52,10 +54,21 @@ describe('portal reviewer routes', () => {
     expect(deckRoute).toContain('synchronizePendingReviewAssignments()');
   });
 
-  test('votes stay client-side for a 15-second undo window before submission', () => {
+  test('votes stay client-side for a 5-second undo window before submission', () => {
     expect(reviewAppSource).toContain('REVIEW_UNDO_WINDOW_MS');
     expect(reviewAppSource).toContain('Отменить решение');
     expect(reviewAppSource).toContain('pendingVote');
+  });
+
+  test('the rejection sheet keeps the comment and actions usable at short viewport heights', () => {
+    expect(reviewAppSource).toContain('Текст страницы-источника');
+    expect(reviewAppSource).not.toContain('Текст исходного документа');
+    expect(reviewSheetSource).toContain('rows={4}');
+    expect(reviewCssSource).toContain('max-height: 88dvh');
+    expect(reviewCssSource).toContain('.review-reason-list { display: grid; gap: 6px; min-height: 0; overflow-y: auto; }');
+    expect(reviewCssSource).toContain('resize: none');
+    expect(reviewCssSource).toContain('min-height: 96px');
+    expect(reviewCssSource).toContain('.review-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0; }');
   });
 
   test('defer is local navigation while cannot-assess is an abstain vote', () => {

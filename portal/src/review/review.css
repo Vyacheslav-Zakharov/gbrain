@@ -205,7 +205,9 @@
   width: 100%;
   max-width: 560px;
   max-height: 88vh;
-  overflow-y: auto;
+  max-height: 88dvh;
+  overflow: hidden;
+  overscroll-behavior: contain;
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: 16px 16px 0 0;
@@ -218,7 +220,7 @@
 .review-sheet-title { margin: 0; font-size: 16px; font-weight: 600; }
 .review-sheet-hint { margin: 0; font-size: 12px; color: var(--text-3); }
 
-.review-reason-list { display: grid; gap: 6px; }
+.review-reason-list { display: grid; gap: 6px; min-height: 0; overflow-y: auto; }
 .review-reason {
   display: flex;
   justify-content: space-between;
@@ -239,7 +241,12 @@
 .review-comment-label { font-size: 12px; color: var(--text-3); }
 .review-comment {
   width: 100%;
-  resize: vertical;
+  min-height: 96px;
+  max-height: min(30dvh, 180px);
+  flex-shrink: 0;
+  resize: none;
+  overflow-y: auto;
+  box-sizing: border-box;
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--surface-2);
@@ -247,7 +254,7 @@
   padding: 10px;
 }
 
-.review-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.review-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0; }
 
 .review-details-body {
   margin: 0;

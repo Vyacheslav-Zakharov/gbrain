@@ -337,7 +337,7 @@ export function ReviewApp() {
               )}
             </section>
             <h3 className="review-details-heading">
-              {details.target_type === 'take_proposal' ? 'Текст исходного документа' : 'Текст предлагаемой концепции'}
+              {details.target_type === 'take_proposal' ? 'Текст страницы-источника' : 'Текст предлагаемой концепции'}
             </h3>
             <pre className="review-details-body">{details.detail || 'Исходный текст не найден.'}</pre>
             <div className="review-sheet-actions">
