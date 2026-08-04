@@ -28,9 +28,9 @@ locks, stale-source checks, file read-back and rollback stay in one place.
    and reject; it is never a majority of only those who happened to vote.
 4. **Facilitation and escalation.** Shared rounds with one or two reviewers do
    not auto-finalize: after all available votes they move to Admin with
-   `facilitator_required`. A completed tie for an even group, or missing votes
-   past the deadline, also escalates. **Non-response is never counted as
-   reject.**
+   `facilitator_required`. A completed tie for an even group, a completed set
+   containing abstentions without a quorum, or missing votes past the deadline
+   also escalates. **Non-response and abstention are never counted as reject.**
 5. **Admin.** Sees named votes, reason codes, comments, counts and the quorum
    threshold (or a plain facilitator label for shared `N≤2`). Can finalize ONLY
    an escalated round, and only with a mandatory override reason
@@ -43,6 +43,9 @@ locks, stale-source checks, file read-back and rollback stay in one place.
 7. **Reject taxonomy.** A reject requires a stable code from
    `src/core/ai-review-reasons.ts`; some codes additionally require a comment.
    The Russian label is presentation only — the code is what is stored.
+   `abstain` is stored with `reason_code=NULL`, marks the assignment
+   processed, and supports neither approve nor reject. The reviewer remains in
+   the frozen denominator.
 8. **Server-derived trust.** The browser supplies a decision, a reason and an
    idempotency key. Never an actor, a reviewer list, or a source id.
 9. **Autopilot stays disabled.** The assignment synchronizer enrolls pending
@@ -59,7 +62,7 @@ auto-accept.
                          (personal owner | shared strict-majority quorum)
   open ─────────────────────────────────────────────► finalizing ──► finalized
    │                                                       │  (publisher OK)
-   │  (facilitator_required | disagreement | deadline_missed)│
+   │  (facilitator_required | no_quorum | disagreement | deadline_missed)│
    ▼                                                       │ (publisher failed)
 escalated ──(admin finalize + reason)──► finalizing ───────┘
    ▲                                                       │
@@ -70,8 +73,8 @@ escalated ──(admin finalize + reason)──► finalizing ──────
 | From | To | Trigger | Guard |
 |---|---|---|---|
 | `open` | `open` | vote cast, round incomplete | assignment belongs to caller; source ACL live; round not overdue |
-| `open` | `finalizing` | personal owner vote, or shared `N>2` reaches strict-majority quorum | CAS on `(id, status, round_version)` |
-| `open` | `escalated` | shared `N≤2` finished voting, completed tie, or deadline swept with missing votes | — |
+| `open` | `finalizing` | personal owner approve/reject, or shared `N>2` reaches strict-majority quorum | CAS on `(id, status, round_version)` |
+| `open` | `escalated` | personal abstain, shared `N≤2` finished voting, shared `N>2` exhausted without quorum, or deadline swept with missing votes | — |
 | `escalated` | `finalizing` | Admin finalize | escalated only; override reason ≥ 8 chars |
 | `finalizing` | `finalized` | guarded publisher succeeded | proposal still `pending`, snapshot hash unchanged |
 | `finalizing` | `escalated` | publisher threw | `publication_failed` event recorded; canonical outcome is not reported as finalized |
@@ -174,8 +177,14 @@ synchronization remains an explicit side effect of opening the review deck.
   handle** → details, which is not a vote.
 - The card is `touch-action: pan-y` and only the handle is `touch-action:
   none`, so page scrolling and pull-to-refresh keep working.
-- Three real buttons always duplicate the gestures; `←` `→` `↓` mirror them.
+- Three primary buttons always duplicate the gestures; `←` `→` `↓` mirror them.
   `Esc` closes details or the reason sheet without voting.
+- **Отложить** rotates the current card to the end of the in-memory deck. It is
+  navigation only: no API call, vote, assignment update, pending-count change,
+  or quorum effect. Reloading restores server order.
+- **Не могу оценить** stages an `abstain` vote. It marks that assignment
+  processed but supports neither side; exhausted no-quorum rounds go to the
+  facilitator. This action uses the same 15-second cancellation window.
 - `prefers-reduced-motion` drops the transform/spring; an `aria-live` region
   announces "Голос сохранён" and every error.
 - Concept cards derive their visible title from the proposed Markdown frontmatter
@@ -192,7 +201,7 @@ synchronization remains an explicit side effect of opening the review deck.
   done. A `stale_proposal` / `round_closed` / `foreign_assignment` response
   drops the card, because it is genuinely no longer this reviewer's to decide.
 
-Approve and reject are staged in the browser for **15 seconds** before the vote
+Approve, reject and abstain are staged in the browser for **15 seconds** before the vote
 request is sent. The card stays visible, every other decision control is
 disabled, and an explicit countdown button cancels the staged request. A late
 Details response is discarded after staging, and the cancel handler refuses to
@@ -205,7 +214,7 @@ apply; the UI never promises undo after submission.
 
 `admin/src/pages/ReviewRounds.tsx` ("Коллективная проверка") reuses the
 `AIReview.css` list/detail hierarchy. It shows per-round tallies (за / против /
-без ответа) and the escalation reason, and on detail a named vote matrix with
+не могут оценить / без ответа) and the escalation reason, and on detail a named vote matrix with
 reason codes and comments. Finalize controls render **only** for an escalated
 round and stay disabled until the mandatory reason is long enough; the server
 revalidates both.

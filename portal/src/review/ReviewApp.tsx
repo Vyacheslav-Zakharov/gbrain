@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { portalApi, ReviewApiError } from '../api';
 import { keyToIntent, prefersReducedMotion, type GestureIntent } from './gestures';
 import { reasonsForTarget, reviewErrorMessage } from './reasons';
+import { deferReviewCard } from './queue';
 import {
   canCancelPendingDecision,
   createUndoDeadline,
@@ -23,7 +24,7 @@ function newIdempotencyKey(): string {
 
 interface PendingVote {
   assignmentId: number;
-  decision: 'approve' | 'reject';
+  decision: 'approve' | 'reject' | 'abstain';
   reasonCode?: string;
   comment?: string;
   proposalSnapshotHash: string;
@@ -86,6 +87,19 @@ export function ReviewApp() {
     attemptKey.current = newIdempotencyKey();
   }, []);
 
+  const deferCard = useCallback(() => {
+    if (!card || busy || pendingVote) return;
+    detailsRequestId.current += 1;
+    setDetails(null);
+    setSheetOpen(false);
+    setError('');
+    attemptKey.current = newIdempotencyKey();
+    setCards(deferReviewCard);
+    setAnnouncement(cards.length > 1
+      ? 'Карточка отложена в конец очереди. Голос не отправлен.'
+      : 'Карточка отложена, но других карточек сейчас нет. Голос не отправлен.');
+  }, [busy, card, cards.length, pendingVote]);
+
   const commitVote = useCallback(async (pending: PendingVote) => {
     if (committingVote.current) return;
     committingVote.current = true;
@@ -103,11 +117,15 @@ export function ReviewApp() {
         pending.idempotencyKey,
       );
       setAnnouncement(
-        result.round_status === 'finalized'
-          ? `Голос сохранён. Решение принято: ${result.outcome === 'accepted' ? 'подтверждено' : 'отклонено'}.`
-          : result.round_status === 'escalated'
-            ? 'Голос сохранён. Решение передано администратору.'
-            : 'Голос сохранён. Ожидаем остальных проверяющих.',
+        pending.decision === 'abstain'
+          ? result.round_status === 'escalated'
+            ? 'Ответ «Не могу оценить» сохранён. Решение передано администратору.'
+            : 'Ответ «Не могу оценить» сохранён. Он не поддерживает ни одну сторону.'
+          : result.round_status === 'finalized'
+            ? `Голос сохранён. Решение принято: ${result.outcome === 'accepted' ? 'подтверждено' : 'отклонено'}.`
+            : result.round_status === 'escalated'
+              ? 'Голос сохранён. Решение передано администратору.'
+              : 'Голос сохранён. Ожидаем остальных проверяющих.',
       );
       dropCard();
     } catch (err) {
@@ -126,7 +144,7 @@ export function ReviewApp() {
     }
   }, [dropCard]);
 
-  const stageVote = useCallback((decision: 'approve' | 'reject', reasonCode?: string, comment?: string) => {
+  const stageVote = useCallback((decision: 'approve' | 'reject' | 'abstain', reasonCode?: string, comment?: string) => {
     if (!card || busy || pendingVote) return;
     const deadlineMs = createUndoDeadline();
     const pending: PendingVote = {
@@ -145,7 +163,7 @@ export function ReviewApp() {
     setDetails(null);
     setSheetOpen(false);
     setError('');
-    setAnnouncement(`Решение подготовлено. Его можно отменить в течение ${REVIEW_UNDO_WINDOW_MS / 1_000} секунд.`);
+    setAnnouncement(`${decision === 'abstain' ? 'Ответ' : 'Решение'} подготовлено. Его можно отменить в течение ${REVIEW_UNDO_WINDOW_MS / 1_000} секунд.`);
   }, [busy, card, pendingVote]);
 
   const cancelPendingVote = useCallback(() => {
@@ -248,7 +266,7 @@ export function ReviewApp() {
             {pendingVote && (
               <div className="review-undo" role="status" aria-live="polite">
                 <span>
-                  {pendingVote.decision === 'approve' ? 'Подтверждение' : 'Отклонение'} будет отправлено через{' '}
+                  {pendingVote.decision === 'approve' ? 'Подтверждение' : pendingVote.decision === 'reject' ? 'Отклонение' : 'Ответ «Не могу оценить»'} будет отправлено через{' '}
                   <strong>{undoSeconds} сек.</strong>
                 </span>
                 <button type="button" disabled={busy} onClick={cancelPendingVote}>Отменить решение</button>
@@ -265,6 +283,17 @@ export function ReviewApp() {
                 {busy ? 'Сохраняем…' : 'Подтвердить'}
               </button>
             </div>
+            <div className="review-actions review-actions-secondary">
+              <button type="button" className="review-btn ghost" disabled={busy || Boolean(pendingVote)} onClick={deferCard}>
+                Отложить
+              </button>
+              <button type="button" className="review-btn ghost" disabled={busy || Boolean(pendingVote)} onClick={() => stageVote('abstain')}>
+                Не могу оценить
+              </button>
+            </div>
+            <p className="review-hint">
+              «Отложить» переносит карточку в конец очереди без голоса. «Не могу оценить» завершает вашу проверку без поддержки ни одной из сторон.
+            </p>
             <p className="review-hint">
               Жесты: вправо — подтвердить, влево — причина отклонения, вниз от полоски — детали.
               Клавиши: <kbd>→</kbd>, <kbd>←</kbd>, <kbd>↓</kbd>.

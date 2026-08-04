@@ -1016,8 +1016,8 @@ export async function castReviewerVote(
   const nowMs = input.nowMs ?? Date.now();
 
   const decision = String(input.decision ?? '');
-  if (decision !== 'approve' && decision !== 'reject') {
-    throw new ReviewConflictError('decision must be approve or reject', 'invalid_decision');
+  if (decision !== 'approve' && decision !== 'reject' && decision !== 'abstain') {
+    throw new ReviewConflictError('decision must be approve, reject, or abstain', 'invalid_decision');
   }
   let reasonCode: string | null = null;
   let comment: string | null = null;
@@ -1341,6 +1341,7 @@ export interface AdminRoundSummary {
   assigned: number;
   approvals: number;
   rejections: number;
+  abstentions: number;
   quorum: number | null;
   missing: string[];
 }
@@ -1375,6 +1376,7 @@ export async function listReviewRounds(
       assigned: aggregate.assigned,
       approvals: aggregate.approvals,
       rejections: aggregate.rejections,
+      abstentions: aggregate.abstentions,
       quorum: aggregate.quorum,
       missing: aggregate.missing,
     });
@@ -1445,6 +1447,7 @@ export async function getReviewRoundDetail(
     assigned: aggregate.assigned,
     approvals: aggregate.approvals,
     rejections: aggregate.rejections,
+    abstentions: aggregate.abstentions,
     quorum: aggregate.quorum,
     missing: aggregate.missing,
     matrix: matrixRows.map(row => ({

@@ -1655,7 +1655,7 @@ CREATE TABLE IF NOT EXISTS ai_review_votes (
   id                     BIGSERIAL   PRIMARY KEY,
   round_id               BIGINT      NOT NULL REFERENCES ai_review_rounds(id) ON DELETE CASCADE,
   assignment_id          BIGINT      NOT NULL REFERENCES ai_review_assignments(id) ON DELETE CASCADE,
-  decision               TEXT        NOT NULL CHECK (decision IN ('approve','reject')),
+  decision               TEXT        NOT NULL CHECK (decision IN ('approve','reject','abstain')),
   reason_code            TEXT,
   comment                TEXT,
   voter_kind             TEXT        NOT NULL DEFAULT 'portal_user'

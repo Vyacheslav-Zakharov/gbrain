@@ -58,6 +58,17 @@ describe('portal reviewer routes', () => {
     expect(reviewAppSource).toContain('pendingVote');
   });
 
+  test('defer is local navigation while cannot-assess is an abstain vote', () => {
+    expect(reviewAppSource).toContain('Отложить');
+    expect(reviewAppSource).toContain('setCards(deferReviewCard)');
+    expect(reviewAppSource).toContain('Голос не отправлен');
+    expect(reviewAppSource).toContain('Не могу оценить');
+    expect(reviewAppSource).toContain("stageVote('abstain')");
+    expect(portalApiSource).toContain("'approve' | 'reject' | 'abstain'");
+    expect(adminRoundReviewSource).toContain("abstain: 'Не может оценить'");
+    expect(adminRoundReviewSource).toContain("no_quorum: 'Кворум не достигнут'");
+  });
+
   test('every reviewer endpoint requires a Portal session', () => {
     for (const route of [
       "app.get('/portal/api/review/summary'",

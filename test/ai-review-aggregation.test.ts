@@ -22,7 +22,7 @@ function assignments(...emails: string[]) {
   return emails.map((email, index) => ({ assignment_id: index + 1, reviewer_email: email }));
 }
 
-function vote(assignmentId: number, email: string, decision: 'approve' | 'reject', extra: Partial<AggregationVote> = {}): AggregationVote {
+function vote(assignmentId: number, email: string, decision: 'approve' | 'reject' | 'abstain', extra: Partial<AggregationVote> = {}): AggregationVote {
   return { assignment_id: assignmentId, actor_email: email, decision, voter_kind: 'portal_user', active: true, ...extra };
 }
 
@@ -163,6 +163,51 @@ describe('round aggregation', () => {
     expect(result.reason).toBe('disagreement');
     expect(result.approvals).toBe(2);
     expect(result.rejections).toBe(2);
+  });
+
+  test('abstain completes an assignment but supports neither side', () => {
+    const result = aggregateShared({
+      assignments: assignments('a@x.test', 'b@x.test', 'c@x.test'),
+      votes: [
+        vote(1, 'a@x.test', 'approve'),
+        vote(2, 'b@x.test', 'reject'),
+        vote(3, 'c@x.test', 'abstain'),
+      ],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result).toMatchObject({
+      verdict: 'escalate', reason: 'no_quorum', voted: 3,
+      approvals: 1, rejections: 1, abstentions: 1, missing: [], quorum: 2,
+    });
+  });
+
+  test('abstain does not prevent the other reviewers from reaching quorum', () => {
+    const result = aggregateShared({
+      assignments: assignments('a@x.test', 'b@x.test', 'c@x.test', 'd@x.test'),
+      votes: [
+        vote(1, 'a@x.test', 'abstain'),
+        vote(2, 'b@x.test', 'approve'),
+        vote(3, 'c@x.test', 'approve'),
+        vote(4, 'd@x.test', 'approve'),
+      ],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result).toMatchObject({
+      verdict: 'auto_accept', reason: 'quorum_approve', voted: 4,
+      approvals: 3, rejections: 0, abstentions: 1, quorum: 3,
+    });
+  });
+
+  test('a personal owner who cannot assess escalates to the facilitator', () => {
+    const result = aggregatePersonal({
+      assignments: assignments('solo@x.test'),
+      votes: [vote(1, 'solo@x.test', 'abstain')],
+      dueAtMs, nowMs: 1_000,
+    });
+    expect(result).toMatchObject({
+      verdict: 'escalate', reason: 'facilitator_required', voted: 1,
+      approvals: 0, rejections: 0, abstentions: 1, missing: [], quorum: 1,
+    });
   });
 
   test('an incomplete round stays open before the deadline', () => {

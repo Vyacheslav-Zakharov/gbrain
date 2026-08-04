@@ -84,7 +84,7 @@ export const portalApi = {
    */
   reviewVote: async (
     assignmentId: number,
-    body: { decision: 'approve' | 'reject'; reason_code?: string; comment?: string; proposal_snapshot_hash: string },
+    body: { decision: 'approve' | 'reject' | 'abstain'; reason_code?: string; comment?: string; proposal_snapshot_hash: string },
     idempotencyKey: string,
   ): Promise<ReviewVoteResponse> => {
     const response = await fetch(`/portal/api/review/items/${assignmentId}/vote`, {

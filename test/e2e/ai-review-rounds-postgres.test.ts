@@ -185,4 +185,93 @@ describePg('multi-review voting on separate Postgres pools', () => {
     const proposal = await engineA.executeRaw<{ status: string }>(`SELECT status FROM take_proposals WHERE id=$1`, [proposalId]);
     expect(proposal[0]!.status).toBe(detail.round.status === 'finalized' ? 'accepted' : 'pending');
   }, 30_000);
+
+  test('abstain persists on PostgreSQL and exhausted no-quorum escalates', async () => {
+    const slug = 'notes/postgres-abstain';
+    const markdown = `---\ntype: note\ntitle: PostgreSQL abstain\n---\n\nEvidence requiring human review.\n`;
+    await importFromContent(engineA, slug, markdown, { sourceId: TEAM, noEmbed: true });
+    const page = await engineA.getPage(slug, { sourceId: TEAM });
+    const rows = await engineA.executeRaw<{ id: number }>(
+      `INSERT INTO take_proposals
+         (source_id,page_slug,content_hash,prompt_version,proposal_run_id,claim_hash,claim_text,kind,holder,weight,domain,model_id)
+       VALUES ($1,$2,$3,'pg-test-v1','pg-test-run-3','pg-claim-3','Abstain claim','take','world',0.7,'testing','stub')
+       RETURNING id`,
+      [TEAM, slug, contentHash(page!.compiled_truth)],
+    );
+    const proposalId = Number(rows[0]!.id);
+    const opened = await openReviewRound(engineA, {
+      targetType: 'take_proposal', targetId: proposalId, permissions: PERMISSIONS, actor: 'pg-test',
+    });
+    const assignment = (email: string) => Number(opened.assignments.find(item => item.reviewer_email === email)!.id);
+    await castReviewerVote(engineA, scope(ANNA), {
+      assignmentId: assignment(ANNA), decision: 'approve', idempotencyKey: 'pg-abstain-anna',
+    });
+    await castReviewerVote(engineB, scope(BORIS), {
+      assignmentId: assignment(BORIS), decision: 'reject', reasonCode: 'outdated', idempotencyKey: 'pg-abstain-boris',
+    });
+    const result = await castReviewerVote(engineA, scope(CAROL), {
+      assignmentId: assignment(CAROL), decision: 'abstain', idempotencyKey: 'pg-abstain-carol',
+    });
+    expect(result.round).toMatchObject({ status: 'escalated', escalation_reason: 'no_quorum' });
+    const detail = await getReviewRoundDetail(engineB, Number(opened.round.id));
+    expect(detail).toMatchObject({ approvals: 1, rejections: 1, abstentions: 1, missing: [] });
+    expect(detail.matrix.find(item => item.reviewer_email === CAROL)).toMatchObject({
+      decision: 'abstain', reason_code: null,
+    });
+    const constraint = await engineA.executeRaw<{ definition: string }>(
+      `SELECT pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conname='ai_review_votes_decision_check'`,
+    );
+    expect(constraint[0]!.definition).toContain("'abstain'");
+  }, 30_000);
+
+  test('concurrent abstain and decisive vote never publish an escalation', async () => {
+    const slug = 'notes/postgres-abstain-race';
+    const markdown = `---\ntype: note\ntitle: PostgreSQL abstain race\n---\n\nEvidence for a race test.\n`;
+    await importFromContent(engineA, slug, markdown, { sourceId: TEAM, noEmbed: true });
+    const page = await engineA.getPage(slug, { sourceId: TEAM });
+    const rows = await engineA.executeRaw<{ id: number }>(
+      `INSERT INTO take_proposals
+         (source_id,page_slug,content_hash,prompt_version,proposal_run_id,claim_hash,claim_text,kind,holder,weight,domain,model_id)
+       VALUES ($1,$2,$3,'pg-test-v1','pg-test-run-4','pg-claim-4','Abstain race claim','take','world',0.7,'testing','stub')
+       RETURNING id`,
+      [TEAM, slug, contentHash(page!.compiled_truth)],
+    );
+    const proposalId = Number(rows[0]!.id);
+    const opened = await openReviewRound(engineA, {
+      targetType: 'take_proposal', targetId: proposalId, permissions: PERMISSIONS, actor: 'pg-test',
+    });
+    const assignment = (email: string) => Number(opened.assignments.find(item => item.reviewer_email === email)!.id);
+    await castReviewerVote(engineA, scope(ANNA), {
+      assignmentId: assignment(ANNA), decision: 'approve', idempotencyKey: 'pg-race-anna',
+    });
+
+    const raced = await Promise.allSettled([
+      castReviewerVote(engineA, scope(CAROL), {
+        assignmentId: assignment(CAROL), decision: 'abstain', idempotencyKey: 'pg-race-carol',
+      }),
+      castReviewerVote(engineB, scope(BORIS), {
+        assignmentId: assignment(BORIS), decision: 'approve', idempotencyKey: 'pg-race-boris',
+      }),
+    ]);
+    expect(raced.some(result => result.status === 'fulfilled')).toBe(true);
+
+    const detail = await getReviewRoundDetail(engineA, Number(opened.round.id));
+    expect(detail.round).toMatchObject({ status: 'finalized', outcome: 'accepted', finalized_mode: 'auto_quorum' });
+    expect(detail.approvals).toBe(2);
+    expect(detail.abstentions === 0 || detail.abstentions === 1).toBe(true);
+    const events = await engineA.executeRaw<{ count: number }>(
+      `SELECT count(*)::int AS count FROM ai_review_events
+        WHERE details->>'round_id'=$1::text AND action='round_finalized'`,
+      [opened.round.id],
+    );
+    expect(Number(events[0]!.count)).toBe(1);
+    const escalations = await engineA.executeRaw<{ count: number }>(
+      `SELECT count(*)::int AS count FROM ai_review_events
+        WHERE details->>'round_id'=$1::text AND action='round_escalated'`,
+      [opened.round.id],
+    );
+    expect(Number(escalations[0]!.count)).toBe(0);
+  }, 30_000);
 });

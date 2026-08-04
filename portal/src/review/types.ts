@@ -49,7 +49,7 @@ export interface ReviewSummary {
 }
 
 export interface ReviewVoteResponse {
-  decision: 'approve' | 'reject';
+  decision: 'approve' | 'reject' | 'abstain';
   replayed: boolean;
   round_status: 'open' | 'escalated' | 'finalizing' | 'finalized' | 'cancelled';
   outcome: 'accepted' | 'rejected' | null;

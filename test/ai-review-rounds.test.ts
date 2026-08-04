@@ -578,6 +578,44 @@ describe('auto-finalization', () => {
     expect(proposal[0]!.status).toBe('pending');
   });
 
+  test('abstain is durable, supports neither side, and exhausts a no-quorum round', async () => {
+    const id = await seedTakeProposal();
+    const { assignments } = await openQuorumRound(id);
+    await castReviewerVote(engine, scope(ANNA), {
+      assignmentId: assignmentFor(assignments, ANNA), decision: 'approve',
+    });
+    await castReviewerVote(engine, scope(BORIS), {
+      assignmentId: assignmentFor(assignments, BORIS), decision: 'reject', reasonCode: 'outdated',
+    });
+    const final = await castReviewerVote(engine, scope(CAROL), {
+      assignmentId: assignmentFor(assignments, CAROL), decision: 'abstain',
+    });
+    expect(final.round).toMatchObject({ status: 'escalated', escalation_reason: 'no_quorum' });
+    expect(final.aggregate).toMatchObject({
+      approvals: 1, rejections: 1, abstentions: 1, voted: 3, missing: [], quorum: 2,
+    });
+    const detail = await getReviewRoundDetail(engine, Number(final.round.id));
+    expect(detail.abstentions).toBe(1);
+    const carol = detail.matrix.find(entry => entry.reviewer_email === CAROL);
+    expect(carol).toMatchObject({ decision: 'abstain', reason_code: null });
+    const assignment = await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM ai_review_assignments WHERE id=$1`, [assignmentFor(assignments, CAROL)],
+    );
+    expect(assignment[0]!.status).toBe('voted');
+  });
+
+  test('a personal owner can abstain and hand the proposal to a facilitator', async () => {
+    const id = await seedTakeProposal('solo-area', 'notes/solo-abstain');
+    const { assignments } = await openReviewRound(engine, {
+      targetType: 'take_proposal', targetId: id, permissions: PERMS, actor: 'admin-test',
+    });
+    const result = await castReviewerVote(engine, scope(SOLO, ['solo-area']), {
+      assignmentId: assignmentFor(assignments, SOLO), decision: 'abstain',
+    });
+    expect(result.round).toMatchObject({ status: 'escalated', escalation_reason: 'facilitator_required' });
+    expect(result.aggregate).toMatchObject({ abstentions: 1, approvals: 0, rejections: 0 });
+  });
+
   test('a system-authored vote cannot complete a round', async () => {
     const id = await seedTakeProposal();
     const { round, assignments } = await openTeamRound(id);

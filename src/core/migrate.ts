@@ -6002,6 +6002,18 @@ export const MIGRATIONS: Migration[] = [
         CHECK (finalized_mode IN ('auto_unanimous','auto_quorum','admin_override'));
     `,
   },
+  {
+    version: 137,
+    name: 'ai_review_abstain_decision',
+    idempotent: true,
+    sql: `
+      ALTER TABLE ai_review_votes
+        DROP CONSTRAINT IF EXISTS ai_review_votes_decision_check;
+      ALTER TABLE ai_review_votes
+        ADD CONSTRAINT ai_review_votes_decision_check
+        CHECK (decision IN ('approve','reject','abstain'));
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

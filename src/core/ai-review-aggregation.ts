@@ -22,7 +22,7 @@
  *   6. Zero eligible reviewers fails CLOSED (escalate, never auto-accept).
  */
 
-export type ReviewDecision = 'approve' | 'reject';
+export type ReviewDecision = 'approve' | 'reject' | 'abstain';
 export type ReviewVoterKind = 'portal_user' | 'system';
 export type ReviewPolicyKind = 'personal' | 'shared';
 
@@ -159,6 +159,7 @@ export type RoundVerdictReason =
   | 'facilitator_required'
   | 'invalid_personal_reviewer_count'
   | 'disagreement'
+  | 'no_quorum'
   | 'deadline_missed';
 
 export interface AggregationResult {
@@ -168,6 +169,8 @@ export interface AggregationResult {
   voted: number;
   approvals: number;
   rejections: number;
+  /** Processed assignments that support neither side. */
+  abstentions: number;
   /** Strict-majority threshold for shared N>2, 1 for personal, otherwise null. */
   quorum: number | null;
   /** Reviewer emails with no counted vote yet. Never treated as reject. */
@@ -185,7 +188,7 @@ export function aggregateRound(input: AggregationInput): AggregationResult {
   const assignments = Array.isArray(input.assignments) ? input.assignments : [];
   const assigned = assignments.length;
   if (assigned === 0) {
-    return { verdict: 'escalate', reason: 'no_reviewers', assigned: 0, voted: 0, approvals: 0, rejections: 0, quorum: null, missing: [] };
+    return { verdict: 'escalate', reason: 'no_reviewers', assigned: 0, voted: 0, approvals: 0, rejections: 0, abstentions: 0, quorum: null, missing: [] };
   }
 
   const byAssignment = new Map<number, AggregationAssignment>();
@@ -198,54 +201,59 @@ export function aggregateRound(input: AggregationInput): AggregationResult {
     const assignment = byAssignment.get(vote.assignment_id);
     if (!assignment) continue;
     if (normalizeEmail(vote.actor_email) !== normalizeEmail(assignment.reviewer_email)) continue;
-    if (vote.decision !== 'approve' && vote.decision !== 'reject') continue;
+    if (vote.decision !== 'approve' && vote.decision !== 'reject' && vote.decision !== 'abstain') continue;
     counted.set(vote.assignment_id, vote.decision);
   }
 
   let approvals = 0;
   let rejections = 0;
+  let abstentions = 0;
   const missing: string[] = [];
   for (const assignment of assignments) {
     const decision = counted.get(assignment.assignment_id);
     if (decision === 'approve') approvals += 1;
     else if (decision === 'reject') rejections += 1;
+    else if (decision === 'abstain') abstentions += 1;
     else missing.push(assignment.reviewer_email);
   }
-  const voted = approvals + rejections;
+  const voted = approvals + rejections + abstentions;
 
   if (input.policyKind === 'personal') {
     const quorum = 1;
     if (assigned !== 1) {
-      return { verdict: 'escalate', reason: 'invalid_personal_reviewer_count', assigned, voted, approvals, rejections, quorum, missing };
+      return { verdict: 'escalate', reason: 'invalid_personal_reviewer_count', assigned, voted, approvals, rejections, abstentions, quorum, missing };
     }
     if (approvals === 1) {
-      return { verdict: 'auto_accept', reason: 'personal_approve', assigned, voted, approvals, rejections, quorum, missing };
+      return { verdict: 'auto_accept', reason: 'personal_approve', assigned, voted, approvals, rejections, abstentions, quorum, missing };
     }
     if (rejections === 1) {
-      return { verdict: 'auto_reject', reason: 'personal_reject', assigned, voted, approvals, rejections, quorum, missing };
+      return { verdict: 'auto_reject', reason: 'personal_reject', assigned, voted, approvals, rejections, abstentions, quorum, missing };
+    }
+    if (voted === assigned) {
+      return { verdict: 'escalate', reason: 'facilitator_required', assigned, voted, approvals, rejections, abstentions, quorum, missing };
     }
   } else if (assigned > 2) {
     const quorum = Math.floor(assigned / 2) + 1;
     if (approvals >= quorum) {
-      return { verdict: 'auto_accept', reason: 'quorum_approve', assigned, voted, approvals, rejections, quorum, missing };
+      return { verdict: 'auto_accept', reason: 'quorum_approve', assigned, voted, approvals, rejections, abstentions, quorum, missing };
     }
     if (rejections >= quorum) {
-      return { verdict: 'auto_reject', reason: 'quorum_reject', assigned, voted, approvals, rejections, quorum, missing };
+      return { verdict: 'auto_reject', reason: 'quorum_reject', assigned, voted, approvals, rejections, abstentions, quorum, missing };
     }
     if (voted === assigned) {
-      return { verdict: 'escalate', reason: 'disagreement', assigned, voted, approvals, rejections, quorum, missing };
+      return { verdict: 'escalate', reason: abstentions > 0 ? 'no_quorum' : 'disagreement', assigned, voted, approvals, rejections, abstentions, quorum, missing };
     }
   } else if (voted === assigned) {
-    return { verdict: 'escalate', reason: 'facilitator_required', assigned, voted, approvals, rejections, quorum: null, missing };
+    return { verdict: 'escalate', reason: 'facilitator_required', assigned, voted, approvals, rejections, abstentions, quorum: null, missing };
   }
 
   const quorum = input.policyKind === 'personal' ? 1 : assigned > 2 ? Math.floor(assigned / 2) + 1 : null;
 
   if (Number.isFinite(input.dueAtMs) && input.nowMs >= input.dueAtMs) {
-    return { verdict: 'escalate', reason: 'deadline_missed', assigned, voted, approvals, rejections, quorum, missing };
+    return { verdict: 'escalate', reason: 'deadline_missed', assigned, voted, approvals, rejections, abstentions, quorum, missing };
   }
 
-  return { verdict: 'open', reason: 'awaiting_votes', assigned, voted, approvals, rejections, quorum, missing };
+  return { verdict: 'open', reason: 'awaiting_votes', assigned, voted, approvals, rejections, abstentions, quorum, missing };
 }
 
 export const DEFAULT_ROUND_DEADLINE_HOURS = 72;

@@ -15,6 +15,7 @@ const ESCALATION_LABELS: Record<string, string> = {
   facilitator_required: 'Требуется решение фасилитатора',
   invalid_personal_reviewer_count: 'Ошибка состава проверяющих личной области',
   disagreement: 'Расхождение голосов',
+  no_quorum: 'Кворум не достигнут',
   deadline_missed: 'Истёк срок голосования',
   stale_proposal: 'Предложение изменилось',
   publication_failed: 'Ошибка безопасной публикации',
@@ -22,7 +23,11 @@ const ESCALATION_LABELS: Record<string, string> = {
   no_reviewers: 'Нет назначенных проверяющих',
 };
 
-const DECISION_LABELS: Record<string, string> = { approve: 'Подтвердил', reject: 'Отклонил' };
+const DECISION_LABELS: Record<string, string> = {
+  approve: 'Подтвердил',
+  reject: 'Отклонил',
+  abstain: 'Не может оценить',
+};
 
 function finalizationLabel(round: Round): string {
   if (round.finalized_mode === 'admin_override') return ' администратором';
@@ -56,6 +61,7 @@ interface RoundSummary {
   assigned: number;
   approvals: number;
   rejections: number;
+  abstentions: number;
   quorum: number | null;
   missing: string[];
 }
@@ -63,7 +69,7 @@ interface RoundSummary {
 interface MatrixEntry {
   reviewer_email: string;
   assignment_id: number;
-  decision: 'approve' | 'reject' | null;
+  decision: 'approve' | 'reject' | 'abstain' | null;
   reason_code: string | null;
   comment: string | null;
   voted_at: string | null;
@@ -201,6 +207,7 @@ export function ReviewRoundsPage() {
               <div className="proposal-row-meta">
                 <span className="round-tally approve">за {item.approvals}</span>
                 <span className="round-tally reject">против {item.rejections}</span>
+                <span className="round-tally muted">не могут оценить {item.abstentions}</span>
                 <span className="round-tally muted">без ответа {item.missing.length}</span>
                 <span className="round-tally muted">
                   {item.quorum === null ? 'решает фасилитатор' : `кворум ${item.quorum} из ${item.assigned}`}
