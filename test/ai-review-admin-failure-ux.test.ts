@@ -44,11 +44,29 @@ describe('AI Review admin failure UX', () => {
 
   test('Meeting Review uses the shared review-console visual hierarchy', () => {
     const source = readFileSync(new URL('../admin/src/pages/MeetingReview.tsx', import.meta.url), 'utf8');
+    const appSource = readFileSync(new URL('../admin/src/App.tsx', import.meta.url), 'utf8');
     expect(source).toContain('className={`proposal-row');
     expect(source).toContain('className="detail-title"');
     expect(source).toContain('className="review-form"');
     expect(source).toContain('className="reject"');
-    expect(source).toContain('className="accept"');
+    expect(source).toContain('Требуют решения');
+    expect(source).toContain('Готовы автоматически');
+    expect(source).toContain('Действий не требуется');
+    expect(source).not.toContain('Принять и поставить импорт');
+    expect(source).not.toContain('api.meetingReviewAccept');
+    expect(source).not.toContain('transactional autopublisher');
     expect(source).toContain("setMobileDetail(true)");
+    expect(appSource).toContain("meetingReviewItems({ status: 'pending', review_class: 'exception', limit: 1 })");
+  });
+
+  test('Meeting Review accept route is a fail-closed kill switch', () => {
+    const source = readFileSync(new URL('../src/commands/serve-http.ts', import.meta.url), 'utf8');
+    const start = source.indexOf("app.post('/admin/api/meeting-review/items/:id/accept'");
+    const end = source.indexOf("app.post('/admin/api/meeting-review/items/:id/reject'", start);
+    const route = source.slice(start, end);
+    expect(route).toContain("error: 'direct_meeting_accept_disabled'");
+    expect(route).toContain('res.status(409)');
+    expect(route).not.toContain('enqueueMeetingIngest');
+    expect(route).not.toContain("'--apply'");
   });
 });

@@ -98,7 +98,7 @@ export function App() {
       void api.aiReviewConcepts({ status: 'pending', limit: 1 })
         .then(data => { if (alive) setPendingConceptCount(Number(data.total ?? 0)); })
         .catch(() => { if (alive) setPendingConceptCount(null); });
-      void api.meetingReviewItems({ status: 'pending', limit: 1 })
+      void api.meetingReviewItems({ status: 'pending', review_class: 'exception', limit: 1 })
         .then(data => { if (alive) setPendingMeetingCount(Number(data.total ?? 0)); })
         .catch(() => { if (alive) setPendingMeetingCount(null); });
     };

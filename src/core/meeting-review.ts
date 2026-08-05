@@ -4,6 +4,15 @@ import { mkdir, readFile, readdir, realpath, rename, writeFile } from 'node:fs/p
 import { chat as gatewayChat } from './ai/gateway.ts';
 
 export type MeetingReviewStatus = 'pending' | 'accepted' | 'rejected';
+export type MeetingReviewClass = 'ready' | 'exception';
+
+export interface MeetingReviewAttention {
+  kind: string;
+  title: string;
+  detail: string;
+  action: string;
+  value?: string;
+}
 
 export interface MeetingReviewDraft {
   canonical_markdown: string;
@@ -18,10 +27,13 @@ export interface MeetingReviewItem {
   slug: string;
   source: string;
   split_source: string | null;
+  shared_stub: boolean;
   status: MeetingReviewStatus;
   route_reason: string;
   needs_review: Array<Record<string, unknown>>;
   created_stubs: string[];
+  review_class: MeetingReviewClass;
+  attention: MeetingReviewAttention[];
   generated_at: string;
   draft?: MeetingReviewDraft;
   revision_id?: number;
@@ -62,6 +74,7 @@ export interface MeetingReviewPaths {
 
 export interface MeetingReviewListOpts {
   status?: MeetingReviewStatus;
+  review_class?: MeetingReviewClass;
   query?: string;
   limit?: number;
 }
@@ -120,6 +133,68 @@ function recordArray(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? value.filter((v): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v)) : [];
 }
 
+function attentionFor(item: Pick<MeetingReviewItem, 'route_reason' | 'needs_review' | 'created_stubs'>): MeetingReviewAttention[] {
+  const attention: MeetingReviewAttention[] = [];
+  const seen = new Set<string>();
+  const add = (entry: MeetingReviewAttention) => {
+    const key = `${entry.kind}:${entry.value || entry.detail}`;
+    if (!seen.has(key)) { seen.add(key); attention.push(entry); }
+  };
+  for (const issue of item.needs_review) {
+    const kind = text(issue.kind) || 'review_required';
+    const value = text(issue.value);
+    if (kind === 'participant_unresolved') add({
+      kind, value,
+      title: 'Не найден участник',
+      detail: 'Ссылка на участника не сопоставлена с канонической карточкой сотрудника.',
+      action: 'Сопоставьте участника с существующим сотрудником или подтверждённым контактом.',
+    });
+    else if (kind === 'participant_stub_created') add({
+      kind, value,
+      title: 'Неподтверждённый внешний участник',
+      detail: 'Участник не сопоставлен по рабочей почте или имени.',
+      action: 'Подтвердите личность, оставьте упоминание обычным текстом или создайте проверенный контакт.',
+    });
+    else add({
+      kind, value,
+      title: 'Требуется содержательная проверка',
+      detail: text(issue.reason) || value || kind,
+      action: 'Устраните указанную причину и заново сформируйте preview.',
+    });
+  }
+  for (const stub of item.created_stubs) {
+    const alreadyExplained = item.needs_review.some(issue => {
+      const value = text(issue.value);
+      return value && (stub === value || stub.endsWith(`:${value}`));
+    });
+    if (!alreadyExplained) add({
+      kind: 'planned_stub', value: stub,
+      title: 'Планируется новая canonical page',
+      detail: `Preview предлагает создать ${stub}.`,
+      action: 'Подтвердите сущность или оставьте упоминание обычным текстом.',
+    });
+  }
+  if (/\bunresolved\b/i.test(item.route_reason)) add({
+    kind: 'routing_unresolved',
+    title: 'Не определено подразделение',
+    detail: 'Источник для закрытой встречи не определён однозначно.',
+    action: 'Выберите корректный внутренний источник до публикации.',
+  });
+  return attention;
+}
+
+function decorateMeetingReviewItem(item: MeetingReviewItem): MeetingReviewItem {
+  const normalized = {
+    ...item,
+    shared_stub: item.shared_stub === true,
+    route_reason: text(item.route_reason),
+    needs_review: recordArray(item.needs_review),
+    created_stubs: stringArray(item.created_stubs),
+  };
+  const attention = attentionFor(normalized);
+  return { ...normalized, attention, review_class: attention.length > 0 ? 'exception' : 'ready' };
+}
+
 async function loadPreviewItems(paths: MeetingReviewPaths): Promise<Map<string, MeetingReviewItem>> {
   let names: string[] = [];
   try { names = (await readdir(paths.reportsDir)).filter(name => name.endsWith('.json')).sort().reverse(); } catch { return new Map(); }
@@ -130,19 +205,22 @@ async function loadPreviewItems(paths: MeetingReviewPaths): Promise<Map<string, 
     for (const row of report.results) {
       const id = text(row.id);
       if (!SAFE_ID.test(id) || items.has(id)) continue;
-      items.set(id, {
+      items.set(id, decorateMeetingReviewItem({
         id,
         topic: text(row.topic),
         date: text(row.date),
         slug: text(row.slug),
         source: text(row.source),
         split_source: text(row.split_source) || null,
+        shared_stub: row.shared_stub === true,
         status: 'pending',
         route_reason: text(row.route_reason),
         needs_review: recordArray(row.needs_review),
         created_stubs: stringArray(row.created_stubs),
+        review_class: 'ready',
+        attention: [],
         generated_at: text(report.generated_at),
-      });
+      }));
     }
   }
   const ingestState = await readJson<{ ingested?: unknown[] }>(paths.ingestStatePath, {});
@@ -204,23 +282,28 @@ async function mergeItems(paths: MeetingReviewPaths): Promise<Map<string, Meetin
   ]);
   for (const [id, saved] of Object.entries(ledger.items || {})) {
     const base = preview.get(id);
-    if (base) preview.set(id, { ...base, ...saved, id });
-    else if (saved.topic && saved.slug && saved.source) preview.set(id, { ...saved, id } as MeetingReviewItem);
+    if (base) preview.set(id, decorateMeetingReviewItem({ ...base, ...saved, id }));
+    else if (saved.topic && saved.slug && saved.source) preview.set(id, decorateMeetingReviewItem({ ...saved, id } as MeetingReviewItem));
   }
   return preview;
 }
 
-export async function listMeetingReviewItems(opts: MeetingReviewListOpts = {}, deps: MeetingReviewDeps = {}): Promise<{ rows: MeetingReviewItem[]; total: number }> {
+export async function listMeetingReviewItems(opts: MeetingReviewListOpts = {}, deps: MeetingReviewDeps = {}): Promise<{ rows: MeetingReviewItem[]; total: number; counts: Record<MeetingReviewClass, number> }> {
   const paths = deps.paths ?? resolveMeetingReviewPaths();
   const status = opts.status ?? 'pending';
   const query = (opts.query || '').trim().toLowerCase();
   const requestedLimit = Number.isFinite(opts.limit) ? Number(opts.limit) : 100;
   const limit = Math.max(1, Math.min(200, requestedLimit));
-  const rows = [...(await mergeItems(paths)).values()]
+  const candidates = [...(await mergeItems(paths)).values()]
     .filter(item => item.status === status)
     .filter(item => !query || `${item.topic} ${item.slug} ${item.source} ${item.date}`.toLowerCase().includes(query))
     .sort((a, b) => `${b.date}:${b.id}`.localeCompare(`${a.date}:${a.id}`));
-  return { rows: rows.slice(0, limit), total: rows.length };
+  const counts = {
+    exception: candidates.filter(item => item.review_class === 'exception').length,
+    ready: candidates.filter(item => item.review_class === 'ready').length,
+  };
+  const rows = opts.review_class ? candidates.filter(item => item.review_class === opts.review_class) : candidates;
+  return { rows: rows.slice(0, limit), total: rows.length, counts };
 }
 
 export async function getMeetingReviewItem(idRaw: string, deps: MeetingReviewDeps = {}): Promise<{ item: MeetingReviewItem; revisions: MeetingLedger['revisions']; events: MeetingLedger['events'] }> {
@@ -291,27 +374,9 @@ export async function createLlmMeetingRevision(idRaw: string, field: keyof Meeti
 }
 
 export async function acceptMeetingReview(idRaw: string, draftInput: MeetingReviewDraft, actor: string, deps: MeetingReviewDeps = {}): Promise<MeetingReviewItem> {
-  const id = validateId(idRaw);
-  const draft = validateDraft(draftInput);
-  const paths = deps.paths ?? resolveMeetingReviewPaths();
-  return serialMutation(async () => {
-    const [ledger, items, overrides] = await Promise.all([
-      readJson<MeetingLedger>(paths.ledgerPath, emptyLedger()),
-      mergeItems(paths),
-      readJson<Record<string, unknown>>(paths.overridesPath, {}),
-    ]);
-    const item = items.get(id);
-    if (!item) throw new Error('meeting review item not found');
-    if (item.status !== 'pending') throw new Error('meeting is no longer pending');
-    const now = (deps.now?.() ?? new Date()).toISOString();
-    overrides[id] = { status: 'accepted', actor, accepted_at: now, draft };
-    const accepted: MeetingReviewItem = { ...item, status: 'accepted', acted_at: now, acted_by: actor };
-    ledger.items[id] = accepted;
-    ledger.events.push({ meeting_id: id, action: 'accept', actor, created_at: now });
-    await atomicWriteJson(paths.overridesPath, overrides);
-    await atomicWriteJson(paths.ledgerPath, ledger);
-    return accepted;
-  });
+  validateId(idRaw);
+  void draftInput; void actor; void deps;
+  throw new Error('Direct meeting acceptance is disabled; resolve review blockers and use the transactional autopublisher');
 }
 
 export async function attachMeetingReviewJob(idRaw: string, jobId: number, actor: string, deps: MeetingReviewDeps = {}): Promise<MeetingReviewItem> {

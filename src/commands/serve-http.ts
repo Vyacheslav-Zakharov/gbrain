@@ -115,14 +115,12 @@ import {
   rejectConceptProposal,
 } from '../core/concept-review.ts';
 import {
-  acceptMeetingReview,
-  attachMeetingReviewJob,
   createLlmMeetingRevision,
   createManualMeetingRevision,
   getMeetingReviewItem,
   listMeetingReviewItems,
   rejectMeetingReview,
-  reopenMeetingReviewAfterQueueFailure,
+  type MeetingReviewClass,
   type MeetingReviewStatus,
 } from '../core/meeting-review.ts';
 import {
@@ -3143,8 +3141,11 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     try {
       const statusRaw = String(req.query.status ?? 'pending');
       const status = ['pending', 'accepted', 'rejected'].includes(statusRaw) ? statusRaw as MeetingReviewStatus : 'pending';
+      const reviewClassRaw = String(req.query.review_class ?? '');
+      const review_class = ['ready', 'exception'].includes(reviewClassRaw) ? reviewClassRaw as MeetingReviewClass : undefined;
       res.json(await listMeetingReviewItems({
         status,
+        review_class,
         query: typeof req.query.q === 'string' ? req.query.q : undefined,
         limit: Number(req.query.limit ?? 100),
       }));
@@ -3175,19 +3176,10 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   });
 
   app.post('/admin/api/meeting-review/items/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
-    const id = String(req.params.id);
-    const actor = adminActor(req);
-    try {
-      await acceptMeetingReview(id, req.body?.draft, actor);
-      try {
-        const job = await enqueueMeetingIngest(['--wait-lock', '--apply', '--ids', id], `meeting-review:${id}:accepted-v1`);
-        const item = await attachMeetingReviewJob(id, job.id, actor);
-        res.status(202).json({ item, job_id: job.id });
-      } catch (queueError) {
-        await reopenMeetingReviewAfterQueueFailure(id, queueError instanceof Error ? queueError.message : String(queueError), actor);
-        throw queueError;
-      }
-    } catch (error) { sendReviewError(res, error); }
+    res.status(409).json({
+      error: 'direct_meeting_accept_disabled',
+      message: 'Прямой импорт отключён. Устраните указанную причину; clean-встречи публикуются transactional autopublisher автоматически.',
+    });
   });
 
   app.post('/admin/api/meeting-review/items/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
