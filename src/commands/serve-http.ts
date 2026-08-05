@@ -115,11 +115,15 @@ import {
   rejectConceptProposal,
 } from '../core/concept-review.ts';
 import {
+  askMeetingReviewAdvisor,
   createLlmMeetingRevision,
   createManualMeetingRevision,
   getMeetingReviewItem,
+  isCanonicalMeetingPersonSlug,
   listMeetingReviewItems,
+  MEETING_INTERNAL_SOURCE_OPTIONS,
   rejectMeetingReview,
+  saveMeetingReviewResolution,
   type MeetingReviewClass,
   type MeetingReviewStatus,
 } from '../core/meeting-review.ts';
@@ -3154,6 +3158,30 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
   });
 
+  app.get('/admin/api/meeting-review/sources', requireAdmin, async (_req: Request, res: Response) => {
+    res.json({ rows: MEETING_INTERNAL_SOURCE_OPTIONS });
+  });
+
+  const isCanonicalMeetingEntity = (page: Awaited<ReturnType<typeof engine.getPage>>): boolean => {
+    if (!page || page.type !== 'person' || /\/(?:index|readme)$/i.test(page.slug)) return false;
+    const status = String(page.frontmatter?.status ?? '').trim().toLowerCase();
+    return status === 'active' || status === 'stable';
+  };
+
+  app.get('/admin/api/meeting-review/entities', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const query = String(req.query.q ?? '').trim().toLowerCase();
+      const pages = await engine.listPages({ sourceId: 'shared', limit: 5_000, sort: 'slug' });
+      const rows = pages
+        .filter(page => isCanonicalMeetingPersonSlug(page.slug))
+        .filter(page => isCanonicalMeetingEntity(page))
+        .filter(page => !query || `${page.title || ''} ${page.slug}`.toLowerCase().includes(query))
+        .slice(0, 50)
+        .map(page => ({ slug: page.slug, title: page.title || page.slug, kind: page.slug.startsWith('hcm/employees/') ? 'employee' : 'contact' }));
+      res.json({ rows });
+    } catch (error) { sendReviewError(res, error); }
+  });
+
   app.get('/admin/api/meeting-review/items/:id', requireAdmin, async (req: Request, res: Response) => {
     try { res.json(await getMeetingReviewItem(String(req.params.id))); }
     catch (error) { sendReviewError(res, error); }
@@ -3170,6 +3198,39 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         String(req.params.id),
         String(req.body?.field ?? 'canonical_markdown') as 'canonical_markdown' | 'shared_markdown' | 'split_markdown',
         String(req.body?.comment ?? ''),
+        adminActor(req),
+      ));
+    } catch (error) { sendReviewError(res, error); }
+  });
+
+  app.post('/admin/api/meeting-review/items/:id/resolution', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const resolution = await saveMeetingReviewResolution(id, req.body, adminActor(req), {
+        entityExists: async slug => isCanonicalMeetingEntity(await engine.getPage(slug, { sourceId: 'shared' })),
+      });
+      try {
+        const job = await enqueueMeetingIngest(
+          ['--dry-run', '--ids', id, '--limit', '1'],
+          `meeting-review:resolution:${id}:${resolution.updated_at}`,
+        );
+        res.status(202).json({ resolution, job_id: job.id });
+      } catch {
+        res.status(202).json({
+          resolution,
+          job_id: null,
+          warning: 'resolution_saved_preview_queue_failed',
+          message: 'Решение сохранено, но повторная проверка не поставлена в очередь. Запустите «Обновить предпросмотр».',
+        });
+      }
+    } catch (error) { sendReviewError(res, error); }
+  });
+
+  app.post('/admin/api/meeting-review/items/:id/advisor', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await askMeetingReviewAdvisor(
+        String(req.params.id),
+        String(req.body?.question ?? ''),
         adminActor(req),
       ));
     } catch (error) { sendReviewError(res, error); }
