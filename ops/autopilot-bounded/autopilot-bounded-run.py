@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -115,7 +116,13 @@ def serializable_snapshot(value: dict) -> dict:
     }
 
 
-def evaluate_postflight(pre: dict, post: dict, source: str, run_failed: bool) -> dict:
+def evaluate_postflight(
+    pre: dict,
+    post: dict,
+    source: str,
+    run_failed: bool,
+    expected_budget_take_count: int | None = None,
+) -> dict:
     pending_take_delta = post["takes"].get((source, "pending"), 0) - pre["takes"].get((source, "pending"), 0)
     pending_concept_delta = post["concepts"].get((source, "pending"), 0) - pre["concepts"].get((source, "pending"), 0)
     take_status_deltas = {
@@ -181,6 +188,10 @@ def evaluate_postflight(pre: dict, post: dict, source: str, run_failed: bool) ->
     post_nonterminal = sum(post["jobs"].values())
     stop_reasons = []
     if run_failed: stop_reasons.append("phase_failure")
+    if expected_budget_take_count is not None and (
+        expected_budget_take_count != len(new_take_ids) or invalid_new_takes
+    ):
+        stop_reasons.append("budget_progress_mismatch")
     if len(new_take_ids) > MAX_NEW_TAKES: stop_reasons.append("take_review_capacity_exceeded")
     if len(new_concept_ids) > MAX_NEW_CONCEPTS: stop_reasons.append("concept_review_capacity_exceeded")
     if cross_source_proposal_changes or cross_source_canonical_changes: stop_reasons.append("cross_source_write")
@@ -193,6 +204,7 @@ def evaluate_postflight(pre: dict, post: dict, source: str, run_failed: bool) ->
         "pending_concepts_net": pending_concept_delta,
         "gross_new_take_ids": sorted(new_take_ids),
         "gross_new_concept_ids": sorted(new_concept_ids),
+        "reported_budget_exhausted_take_count": expected_budget_take_count,
         "allowed_take_supersede_ids": sorted(allowed_take_supersedes),
         "take_proposal_statuses": [{"source_id": k[0], "status": k[1], "delta": v} for k, v in sorted(take_status_deltas.items())],
         "concept_proposal_statuses": [{"source_id": k[0], "status": k[1], "delta": v} for k, v in sorted(concept_status_deltas.items())],
@@ -235,6 +247,35 @@ def phase_result(report: dict | None, phase: str) -> dict | None:
         if item.get("phase") == phase:
             return item
     return None
+
+
+def phase_result_acceptable(report: dict | None, phase: str, result: dict | None) -> bool:
+    if not report or not result or report.get("status") not in {"clean", "partial"}:
+        return False
+    status = result.get("status")
+    if status in {"ok", "skipped"}:
+        return True
+    details = result.get("details")
+    if (
+        phase != "propose_takes"
+        or report.get("status") != "partial"
+        or status != "warn"
+        or not isinstance(details, dict)
+    ):
+        return False
+    inserted = details.get("proposals_inserted")
+    warnings = details.get("warnings")
+    return (
+        details.get("budget_exhausted") is True
+        and isinstance(inserted, int) and not isinstance(inserted, bool)
+        and 0 < inserted <= MAX_NEW_TAKES
+        and isinstance(warnings, list) and len(warnings) == 1
+        and isinstance(warnings[0], str)
+        and re.fullmatch(
+            r"budget exhausted at page [1-9]\d*/[1-9]\d* \(reserved \$\d+\.\d{4} / cap \$\d+\.\d{2}\)",
+            warnings[0],
+        ) is not None
+    )
 
 
 def run() -> int:
@@ -346,6 +387,7 @@ def run() -> int:
         phase_receipts = []
         deadline = time.monotonic() + TOTAL_WALL_SECONDS
         run_failed = False
+        expected_budget_take_count = None
         for phase in PHASES:
             remaining = int(deadline - time.monotonic())
             if remaining <= 0:
@@ -379,14 +421,23 @@ def run() -> int:
                 "summary": result.get("summary") if result else None,
                 "details": result.get("details") if result else None,
             })
-            if rc != 0 or report is None or result is None or result.get("status") not in {"ok", "skipped"}:
+            accepted = rc == 0 and phase_result_acceptable(report, phase, result)
+            if accepted and phase == "propose_takes" and result.get("status") == "warn":
+                expected_budget_take_count = result["details"]["proposals_inserted"]
+            if not accepted:
                 run_failed = True
                 break
 
         post = snapshot(conn)
         atomic_json(run_dir / "post.json", serializable_snapshot(post))
 
-        assessment = evaluate_postflight(pre, post, source, run_failed)
+        assessment = evaluate_postflight(
+            pre,
+            post,
+            source,
+            run_failed,
+            expected_budget_take_count=expected_budget_take_count,
+        )
         stop_reasons = assessment["stop_reasons"]
 
         receipt = {
