@@ -159,6 +159,10 @@ export const api = {
     return apiFetch(`/admin/api/meeting-review/items?${qs.toString()}`);
   },
   meetingReviewItem: (id: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}`),
+  meetingReviewSources: () => apiFetch('/admin/api/meeting-review/sources'),
+  meetingReviewEntities: (q = '') => apiFetch(`/admin/api/meeting-review/entities?q=${encodeURIComponent(q)}`),
+  meetingReviewResolution: (id: string, resolution: object) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/resolution`, { method: 'POST', body: JSON.stringify(resolution) }),
+  meetingReviewAdvisor: (id: string, question: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/advisor`, { method: 'POST', body: JSON.stringify({ question }) }),
   meetingReviewManualRevision: (id: string, draft: object) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/revisions/manual`, { method: 'POST', body: JSON.stringify({ draft }) }),
   meetingReviewLlmRevision: (id: string, field: string, comment: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/revisions/llm`, { method: 'POST', body: JSON.stringify({ field, comment }) }),
   // Backward-compatible client surface only: the server endpoint is a fail-closed 409 kill switch.
