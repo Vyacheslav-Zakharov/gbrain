@@ -1,0 +1,16 @@
+[Unit]
+Description=GBrain bounded proposal-only Autopilot
+After=network-online.target gbrain-persistent.service gbrain-worker.service
+Wants=network-online.target
+ConditionPathExists=!%h/.gbrain/state/autopilot-bounded/HOLD.json
+
+[Service]
+Type=oneshot
+ExecStart=%h/.gbrain/autopilot-bounded-run.sh
+TimeoutStartSec=50min
+KillMode=control-group
+StandardOutput=append:%h/.gbrain/autopilot-bounded.log
+StandardError=append:%h/.gbrain/autopilot-bounded.err
+
+[Install]
+WantedBy=default.target

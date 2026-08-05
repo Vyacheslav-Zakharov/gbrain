@@ -62,8 +62,8 @@ describe('v0.41 T9 R-GATE: ALL_PHASES + PHASE_SCOPE contract', () => {
     expect(PHASE_SCOPE.extract_atoms).toBe('source');
   });
 
-  test('PHASE_SCOPE declares synthesize_concepts as global-scoped', () => {
-    expect(PHASE_SCOPE.synthesize_concepts).toBe('global');
+  test('PHASE_SCOPE declares synthesize_concepts as source-scoped', () => {
+    expect(PHASE_SCOPE.synthesize_concepts).toBe('source');
   });
 
   test('every ALL_PHASES entry has a PHASE_SCOPE entry (exhaustive map)', () => {

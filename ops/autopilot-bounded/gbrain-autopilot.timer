@@ -1,0 +1,12 @@
+[Unit]
+Description=Run GBrain bounded proposal-only Autopilot daily
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=10min
+AccuracySec=1min
+Unit=gbrain-autopilot.service
+
+[Install]
+WantedBy=timers.target

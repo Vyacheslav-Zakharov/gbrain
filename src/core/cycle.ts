@@ -230,11 +230,11 @@ export const PHASE_SCOPE: Record<CyclePhase, PhaseScope> = {
   orphans: 'global',
   purge: 'global',
   'schema-suggest': 'source',
-  // v0.41 T9 — extract_atoms is naturally per-source (each source's
-  // transcript dir gets walked independently). synthesize_concepts is
-  // global because concept clusters cross sources by nature.
+  // v0.41 T9 — both phases are naturally per-source. A brain-wide
+  // synthesize_concepts dispatch can regroup evidence across repositories and
+  // bypass source provenance, so it must only run inside a resolved source cycle.
   extract_atoms: 'source',
-  synthesize_concepts: 'global',
+  synthesize_concepts: 'source',
   // v0.41.11.0 — declared 'source' for taxonomy alignment with
   // extract_facts (per-source semantics). PHASE_SCOPE has no runtime
   // fanout enforcement today (per the comment above); the phase
@@ -1935,6 +1935,7 @@ export async function runCycle(
         const { runPhaseSynthesizeConcepts } = await import('./cycle/synthesize-concepts.ts');
         const { result, duration_ms } = await timePhase(() => runPhaseSynthesizeConcepts(engine, {
           brainDir: brainDir ?? undefined,
+          sourceId: cycleSourceId,
           dryRun,
           // v0.41.19.0 (T3): closure refreshes cycle lock + fires outer hook.
           yieldDuringPhase: buildYieldDuringPhase(lock, opts.yieldDuringPhase),

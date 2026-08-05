@@ -6,11 +6,67 @@ import type { PhaseResult } from '../cycle.ts';
 import type { ProgressReporter } from '../progress.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
-import { chat as gatewayChat } from '../ai/gateway.ts';
+import { chat as gatewayChat, getChatModel, type ChatResult } from '../ai/gateway.ts';
+import { canonicalLookup, type ModelPricing } from '../model-pricing.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { contentHash } from './propose-takes.ts';
 
 const DEFAULT_BUDGET_USD = 1.5;
+const MAX_OUTPUT_TOKENS = 3072;
+const CHAT_FRAMING_TOKEN_CEILING = 1024;
+
+/** Strict non-negative decimal parser: rejects trailing units/junk and exponent notation. */
+export function parseSynthesisBudget(raw: string | null | undefined): number | null {
+  if (raw == null) return DEFAULT_BUDGET_USD;
+  const value = raw.trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function tokenCeiling(text: string): number {
+  // A tokenizer cannot emit more tokens than UTF-8 bytes, plus conservative
+  // provider/chat framing overhead. This intentionally overestimates.
+  return Buffer.byteLength(text, 'utf8') + CHAT_FRAMING_TOKEN_CEILING;
+}
+
+function maxCallCostUsd(pricing: ModelPricing, input: string): number {
+  return (
+    (tokenCeiling(input) / 1_000_000) * pricing.input
+    + (MAX_OUTPUT_TOKENS / 1_000_000) * pricing.output
+  );
+}
+
+function actualCallCostUsd(pricing: ModelPricing, response: ChatResult): number {
+  return (
+    (response.usage.input_tokens / 1_000_000) * pricing.input
+    + (response.usage.output_tokens / 1_000_000) * pricing.output
+  );
+}
+
+async function refusedSynthesisResult(
+  engine: BrainEngine,
+  sourceId: string,
+  reason: string,
+  extra: Record<string, unknown> = {},
+): Promise<PhaseResult> {
+  let rollupPersisted = false;
+  try {
+    const rollup = await upsertExtractRollup(engine, {
+      kind: 'concepts', source_id: sourceId, round_completed_delta: 0, halt_delta: 1,
+    });
+    rollupPersisted = rollup.ok;
+  } catch {
+    // Preserve fail-closed behavior and make the observability failure explicit.
+  }
+  return {
+    phase: 'synthesize_concepts',
+    status: rollupPersisted ? 'warn' : 'fail',
+    duration_ms: 0,
+    summary: `synthesize_concepts: refused (${reason})`,
+    details: { reason, source_scope: sourceId, rollup_persisted: rollupPersisted, ...extra },
+  };
+}
 const MAX_TAKES_PER_SOURCE = 200;
 const MAX_GROUPS_PER_SOURCE = 20;
 const MAX_TAKES_PER_GROUP = 20;
@@ -41,10 +97,14 @@ export interface TakeConceptGroup {
 
 export interface SynthesizeConceptsOpts {
   brainDir?: string;
+  /** Restrict reads, writes, receipts, and rollups to one canonical source. */
+  sourceId?: string;
   dryRun?: boolean;
   yieldDuringPhase?: (() => Promise<void>) | undefined;
   progress?: ProgressReporter;
   _chat?: typeof gatewayChat;
+  /** Test seam: resolved model used for pre-submit pricing. */
+  _model?: string;
   /** Test seam: exact canonical Takes snapshot; suppresses the DB query. */
   _takes?: CanonicalTakeInput[];
   /** Test seam: occupied Take IDs from pending/accepted/rejected Concept proposals. */
@@ -178,7 +238,30 @@ export async function runPhaseSynthesizeConcepts(
   engine: BrainEngine,
   opts: SynthesizeConceptsOpts = {},
 ): Promise<PhaseResult> {
+  if (!opts.sourceId) {
+    return {
+      phase: 'synthesize_concepts', status: 'warn', duration_ms: 0,
+      summary: 'synthesize_concepts: source scope is required',
+      details: { reason: 'source_scope_required' },
+    };
+  }
   const chat = opts._chat ?? gatewayChat;
+  let budgetUsd = DEFAULT_BUDGET_USD;
+  try {
+    const rawBudget = await engine.getConfig('cycle.synthesize_concepts.budget_usd');
+    const parsed = parseSynthesisBudget(rawBudget);
+    if (parsed === null) {
+      return refusedSynthesisResult(engine, opts.sourceId, 'invalid_budget_config', {
+        config_key: 'cycle.synthesize_concepts.budget_usd',
+      });
+    }
+    budgetUsd = parsed;
+  } catch (err) {
+    return refusedSynthesisResult(engine, opts.sourceId, 'budget_config_query_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
   let takes: CanonicalTakeInput[];
   if (opts._takes !== undefined) {
     takes = opts._takes;
@@ -192,7 +275,9 @@ export async function runPhaseSynthesizeConcepts(
           WHERE t.active = true
             AND t.superseded_by IS NULL
             AND p.deleted_at IS NULL
+            ${opts.sourceId ? 'AND p.source_id = $1' : ''}
           ORDER BY p.source_id, t.id`,
+        opts.sourceId ? [opts.sourceId] : [],
       );
     } catch (err) {
       return {
@@ -203,12 +288,28 @@ export async function runPhaseSynthesizeConcepts(
     }
   }
 
+  // Defense in depth for injected snapshots and future alternative loaders.
+  if (opts.sourceId) takes = takes.filter(take => take.source_id === opts.sourceId);
+
   if (takes.length === 0) {
     return {
       phase: 'synthesize_concepts', status: 'skipped', duration_ms: 0,
       summary: 'synthesize_concepts: no active canonical Takes',
       details: { reason: 'no_active_takes' },
     };
+  }
+
+  let model: string;
+  try {
+    model = opts._model ?? (opts._chat ? 'anthropic:claude-sonnet-4-6' : getChatModel());
+  } catch (err) {
+    return refusedSynthesisResult(engine, opts.sourceId, 'model_resolution_failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const pricing = canonicalLookup(model);
+  if (!pricing) {
+    return refusedSynthesisResult(engine, opts.sourceId, 'unpriced_model', { model });
   }
 
   let occupiedTakeIdsBySource: Map<string, Set<number>>;
@@ -221,7 +322,7 @@ export async function runPhaseSynthesizeConcepts(
     );
   } else {
     try {
-      occupiedTakeIdsBySource = await loadOccupiedTakeIdsBySource(engine);
+      occupiedTakeIdsBySource = await loadOccupiedTakeIdsBySource(engine, opts.sourceId);
     } catch (err) {
       return {
         phase: 'synthesize_concepts', status: 'warn', duration_ms: 0,
@@ -252,6 +353,7 @@ export async function runPhaseSynthesizeConcepts(
   let occupiedTakesSeen = 0;
   let validationRetries = 0;
   let estimatedSpendUsd = 0;
+  let reservedMaxSpendUsd = 0;
   let lastYieldMs = Date.now();
   async function maybeYield(): Promise<void> {
     if (!opts.yieldDuringPhase || Date.now() - lastYieldMs < 30_000) return;
@@ -269,32 +371,48 @@ export async function runPhaseSynthesizeConcepts(
       sourcesSkippedTerminalProvenance++;
       continue;
     }
-    if (estimatedSpendUsd >= DEFAULT_BUDGET_USD) {
-      failures.push({ source_id: sourceId, error: 'budget_exhausted' });
-      continue;
-    }
     let groups: TakeConceptGroup[] = [];
     try {
       const input = sourceTakes.map(t => ({ id: t.id, page_slug: t.page_slug, claim: t.claim, kind: t.kind, holder: t.holder, weight: t.weight }));
       const userContent = `SOURCE_ID: ${sourceId}\nALREADY_REVIEWED_OR_PENDING_TAKE_IDS: ${JSON.stringify([...occupiedAtStart].sort((a, b) => a - b))}\n<UNTRUSTED_TAKES_JSON>\n${JSON.stringify(input)}\n</UNTRUSTED_TAKES_JSON>`;
+      const firstPrompt = `${SYNTH_PROMPT}\n${userContent}`;
+      const firstReservation = maxCallCostUsd(pricing, firstPrompt);
+      if (reservedMaxSpendUsd + firstReservation > budgetUsd) {
+        failures.push({ source_id: sourceId, error: 'budget_exhausted' });
+        continue;
+      }
+      reservedMaxSpendUsd += firstReservation;
       let response = await chat({
+        model,
         system: SYNTH_PROMPT,
         messages: [{ role: 'user', content: userContent }],
-        maxTokens: 4096,
+        maxTokens: MAX_OUTPUT_TOKENS,
       });
-      estimatedSpendUsd += (response.usage.input_tokens * 3 + response.usage.output_tokens * 15) / 1_000_000;
+      const responsePricing = canonicalLookup(response.model);
+      if (!responsePricing) throw new Error(`unpriced_response_model:${response.model}`);
+      estimatedSpendUsd += actualCallCostUsd(responsePricing, response);
       groups = parseTakeGroupsResponse(response.text, sourceTakes);
       let compact = response.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-      if (groups.length === 0 && compact !== '[]' && estimatedSpendUsd < DEFAULT_BUDGET_USD) {
-        validationRetries++;
-        response = await chat({
-          system: `${SYNTH_PROMPT}\n\nПОВТОР ПОСЛЕ НЕВАЛИДНОГО ОТВЕТА: верни максимум 8 самых доказательных групп, summary_ru — ровно 2–3 коротких предложения. Не используй markdown/code fence. Обязательно закрой весь JSON-массив.`,
-          messages: [{ role: 'user', content: userContent }],
-          maxTokens: 4096,
-        });
-        estimatedSpendUsd += (response.usage.input_tokens * 3 + response.usage.output_tokens * 15) / 1_000_000;
-        groups = parseTakeGroupsResponse(response.text, sourceTakes);
-        compact = response.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      if (groups.length === 0 && compact !== '[]') {
+        const retrySystem = `${SYNTH_PROMPT}\n\nПОВТОР ПОСЛЕ НЕВАЛИДНОГО ОТВЕТА: верни максимум 8 самых доказательных групп, summary_ru — ровно 2–3 коротких предложения. Не используй markdown/code fence. Обязательно закрой весь JSON-массив.`;
+        const retryReservation = maxCallCostUsd(pricing, `${retrySystem}\n${userContent}`);
+        if (reservedMaxSpendUsd + retryReservation > budgetUsd) {
+          failures.push({ source_id: sourceId, error: 'budget_exhausted_before_validation_retry' });
+        } else {
+          reservedMaxSpendUsd += retryReservation;
+          validationRetries++;
+          response = await chat({
+            model,
+            system: retrySystem,
+            messages: [{ role: 'user', content: userContent }],
+            maxTokens: MAX_OUTPUT_TOKENS,
+          });
+          const retryPricing = canonicalLookup(response.model);
+          if (!retryPricing) throw new Error(`unpriced_response_model:${response.model}`);
+          estimatedSpendUsd += actualCallCostUsd(retryPricing, response);
+          groups = parseTakeGroupsResponse(response.text, sourceTakes);
+          compact = response.text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+        }
       }
       if (groups.length === 0 && compact !== '[]') failures.push({ source_id: sourceId, error: 'no_valid_groups_after_validation' });
       await maybeYield();
@@ -356,7 +474,7 @@ export async function runPhaseSynthesizeConcepts(
            RETURNING id`,
           [sourceId, pageSlug, sourceContentHash, destinationContentHash,
            SYNTHESIZE_CONCEPTS_PROMPT_VERSION, proposalRunId, proposedMarkdown,
-           JSON.stringify(sourceTakes), 'configured:synthesize_concepts'],
+           JSON.stringify(sourceTakes), model],
         );
         insertedCount = inserted.length;
       }
@@ -369,7 +487,7 @@ export async function runPhaseSynthesizeConcepts(
   if (!opts.dryRun && conceptsWritten > 0) {
     try {
       await writeReceipt(engine, {
-        kind: 'concepts', source_id: 'default', run_id: proposalRunId, round: 'single',
+        kind: 'concepts', source_id: opts.sourceId ?? 'default', run_id: proposalRunId, round: 'single',
         extracted_at: new Date().toISOString(), total_rows: conceptsWritten, cost_usd: estimatedSpendUsd,
         summary: `Proposed ${conceptsWritten} Russian concepts from ${takes.length} active canonical Takes for human review.`,
       });
@@ -377,7 +495,7 @@ export async function runPhaseSynthesizeConcepts(
   }
   if (!opts.dryRun) {
     await upsertExtractRollup(engine, {
-      kind: 'concepts', source_id: 'default', cost_delta: estimatedSpendUsd,
+      kind: 'concepts', source_id: opts.sourceId ?? 'default', cost_delta: estimatedSpendUsd,
       round_completed_delta: failures.length === 0 ? 1 : 0,
       halt_delta: failures.length > 0 ? 1 : 0,
     });
@@ -391,11 +509,12 @@ export async function runPhaseSynthesizeConcepts(
       concepts_written: conceptsWritten, concepts_proposed: conceptsWritten, proposal_run_id: proposalRunId,
       tier_counts: tierCounts, groups_found: groupsFound, takes_seen: takes.length,
       sources_seen: bySource.size, failures, estimated_spend_usd: estimatedSpendUsd,
+      reserved_max_spend_usd: reservedMaxSpendUsd, model, max_output_tokens: MAX_OUTPUT_TOKENS,
       validation_retries: validationRetries,
       occupied_takes_seen: occupiedTakesSeen,
       sources_skipped_terminal_provenance: sourcesSkippedTerminalProvenance,
       groups_skipped_terminal_provenance: groupsSkippedTerminalProvenance,
-      budget_usd: DEFAULT_BUDGET_USD, dry_run: opts.dryRun ?? false,
+      budget_usd: budgetUsd, source_scope: opts.sourceId ?? null, dry_run: opts.dryRun ?? false,
       prompt_version: SYNTHESIZE_CONCEPTS_PROMPT_VERSION,
     },
   };

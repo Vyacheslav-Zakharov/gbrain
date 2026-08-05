@@ -18,6 +18,7 @@ import { describe, test, expect } from 'bun:test';
 import {
   runPhaseProposeTakes,
   parseExtractorOutput,
+  parseProposeTakesBudget,
   contentHash,
   proposalClaimHash,
   hasCompleteFence,
@@ -54,6 +55,7 @@ function buildMockEngine(opts: {
   insertConflicts?: number;
   history?: Array<{ id: number; status: string; content_hash: string; prompt_version: string; claim_hash: string }>;
   rejectedClaims?: Array<{ proposal_id: number; claim: string; reason: string }>;
+  budgetConfig?: string | null;
 }): { engine: BrainEngine; captured: CapturedSql[]; transactionAttempts: () => number } {
   const captured: CapturedSql[] = [];
   const scans = opts.existingProposals ?? new Set<string>();
@@ -68,6 +70,9 @@ function buildMockEngine(opts: {
     },
     async listPages() {
       return opts.pages;
+    },
+    async getConfig(key: string) {
+      return key === 'cycle.propose_takes.budget_usd' ? (opts.budgetConfig ?? null) : null;
     },
     async executeRaw<T>(sql: string, params?: unknown[]): Promise<T[]> {
       captured.push({ sql, params: params ?? [] });
@@ -128,6 +133,17 @@ function buildCtx(engine: BrainEngine): OperationContext {
     sourceId: 'default',
   };
 }
+
+describe('parseProposeTakesBudget', () => {
+  test('accepts strict non-negative decimals and rejects trailing junk', () => {
+    expect(parseProposeTakesBudget(null)).toBe(5.0);
+    expect(parseProposeTakesBudget('0')).toBe(0);
+    expect(parseProposeTakesBudget('0.10')).toBe(0.10);
+    expect(parseProposeTakesBudget('1junk')).toBeNull();
+    expect(parseProposeTakesBudget('-1')).toBeNull();
+    expect(parseProposeTakesBudget('1e2')).toBeNull();
+  });
+});
 
 // ─── parseExtractorOutput ───────────────────────────────────────────
 
@@ -287,6 +303,20 @@ describe('extractExistingTakesForDedup', () => {
 // ─── Phase integration ──────────────────────────────────────────────
 
 describe('runPhaseProposeTakes — phase integration', () => {
+  test('DB budget zero denies the first extractor call and closes the claimed scan', async () => {
+    const pages = [buildPage({ slug: 'wiki/zero-budget', body: 'A claim that must not reach the model.' })];
+    const { engine, captured } = buildMockEngine({ pages, budgetConfig: '0' });
+    let extractorCalls = 0;
+    const result = await runPhaseProposeTakes(buildCtx(engine), {
+      extractor: async () => { extractorCalls += 1; return []; },
+    });
+
+    expect(extractorCalls).toBe(0);
+    expect(result.status).toBe('warn');
+    expect((result.details as Record<string, unknown>).budget_exhausted).toBe(true);
+    expect(captured.some(c => c.sql.includes("error_text = 'budget_exhausted'"))).toBe(true);
+  });
+
   test('happy path: scans pages, extracts proposals, writes via INSERT', async () => {
     const pages = [buildPage({ slug: 'wiki/concepts/network-effects', body: 'Marketplaces with cold-start liquidity always win.' })];
     const { engine, captured } = buildMockEngine({ pages });

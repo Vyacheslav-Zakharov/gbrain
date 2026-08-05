@@ -52,21 +52,21 @@ function stubChat(groups: number): (o: ChatOpts) => Promise<ChatResult> {
 describe('Take-based synthesize_concepts progress wiring', () => {
   test('phase does not call start or finish', async () => {
     const { reporter, events } = makeMockReporter();
-    await runPhaseSynthesizeConcepts(engine, { _takes: [take(1), take(2)], _chat: stubChat(1), progress: reporter });
+    await runPhaseSynthesizeConcepts(engine, { sourceId: 'shared', _takes: [take(1), take(2)], _chat: stubChat(1), progress: reporter });
     expect(events.filter(e => e.kind === 'start')).toHaveLength(0);
     expect(events.filter(e => e.kind === 'finish')).toHaveLength(0);
   });
 
   test('one tick per validated concept group', async () => {
     const { reporter, events } = makeMockReporter();
-    await runPhaseSynthesizeConcepts(engine, { _takes: [take(1), take(2), take(3), take(4)], _chat: stubChat(2), progress: reporter });
+    await runPhaseSynthesizeConcepts(engine, { sourceId: 'shared', _takes: [take(1), take(2), take(3), take(4)], _chat: stubChat(2), progress: reporter });
     const ticks = events.filter(e => e.kind === 'tick');
     expect(ticks).toHaveLength(2);
     expect(ticks[0].note).toMatch(/proposals/);
   });
 
   test('progress remains optional', async () => {
-    const output = await runPhaseSynthesizeConcepts(engine, { _takes: [] });
+    const output = await runPhaseSynthesizeConcepts(engine, { sourceId: 'shared', _takes: [] });
     expect(output.phase).toBe('synthesize_concepts');
   });
 });

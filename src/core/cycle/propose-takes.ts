@@ -40,7 +40,8 @@
 
 import { randomUUID, createHash } from 'node:crypto';
 import { BaseCyclePhase, type ScopedReadOpts, type BasePhaseOpts } from './base-phase.ts';
-import { chat as gatewayChat } from '../ai/gateway.ts';
+import { chat as gatewayChat, getChatModel } from '../ai/gateway.ts';
+import { canonicalLookup, type ModelPricing } from '../model-pricing.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
 import { upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { GBrainError } from '../types.ts';
@@ -62,6 +63,24 @@ export const PROPOSE_TAKES_PROMPT_VERSION = 'v0.36.1.3-ru-owner-rules-v1';
 // starts with no cross-version cache compatibility.
 const PROPOSE_TAKES_ROLLOUT_COMPATIBLE_PROMPT_VERSIONS = [] as const;
 const PENDING_CLAIM_WRITE_ATTEMPTS = 3;
+const PROPOSE_MAX_OUTPUT_TOKENS = 2048;
+const PROPOSE_CHAT_FRAMING_TOKEN_CEILING = 1024;
+
+export function parseProposeTakesBudget(raw: string | null, fallback = 5.0): number | null {
+  if (raw === null) return fallback;
+  const value = raw.trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function proposeMaxCallCostUsd(pricing: ModelPricing, prompt: string): number {
+  const inputTokenCeiling = Buffer.byteLength(prompt, 'utf8') + PROPOSE_CHAT_FRAMING_TOKEN_CEILING;
+  return (
+    (inputTokenCeiling / 1_000_000) * pricing.input
+    + (PROPOSE_MAX_OUTPUT_TOKENS / 1_000_000) * pricing.output
+  );
+}
 
 class PendingClaimWriteConflict extends Error {
   constructor() {
@@ -275,18 +294,22 @@ export function extractExistingTakesForDedup(pageBody: string): Array<{
  * then, the production extractor returns whatever the stub LLM produces —
  * empirically often a sparse list or [].
  */
-export async function defaultExtractor(
-  input: Parameters<ProposeTakesExtractor>[0],
-): Promise<ProposedTake[]> {
-  const prompt = EXTRACT_TAKES_PROMPT
+function buildExtractorPrompt(input: Parameters<ProposeTakesExtractor>[0]): string {
+  return EXTRACT_TAKES_PROMPT
     .replace('{EXISTING_TAKES_JSON}', JSON.stringify(input.existingTakes, null, 2))
     .replace('{REJECTED_CLAIMS_JSON}', JSON.stringify(input.rejectedClaims, null, 2))
     .replace('{PAGE_BODY}', input.pageBody);
+}
+
+export async function defaultExtractor(
+  input: Parameters<ProposeTakesExtractor>[0],
+): Promise<ProposedTake[]> {
+  const prompt = buildExtractorPrompt(input);
 
   const result = await gatewayChat({
     messages: [{ role: 'user', content: prompt }],
     ...(input.modelHint ? { model: input.modelHint } : {}),
-    maxTokens: 2048,
+    maxTokens: PROPOSE_MAX_OUTPUT_TOKENS,
   });
 
   // ChatResult.text is already the concatenated text content.
@@ -364,6 +387,11 @@ class ProposeTakesPhase extends BaseCyclePhase {
     const promptVersion = opts.promptVersion ?? PROPOSE_TAKES_PROMPT_VERSION;
     const pageLimit = opts.pageLimit ?? 100;
     const skipPagesWithFence = opts.skipPagesWithFence ?? false;
+    const modelId = opts.model ?? (opts.extractor ? 'anthropic:claude-sonnet-4-6' : getChatModel());
+    const pricing = canonicalLookup(modelId);
+    if (!pricing) throw new Error(`unpriced model denied: ${modelId}`);
+    const budgetUsd = opts.budgetUsd ?? this.budgetUsdDefault;
+    let reservedMaxSpendUsd = 0;
     const proposalRunId = `propose-${new Date().toISOString().slice(0, 19).replace(/[-:T]/g, '')}-${randomUUID().slice(0, 8)}`;
 
     const result: ProposeTakesResult = {
@@ -403,7 +431,6 @@ class ProposeTakesPhase extends BaseCyclePhase {
       // Atomically claim this page-level scan. Completed/running rows are cache
       // hits; failed rows are reclaimed for retry. This also caches [] results.
       const sourceId = page.source_id ?? scope.sourceId ?? 'default';
-      const modelId = opts.model ?? 'claude-sonnet-4-6';
       if (promptVersion === PROPOSE_TAKES_PROMPT_VERSION) {
         let compatibleHit = false;
         for (const compatibleVersion of PROPOSE_TAKES_ROLLOUT_COMPATIBLE_PROMPT_VERSIONS) {
@@ -442,50 +469,51 @@ class ProposeTakesPhase extends BaseCyclePhase {
       const scanId = scanRows[0]!.id;
       result.cache_misses += 1;
 
-      // Budget pre-check before the LLM call. Estimate: ~1500 input tokens + 500 output.
-      const budget = this.checkBudget({
-        modelId: opts.model ?? 'claude-sonnet-4-6',
-        estimatedInputTokens: 1500,
-        maxOutputTokens: 500,
-      });
-      if (!budget.allowed) {
+      const rejectedClaims = await engine.executeRaw<{ proposal_id: number; claim: string; reason: string }>(
+        `SELECT tp.id AS proposal_id,
+                COALESCE(rev.proposed_payload->>'claim_text', tp.claim_text) AS claim,
+                COALESCE(ev.details->>'reason_code', ev.details->>'reason', 'reviewed_reject') AS reason
+           FROM take_proposals tp
+           LEFT JOIN LATERAL (
+             SELECT proposed_payload FROM ai_review_revisions
+              WHERE target_type='take_proposal' AND target_id=tp.id AND status='draft'
+              ORDER BY id DESC LIMIT 1
+           ) rev ON true
+           LEFT JOIN LATERAL (
+             SELECT details FROM ai_review_events
+              WHERE target_type='take_proposal' AND target_id=tp.id AND action='reject'
+              ORDER BY id DESC LIMIT 1
+           ) ev ON true
+          WHERE tp.source_id=$1 AND tp.page_slug=$2 AND tp.status='rejected'
+          ORDER BY tp.acted_at DESC NULLS LAST, tp.id DESC
+          LIMIT 50`,
+        [sourceId, page.slug],
+      );
+      const extractorInput = {
+        pagePath: page.slug,
+        pageBody: body,
+        existingTakes,
+        rejectedClaims,
+        modelHint: modelId,
+      };
+      const reservedCallUsd = proposeMaxCallCostUsd(pricing, buildExtractorPrompt(extractorInput));
+      if (reservedMaxSpendUsd + reservedCallUsd > budgetUsd) {
         result.budget_exhausted = true;
         result.warnings.push(
-          `budget exhausted at page ${result.pages_scanned}/${pages.length} (cumulative $${budget.cumulativeCostUsd.toFixed(4)} / cap $${budget.budgetUsd.toFixed(2)})`,
+          `budget exhausted at page ${result.pages_scanned}/${pages.length} (reserved $${reservedMaxSpendUsd.toFixed(4)} / cap $${budgetUsd.toFixed(2)})`,
+        );
+        await engine.executeRaw(
+          `UPDATE take_proposal_scans SET status = 'failed', error_text = 'budget_exhausted', completed_at = now() WHERE id = $1`,
+          [scanId],
         );
         break;
       }
+      reservedMaxSpendUsd += reservedCallUsd;
 
       // Call the extractor. Errors on a single page log a warning but do not abort.
       let proposals: ProposedTake[];
       try {
-        const rejectedClaims = await engine.executeRaw<{ proposal_id: number; claim: string; reason: string }>(
-          `SELECT tp.id AS proposal_id,
-                  COALESCE(rev.proposed_payload->>'claim_text', tp.claim_text) AS claim,
-                  COALESCE(ev.details->>'reason_code', ev.details->>'reason', 'reviewed_reject') AS reason
-             FROM take_proposals tp
-             LEFT JOIN LATERAL (
-               SELECT proposed_payload FROM ai_review_revisions
-                WHERE target_type='take_proposal' AND target_id=tp.id AND status='draft'
-                ORDER BY id DESC LIMIT 1
-             ) rev ON true
-             LEFT JOIN LATERAL (
-               SELECT details FROM ai_review_events
-                WHERE target_type='take_proposal' AND target_id=tp.id AND action='reject'
-                ORDER BY id DESC LIMIT 1
-             ) ev ON true
-            WHERE tp.source_id=$1 AND tp.page_slug=$2 AND tp.status='rejected'
-            ORDER BY tp.acted_at DESC NULLS LAST, tp.id DESC
-            LIMIT 50`,
-          [sourceId, page.slug],
-        );
-        proposals = await extractor({
-          pagePath: page.slug,
-          pageBody: body,
-          existingTakes,
-          rejectedClaims,
-          modelHint: opts.model,
-        });
+        proposals = await extractor(extractorInput);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await engine.executeRaw(
@@ -644,7 +672,15 @@ class ProposeTakesPhase extends BaseCyclePhase {
 
     return {
       summary: `propose_takes: scanned ${result.pages_scanned} pages, ${result.cache_hits} cached, ${result.proposals_inserted} new proposals, ${result.proposals_suppressed} governed suppressions (run ${proposalRunId})`,
-      details: { ...result, proposal_run_id: proposalRunId, prompt_version: promptVersion },
+      details: {
+        ...result,
+        proposal_run_id: proposalRunId,
+        prompt_version: promptVersion,
+        model: modelId,
+        budget_usd: budgetUsd,
+        reserved_max_spend_usd: reservedMaxSpendUsd,
+        max_output_tokens: PROPOSE_MAX_OUTPUT_TOKENS,
+      },
       status: result.budget_exhausted ? 'warn' : 'ok',
     };
   }
@@ -658,7 +694,55 @@ export async function runPhaseProposeTakes(
   ctx: OperationContext,
   opts: ProposeTakesOpts = {},
 ) {
-  return new ProposeTakesPhase().run(ctx, opts);
+  const sourceId = ctx.sourceId;
+  let reason: string | null = sourceId ? null : 'source_scope_required';
+  let budgetUsd = opts.budgetUsd;
+  if (reason === null && budgetUsd !== undefined && (!Number.isFinite(budgetUsd) || budgetUsd < 0)) {
+    reason = 'invalid_budget_override';
+  }
+  if (reason === null && budgetUsd === undefined) {
+    try {
+      const raw = await ctx.engine.getConfig('cycle.propose_takes.budget_usd');
+      const parsed = parseProposeTakesBudget(raw);
+      if (parsed === null) reason = 'invalid_budget_config';
+      else budgetUsd = parsed;
+    } catch {
+      reason = 'budget_config_unreadable';
+    }
+  }
+  let model = opts.model;
+  if (reason === null && !model) {
+    try {
+      model = opts.extractor ? 'anthropic:claude-sonnet-4-6' : getChatModel();
+    } catch {
+      reason = 'model_resolution_failed';
+    }
+  }
+  if (reason === null && (!model || !canonicalLookup(model))) reason = 'unpriced_model';
+
+  if (reason !== null) {
+    let rollupPersisted = false;
+    if (sourceId) {
+      try {
+        const rollup = await upsertExtractRollup(ctx.engine, {
+          kind: 'takes.proposed', source_id: sourceId, round_completed_delta: 0, halt_delta: 1,
+        });
+        rollupPersisted = rollup.ok;
+      } catch {
+        // The result remains fail-closed; expose missing durable observability.
+      }
+    }
+    return {
+      phase: 'propose_takes' as CyclePhase,
+      status: rollupPersisted || !sourceId ? 'warn' as PhaseStatus : 'fail' as PhaseStatus,
+      duration_ms: 0,
+      summary: `propose_takes: refused (${reason})`,
+      details: { reason, source_scope: sourceId ?? null, rollup_persisted: rollupPersisted },
+    };
+  }
+
+  const resolvedOpts: ProposeTakesOpts = { ...opts, budgetUsd: budgetUsd!, model: model! };
+  return new ProposeTakesPhase().run(ctx, resolvedOpts);
 }
 
 /** Test-only access to the class for subclassing in tests. */
