@@ -122,12 +122,12 @@ export const api = {
   login: (token: string) => apiFetch('/admin/login', { method: 'POST', body: JSON.stringify({ token }) }),
   signOutEverywhere: () => apiFetch('/admin/api/sign-out-everywhere', { method: 'POST' }),
   accessControlPermissions: () => apiFetch('/admin/api/permissions'),
-  accessControlSavePermissions: (email: string, payload: { grants: Array<{ source_id: string; read: boolean; write: boolean }>; expected_version: string }) =>
+  accessControlSavePermissions: (email: string, payload: { grants: Array<{ source_id: string; read: boolean; write: boolean }>; expected_version: string | number }) =>
     apiFetch(`/admin/api/permissions/${encodeURIComponent(email)}`, { method: 'POST', body: JSON.stringify(payload) }),
   accessControlRequests: () => apiFetch('/admin/api/access-requests'),
-  accessControlApproveRequest: (id: string, payload: { grants: Array<{ index: number; read: boolean; write: boolean }>; expected_version: string }) =>
+  accessControlApproveRequest: (id: string, payload: { grants: Array<{ index: number; read: boolean; write: boolean }>; expected_version: string | number }) =>
     apiFetch(`/admin/api/access-requests/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify(payload) }),
-  accessControlRejectRequest: (id: string, expected_version: string, reason = '') =>
+  accessControlRejectRequest: (id: string, expected_version: string | number, reason = '') =>
     apiFetch(`/admin/api/access-requests/${encodeURIComponent(id)}/reject`, { method: 'POST', body: JSON.stringify({ expected_version, reason }) }),
   stats: () => apiFetch('/admin/api/stats'),
   health: () => apiFetch('/admin/api/health-indicators'),

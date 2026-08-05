@@ -37,7 +37,7 @@ beforeAll(async () => {
     sql,
     tokenTtl: 60,
     refreshTtl: 300,
-    userSourceGrantResolver: (email) => email === 'alice@example.test' ? {
+    userSourceGrantResolver: async (email) => email === 'alice@example.test' ? {
       user_email: email,
       source_id: 'alice-example',
       federated_read: ['alice-example', 'shared', 'internal-example'],

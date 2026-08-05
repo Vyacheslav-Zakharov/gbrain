@@ -15,10 +15,10 @@ type PermissionUser = {
   source_id: string;
   federated_read: string[];
   federated_write: string[];
-  version: string;
+  version: string | number;
 };
 
-type PermissionResponse = { areas: AccessArea[]; users: PermissionUser[] };
+type PermissionResponse = { areas: AccessArea[]; users: PermissionUser[]; authority?: 'json' | 'db' };
 
 type RequestGrant = { area: string; source_id?: string; read?: boolean; write?: boolean };
 type AccessRequest = {
@@ -33,10 +33,17 @@ type AccessRequest = {
   decided_at?: string;
   decided_by?: string;
   rejection_reason?: string;
-  version: string;
+  version: string | number;
 };
 
-type RequestResponse = { requests: AccessRequest[] };
+type RequestResponse = { requests: AccessRequest[]; authority?: 'json' | 'db' };
+type MutationAudit = { actor?: string; changed_at?: string } | null;
+type MutationResponse = { audit?: MutationAudit };
+
+function auditNotice(audit: MutationAudit | undefined): string {
+  if (!audit?.actor && !audit?.changed_at) return '';
+  return ` · журнал: ${audit.actor || 'актор не указан'}${audit.changed_at ? `, ${audit.changed_at}` : ''}`;
+}
 
 type GrantSelection = { read: boolean; write: boolean };
 
@@ -165,8 +172,8 @@ export function AccessControlPage() {
       const labels = new Map(permissions.areas.map(area => [area.sourceId, area.label]));
       const summary = changes.map(grant => `• ${labels.get(grant.source_id) || grant.source_id}: ${grant.write ? 'R/W' : grant.read ? 'R' : 'нет доступа'}`).join('\n');
       if (!confirm(`Применить изменения для ${user.email}?\n\n${summary}`)) return;
-      await api.accessControlSavePermissions(user.email, { grants, expected_version: user.version });
-      setNotice(`Права сохранены: ${user.email}`);
+      const result = await api.accessControlSavePermissions(user.email, { grants, expected_version: user.version }) as MutationResponse;
+      setNotice(`Права сохранены: ${user.email}${auditNotice(result.audit)}`);
       try {
         await loadPermissions();
       } catch {
@@ -203,8 +210,8 @@ export function AccessControlPage() {
     setError(null);
     setNotice(null);
     try {
-      await api.accessControlApproveRequest(request.id, { grants, expected_version: request.version });
-      setNotice(`Решение по заявке ${request.id} сохранено.`);
+      const result = await api.accessControlApproveRequest(request.id, { grants, expected_version: request.version }) as MutationResponse;
+      setNotice(`Решение по заявке ${request.id} сохранено${auditNotice(result.audit)}.`);
       try {
         await Promise.all([loadRequests(), loadPermissions()]);
       } catch {
@@ -229,8 +236,8 @@ export function AccessControlPage() {
     setError(null);
     setNotice(null);
     try {
-      await api.accessControlRejectRequest(request.id, request.version, reason.trim());
-      setNotice(`Заявка ${request.id} отклонена.`);
+      const result = await api.accessControlRejectRequest(request.id, request.version, reason.trim()) as MutationResponse;
+      setNotice(`Заявка ${request.id} отклонена${auditNotice(result.audit)}.`);
       try {
         await loadRequests();
       } catch {
@@ -266,7 +273,7 @@ export function AccessControlPage() {
     {!loading && tab === 'permissions' && permissions && <section id="access-panel-permissions" role="tabpanel" aria-labelledby="access-tab-permissions">
       <div className="access-control-toolbar">
         <input aria-label="Поиск пользователя" placeholder="Поиск по email или личной области" value={search} onChange={event => setSearch(event.target.value)} />
-        <span className="access-control-count">Пользователей: {visibleUsers.length}</span>
+        <span className="access-control-count">Пользователей: {visibleUsers.length} · источник: {permissions.authority === 'db' ? 'PostgreSQL' : 'JSON (переходный режим)'}</span>
       </div>
       <div className="access-control-table-wrap">
         <table className="access-control-table">
@@ -323,12 +330,12 @@ export function AccessControlPage() {
     </section>}
 
     {!loading && tab === 'admins' && <section id="access-panel-admins" role="tabpanel" aria-labelledby="access-tab-admins" className="access-control-admin-info">
-      <h2>Как назначаются администраторы сейчас</h2>
-      <p>Для корпоративного входа администратор GBrain определяется серверным allowlist <code>GBRAIN_ADMIN_EMAILS</code>. Изменение требует обновления серверной конфигурации и перезапуска GBrain.</p>
-      <p>До даты <code>GBRAIN_ADMIN_FALLBACK_UNTIL</code> сервер также может принимать ограниченные по времени bootstrap- и magic-link fallback-сессии. Этот экран не управляет ими.</p>
-      <p>Решения по заявкам сохраняют email администратора либо fingerprint fallback-сессии. Прямые изменения прав до Release C фиксируются в service log; полноценный неизменяемый before/after audit появится вместе с PostgreSQL ACL в Release C.</p>
-      <h2>Keycloak</h2>
-      <p>На этом релизе Keycloak подтверждает личность, но его роли ещё не назначают права администратора GBrain. Роль <code>gbrain-admin</code> будет включена отдельным Release B после shadow-проверки и rollback gate.</p>
+      <h2>Как назначаются администраторы</h2>
+      <p>Для корпоративного входа администратор определяется только exact client role <code>gbrain-admin</code> клиента <code>gbrain-portal</code> в Keycloak.</p>
+      <p>Realm roles, домен email и видимость этого экрана сами по себе не дают административных прав. Ограниченные fallback-сессии возможны только в явно настроенное rollback-окно.</p>
+      <p>Изменения source ACL и решения по заявкам в режиме PostgreSQL сохраняются транзакционно с before/after audit, актором и временем.</p>
+      <h2>Разделение полномочий</h2>
+      <p>Роль <code>gbrain-admin</code> не превращается в MCP OAuth scope <code>admin</code> и не расширяет R/W-права пользователя на источники.</p>
       <div className="access-control-alert">Права R/W на источники не делают пользователя администратором.</div>
     </section>}
   </div>;

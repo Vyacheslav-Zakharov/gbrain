@@ -1756,6 +1756,136 @@ CREATE TRIGGER minion_job_notify AFTER INSERT OR UPDATE OF status ON minion_jobs
   FOR EACH ROW EXECUTE FUNCTION notify_minion_job_change();
 
 -- ============================================================
+-- Portal access-control database authority (v138)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS portal_users (
+  email              TEXT        PRIMARY KEY,
+  keycloak_sub       TEXT        UNIQUE,
+  personal_source_id TEXT        NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  status             TEXT        NOT NULL CHECK (status IN ('active','disabled')),
+  version            BIGINT      NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_login_at      TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS portal_source_grants (
+  user_email TEXT        NOT NULL REFERENCES portal_users(email) ON DELETE RESTRICT,
+  source_id  TEXT        NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  can_read   BOOLEAN     NOT NULL,
+  can_write  BOOLEAN     NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_email, source_id),
+  CHECK (can_read OR can_write),
+  CHECK (NOT can_write OR can_read)
+);
+CREATE INDEX IF NOT EXISTS portal_source_grants_source_idx
+  ON portal_source_grants (source_id, user_email);
+
+CREATE TABLE IF NOT EXISTS portal_access_requests (
+  id               TEXT        PRIMARY KEY,
+  user_email       TEXT        NOT NULL REFERENCES portal_users(email) ON DELETE RESTRICT,
+  reason           TEXT        NOT NULL DEFAULT '',
+  status           TEXT        NOT NULL CHECK (status IN ('pending','approved','approved_partial','rejected','already_granted')),
+  requested_at     TIMESTAMPTZ NOT NULL,
+  decided_by       TEXT,
+  decided_at       TIMESTAMPTZ,
+  rejection_reason TEXT,
+  version          BIGINT      NOT NULL DEFAULT 1 CHECK (version > 0)
+);
+CREATE INDEX IF NOT EXISTS portal_access_requests_status_time_idx
+  ON portal_access_requests (status, requested_at DESC);
+
+CREATE TABLE IF NOT EXISTS portal_access_request_grants (
+  request_id      TEXT    NOT NULL REFERENCES portal_access_requests(id) ON DELETE CASCADE,
+  source_id       TEXT    NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  requested_read  BOOLEAN NOT NULL,
+  requested_write BOOLEAN NOT NULL,
+  approved_read   BOOLEAN,
+  approved_write  BOOLEAN,
+  PRIMARY KEY (request_id, source_id),
+  CHECK (requested_read OR requested_write),
+  CHECK (NOT requested_write OR requested_read),
+  CHECK ((approved_read IS NULL) = (approved_write IS NULL)),
+  CHECK (approved_write IS NOT TRUE OR approved_read IS TRUE),
+  CHECK (approved_read IS NOT TRUE OR requested_read),
+  CHECK (approved_write IS NOT TRUE OR requested_write)
+);
+
+CREATE TABLE IF NOT EXISTS portal_acl_audit (
+  id            BIGSERIAL   PRIMARY KEY,
+  actor_email   TEXT        NOT NULL,
+  subject_email TEXT        NOT NULL,
+  action        TEXT        NOT NULL,
+  request_id    TEXT        REFERENCES portal_access_requests(id) ON DELETE SET NULL,
+  before_state  JSONB,
+  after_state   JSONB,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (before_state IS NOT NULL OR after_state IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS portal_acl_audit_subject_time_idx
+  ON portal_acl_audit(subject_email, created_at DESC);
+CREATE INDEX IF NOT EXISTS portal_acl_audit_request_idx
+  ON portal_acl_audit(request_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION portal_acl_guard_user_identity()
+RETURNS trigger AS \$\$
+BEGIN
+  IF OLD.keycloak_sub IS NOT NULL AND NEW.keycloak_sub IS DISTINCT FROM OLD.keycloak_sub THEN
+    RAISE EXCEPTION 'portal_keycloak_identity_immutable';
+  END IF;
+  IF NEW.personal_source_id IS DISTINCT FROM OLD.personal_source_id THEN
+    RAISE EXCEPTION 'portal_personal_source_immutable';
+  END IF;
+  RETURN NEW;
+END;
+\$\$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS portal_users_identity_guard ON portal_users;
+CREATE TRIGGER portal_users_identity_guard
+  BEFORE UPDATE OF keycloak_sub, personal_source_id ON portal_users
+  FOR EACH ROW EXECUTE FUNCTION portal_acl_guard_user_identity();
+
+CREATE OR REPLACE FUNCTION portal_acl_guard_personal_grant()
+RETURNS trigger AS \$\$
+DECLARE personal_id TEXT;
+BEGIN
+  SELECT personal_source_id INTO personal_id
+    FROM portal_users WHERE email = OLD.user_email;
+  IF OLD.source_id = personal_id AND TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'portal_personal_grant_immutable';
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    SELECT personal_source_id INTO personal_id
+      FROM portal_users WHERE email = NEW.user_email;
+    IF NEW.source_id = personal_id AND (NEW.can_read IS NOT TRUE OR NEW.can_write IS NOT TRUE) THEN
+      RAISE EXCEPTION 'portal_personal_grant_requires_read_write';
+    END IF;
+    IF OLD.source_id = (SELECT personal_source_id FROM portal_users WHERE email = OLD.user_email)
+       AND (NEW.user_email IS DISTINCT FROM OLD.user_email OR NEW.source_id IS DISTINCT FROM OLD.source_id) THEN
+      RAISE EXCEPTION 'portal_personal_grant_immutable';
+    END IF;
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END;
+\$\$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS portal_source_grants_personal_guard ON portal_source_grants;
+CREATE TRIGGER portal_source_grants_personal_guard
+  BEFORE UPDATE OR DELETE ON portal_source_grants
+  FOR EACH ROW EXECUTE FUNCTION portal_acl_guard_personal_grant();
+
+CREATE OR REPLACE FUNCTION portal_acl_audit_append_only()
+RETURNS trigger AS \$\$
+BEGIN
+  RAISE EXCEPTION 'portal_acl_audit_append_only';
+END;
+\$\$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS portal_acl_audit_append_only_guard ON portal_acl_audit;
+CREATE TRIGGER portal_acl_audit_append_only_guard
+  BEFORE UPDATE OR DELETE ON portal_acl_audit
+  FOR EACH ROW EXECUTE FUNCTION portal_acl_audit_append_only();
+
+-- ============================================================
 -- Row Level Security: block anon access, postgres role bypasses
 -- ============================================================
 -- The postgres role (used by gbrain via pooler) has BYPASSRLS.
@@ -1821,6 +1951,12 @@ BEGIN
     ALTER TABLE source_base_views ENABLE ROW LEVEL SECURITY;
     ALTER TABLE source_transform_views ENABLE ROW LEVEL SECURITY;
     ALTER TABLE source_article_views ENABLE ROW LEVEL SECURITY;
+    -- v138 Portal access-control authority tables
+    ALTER TABLE portal_users ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE portal_source_grants ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE portal_access_requests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE portal_access_request_grants ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE portal_acl_audit ENABLE ROW LEVEL SECURITY;
     RAISE NOTICE 'RLS enabled on all tables (role % has BYPASSRLS)', current_user;
   ELSE
     RAISE WARNING 'Skipping RLS: role % does not have BYPASSRLS privilege. Run as postgres role to enable.', current_user;

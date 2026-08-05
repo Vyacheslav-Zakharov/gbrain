@@ -100,6 +100,14 @@ describe('portal SPA contract', () => {
     expect(serveSource).toContain("res.status(400).json({ error: 'rejection_reason_required' });");
   });
 
+  test('keeps compare mode JSON-authoritative, read-only, and request-aware', () => {
+    expect(serveSource).toContain('await verifyCompareAclSnapshot();');
+    expect(serveSource).toContain('comparePortalAccessControlSnapshot(engine, snapshot)');
+    expect(serveSource).toContain("res.status(409).json({ error: 'acl_compare_mode_read_only' });");
+    expect(serveSource).toContain('Заявки временно приостановлены на время проверки ACL.');
+    expect(serveSource).toContain("if (portalAclMode === 'compare') {\n      const permissions = await portalAclAuthority.getUserPermissions(email);");
+  });
+
   test('ships browser containment and private caching headers', () => {
     expect(serveSource).toContain("frame-ancestors 'none'");
     expect(serveSource).toContain("object-src 'none'");
