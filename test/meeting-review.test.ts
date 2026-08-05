@@ -37,6 +37,7 @@ beforeEach(async () => {
     results: [{
       id: 'abcd1234', topic: 'Example meeting', date: '2026-07-29',
       slug: 'meetings/2026-07-29-example', source: 'internal-example', split_source: null,
+      meeting_status: 'Утверждено',
       route_reason: 'example route', needs_review: [{ kind: 'participant_unresolved', value: 'alice-example' }],
       created_stubs: ['shared:people/alice-example'], canonical_preview: canonical, shared_preview: shared,
     }],
@@ -85,6 +86,7 @@ describe('meeting review queue', () => {
       results: [{
         id: 'clean1234', topic: 'Clean meeting', date: '2026-07-30',
         slug: 'meetings/2026-07-30-clean', source: 'shared', split_source: null,
+        meeting_status: 'Утверждено',
         route_reason: 'non-sensitive shared content', needs_review: [], created_stubs: [],
       }],
     }));
@@ -102,6 +104,53 @@ describe('meeting review queue', () => {
     expect(ready.total).toBe(1);
     expect(ready.rows[0]?.review_class).toBe('ready');
     expect(ready.rows[0]?.attention).toEqual([]);
+  });
+
+  test('classifies nonapproved status as an exception', async () => {
+    await writeFile(join(paths.reportsDir, 'run-3.json'), JSON.stringify({
+      dry_run: true,
+      generated_at: '2026-07-30T01:00:00Z',
+      results: [{
+        id: 'done1234', topic: 'Finished but not approved', date: '2026-07-30',
+        slug: 'meetings/2026-07-30-finished', source: 'shared', split_source: null,
+        meeting_status: 'Завершено', route_reason: 'non-sensitive shared content',
+        needs_review: [], created_stubs: [],
+      }],
+    }));
+    const detail = await getMeetingReviewItem('done1234', { paths });
+    expect(detail.item.review_class).toBe('exception');
+    expect(detail.item.attention[0]).toMatchObject({ kind: 'status_not_approved' });
+  });
+
+  test('fresh preview safety fields override stale ledger fields', async () => {
+    await writeFile(paths.ledgerPath, JSON.stringify({
+      schema_version: 1,
+      items: {
+        clean1234: {
+          id: 'clean1234', topic: 'Old row', date: '2026-07-01',
+          slug: 'meetings/old', source: 'shared', split_source: null,
+          status: 'pending', meeting_status: 'Завершено', route_reason: 'department unresolved',
+          needs_review: [{ kind: 'participant_unresolved', value: 'stale' }],
+          created_stubs: ['shared:people/stale'], generated_at: '2026-07-01T00:00:00Z',
+        },
+      },
+      revisions: [], events: [], next_revision_id: 1,
+    }));
+    await writeFile(join(paths.reportsDir, 'run-3.json'), JSON.stringify({
+      dry_run: true,
+      generated_at: '2026-07-30T01:00:00Z',
+      results: [{
+        id: 'clean1234', topic: 'Fresh clean row', date: '2026-07-30',
+        slug: 'meetings/2026-07-30-clean', source: 'shared', split_source: null,
+        meeting_status: 'Утверждено', route_reason: 'non-sensitive shared content',
+        needs_review: [], created_stubs: [],
+      }],
+    }));
+    const detail = await getMeetingReviewItem('clean1234', { paths });
+    expect(detail.item.status).toBe('pending');
+    expect(detail.item.review_class).toBe('ready');
+    expect(detail.item.topic).toBe('Fresh clean row');
+    expect(detail.item.attention).toEqual([]);
   });
 
   test('rejects without publishing', async () => {

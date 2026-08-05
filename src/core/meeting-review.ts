@@ -28,6 +28,7 @@ export interface MeetingReviewItem {
   source: string;
   split_source: string | null;
   shared_stub: boolean;
+  meeting_status: string;
   status: MeetingReviewStatus;
   route_reason: string;
   needs_review: Array<Record<string, unknown>>;
@@ -133,13 +134,20 @@ function recordArray(value: unknown): Array<Record<string, unknown>> {
   return Array.isArray(value) ? value.filter((v): v is Record<string, unknown> => Boolean(v) && typeof v === 'object' && !Array.isArray(v)) : [];
 }
 
-function attentionFor(item: Pick<MeetingReviewItem, 'route_reason' | 'needs_review' | 'created_stubs'>): MeetingReviewAttention[] {
+function attentionFor(item: Pick<MeetingReviewItem, 'meeting_status' | 'route_reason' | 'needs_review' | 'created_stubs'>): MeetingReviewAttention[] {
   const attention: MeetingReviewAttention[] = [];
   const seen = new Set<string>();
   const add = (entry: MeetingReviewAttention) => {
     const key = `${entry.kind}:${entry.value || entry.detail}`;
     if (!seen.has(key)) { seen.add(key); attention.push(entry); }
   };
+  if (item.meeting_status !== 'Утверждено') add({
+    kind: 'status_not_approved',
+    value: item.meeting_status || 'не указан',
+    title: 'Встреча не утверждена',
+    detail: `Текущий статус: ${item.meeting_status || 'не указан'}. Автопубликация разрешена только после статуса «Утверждено».`,
+    action: 'Утвердите встречу в исходной системе и заново сформируйте preview.',
+  });
   for (const issue of item.needs_review) {
     const kind = text(issue.kind) || 'review_required';
     const value = text(issue.value);
@@ -187,6 +195,7 @@ function decorateMeetingReviewItem(item: MeetingReviewItem): MeetingReviewItem {
   const normalized = {
     ...item,
     shared_stub: item.shared_stub === true,
+    meeting_status: text(item.meeting_status),
     route_reason: text(item.route_reason),
     needs_review: recordArray(item.needs_review),
     created_stubs: stringArray(item.created_stubs),
@@ -213,6 +222,7 @@ async function loadPreviewItems(paths: MeetingReviewPaths): Promise<Map<string, 
         source: text(row.source),
         split_source: text(row.split_source) || null,
         shared_stub: row.shared_stub === true,
+        meeting_status: text(row.meeting_status),
         status: 'pending',
         route_reason: text(row.route_reason),
         needs_review: recordArray(row.needs_review),
@@ -282,7 +292,16 @@ async function mergeItems(paths: MeetingReviewPaths): Promise<Map<string, Meetin
   ]);
   for (const [id, saved] of Object.entries(ledger.items || {})) {
     const base = preview.get(id);
-    if (base) preview.set(id, decorateMeetingReviewItem({ ...base, ...saved, id }));
+    if (base) preview.set(id, decorateMeetingReviewItem({
+      ...saved,
+      ...base,
+      id,
+      status: saved.status ?? base.status,
+      acted_at: saved.acted_at,
+      acted_by: saved.acted_by,
+      reject_reason: saved.reject_reason,
+      job_id: saved.job_id,
+    }));
     else if (saved.topic && saved.slug && saved.source) preview.set(id, decorateMeetingReviewItem({ ...saved, id } as MeetingReviewItem));
   }
   return preview;
