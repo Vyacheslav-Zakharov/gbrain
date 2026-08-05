@@ -14,7 +14,7 @@
 - Keycloak role не превращается в MCP scope `admin` и не расширяет source grants.
 - `json` остаётся authority до завершения compare и отдельного DB-cutover approval.
 - Неизвестный `GBRAIN_PORTAL_ACL_MODE` должен останавливать запуск.
-- `compare` авторизует по JSON; DB используется только как shadow comparison. При мутациях в compare ожидается расхождение до контролируемой повторной синхронизации — не трактовать его как безопасный ноль.
+- `compare` авторизует по JSON; DB используется только как shadow comparison. Режим read-only для ACL: Portal/Admin mutations и provisioning блокируются, чтобы исключить dual-write и накопление расхождений.
 - `db` не имеет fallback к JSON.
 - JSON удаляется/архивируется только после отдельного rollback observation gate.
 
@@ -104,21 +104,22 @@ Acceptance:
 
 - authorization фактически остаётся JSON;
 - aggregate mismatch telemetry не содержит email/source identities;
-- объяснённых mismatch после новых JSON mutations может быть больше нуля;
+- mismatch budget = `0`; любое расхождение блокирует следующий gate и требует отдельного диагностического/repair плана;
+- Portal/Admin ACL mutations, заявки и provisioning возвращают контролируемый read-only отказ;
 - DB outage/invalid DB rows не расширяют authority;
 - health, Admin, Portal, OAuth и reviewer paths работают;
 - observation window и допустимый mismatch budget заданы до старта.
 
-Перед cutover требуется короткий mutation freeze, повторный controlled reconciliation/import и `compare total=0`.
+Перед cutover требуется сохранить mutation freeze и повторно доказать `compare total=0`. Повторный import в непустую расходящуюся DB не выполнять: utility намеренно abort-ит; для такого состояния нужен отдельный reviewed repair plan.
 
 **Stop:** не переключать на `db` без Gate C4.
 
-## Gate C4 — final freeze/reconciliation и DB authority
+## Gate C4 — final freeze/zero-mismatch proof и DB authority
 
 **Отдельное approval:**
 
 1. начать mutation freeze;
-2. выполнить final reconciliation;
+2. подтвердить final `compare total=0` без repair/re-import;
 3. установить `GBRAIN_PORTAL_ACL_MODE=db`;
 4. перезапустить exact candidate.
 
