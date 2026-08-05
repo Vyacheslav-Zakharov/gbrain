@@ -39,6 +39,7 @@ MAX_NEW_TAKES = 10
 MAX_NEW_CONCEPTS = 5
 PHASE_TIMEOUT_SECONDS = 20 * 60
 TOTAL_WALL_SECONDS = 45 * 60
+POSTFLIGHT_SETTLE_SECONDS = 75
 GUARD_MANIFEST = Path.home() / ".gbrain" / "update-guard" / "gbrain-customizations" / "0.42.53.0" / "manifest.json"
 REQUIRED_RUNTIME_FILES = {
     "src/core/cycle.ts": INSTALLED_CYCLE,
@@ -78,9 +79,31 @@ def snapshot(conn: psycopg.Connection) -> dict:
         canonical_take_rows = {r["id"]: (r["source_id"], row_sha256(r["row_json"])) for r in cur.fetchall()}
         cur.execute("SELECT id,source_id,to_jsonb(p)::text AS row_json FROM pages p WHERE type='concept' ORDER BY id")
         canonical_concept_rows = {r["id"]: (r["source_id"], row_sha256(r["row_json"])) for r in cur.fetchall()}
-        cur.execute("SELECT id,target_type,target_id,action,actor,to_jsonb(e)::text AS row_json FROM ai_review_events e ORDER BY id")
+        cur.execute("""
+            SELECT id,target_type,target_id,action,actor,details->>'source_id' AS details_source_id,
+                   CASE WHEN previous_state IS NULL
+                         AND jsonb_typeof(new_state)='object'
+                         AND (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(new_state) k)
+                             = ARRAY['escalation_reason','policy_kind','status']::text[]
+                         AND COALESCE(new_state->>'status','') <> ''
+                         AND COALESCE(new_state->>'policy_kind','') <> ''
+                         AND jsonb_typeof(details)='object'
+                         AND (SELECT array_agg(k ORDER BY k) FROM jsonb_object_keys(details) k)
+                             = ARRAY['deadline_hours','due_at','reviewers','round_id','source_id']::text[]
+                         AND COALESCE(details->>'round_id','') ~ '^[1-9][0-9]*$'
+                         AND COALESCE(details->>'due_at','') <> ''
+                         AND COALESCE(details->>'deadline_hours','') ~ '^[1-9][0-9]*$'
+                         AND jsonb_typeof(details->'reviewers')='array'
+                         AND jsonb_array_length(details->'reviewers') > 0
+                        THEN true ELSE false END AS assignment_contract_ok,
+                   to_jsonb(e)::text AS row_json
+            FROM ai_review_events e ORDER BY id
+        """)
         review_events = {
-            r["id"]: (r["target_type"], r["target_id"], r["action"], r["actor"], row_sha256(r["row_json"]))
+            r["id"]: (
+                r["target_type"], r["target_id"], r["action"], r["actor"],
+                r["details_source_id"] or "", r["assignment_contract_ok"], row_sha256(r["row_json"]),
+            )
             for r in cur.fetchall()
         }
         cur.execute("SELECT p.source_id, count(*)::int AS count FROM takes t JOIN pages p ON p.id=t.page_id GROUP BY p.source_id ORDER BY p.source_id")
@@ -168,10 +191,32 @@ def evaluate_postflight(
         and post["review_events"][i][2] == "supersede"
         and post["review_events"][i][3] == "system:propose_takes"
     }
+    allowed_assignment_event_ids = {
+        i for i in new_event_ids
+        if (
+            (post["review_events"][i][0], post["review_events"][i][1])
+            in ({("take_proposal", row_id) for row_id in new_take_ids}
+                | {("concept_proposal", row_id) for row_id in new_concept_ids})
+        )
+        and post["review_events"][i][2] == "round_opened"
+        and post["review_events"][i][3] == "system:assignment-sync"
+        and post["review_events"][i][4] == source
+        and post["review_events"][i][5] is True
+    }
     expected_supersede_targets = Counter(allowed_take_supersedes)
     actual_supersede_targets = Counter(post["review_events"][i][1] for i in allowed_supersede_event_ids)
     supersede_event_mismatch = sum((expected_supersede_targets - actual_supersede_targets).values()) + sum((actual_supersede_targets - expected_supersede_targets).values())
-    review_event_violations = len(deleted_event_ids) + len(changed_existing_event_ids) + len(new_event_ids - allowed_supersede_event_ids) + supersede_event_mismatch
+    expected_assignment_targets = Counter(
+        [("take_proposal", row_id) for row_id in new_take_ids]
+        + [("concept_proposal", row_id) for row_id in new_concept_ids]
+    )
+    actual_assignment_targets = Counter(
+        (post["review_events"][i][0], post["review_events"][i][1])
+        for i in allowed_assignment_event_ids
+    )
+    assignment_event_mismatch = sum((expected_assignment_targets - actual_assignment_targets).values()) + sum((actual_assignment_targets - expected_assignment_targets).values())
+    allowed_new_event_ids = allowed_supersede_event_ids | allowed_assignment_event_ids
+    review_event_violations = len(deleted_event_ids) + len(changed_existing_event_ids) + len(new_event_ids - allowed_new_event_ids) + supersede_event_mismatch + assignment_event_mismatch
     changed_canonical_take_ids = {i for i in set(pre["canonical_take_rows"]) | set(post["canonical_take_rows"]) if pre["canonical_take_rows"].get(i) != post["canonical_take_rows"].get(i)}
     changed_canonical_concept_ids = {i for i in set(pre["canonical_concept_rows"]) | set(post["canonical_concept_rows"]) if pre["canonical_concept_rows"].get(i) != post["canonical_concept_rows"].get(i)}
     canonical_changes = len(changed_canonical_take_ids) + len(changed_canonical_concept_ids)
@@ -206,6 +251,7 @@ def evaluate_postflight(
         "gross_new_concept_ids": sorted(new_concept_ids),
         "reported_budget_exhausted_take_count": expected_budget_take_count,
         "allowed_take_supersede_ids": sorted(allowed_take_supersedes),
+        "allowed_assignment_event_ids": sorted(allowed_assignment_event_ids),
         "take_proposal_statuses": [{"source_id": k[0], "status": k[1], "delta": v} for k, v in sorted(take_status_deltas.items())],
         "concept_proposal_statuses": [{"source_id": k[0], "status": k[1], "delta": v} for k, v in sorted(concept_status_deltas.items())],
         "proposal_invariant_violations": proposal_invariant_violations,
@@ -428,6 +474,8 @@ def run() -> int:
                 run_failed = True
                 break
 
+        if not run_failed:
+            time.sleep(POSTFLIGHT_SETTLE_SECONDS)
         post = snapshot(conn)
         atomic_json(run_dir / "post.json", serializable_snapshot(post))
 
