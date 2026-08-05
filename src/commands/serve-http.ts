@@ -64,6 +64,19 @@ import {
   writeJsonAtomically,
 } from '../core/portal-access-control-json.ts';
 import {
+  PortalAccessControlRepository,
+  PortalAccessControlError,
+} from '../core/portal-access-control.ts';
+import type { PortalAccessRequest as DbPortalAccessRequest } from '../core/portal-access-control.ts';
+import {
+  PortalAccessControlAuthority,
+  parsePortalAclMode,
+} from '../core/portal-access-control-authority.ts';
+import {
+  comparePortalAccessControlSnapshot,
+  loadPortalAccessControlJson,
+} from '../core/portal-access-control-migration.ts';
+import {
   PortalSessionStore,
   isPortalFileAllowed,
   portalSessionCookieName,
@@ -583,6 +596,20 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // brains too. The narrow SqlQuery contract is scalar-binds-only; JSONB
   // writes use executeRawJsonb (see mcp_request_log INSERT sites below).
   const sql = sqlQueryForEngine(engine);
+  const portalAclMode = parsePortalAclMode(process.env.GBRAIN_PORTAL_ACL_MODE);
+  const portalAccessControl = new PortalAccessControlRepository(engine);
+  const portalAclMismatchCounters = { user_grants: 0, reviewer_map: 0, snapshot: 0 };
+  const portalAclAuthority = new PortalAccessControlAuthority({
+    mode: portalAclMode,
+    repository: portalAccessControl,
+    jsonReader: email => getJsonUserPermissions(email),
+    jsonListReader: () => loadJsonUserPermissionsMap() as any,
+    onMismatch: event => {
+      portalAclMismatchCounters[event.kind] += 1;
+      console.warn(`[Portal ACL compare] ${event.kind}_mismatch_count=${portalAclMismatchCounters[event.kind]}`);
+    },
+  });
+  console.error(`[serve-http] Portal ACL authority mode: ${portalAclMode}`);
 
   // Initialize OAuth provider. F12 cleanup: DCR-disable now flips a
   // constructor option instead of monkey-patching `_clientsStore` after
@@ -592,6 +619,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     sql,
     tokenTtl,
     dcrDisabled: !enableDcr,
+    userSourceGrantResolver: async email => {
+      const permissions = await portalAclAuthority.getUserPermissions(email);
+      return permissions ? { ...permissions, user_email: email.trim().toLowerCase() } : undefined;
+    },
   });
 
   // Sweep expired tokens on startup (non-blocking)
@@ -786,7 +817,7 @@ const internalAccessAreas = [
   { id: "руководство", sourceId: "internal-management", label: "Руководство и стратегия", hint: "закрытые планы, стратегические инициативы, протоколы" }
 ];
 const managedAccessAreas = [sharedAccessArea, ...internalAccessAreas];
-const getUserPermissions = async (email: string) => {
+const getJsonUserPermissions = async (email: string) => {
   recoverAccessControlTransactionLocal();
   const configPath = require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
   try {
@@ -820,12 +851,16 @@ const getUserPermissions = async (email: string) => {
     };
   }
 };
+const getUserPermissions = async (email: string) => {
+  const permissions = await portalAclAuthority.getUserPermissions(email);
+  return permissions ?? { source_id: '', federated_read: [], federated_write: [] };
+};
 /**
  * The WHOLE permission map, used only by multi-reviewer AI Review to freeze a
  * round's mandatory-reviewer list. Read-only; a parse failure returns `{}` so
  * round creation fails closed with `no_reviewers` instead of guessing.
  */
-const loadUserPermissionsMap = (): ReviewerPermissionMap => {
+const loadJsonUserPermissionsMap = (): ReviewerPermissionMap => {
   recoverAccessControlTransactionLocal();
   const configPath = userPermissionsPath();
   try {
@@ -838,28 +873,16 @@ const loadUserPermissionsMap = (): ReviewerPermissionMap => {
     return {};
   }
 };
+const loadUserPermissionsMap = async (): Promise<ReviewerPermissionMap> =>
+  portalAclAuthority.listReviewerPermissions() as Promise<ReviewerPermissionMap>;
 
 /**
  * Source ids this user may currently WRITE to. Re-read per request so a
  * revoked grant immediately closes the reviewer surface, even for an
  * assignment that was frozen while the grant was still live.
  */
-const getWriteSourceIdsForUser = async (email: string): Promise<string[]> => {
-  const map = loadUserPermissionsMap();
-  const normalized = String(email || '').trim().toLowerCase();
-  const entry = Object.entries(map).find(([key]) => String(key).trim().toLowerCase() === normalized)?.[1];
-  // Review authorization is strict: unlike the general Portal onboarding path,
-  // it never invents an implicit personal grant for an absent/deactivated user.
-  if (!entry || entry.active === false || entry.disabled === true) return [];
-  const ids = new Set<string>();
-  const personal = String(entry.source_id ?? '').trim();
-  if (personal) ids.add(personal);
-  for (const raw of Array.isArray(entry.federated_write) ? entry.federated_write : []) {
-    const id = String(raw ?? '').trim();
-    if (id) ids.add(id);
-  }
-  return Array.from(ids);
-};
+const getWriteSourceIdsForUser = async (email: string): Promise<string[]> =>
+  portalAclAuthority.getWriteSourceIds(email);
 
 const managedAreaById = (areaId: string) => managedAccessAreas.find((a) => a.id === areaId);
 const managedSourceIdForArea = (areaId: string) => managedAreaById(areaId)?.sourceId || null;
@@ -955,7 +978,6 @@ const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, 
     if (requests.length === 0)
       return;
     const requestPath = accessRequestsPath();
-    const data = readAccessRequestsStrict();
     const request2 = {
       id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       email: userEmail,
@@ -966,8 +988,23 @@ const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, 
       approved_by: null,
       approved_at: null
     };
-    data.push(request2);
-    writeJsonFileLocal(requestPath, data);
+    if (portalAclMode === 'db') {
+      await portalAccessControl.createRequest({
+        id: request2.id,
+        email: userEmail,
+        reason: request2.reason,
+        requestedAt: request2.requested_at,
+        grants: requests.map(row => ({
+          sourceId: row.source_id,
+          requestedRead: row.read || row.write,
+          requestedWrite: row.write,
+        })),
+      });
+    } else {
+      const data = readAccessRequestsStrict();
+      data.push(request2);
+      writeJsonFileLocal(requestPath, data);
+    }
     console.log(`[Auth] Saved access request ${request2.id} for ${userEmail}`);
     try {
       const body2 = [
@@ -985,7 +1022,7 @@ const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, 
         ``,
         `Админка заявок: ${publicUrl || "http://127.0.0.1:" + port}/admin/access-requests`,
         ``,
-        `Файл заявок: ${requestPath}`
+        portalAclMode === 'db' ? `Хранилище заявок: PostgreSQL` : `Файл заявок: ${requestPath}`
       ].join(`
 `);
       const { spawn: spawn5 } = require("child_process");
@@ -1123,12 +1160,17 @@ const schedulePersonalSourceSync = (sourceId: string) => {
     }
   }
 
-const ensurePortalUserProvisioned = async (emailRaw: string) => {
+const ensurePortalUserProvisioned = async (emailRaw: string, keycloakSubRaw?: string) => {
     const fs = require("fs");
     const path = require("path");
     const email = String(emailRaw || "").trim().toLowerCase();
     if (!email.endsWith("@avers.kz"))
       throw new Error("Only @avers.kz users can be provisioned");
+    if (portalAclMode === 'compare') {
+      const permissions = await portalAclAuthority.getUserPermissions(email);
+      if (!permissions) throw new Error('portal_acl_user_missing');
+      return;
+    }
     const sourceId = personalSourceIdFromEmail(email);
     const dirName = personalDirNameFromEmail(email);
     const personalRoot = path.join(process.env.HOME || "/home/avers", "brain-repos", "personal", dirName);
@@ -1156,26 +1198,36 @@ const ensurePortalUserProvisioned = async (emailRaw: string) => {
       console.log(`[Provision] Registered personal source ${sourceId} for ${email}`);
     }
 
-    const permsPath = userPermissionsPath();
-    recoverAccessControlTransactionLocal();
-    const perms = fs.existsSync(permsPath)
-      ? loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(permsPath)
-      : {};
-    if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
-    const existing = perms[email] || { source_id: sourceId, federated_read: [], federated_write: [] };
-    if (perms[email]) portalPermissionsVersion(existing);
-    existing.source_id = existing.source_id || sourceId;
-    const read = new Set(Array.isArray(existing.federated_read) ? existing.federated_read : []);
-    const write = new Set(Array.isArray(existing.federated_write) ? existing.federated_write : []);
-    read.add(sourceId);
-    read.add("shared");
-    write.add(sourceId);
-    existing.federated_read = Array.from(read).filter(Boolean);
-    existing.federated_write = Array.from(write).filter(Boolean);
-    if (JSON.stringify(perms[email]) !== JSON.stringify(existing)) {
-      perms[email] = existing;
-      writeJsonFileLocal(permsPath, perms);
-      console.log(`[Provision] Updated permissions for ${email}`);
+    const keycloakSub = String(keycloakSubRaw || '').trim();
+    if (portalAclMode === 'db') {
+      if (keycloakSub) {
+        await portalAccessControl.provisionUser({ email, keycloakSub, personalSourceId: sourceId });
+      } else {
+        const existingDbUser = await portalAccessControl.getUser(email);
+        if (!existingDbUser || existingDbUser.status !== 'active') throw new Error('portal_acl_user_missing');
+      }
+    } else {
+      const permsPath = userPermissionsPath();
+      recoverAccessControlTransactionLocal();
+      const perms = fs.existsSync(permsPath)
+        ? loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(permsPath)
+        : {};
+      if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
+      const existing = perms[email] || { source_id: sourceId, federated_read: [], federated_write: [] };
+      if (perms[email]) portalPermissionsVersion(existing);
+      existing.source_id = existing.source_id || sourceId;
+      const read = new Set(Array.isArray(existing.federated_read) ? existing.federated_read : []);
+      const write = new Set(Array.isArray(existing.federated_write) ? existing.federated_write : []);
+      read.add(sourceId);
+      read.add("shared");
+      write.add(sourceId);
+      existing.federated_read = Array.from(read).filter(Boolean);
+      existing.federated_write = Array.from(write).filter(Boolean);
+      if (JSON.stringify(perms[email]) !== JSON.stringify(existing)) {
+        perms[email] = existing;
+        writeJsonFileLocal(permsPath, perms);
+        console.log(`[Provision] Updated permissions for ${email}`);
+      }
     }
 
     if (shouldSync)
@@ -1183,6 +1235,22 @@ const ensurePortalUserProvisioned = async (emailRaw: string) => {
   }
 
 const readAccessRequests = (): PortalAccessRequest[] => readAccessRequestsStrict();
+
+const verifyCompareAclSnapshot = async (): Promise<void> => {
+  if (portalAclMode !== 'compare') return;
+  try {
+    const snapshot = loadPortalAccessControlJson({
+      permissionsPath: userPermissionsPath(),
+      requestsPath: accessRequestsPath(),
+    });
+    const comparison = await comparePortalAccessControlSnapshot(engine, snapshot);
+    if (comparison.total === 0) return;
+  } catch {
+    // A corrupt/unavailable plane is itself one aggregate mismatch. JSON remains authority.
+  }
+  portalAclMismatchCounters.snapshot += 1;
+  console.warn(`[Portal ACL compare] snapshot_mismatch_count=${portalAclMismatchCounters.snapshot}`);
+};
 
 const readAccessRequestsStrict = (): PortalAccessRequest[] => {
     recoverAccessControlTransactionLocal();
@@ -1197,6 +1265,65 @@ const writeAccessRequests = (items: PortalAccessRequest[]): void => {
     recoverAccessControlTransactionLocal();
     writeJsonFileLocal(accessRequestsPath(), items);
   };
+
+const dbAccessRequestToApi = (request: DbPortalAccessRequest) => {
+  const toRow = (grant: DbPortalAccessRequest['grants'][number]) => {
+    const area = managedAccessAreas.find(item => item.sourceId === grant.sourceId)?.id || grant.sourceId;
+    return {
+      area,
+      source_id: grant.sourceId,
+      read: grant.requestedRead,
+      write: grant.requestedWrite,
+    };
+  };
+  const requested = request.grants.map(toRow);
+  const approved = request.grants.filter(grant => grant.approvedRead || grant.approvedWrite).map(grant => ({
+    ...toRow(grant),
+    read: grant.approvedRead === true || grant.approvedWrite === true,
+    write: grant.approvedWrite === true,
+    requested_read: grant.requestedRead,
+    requested_write: grant.requestedWrite,
+  }));
+  const denied = request.grants.filter(grant =>
+    grant.approvedRead === false || grant.approvedWrite === false,
+  ).map(grant => ({
+    ...toRow(grant),
+    read: grant.requestedRead && grant.approvedRead !== true,
+    write: grant.requestedWrite && grant.approvedWrite !== true,
+  })).filter(grant => grant.read || grant.write);
+  return {
+    id: request.id,
+    email: request.userEmail,
+    requested_at: request.requestedAt,
+    requests: requested,
+    reason: request.reason,
+    status: request.status,
+    decided_at: request.decidedAt,
+    decided_by: request.decidedBy,
+    rejection_reason: request.rejectionReason,
+    approved_requests: approved,
+    denied_requests: denied,
+    version: request.version,
+  };
+};
+
+const readLatestAclAudit = async (filters: { subjectEmail?: string; requestId?: string; action?: string; stateVersion: number }) => {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (filters.subjectEmail) { params.push(filters.subjectEmail); clauses.push(`subject_email = $${params.length}`); }
+  if (filters.requestId) { params.push(filters.requestId); clauses.push(`request_id = $${params.length}`); }
+  if (filters.action) { params.push(filters.action); clauses.push(`action = $${params.length}`); }
+  params.push(filters.stateVersion);
+  clauses.push(`CAST(after_state->>'version' AS BIGINT) = $${params.length}`);
+  const rows = await engine.executeRaw<{ actor_email: string; created_at: string }>(`
+    SELECT actor_email, created_at
+      FROM portal_acl_audit
+     ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+     ORDER BY id DESC
+     LIMIT 1
+  `, params);
+  return rows[0] ? { actor: rows[0].actor_email, changed_at: rows[0].created_at } : null;
+};
 
 
 
@@ -1533,7 +1660,7 @@ const writeAccessRequests = (items: PortalAccessRequest[]): void => {
     try {
       const { idToken } = await keycloakOidc.exchangeCode(String(req.query.code || ''), transaction.codeVerifier);
       const identity = await keycloakOidc.verifyIdToken(idToken, transaction.nonce);
-      await ensurePortalUserProvisioned(identity.email);
+      await ensurePortalUserProvisioned(identity.email, identity.sub);
       if (transaction.prompt === 'none' && transaction.existingSessionToken) {
         if (!portalSessions.revalidate(transaction.existingSessionToken, identity)) {
           clearPortalSessionCookies(req, res);
@@ -1619,6 +1746,9 @@ app.post("/portal/welcome", express.urlencoded({ extended: false }), async (req:
     const userEmail = resolvePortalUser(req, res);
     if (!userEmail)
       return res.redirect("/login");
+    if (portalAclMode === 'compare' && !req.body?.skip) {
+      return res.status(409).send("Заявки временно приостановлены на время проверки ACL.");
+    }
     try {
       await ensurePortalUserProvisioned(String(userEmail));
       if (!req.body?.skip)
@@ -1751,7 +1881,8 @@ app.get('/portal/api/session', async (req: any, res: any) => {
   // canReview is a capability, NOT a permission grant: it only decides whether
   // the reviewer nav entry renders. Every review endpoint re-derives identity
   // and ACL server-side regardless of what the browser believes.
-  const configured = Object.keys(loadUserPermissionsMap()).some(k => String(k).trim().toLowerCase() === normalized);
+  const permissionMap = await loadUserPermissionsMap();
+  const configured = Object.keys(permissionMap).some(k => String(k).trim().toLowerCase() === normalized);
   const writeSources = configured ? await getWriteSourceIdsForUser(normalized).catch(() => []) : [];
   res.json({
     email: userEmail,
@@ -1836,11 +1967,11 @@ const reviewerScopeFor = async (email: string): Promise<ReviewerScope> => ({
 let reviewAssignmentSyncInFlight: ReturnType<typeof ensurePendingReviewRounds> | null = null;
 const synchronizePendingReviewAssignments = () => {
   if (reviewAssignmentSyncInFlight) return reviewAssignmentSyncInFlight;
-  reviewAssignmentSyncInFlight = ensurePendingReviewRounds(engine, {
-    permissions: loadUserPermissionsMap(),
+  reviewAssignmentSyncInFlight = (async () => ensurePendingReviewRounds(engine, {
+    permissions: await loadUserPermissionsMap(),
     actor: 'system:assignment-sync',
     limit: 100,
-  }).finally(() => {
+  }))().finally(() => {
     reviewAssignmentSyncInFlight = null;
   });
   return reviewAssignmentSyncInFlight;
@@ -2560,18 +2691,79 @@ async function decide(button){const id=button.dataset.id,action=button.dataset.a
 load();
 </script></body></html>`);
   });
-  app.get("/admin/api/access-requests", requireAdmin, (_req: any, res: any) => {
+  app.get("/admin/api/access-requests", requireAdmin, async (_req: any, res: any) => {
     try {
+      if (portalAclMode === 'db') {
+        const requests = (await portalAccessControl.listRequests()).map(dbAccessRequestToApi);
+        res.json({ requests, authority: 'db' });
+        return;
+      }
+      await verifyCompareAclSnapshot();
       const requests = readAccessRequestsStrict()
         .sort((a, b) => String(b.requested_at || "").localeCompare(String(a.requested_at || "")))
         .map(request => ({ ...request, version: portalAccessRequestVersion(request) }));
-      res.json({ requests });
+      res.json({ requests, authority: 'json' });
     } catch {
       res.status(503).json({ error: 'access_control_store_unavailable' });
     }
   });
-  app.post("/admin/api/access-requests/:id/approve", requireAdmin, requireAdminSameOrigin, express.json(), (req: any, res: any) => {
+  app.post("/admin/api/access-requests/:id/approve", requireAdmin, requireAdminSameOrigin, express.json(), async (req: any, res: any) => {
     const id = String(req.params.id || "");
+    if (portalAclMode === 'compare') {
+      res.status(409).json({ error: 'acl_compare_mode_read_only' });
+      return;
+    }
+    if (portalAclMode === 'db') {
+      try {
+        const item = await portalAccessControl.getRequest(id);
+        if (!item) { res.status(404).json({ error: 'Request not found' }); return; }
+        const expectedVersion = Number(req.body?.expected_version);
+        if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+          res.status(400).json({ error: 'expected_version_required' });
+          return;
+        }
+        const requestedRows = item.grants.map(grant => ({
+          area: managedAccessAreas.find(area => area.sourceId === grant.sourceId)?.id || grant.sourceId,
+          source_id: grant.sourceId,
+          read: grant.requestedRead,
+          write: grant.requestedWrite,
+        }));
+        let decisions;
+        try {
+          decisions = normalizeRequestGrantDecisions(requestedRows, req.body?.grants);
+        } catch {
+          res.status(400).json({ error: 'invalid_request_decision' });
+          return;
+        }
+        if (!decisions.some(decision => decision.read || decision.write)) {
+          res.status(400).json({ error: 'no_permissions_selected' });
+          return;
+        }
+        const partial = decisions.some((decision, index) =>
+          (requestedRows[index].read && !decision.read) || (requestedRows[index].write && !decision.write),
+        );
+        const updated = await portalAccessControl.decideRequest({
+          requestId: id,
+          expectedVersion,
+          decision: partial ? 'approved_partial' : 'approved',
+          grants: decisions.map((decision, index) => ({
+            sourceId: requestedRows[index].source_id,
+            approvedRead: decision.read || decision.write,
+            approvedWrite: decision.write,
+          })),
+        }, adminActor(req, res));
+        const audit = await readLatestAclAudit({ requestId: id, action: 'approve_access_request', stateVersion: updated.version });
+        res.json({ approved: true, partial, request: dbAccessRequestToApi(updated), audit });
+      } catch (error) {
+        if (error instanceof PortalAccessControlError) {
+          const status = error.code === 'conflict' ? 409 : error.code === 'not_found' ? 404 : 400;
+          res.status(status).json({ error: error.code === 'conflict' ? 'request_changed' : error.code });
+          return;
+        }
+        res.status(503).json({ error: 'access_control_store_unavailable' });
+      }
+      return;
+    }
     let requests: PortalAccessRequest[];
     try {
       requests = readAccessRequestsStrict();
@@ -2705,8 +2897,46 @@ load();
     commitAccessControlJsonTransaction(accessControlTransactionPaths(), perms, requests);
     res.json({ approved: true, partial: item.status === "approved_partial", permissions: user, approved_requests: item.approved_requests, denied_requests: item.denied_requests });
   });
-  app.post("/admin/api/access-requests/:id/reject", requireAdmin, requireAdminSameOrigin, express.json(), (req: any, res: any) => {
+  app.post("/admin/api/access-requests/:id/reject", requireAdmin, requireAdminSameOrigin, express.json(), async (req: any, res: any) => {
     const id = String(req.params.id || "");
+    if (portalAclMode === 'compare') {
+      res.status(409).json({ error: 'acl_compare_mode_read_only' });
+      return;
+    }
+    if (portalAclMode === 'db') {
+      try {
+        const item = await portalAccessControl.getRequest(id);
+        if (!item) { res.status(404).json({ error: 'Request not found' }); return; }
+        const expectedVersion = Number(req.body?.expected_version);
+        if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+          res.status(400).json({ error: 'expected_version_required' });
+          return;
+        }
+        const rejectionReason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 1000) : '';
+        if (!rejectionReason) { res.status(400).json({ error: 'rejection_reason_required' }); return; }
+        const updated = await portalAccessControl.decideRequest({
+          requestId: id,
+          expectedVersion,
+          decision: 'rejected',
+          rejectionReason,
+          grants: item.grants.map(grant => ({
+            sourceId: grant.sourceId,
+            approvedRead: false,
+            approvedWrite: false,
+          })),
+        }, adminActor(req, res));
+        const audit = await readLatestAclAudit({ requestId: id, action: 'reject_access_request', stateVersion: updated.version });
+        res.json({ rejected: true, request: dbAccessRequestToApi(updated), audit });
+      } catch (error) {
+        if (error instanceof PortalAccessControlError) {
+          const status = error.code === 'conflict' ? 409 : error.code === 'not_found' ? 404 : 400;
+          res.status(status).json({ error: error.code === 'conflict' ? 'request_changed' : error.code });
+          return;
+        }
+        res.status(503).json({ error: 'access_control_store_unavailable' });
+      }
+      return;
+    }
     let requests: PortalAccessRequest[];
     try {
       requests = readAccessRequestsStrict();
@@ -2750,7 +2980,7 @@ load();
   app.get('/admin/permissions', requireAdmin, (_req: Request, res: Response) => {
     res.set('Content-Type', 'text/html');
     res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>GBrain User Permissions</title><style>
-body{margin:0;background:#101014;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}.wrap{max-width:1320px;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;cursor:pointer}.btn.gray{background:#444}.muted{color:#aaa;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:18px;background:#1d1d24;border:1px solid #333;border-radius:10px;overflow:hidden}th,td{border-bottom:1px solid #333;padding:8px;text-align:center;vertical-align:middle}th{color:#bbb;font-weight:600;background:#181820;position:sticky;top:0}td.email{text-align:left;white-space:nowrap}td.source{text-align:left;color:#aaa;font-size:12px}input[type=checkbox]{transform:scale(1.1)}.cell{display:flex;gap:6px;justify-content:center;align-items:center}.r{color:#8cc8ff}.w{color:#ffd479}.saved{color:#91e091;margin-left:10px}.err{color:#ff9c9c;margin-left:10px}</style></head><body><div class="wrap"><div class="top"><div><h1>Права пользователей GBrain</h1><div class="muted">Таблица читает и меняет <code>~/.gbrain/user_permissions.json</code>. R = чтение, W = запись.</div></div><div><a class="btn gray" href="/admin/access-requests">Заявки</a> <a class="btn gray" href="/admin/">Админ-панель</a></div></div><div id="msg" class="muted"></div><div id="root">Загрузка...</div></div><script>
+body{margin:0;background:#101014;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}.wrap{max-width:1320px;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;cursor:pointer}.btn.gray{background:#444}.muted{color:#aaa;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:18px;background:#1d1d24;border:1px solid #333;border-radius:10px;overflow:hidden}th,td{border-bottom:1px solid #333;padding:8px;text-align:center;vertical-align:middle}th{color:#bbb;font-weight:600;background:#181820;position:sticky;top:0}td.email{text-align:left;white-space:nowrap}td.source{text-align:left;color:#aaa;font-size:12px}input[type=checkbox]{transform:scale(1.1)}.cell{display:flex;gap:6px;justify-content:center;align-items:center}.r{color:#8cc8ff}.w{color:#ffd479}.saved{color:#91e091;margin-left:10px}.err{color:#ff9c9c;margin-left:10px}</style></head><body><div class="wrap"><div class="top"><div><h1>Права пользователей GBrain</h1><div class="muted">${portalAclMode === 'db' ? 'Источник прав: PostgreSQL. R = чтение, W = запись.' : 'Переходный источник прав: ~/.gbrain/user_permissions.json. R = чтение, W = запись.'}</div></div><div><a class="btn gray" href="/admin/access-requests">Заявки</a> <a class="btn gray" href="/admin/">Админ-панель</a></div></div><div id="msg" class="muted"></div><div id="root">Загрузка...</div></div><script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()}
 function render(data){const areas=data.areas||[];const users=data.users||[];let html='<table><thead><tr><th>Пользователь</th><th>Личная область</th>'+areas.map(a=>'<th>'+esc(a.label)+'<br><span class="muted">'+esc(a.sourceId)+'</span></th>').join('')+'<th></th></tr></thead><tbody>';for(const u of users){html+='<tr data-email="'+esc(u.email)+'" data-version="'+esc(u.version||'')+'"><td class="email">'+esc(u.email)+'</td><td class="source"><code>'+esc(u.source_id||'')+'</code></td>'+areas.map(a=>{const r=(u.federated_read||[]).includes(a.sourceId);const w=(u.federated_write||[]).includes(a.sourceId);return '<td><div class="cell"><label class="r">R <input class="p-read" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(r?'checked':'')+'></label><label class="w">W <input class="p-write" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(w?'checked':'')+'></label></div></td>'}).join('')+'<td><button class="btn save">Сохранить</button></td></tr>'}html+='</tbody></table>';document.getElementById('root').innerHTML=html;document.querySelectorAll('tr[data-email]').forEach(bindRow)}
@@ -2759,8 +2989,21 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 </script></body></html>`);
   });
 
-  app.get('/admin/api/permissions', requireAdmin, (_req: Request, res: Response) => {
+  app.get('/admin/api/permissions', requireAdmin, async (_req: Request, res: Response) => {
     try {
+      if (portalAclMode === 'db') {
+        const users = (await portalAccessControl.listUsers()).map(user => ({
+          email: user.email,
+          source_id: user.personalSourceId,
+          federated_read: user.grants.filter(grant => grant.canRead).map(grant => grant.sourceId),
+          federated_write: user.grants.filter(grant => grant.canWrite).map(grant => grant.sourceId),
+          status: user.status,
+          version: user.version,
+        }));
+        res.json({ areas: managedAccessAreas, users, authority: 'db' });
+        return;
+      }
+      await verifyCompareAclSnapshot();
       recoverAccessControlTransactionLocal();
       const perms = loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(userPermissionsPath());
       if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
@@ -2771,18 +3014,70 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         federated_write: Array.isArray(p?.federated_write) ? p.federated_write : [],
         version: portalPermissionsVersion(p),
       }));
-      res.json({ areas: managedAccessAreas, users });
+      res.json({ areas: managedAccessAreas, users, authority: 'json' });
     } catch {
       res.status(503).json({ error: 'access_control_store_unavailable' });
     }
   });
 
-  app.post('/admin/api/permissions/:email', requireAdmin, requireAdminSameOrigin, express.json(), (req: Request, res: Response) => {
+  app.post('/admin/api/permissions/:email', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     let email: string;
     try {
       email = validatePortalEmail(req.params.email);
     } catch {
       res.status(400).json({ error: 'invalid_portal_email' });
+      return;
+    }
+    if (portalAclMode === 'compare') {
+      res.status(409).json({ error: 'acl_compare_mode_read_only' });
+      return;
+    }
+    if (portalAclMode === 'db') {
+      try {
+        const expectedVersion = Number(req.body?.expected_version);
+        if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+          res.status(400).json({ error: 'expected_version_required' });
+          return;
+        }
+        if (!Array.isArray(req.body?.grants)) {
+          res.status(400).json({ error: 'invalid_grants' });
+          return;
+        }
+        const managedSourceIds = managedAccessAreas.map(area => area.sourceId);
+        const updated = await portalAccessControl.replaceManagedGrants({
+          email,
+          expectedVersion,
+          managedSourceIds,
+          grants: req.body.grants.map((grant: any) => ({
+            sourceId: String(grant?.source_id || ''),
+            canRead: grant?.read === true || grant?.write === true,
+            canWrite: grant?.write === true,
+          })),
+        }, adminActor(req, res));
+        const fresh = await portalAccessControl.getUser(email);
+        if (!fresh) { res.status(503).json({ error: 'access_control_store_unavailable' }); return; }
+        const audit = await readLatestAclAudit({ subjectEmail: email, action: 'replace_managed_grants', stateVersion: fresh.version });
+        res.json({
+          ok: true,
+          user: {
+            email: fresh.email,
+            source_id: fresh.personalSourceId,
+            federated_read: fresh.grants.filter(grant => grant.canRead).map(grant => grant.sourceId),
+            federated_write: fresh.grants.filter(grant => grant.canWrite).map(grant => grant.sourceId),
+            status: fresh.status,
+          },
+          version: updated.version,
+          audit,
+          authority: 'db',
+        });
+      } catch (error) {
+        if (error instanceof PortalAccessControlError) {
+          const status = error.code === 'conflict' ? 409 : error.code === 'not_found' ? 404 : 400;
+          res.status(status).json({ error: error.code === 'conflict' ? 'permissions_changed' : error.code });
+          return;
+        }
+        res.status(503).json({ error: 'access_control_store_unavailable' });
+      }
       return;
     }
     let perms: Record<string, PortalUserPermissions>;
@@ -3159,7 +3454,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   });
 
   app.post('/admin/api/meeting-review/items/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
-    try { res.json(await createManualMeetingRevision(String(req.params.id), req.body?.draft, adminActor(req))); }
+    try { res.json(await createManualMeetingRevision(String(req.params.id), req.body?.draft, adminActor(req, res))); }
     catch (error) { sendReviewError(res, error); }
   });
 
@@ -3169,14 +3464,14 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         String(req.params.id),
         String(req.body?.field ?? 'canonical_markdown') as 'canonical_markdown' | 'shared_markdown' | 'split_markdown',
         String(req.body?.comment ?? ''),
-        adminActor(req),
+        adminActor(req, res),
       ));
     } catch (error) { sendReviewError(res, error); }
   });
 
   app.post('/admin/api/meeting-review/items/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     const id = String(req.params.id);
-    const actor = adminActor(req);
+    const actor = adminActor(req, res);
     try {
       await acceptMeetingReview(id, req.body?.draft, actor);
       try {
@@ -3191,7 +3486,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   });
 
   app.post('/admin/api/meeting-review/items/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
-    try { res.json(await rejectMeetingReview(String(req.params.id), String(req.body?.reason ?? ''), adminActor(req))); }
+    try { res.json(await rejectMeetingReview(String(req.params.id), String(req.body?.reason ?? ''), adminActor(req, res))); }
     catch (error) { sendReviewError(res, error); }
   });
 
@@ -3235,7 +3530,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/proposals/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
-      res.json(await createManualTakeRevision(engine, Number(req.params.id), req.body?.draft, adminActor(req)));
+      res.json(await createManualTakeRevision(engine, Number(req.params.id), req.body?.draft, adminActor(req, res)));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -3247,7 +3542,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         engine,
         Number(req.params.id),
         String(req.body?.comment ?? ''),
-        adminActor(req),
+        adminActor(req, res),
         typeof req.body?.model === 'string' ? req.body.model : undefined,
       ));
     } catch (error) {
@@ -3262,7 +3557,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         engine,
         Number(req.params.id),
         req.body?.draft,
-        adminActor(req),
+        adminActor(req, res),
         typeof req.body?.revision_id === 'number' ? req.body.revision_id : undefined,
       ));
     } catch (error) {
@@ -3273,7 +3568,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   app.post('/admin/api/ai-review/proposals/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
       await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));
-      res.json(await rejectTakeProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+      res.json(await rejectTakeProposal(engine, Number(req.params.id), adminActor(req, res), req.body?.reason));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -3282,7 +3577,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   app.post('/admin/api/ai-review/proposals/:id/defer', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
       await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));
-      res.json(await deferTakeProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+      res.json(await deferTakeProposal(engine, Number(req.params.id), adminActor(req, res), req.body?.reason));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -3291,7 +3586,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   app.post('/admin/api/ai-review/proposals/:id/restore', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
       await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));
-      res.json(await restoreTakeProposalToPending(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+      res.json(await restoreTakeProposalToPending(engine, Number(req.params.id), adminActor(req, res), req.body?.reason));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -3306,8 +3601,8 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       res.json(await openReviewRound(engine, {
         targetType: String(req.body?.target_type ?? 'take_proposal'),
         targetId: Number(req.body?.target_id),
-        permissions: loadUserPermissionsMap(),
-        actor: adminActor(req),
+        permissions: await loadUserPermissionsMap(),
+        actor: adminActor(req, res),
         deadlineHours: req.body?.deadline_hours,
       }));
     } catch (error) {
@@ -3342,7 +3637,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     try {
       res.json(await adminFinalizeRound(engine, {
         roundId: Number(req.params.id),
-        actor: adminActor(req),
+        actor: adminActor(req, res),
         action: String(req.body?.action ?? ''),
         reason: req.body?.reason,
       }));
@@ -3385,7 +3680,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/concepts/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
-      res.json(await createManualConceptRevision(engine, Number(req.params.id), String(req.body?.proposed_markdown ?? ''), adminActor(req)));
+      res.json(await createManualConceptRevision(engine, Number(req.params.id), String(req.body?.proposed_markdown ?? ''), adminActor(req, res)));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -3393,7 +3688,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/concepts/:id/revisions/llm', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
-      res.json(await createLlmConceptRevision(engine, Number(req.params.id), String(req.body?.comment ?? ''), adminActor(req), req.body?.model));
+      res.json(await createLlmConceptRevision(engine, Number(req.params.id), String(req.body?.comment ?? ''), adminActor(req, res), req.body?.model));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -3402,7 +3697,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   app.post('/admin/api/ai-review/concepts/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
       await assertDirectAdminReviewAllowed('concept_proposal', Number(req.params.id));
-      res.json(await acceptConceptProposal(engine, Number(req.params.id), req.body?.proposed_markdown, adminActor(req), {
+      res.json(await acceptConceptProposal(engine, Number(req.params.id), req.body?.proposed_markdown, adminActor(req, res), {
         revisionId: typeof req.body?.revision_id === 'number' ? req.body.revision_id : undefined,
         allowOverwriteExisting: req.body?.allow_overwrite_existing === true,
       }));
@@ -3414,7 +3709,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   app.post('/admin/api/ai-review/concepts/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
       await assertDirectAdminReviewAllowed('concept_proposal', Number(req.params.id));
-      res.json(await rejectConceptProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+      res.json(await rejectConceptProposal(engine, Number(req.params.id), adminActor(req, res), req.body?.reason));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -4098,7 +4393,9 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
   });
 
-  function adminActor(req: Request): string {
+  function adminActor(req: Request, res?: Response): string {
+    const resolved = String(res?.locals?.gbrainAdminActor || '').trim();
+    if (resolved) return resolved;
     const sessionId = (req.cookies as Record<string, string>)?.gbrain_admin || 'unknown';
     return `admin-ui:${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}`;
   }
@@ -4110,7 +4407,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         res.status(400).json({ error: 'config_required' });
         return;
       }
-      const out = await operationsByName.source_connector_config_put.handler(ctx, { config: req.body.config, actor: adminActor(req) });
+      const out = await operationsByName.source_connector_config_put.handler(ctx, { config: req.body.config, actor: adminActor(req, res) });
       res.json(out);
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
@@ -4131,7 +4428,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         connector_id,
         source_object,
         secrets: req.body.secrets,
-        actor: adminActor(req),
+        actor: adminActor(req, res),
       });
       res.json(out);
     } catch (e) {
@@ -4148,7 +4445,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : connectorSecretConfigId(connector_id),
         connector_id,
         source_object,
-        actor: adminActor(req),
+        actor: adminActor(req, res),
       });
       res.json(out);
     } catch (e) {

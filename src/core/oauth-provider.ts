@@ -185,7 +185,7 @@ interface GBrainOAuthProviderOptions {
    */
   dcrDisabled?: boolean;
   /** Test/embedding seam; production defaults to user_permissions.json. */
-  userSourceGrantResolver?: (email: string) => SourceGrant | undefined;
+  userSourceGrantResolver?: (email: string) => SourceGrant | undefined | Promise<SourceGrant | undefined>;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +402,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   private readonly dcrDisabled: boolean;
   private tokenTtl: number;
   private refreshTtl: number;
-  private readonly resolveUserSourceGrant: (email: string) => SourceGrant | undefined;
+  private readonly resolveUserSourceGrant: (email: string) => SourceGrant | undefined | Promise<SourceGrant | undefined>;
 
   constructor(options: GBrainOAuthProviderOptions) {
     this.sql = options.sql;
@@ -467,7 +467,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const portalEmail = (res as any).locals?.gbrainPortalUser;
     const userGrant = normalizeUserSourceGrant(
       portalEmail,
-      this.resolveUserSourceGrant(String(portalEmail ?? '')),
+      await this.resolveUserSourceGrant(String(portalEmail ?? '')),
     );
     if (!userGrant) {
       throw new Error('OAuth authorization denied: valid Portal user source grant required');
