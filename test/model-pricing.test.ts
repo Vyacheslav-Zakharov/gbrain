@@ -49,6 +49,11 @@ describe('CANONICAL_PRICING — table integrity', () => {
       CANONICAL_PRICING['google:gemini-2.0-flash'],
     );
   });
+
+  test('Gemini 3.6 Flash uses official standard paid-tier pricing', () => {
+    expect(CANONICAL_PRICING['google:gemini-3.6-flash']).toEqual({ input: 1.5, output: 7.5 });
+    expect(canonicalLookup('google:gemini-3.6-flash')).toEqual({ input: 1.5, output: 7.5 });
+  });
 });
 
 describe('canonicalLookup — id normalization', () => {
