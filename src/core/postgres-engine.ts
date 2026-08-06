@@ -1994,6 +1994,24 @@ export class PostgresEngine implements BrainEngine {
       modalityFilter = `AND cc.modality = 'text'`;
     }
 
+    // pgvector < 0.8 applies WHERE filters after the approximate HNSW scan.
+    // With the default ef_search=40, a selective source/type/date filter can
+    // therefore return only a few incidental rows even when stronger scoped
+    // matches exist deeper in the index. The production brain currently runs
+    // pgvector 0.6, so iterative_scan is unavailable. Increase exploration
+    // only for filtered searches, bounded by pgvector's hard maximum (1000).
+    // Keep this transaction-local so one request cannot change another
+    // connection's planner behavior.
+    const hasSelectiveHnswFilter = Boolean(
+      sourceClause || typeClause || typesClause || excludeSlugsClause ||
+      languageClause || symbolKindClause || afterDateClause || beforeDateClause ||
+      detailLow || (opts?.exclude_slug_prefixes?.length ?? 0) > 0 ||
+      (opts?.include_slug_prefixes?.length ?? 0) > 0,
+    );
+    const filteredHnswEfSearch = hasSelectiveHnswFilter
+      ? Math.min(1000, Math.max(200, innerLimit * 2))
+      : null;
+
     const rawQuery = `
       WITH hnsw_candidates AS (
         SELECT
@@ -2046,6 +2064,11 @@ export class PostgresEngine implements BrainEngine {
 
     const rows = await sql.begin(async sql => {
       await sql`SET LOCAL statement_timeout = '8s'`;
+      if (filteredHnswEfSearch !== null) {
+        // set_config(..., true) is transaction-local. Pass the bounded integer
+        // as a bind parameter rather than interpolating planner SQL.
+        await sql`SELECT set_config('hnsw.ef_search', ${String(filteredHnswEfSearch)}, true)`;
+      }
       return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
     });
     return rows.map(rowToSearchResult);
