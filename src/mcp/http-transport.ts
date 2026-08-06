@@ -32,6 +32,7 @@ import { operations } from '../core/operations.ts';
 import type { AuthInfo } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
 import { dispatchToolCall } from './dispatch.ts';
+import { GBRAIN_MCP_INSTRUCTIONS } from './server-instructions.ts';
 import { buildDefaultLimiters, type RateLimiter } from './rate-limit.ts';
 import { sqlQueryForEngine } from '../core/sql-query.ts';
 import { parseLegacyTokenScope } from '../core/legacy-token-scope.ts';
@@ -349,6 +350,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
               protocolVersion: '2025-03-26',
               serverInfo: { name: 'gbrain', version: VERSION },
               capabilities: { tools: {} },
+              instructions: GBRAIN_MCP_INSTRUCTIONS,
             },
             jsonrpc: '2.0',
             id,
