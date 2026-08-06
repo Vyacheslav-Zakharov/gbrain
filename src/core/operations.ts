@@ -589,6 +589,35 @@ export function resolveRequestedScope(
 }
 
 /**
+ * Resolve a legacy slug alias without losing the source that owns it.
+ * A federated alias lookup is performed in grant order. Once an alias matches,
+ * the subsequent page/chunk read is pinned to that source so an identical
+ * canonical slug in another granted source cannot replace or augment it.
+ */
+async function resolveReadSlugAlias(
+  engine: BrainEngine,
+  requestedSlug: string,
+  sourceOpts: { sourceId?: string; sourceIds?: string[] },
+): Promise<{ slug: string; sourceOpts: { sourceId?: string; sourceIds?: string[] } }> {
+  if (sourceOpts.sourceIds?.length) {
+    for (const sourceId of sourceOpts.sourceIds) {
+      const canonical = await engine.resolveSlugWithAlias(requestedSlug, sourceId);
+      if (canonical !== requestedSlug) {
+        return { slug: canonical, sourceOpts: { sourceId } };
+      }
+    }
+    return { slug: requestedSlug, sourceOpts };
+  }
+
+  if (sourceOpts.sourceId) {
+    const slug = await engine.resolveSlugWithAlias(requestedSlug, sourceOpts.sourceId);
+    return { slug, sourceOpts };
+  }
+
+  return { slug: requestedSlug, sourceOpts };
+}
+
+/**
  * Code-intel adapter for `resolveRequestedScope`. Graph traversal
  * (code_callers/code_callees/code_blast/code_flow) is single-source by design —
  * the engine APIs and the traversal cache key take ONE `sourceId` string, not a
@@ -725,7 +754,7 @@ const get_page: Operation = {
     source_id: { type: 'string', required: false, description: 'Read from one granted source. Use __all__ to search across the caller grant.' },
   },
   handler: async (ctx, p) => {
-    const slug = p.slug as string;
+    const requestedSlug = p.slug as string;
     const fuzzy = (p.fuzzy as boolean) || false;
     const includeDeleted = (p.include_deleted as boolean) === true;
     // #1393: route BOTH the exact-match read and the fuzzy resolveSlugs through
@@ -735,15 +764,18 @@ const get_page: Operation = {
     // an UNSCOPED exact lookup — a cross-source read of any page by slug. getPage
     // now honors sourceIds[] (both engines), so the same scope closes both paths.
     const sourceOpts = resolveRequestedScope(ctx, p.source_id as string | undefined);
-    const fuzzyScope = sourceOpts;
+    const aliasResolution = await resolveReadSlugAlias(ctx.engine, requestedSlug, sourceOpts);
+    const slug = aliasResolution.slug;
+    const readOpts = aliasResolution.sourceOpts;
+    const fuzzyScope = readOpts;
 
-    let page = await ctx.engine.getPage(slug, { includeDeleted, ...sourceOpts });
-    let resolved_slug: string | undefined;
+    let page = await ctx.engine.getPage(slug, { includeDeleted, ...readOpts });
+    let resolved_slug: string | undefined = slug !== requestedSlug ? slug : undefined;
 
     if (!page && fuzzy) {
       const candidates = await ctx.engine.resolveSlugs(slug, fuzzyScope);
       if (candidates.length === 1) {
-        page = await ctx.engine.getPage(candidates[0], { includeDeleted, ...sourceOpts });
+        page = await ctx.engine.getPage(candidates[0], { includeDeleted, ...readOpts });
         resolved_slug = candidates[0];
       } else if (candidates.length > 1) {
         return { error: 'ambiguous_slug', candidates };
@@ -751,7 +783,7 @@ const get_page: Operation = {
     }
 
     if (!page) {
-      throw new OperationError('page_not_found', `Page not found: ${slug}`, includeDeleted ? 'Check the slug or use fuzzy: true' : 'Page may be soft-deleted; pass include_deleted: true to verify');
+      throw new OperationError('page_not_found', `Page not found: ${requestedSlug}`, includeDeleted ? 'Check the slug or use fuzzy: true' : 'Page may be soft-deleted; pass include_deleted: true to verify');
     }
 
     // v0.37.0 (D11): op-layer write-back for the `last_retrieved_at` stale
@@ -2728,7 +2760,9 @@ const get_chunks: Operation = {
   },
   handler: async (ctx, p) => {
     const sourceOpts = resolveRequestedScope(ctx, p.source_id as string | undefined);
-    return ctx.engine.getChunks(p.slug as string, sourceOpts);
+    const requestedSlug = p.slug as string;
+    const aliasResolution = await resolveReadSlugAlias(ctx.engine, requestedSlug, sourceOpts);
+    return ctx.engine.getChunks(aliasResolution.slug, aliasResolution.sourceOpts);
   },
   scope: 'read',
 };

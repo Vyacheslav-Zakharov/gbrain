@@ -46,6 +46,25 @@ beforeEach(async () => {
     compiled_truth: 'Shared Bob.',
     frontmatter: { type: 'person' },
   }, { sourceId: 'shared' });
+  await engine.executeRaw(`
+    INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug)
+    VALUES
+      ('shared', 'people/alice-old', 'people/alice'),
+      ('shared', 'people/alice-legacy-missing', 'people/alice-miss')
+    ON CONFLICT (source_id, alias_slug) DO UPDATE SET canonical_slug = EXCLUDED.canonical_slug
+  `);
+  await engine.putPage('people/alice-missing', {
+    type: 'person',
+    title: 'Personal fuzzy candidate',
+    compiled_truth: 'Personal fuzzy candidate.',
+    frontmatter: { type: 'person' },
+  }, { sourceId: 'personal' });
+  await engine.putPage('people/alice-missing', {
+    type: 'person',
+    title: 'Shared fuzzy candidate',
+    compiled_truth: 'Shared fuzzy candidate.',
+    frontmatter: { type: 'person' },
+  }, { sourceId: 'shared' });
 
   await engine.upsertChunks('people/alice', [{
     chunk_index: 0,
@@ -91,6 +110,41 @@ describe('source-aware page/chunk MCP operations', () => {
     }) as any;
     expect(page.source_id).toBe('shared');
     expect(page.compiled_truth).toBe('Shared Alice.');
+  });
+
+  test('get_page and get_chunks follow source-scoped legacy slug aliases', async () => {
+    const page = await operationsByName.get_page.handler(ctx(), {
+      slug: 'people/alice-old',
+      source_id: 'shared',
+    }) as any;
+    const chunks = await operationsByName.get_chunks.handler(ctx(), {
+      slug: 'people/alice-old',
+      source_id: 'shared',
+    }) as any[];
+    expect(page.slug).toBe('people/alice');
+    expect(page.source_id).toBe('shared');
+    expect(chunks.map((chunk) => chunk.source_id)).toEqual(['shared']);
+  });
+
+  test('federated alias reads stay in the source that owns the alias', async () => {
+    const page = await operationsByName.get_page.handler(ctx(), {
+      slug: 'people/alice-old',
+    }) as any;
+    const chunks = await operationsByName.get_chunks.handler(ctx(), {
+      slug: 'people/alice-old',
+    }) as any[];
+    expect(page.source_id).toBe('shared');
+    expect(chunks.map((chunk) => chunk.source_id)).toEqual(['shared']);
+  });
+
+  test('fuzzy fallback after an alias match stays in the alias-owning source', async () => {
+    const page = await operationsByName.get_page.handler(ctx(), {
+      slug: 'people/alice-legacy-missing',
+      fuzzy: true,
+    }) as any;
+    expect(page.slug).toBe('people/alice-missing');
+    expect(page.source_id).toBe('shared');
+    expect(page.compiled_truth).toBe('Shared fuzzy candidate.');
   });
 
   test('get_chunks uses the full federated read grant when source_id is omitted', async () => {
