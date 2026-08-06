@@ -674,6 +674,31 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   }
 
+  async function persistRequestLog(input: {
+    tokenName: string;
+    agentName: string;
+    operation: string;
+    latencyMs: number;
+    status: 'success' | 'error';
+    errorMessage?: string | null;
+    params: unknown;
+  }): Promise<number | undefined> {
+    try {
+      const rows = await executeRawJsonb<{ id: number | string }>(
+        engine,
+        `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+         RETURNING id`,
+        [input.tokenName, input.agentName, input.operation, input.latencyMs, input.status, input.errorMessage ?? null],
+        [input.params],
+      );
+      const id = Number(rows[0]?.id);
+      return Number.isSafeInteger(id) ? id : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   // Express 5 app
   const app = express();
   app.set('json replacer', jsonBigIntReplacer);
@@ -5248,16 +5273,16 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       // ever called tools/list, and the v0.26.3 persistence regression test
       // asserting >= 2 rows after tools/list + tools/call was unreachable.
       const latency = Date.now() - startTime;
-      try {
-        await executeRawJsonb(
-          engine,
-          `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-          [authInfo.clientId, agentName, 'tools/list', latency, 'success'],
-          [null],
-        );
-      } catch { /* best effort */ }
+      const requestLogId = await persistRequestLog({
+        tokenName: authInfo.clientId,
+        agentName,
+        operation: 'tools/list',
+        latencyMs: latency,
+        status: 'success',
+        params: null,
+      });
       broadcastEvent({
+        id: requestLogId,
         agent: agentName,
         operation: 'tools/list',
         scopes: authInfo.scopes.join(','),
@@ -5288,16 +5313,17 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         // misbehaving agents need to see the full attempt log, not just
         // valid-op success/error.
         const latency = Date.now() - startTime;
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', `unknown_operation: ${name}`],
-            [null],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: name,
+          latencyMs: latency,
+          status: 'error',
+          errorMessage: `unknown_operation: ${name}`,
+          params: null,
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: name,
           scopes: authInfo.scopes.join(','),
@@ -5320,16 +5346,17 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         // motivation as the unknown-op path — and it makes the v0.26.3
         // persistence regression test reliable across both rejection paths.
         const latency = Date.now() - startTime;
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', `insufficient_scope: requires '${requiredScope}'`],
-            [null],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: name,
+          latencyMs: latency,
+          status: 'error',
+          errorMessage: `insufficient_scope: requires '${requiredScope}'`,
+          params: null,
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: name,
           scopes: authInfo.scopes.join(','),
@@ -5416,16 +5443,17 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         // real object, not a JSON-encoded string.
         const latency = Date.now() - startTime;
         const errorPayload = serializeError(e);
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', errorPayload.message],
-            [logParamsObj],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: name,
+          latencyMs: latency,
+          status: 'error',
+          errorMessage: errorPayload.message,
+          params: logParamsObj,
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: name,
           params: broadcastParams,
@@ -5448,16 +5476,17 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
           const parsed = JSON.parse(toolResult.content[0]?.text ?? '{}');
           errMsg = parsed.error?.message ?? parsed.message ?? errMsg;
         } catch { /* ignore */ }
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', errMsg],
-            [logParamsObj],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: name,
+          latencyMs: latency,
+          status: 'error',
+          errorMessage: errMsg,
+          params: logParamsObj,
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: name,
           params: broadcastParams,
@@ -5470,16 +5499,16 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         return toolResult;
       }
 
-      try {
-        await executeRawJsonb(
-          engine,
-          `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-          [authInfo.clientId, agentName, name, latency, 'success'],
-          [logParamsObj],
-        );
-      } catch { /* best effort */ }
+      const requestLogId = await persistRequestLog({
+        tokenName: authInfo.clientId,
+        agentName,
+        operation: name,
+        latencyMs: latency,
+        status: 'success',
+        params: logParamsObj,
+      });
       broadcastEvent({
+        id: requestLogId,
         agent: agentName,
         operation: name,
         params: broadcastParams,

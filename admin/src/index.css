@@ -348,12 +348,35 @@ label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
 }
 
 /* Activity feed */
-.feed { max-height: 400px; overflow-y: auto; }
+.feed { max-height: 520px; overflow: auto; }
 .feed-empty {
   color: var(--text-muted);
   text-align: center;
   padding: 32px;
   font-size: 13px;
+}
+.feed-row-error { cursor: pointer; }
+.feed-row-error:hover td { background: rgba(239, 68, 68, .035); }
+.feed-error-toggle {
+  appearance: none;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.feed-error-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.feed-error-detail-row td { padding: 0; background: var(--bg-secondary); }
+.feed-error-detail { padding: 16px; border-left: 3px solid var(--error); }
+.feed-error-detail-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.feed-error-detail-header strong { color: var(--error); font-size: 14px; }
+.feed-error-reason { margin-top: 5px; color: var(--text-primary); overflow-wrap: anywhere; }
+.feed-error-grid { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 7px 12px; margin: 14px 0 0; font-size: 12px; }
+.feed-error-grid dt { color: var(--text-muted); }
+.feed-error-grid dd { margin: 0; overflow-wrap: anywhere; }
+.feed-error-privacy { margin-top: 12px; color: var(--text-muted); font-size: 11px; }
+@media (max-width: 700px) {
+  .feed-error-detail-header { flex-direction: column; }
+  .feed-error-grid { grid-template-columns: 1fr; gap: 3px; }
+  .feed-error-grid dd { margin-bottom: 7px; }
 }
 
 /* Sparkline */
