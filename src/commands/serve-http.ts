@@ -5736,16 +5736,16 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         );
 
         const latency = Date.now() - startTime;
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-            [authInfo.clientId, agentName, 'webhook_ingest', latency, 'success'],
-            [{ content_type: contentType, content_hash: contentHash, bytes: body.length, job_id: job.id }],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: 'webhook_ingest',
+          latencyMs: latency,
+          status: 'success',
+          params: { content_type: contentType, content_hash: contentHash, bytes: body.length, job_id: job.id },
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: 'webhook_ingest',
           scopes: authInfo.scopes.join(','),

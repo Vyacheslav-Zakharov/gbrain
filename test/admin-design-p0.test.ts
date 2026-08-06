@@ -234,6 +234,14 @@ describe('Admin design P0 contracts', () => {
     expect(server).toContain('async function persistRequestLog');
     expect(server).toContain('RETURNING id');
     expect(server).toContain('id: requestLogId');
+
+    const webhookStart = server.indexOf("const job = await ingestQueue.add");
+    const webhookEnd = server.indexOf("res.status(202).json", webhookStart);
+    const webhookSuccess = server.slice(webhookStart, webhookEnd);
+    expect(webhookSuccess).toContain('const requestLogId = await persistRequestLog({');
+    expect(webhookSuccess).toContain("operation: 'webhook_ingest'");
+    expect(webhookSuccess).toContain('id: requestLogId');
+    expect(webhookSuccess).not.toContain('executeRawJsonb(');
   });
 
   test('Activity metrics and title are consistently Russian', () => {
