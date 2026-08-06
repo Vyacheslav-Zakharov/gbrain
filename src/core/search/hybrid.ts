@@ -11,7 +11,12 @@
 
 import type { BrainEngine } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
-import type { SearchResult, SearchOpts, HybridSearchMeta } from '../types.ts';
+import type {
+  SearchResult,
+  SearchOpts,
+  HybridSearchMeta,
+  ResolvedColumn,
+} from '../types.ts';
 import { embed, embedQuery } from '../embedding.ts';
 import { registerBackgroundWorkDrainer } from '../background-work.ts';
 import { resolveEmbeddingColumn, isCacheSafe } from './embedding-column.ts';
@@ -723,6 +728,15 @@ export interface HybridSearchOpts extends SearchOpts {
    * a fresh per-call deadline. Not part of the public contract.
    */
   _queryEmbedDeadline?: QueryEmbedDeadline;
+  /**
+   * INTERNAL — original-query embedding already produced for semantic-cache
+   * lookup. Reuse it on cache miss so expansion latency cannot consume the
+   * shared deadline and force a duplicate original-query embed to fail.
+   */
+  _precomputedQueryEmbedding?: {
+    embedding: Float32Array;
+    column: ResolvedColumn;
+  };
 }
 
 /**
@@ -752,10 +766,70 @@ export interface QueryEmbedDeadline {
   signal: AbortSignal;
   /** Absolute wall-clock deadline (ms epoch) — shared so a second embed sees the elapsed budget. */
   deadlineAt: number;
+  /** Optional floor for ordinary shared-budget calls; zero for strict retries. */
+  minimumBudgetMs?: number;
 }
 
-export function makeQueryEmbedDeadline(ms = QUERY_EMBED_TIMEOUT_MS): QueryEmbedDeadline {
-  return { signal: AbortSignal.timeout(ms), deadlineAt: Date.now() + ms };
+export function makeQueryEmbedDeadline(
+  ms = QUERY_EMBED_TIMEOUT_MS,
+  minimumBudgetMs = MIN_QUERY_EMBED_BUDGET_MS,
+): QueryEmbedDeadline {
+  return {
+    signal: AbortSignal.timeout(ms),
+    deadlineAt: Date.now() + ms,
+    minimumBudgetMs,
+  };
+}
+
+/** Construct a strict deadline anchored to an existing absolute timestamp. */
+export function makeQueryEmbedDeadlineAt(
+  deadlineAt: number,
+  minimumBudgetMs = 0,
+): QueryEmbedDeadline {
+  return {
+    signal: AbortSignal.timeout(Math.max(0, deadlineAt - Date.now())),
+    deadlineAt,
+    minimumBudgetMs,
+  };
+}
+
+/** Remaining one-shot retry budget without extending the original deadline. */
+export function queryEmbedRetryBudgetMs(
+  deadlineAt: number,
+  now = Date.now(),
+): number {
+  return Math.max(0, Math.min(MIN_QUERY_EMBED_BUDGET_MS, deadlineAt - now));
+}
+
+/** True only when a cached vector belongs to the exact active vector space. */
+export function sameEmbeddingSpace(a: ResolvedColumn, b: ResolvedColumn): boolean {
+  return a.name === b.name
+    && a.type === b.type
+    && a.dimensions === b.dimensions
+    && a.embeddingModel === b.embeddingModel;
+}
+
+/** Bound a complete async arm (embedding plus DB search) to one deadline. */
+export async function runWithinAbsoluteDeadline<T>(
+  work: () => Promise<T>,
+  deadlineAt: number,
+): Promise<T> {
+  const remaining = deadlineAt - Date.now();
+  if (remaining <= 0) throw new Error('query arm deadline exhausted');
+  const p = work();
+  p.catch(() => { /* swallow a late losing rejection */ });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`query arm deadline ${remaining}ms exceeded`)),
+      remaining,
+    );
+  });
+  try {
+    return await Promise.race([p, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -775,11 +849,14 @@ export async function embedQueryBounded(
   p.catch(() => { /* swallow the loser's late rejection */ });
   // Floor the budget so a healthy embed isn't starved when the shared absolute
   // deadline was mostly consumed by prior work (codex). Still bounded overall.
-  const remaining = Math.max(MIN_QUERY_EMBED_BUDGET_MS, dl.deadlineAt - Date.now());
+  const remaining = Math.max(
+    dl.minimumBudgetMs ?? MIN_QUERY_EMBED_BUDGET_MS,
+    dl.deadlineAt - Date.now(),
+  );
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_, reject) => {
     timer = setTimeout(
-      () => reject(new Error(`query embed deadline ${QUERY_EMBED_TIMEOUT_MS}ms exceeded`)),
+      () => reject(new Error(`query embed deadline ${remaining}ms exceeded`)),
       remaining,
     );
   });
@@ -788,6 +865,76 @@ export async function embedQueryBounded(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/**
+ * Run expanded-query vector arms independently and keep every successful arm.
+ *
+ * Multi-query expansion is a recall aid, so a failed rewrite MUST NOT discard
+ * the original query's successful embedding/search result. Promise.all used to
+ * make one provider 429/timeout collapse the entire vector side to keyword-only.
+ * Promise.allSettled preserves input order while providing per-arm fail-open.
+ *
+ * @internal exported for a hermetic regression test.
+ */
+export async function runQueryVariantArmsFailOpen(
+  queries: string[],
+  runArm: (query: string) => Promise<{
+    embedding: Float32Array;
+    list: SearchResult[];
+  }>,
+  retryOriginalArm: (query: string) => Promise<{
+    embedding: Float32Array;
+    list: SearchResult[];
+  }> = runArm,
+): Promise<{
+  lists: SearchResult[][];
+  originalEmbedding: Float32Array | null;
+  failedArms: number;
+  retriedOriginal: boolean;
+  recoveredOriginal: boolean;
+}> {
+  const settled = await Promise.allSettled(queries.map((query) => runArm(query)));
+  const lists: SearchResult[][] = [];
+  let originalEmbedding: Float32Array | null = null;
+  let failedArms = 0;
+  let retriedOriginal = false;
+  let recoveredOriginal = false;
+
+  for (let i = 0; i < settled.length; i++) {
+    const arm = settled[i];
+    if (arm.status === 'rejected') {
+      failedArms++;
+      continue;
+    }
+    if (i === 0) originalEmbedding = arm.value.embedding;
+    lists.push(arm.value.list);
+  }
+
+  // Expansion can amplify a provider's concurrency/rate-limit failure. If the
+  // original arm rejected and surviving rewrites produced no hits, make one
+  // clean attempt with the original query only. This is intentionally limited
+  // to expanded calls and runs at most once.
+  const noExpandedHits = lists.every((list) => list.length === 0);
+  if (originalEmbedding === null && noExpandedHits && queries.length > 1) {
+    retriedOriginal = true;
+    try {
+      const original = await retryOriginalArm(queries[0]);
+      originalEmbedding = original.embedding;
+      lists.push(original.list);
+      recoveredOriginal = true;
+    } catch {
+      // The caller's existing keyword-only fallback remains the final safety net.
+    }
+  }
+
+  return {
+    lists,
+    originalEmbedding,
+    failedArms,
+    retriedOriginal,
+    recoveredOriginal,
+  };
 }
 
 export async function hybridSearch(
@@ -1239,11 +1386,56 @@ export async function hybridSearch(
       // share one ~6s budget); direct callers get a fresh deadline. On timeout
       // the embed throws → the catch below falls back to keyword-only.
       const embedDl = opts?._queryEmbedDeadline ?? makeQueryEmbedDeadline();
-      const embeddings = await Promise.all(queries.map(q => embedQueryBounded(q, embedOpts, embedDl)));
-      queryEmbedding = embeddings[0];
-      const textLists = await Promise.all(
-        embeddings.map(emb => engine.searchVector(emb, searchOpts)),
+      const variantArms = await runQueryVariantArmsFailOpen(
+        queries,
+        async (variantQuery) => {
+          const precomputed = opts?._precomputedQueryEmbedding;
+          const embedding =
+            variantQuery === query
+              && precomputed
+              && sameEmbeddingSpace(precomputed.column, resolvedCol)
+              ? precomputed.embedding
+              : await embedQueryBounded(variantQuery, embedOpts, embedDl);
+          const list = await engine.searchVector(embedding, searchOpts);
+          return { embedding, list };
+        },
+        async (originalQuery) => {
+          // Never extend the original absolute query-embed deadline. A retry
+          // is useful for an early per-arm 429, but must be refused after the
+          // shared budget has elapsed (otherwise cache + expansion + retry can
+          // cross the CLI force-exit envelope).
+          const retryBudgetMs = queryEmbedRetryBudgetMs(embedDl.deadlineAt);
+          if (retryBudgetMs <= 0) {
+            throw new Error('query embed retry budget exhausted');
+          }
+          const retryDeadlineAt = Math.min(
+            embedDl.deadlineAt,
+            Date.now() + retryBudgetMs,
+          );
+          return runWithinAbsoluteDeadline(
+            async () => {
+              const embedding = await embedQueryBounded(
+                originalQuery,
+                embedOpts,
+                // Strict retry: no 2s floor, otherwise a provider that ignores
+                // AbortSignal could outlive the original absolute deadline.
+                makeQueryEmbedDeadlineAt(retryDeadlineAt, 0),
+              );
+              const list = await engine.searchVector(embedding, searchOpts);
+              return { embedding, list };
+            },
+            embedDl.deadlineAt,
+          );
+        },
       );
+      queryEmbedding = variantArms.originalEmbedding;
+      const textLists = variantArms.lists;
+      if (variantArms.failedArms > 0 && queries.length > 1) {
+        console.warn(
+          `[gbrain] query expansion vector arms degraded: failed=${variantArms.failedArms} total=${queries.length} ` +
+          `retried_original=${variantArms.retriedOriginal} recovered_original=${variantArms.recoveredOriginal}; keeping successful arms`,
+        );
+      }
       for (const list of textLists) {
         for (const r of list) {
           r.modality = r.modality ?? 'text';
@@ -1681,7 +1873,14 @@ export async function hybridSearchCached(
         // v0.42.20.0 (Fix 3) — bounded by the shared deadline; on timeout this
         // throws → caught below → cacheStatus 'disabled' → falls through to the
         // inner hybridSearch (which reuses the same elapsed deadline).
-        queryEmbedding = await embedQueryBounded(query, undefined, queryEmbedDl);
+        queryEmbedding = await embedQueryBounded(
+          query,
+          {
+            embeddingModel: resolvedColCached.embeddingModel,
+            dimensions: resolvedColCached.dimensions,
+          },
+          queryEmbedDl,
+        );
       } else {
         cacheStatus = 'disabled';
       }
@@ -1747,6 +1946,17 @@ export async function hybridSearchCached(
     // v0.42.20.0 (Fix 3) — share the query-embed deadline so the inner embed
     // doesn't start a fresh 6s budget after the cache-lookup already spent it.
     _queryEmbedDeadline: queryEmbedDl,
+    // The cache lookup already paid for the original-query embedding. Reusing
+    // it makes expansion additive instead of risking a deadline-starved
+    // duplicate request that discards the base retrieval arm.
+    ...(queryEmbedding
+      ? {
+          _precomputedQueryEmbedding: {
+            embedding: queryEmbedding,
+            column: resolvedColCached,
+          },
+        }
+      : {}),
     onMeta: (m) => {
       innerMetaBox.current = m;
       // Do NOT call userOnMeta here — we'll emit a merged meta below
