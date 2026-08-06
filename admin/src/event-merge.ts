@@ -26,7 +26,7 @@ export function describeFeedError(event: FeedEvent): FeedErrorDiagnostic {
   if (normalized.includes('page not found') || normalized.includes('page_not_found')) {
     return {
       title: 'Страница не найдена',
-      reason,
+      reason: 'Страница с указанным адресом не найдена.',
       nextAction: 'Проверьте адрес страницы или найдите её через поиск.',
       code: 'page_not_found',
     };
@@ -34,7 +34,7 @@ export function describeFeedError(event: FeedEvent): FeedErrorDiagnostic {
   if (normalized.includes('single source') || normalized.includes('specify source_id')) {
     return {
       title: 'Не указан источник кода',
-      reason,
+      reason: 'Для этой операции нужно явно выбрать один источник кода.',
       nextAction: 'Повторите вызов, явно указав source_id из доступных источников.',
       code: 'source_id_required',
     };
@@ -42,7 +42,7 @@ export function describeFeedError(event: FeedEvent): FeedErrorDiagnostic {
   if (normalized.includes('insufficient_scope')) {
     return {
       title: 'Недостаточно прав',
-      reason,
+      reason: 'У агента нет необходимых прав для этой операции или источника.',
       nextAction: 'Проверьте права агента для этой операции и источника.',
       code: 'insufficient_scope',
     };
@@ -50,7 +50,7 @@ export function describeFeedError(event: FeedEvent): FeedErrorDiagnostic {
   if (normalized.includes('unknown_operation')) {
     return {
       title: 'Неизвестная операция',
-      reason,
+      reason: 'Сервис не распознал запрошенную операцию.',
       nextAction: 'Обновите список инструментов агента и повторите запрос с актуальным именем операции.',
       code: 'unknown_operation',
     };
@@ -58,7 +58,7 @@ export function describeFeedError(event: FeedEvent): FeedErrorDiagnostic {
   if (normalized.includes('timeout') || normalized.includes('timed out')) {
     return {
       title: 'Превышено время ожидания',
-      reason,
+      reason: 'Сервис не завершил операцию за отведённое время.',
       nextAction: 'Повторите запрос. Если ошибка повторяется, проверьте нагрузку и доступность сервиса.',
       code: 'timeout',
     };
@@ -66,15 +66,15 @@ export function describeFeedError(event: FeedEvent): FeedErrorDiagnostic {
   if (normalized.includes('validation') || normalized.includes('invalid')) {
     return {
       title: 'Некорректные параметры',
-      reason,
+      reason: 'Сервис отклонил структуру или формат параметров запроса.',
       nextAction: 'Проверьте обязательные поля и формат параметров запроса.',
       code: event.error?.code || 'validation_error',
     };
   }
   return {
     title: 'Ошибка выполнения',
-    reason,
-    nextAction: 'Откройте эту запись в Admin и проверьте техническую причину и безопасную сводку параметров.',
+    reason: 'Сервис сообщил об ошибке без безопасных подробностей.',
+    nextAction: 'Проверьте код, операцию и безопасную сводку параметров; для разбора используйте идентификатор запроса.',
     code: event.error?.code || 'operation_error',
   };
 }

@@ -98,7 +98,7 @@ describe('Admin design P0 contracts', () => {
     const pageMissing = describeFeedError(pageMissingEvent);
     expect(pageMissing).toEqual({
       title: 'Страница не найдена',
-      reason: 'Page not found: projects/example',
+      reason: 'Страница с указанным адресом не найдена.',
       nextAction: 'Проверьте адрес страницы или найдите её через поиск.',
       code: 'page_not_found',
     });
@@ -109,6 +109,7 @@ describe('Admin design P0 contracts', () => {
       error: { code: 'op_error', message: 'Code traversal runs against a single source. Specify source_id.' },
     });
     expect(sourceMissing.title).toBe('Не указан источник кода');
+    expect(sourceMissing.reason).not.toContain('source_id');
     expect(sourceMissing.nextAction).toContain('source_id');
     expect(formatSafeParams(pageMissingEvent.params)).toBe('Поля: slug · размер около 1024 Б');
     const safeSummary = formatSafeParams({
@@ -126,6 +127,7 @@ describe('Admin design P0 contracts', () => {
     });
     expect(untrustedSummary).toBe('Значения и метаданные параметров скрыты');
     expect(untrustedSummary).not.toContain('secret-value-must-not-copy');
+    expect(pageMissing.reason).not.toContain('projects/example');
   });
 
   test('Dashboard error status has hover summary and click-to-expand diagnostics', () => {
