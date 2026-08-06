@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
+import { PortalAccessControlRepository } from '../../src/core/portal-access-control.ts';
 
 const databaseUrl = process.env.GBRAIN_TEST_POSTGRES_URL;
 const suite = databaseUrl ? describe : describe.skip;
@@ -76,5 +77,39 @@ suite('portal access-control PostgreSQL migration parity', () => {
       INSERT INTO portal_source_grants (user_email, source_id, can_read, can_write)
       VALUES ('pg-user@avers.kz', 'shared', false, true)
     `)).rejects.toThrow();
+  });
+
+  test('binds an imported Keycloak subject when PostgreSQL returns BIGINT versions', async () => {
+    await engine.executeRaw(`
+      INSERT INTO sources (id, name, local_path, config)
+      VALUES ('pg-imported-user', 'PG Imported User', '/tmp/pg-imported-user', '{}'::jsonb)
+      ON CONFLICT (id) DO NOTHING
+    `);
+    await engine.executeRaw(`
+      INSERT INTO portal_users (email, keycloak_sub, personal_source_id, status)
+      VALUES ('pg-imported-user@avers.kz', NULL, 'pg-imported-user', 'active')
+    `);
+    await engine.executeRaw(`
+      INSERT INTO portal_source_grants (user_email, source_id, can_read, can_write)
+      VALUES ('pg-imported-user@avers.kz', 'pg-imported-user', true, true)
+    `);
+
+    const repository = new PortalAccessControlRepository(engine);
+    const user = await repository.provisionUser({
+      email: 'pg-imported-user@avers.kz',
+      keycloakSub: 'kc-imported-user',
+      personalSourceId: 'pg-imported-user',
+    });
+
+    expect(user.keycloakSub).toBe('kc-imported-user');
+    expect(user.version).toBe(1);
+    const audit = await engine.executeRaw<{ before_state: unknown; after_state: unknown }>(`
+      SELECT before_state, after_state
+        FROM portal_acl_audit
+       WHERE action = 'bind_keycloak_identity'
+    `);
+    expect(audit).toHaveLength(1);
+    expect(audit[0]?.before_state).toMatchObject({ version: '1', keycloak_sub: null });
+    expect(audit[0]?.after_state).toMatchObject({ version: '1', keycloak_sub: 'kc-imported-user' });
   });
 });

@@ -127,6 +127,10 @@ async function appendAudit(
     afterState: unknown;
   },
 ): Promise<void> {
+  const stringifyState = (value: unknown): string => JSON.stringify(
+    value,
+    (_key, nested) => typeof nested === 'bigint' ? nested.toString() : nested,
+  );
   await engine.executeRaw(`
     INSERT INTO portal_acl_audit (
       actor_email, subject_email, action, request_id, before_state, after_state
@@ -136,8 +140,8 @@ async function appendAudit(
     input.subjectEmail,
     input.action,
     input.requestId ?? null,
-    JSON.stringify(input.beforeState),
-    JSON.stringify(input.afterState),
+    stringifyState(input.beforeState),
+    stringifyState(input.afterState),
   ]);
 }
 
