@@ -5,6 +5,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { operations } from '../core/operations.ts';
 import { VERSION } from '../version.ts';
 import { buildToolDefs } from './tool-defs.ts';
+import { GBRAIN_MCP_INSTRUCTIONS } from './server-instructions.ts';
 import { dispatchToolCall, validateParams, buildOperationContext } from './dispatch.ts';
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { loadConfig } from '../core/config.ts';
@@ -18,7 +19,7 @@ import { resolveEntitiesToPointers, logDeliveredReflexPointers } from '../core/c
 export async function startMcpServer(engine: BrainEngine) {
   const server = new Server(
     { name: 'gbrain', version: VERSION },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions: GBRAIN_MCP_INSTRUCTIONS },
   );
 
   // Generate tool definitions from operations. Extracted to buildToolDefs so
