@@ -43,7 +43,7 @@ function baseKnobs(): ResolvedSearchKnobs {
 }
 
 describe('KNOBS_HASH_VERSION + version invariants', () => {
-  test('version is 12 (…; 10→11 asymmetric input_type; 11→12 filtered-HNSW recall)', () => {
+  test('version is 13 (…; 11→12 filtered-HNSW recall; 12→13 degraded-arm cache guard)', () => {
     // v0.35.0.0: 1→2 to fold reranker fields. v0.35.6.0: 2→3 to fold
     // floor_ratio. v0.36 wave: piggybacks on v=3 with 7 cross-modal knobs
     // (D2) PLUS column + provider context (D8/CDX-2 cross-column isolation).
@@ -62,7 +62,8 @@ describe('KNOBS_HASH_VERSION + version invariants', () => {
     // query-side vectors for asymmetric providers, so rows keyed on
     // pre-fix document-side query vectors must not be served. Filtered-HNSW
     // recall fix: 11→12 so sparse pre-fix result sets cannot mask the fix.
-    expect(KNOBS_HASH_VERSION).toBe(12);
+    // Degraded expansion writes are excluded from cache in 12→13.
+    expect(KNOBS_HASH_VERSION).toBe(13);
   });
 
   test('hash is 16 hex chars regardless of reranker config', () => {

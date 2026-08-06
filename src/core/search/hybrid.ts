@@ -867,6 +867,38 @@ export async function embedQueryBounded(
   }
 }
 
+export type QueryArmFailureReason = keyof NonNullable<HybridSearchMeta['arms']>['failure_reasons'];
+
+export class QueryArmError extends Error {
+  constructor(public readonly reason: QueryArmFailureReason) {
+    super(reason);
+    this.name = 'QueryArmError';
+  }
+}
+
+function isDeadlineExceededError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const shaped = error as Error & { code?: string };
+  return shaped.name === 'AbortError'
+    || shaped.code === 'ABORT_ERR'
+    || shaped.code === '57014';
+}
+
+/** @internal exported for hermetic bounded-classification tests. */
+export function classifyEmbeddingArmFailure(error: unknown): QueryArmFailureReason {
+  const message = error instanceof Error ? `${error.name} ${error.message}`.toLowerCase() : String(error).toLowerCase();
+  if (isDeadlineExceededError(error) || /timeout|timed out|deadline|abort/.test(message)) return 'embedding_timeout';
+  if (/rate.?limit|\b429\b|too many requests/.test(message)) return 'embedding_rate_limit';
+  return 'embedding_provider';
+}
+
+/** @internal exported for hermetic bounded-classification tests. */
+export function classifyVectorArmFailure(error: unknown): QueryArmFailureReason {
+  const message = error instanceof Error ? `${error.name} ${error.message}`.toLowerCase() : String(error).toLowerCase();
+  if (isDeadlineExceededError(error) || /timeout|timed out|deadline|canceling statement/.test(message)) return 'vector_timeout';
+  return 'vector_database';
+}
+
 /**
  * Run expanded-query vector arms independently and keep every successful arm.
  *
@@ -891,13 +923,17 @@ export async function runQueryVariantArmsFailOpen(
   lists: SearchResult[][];
   originalEmbedding: Float32Array | null;
   failedArms: number;
+  failureReasons: Partial<Record<QueryArmFailureReason, number>>;
+  originalFailed: boolean;
   retriedOriginal: boolean;
   recoveredOriginal: boolean;
 }> {
   const settled = await Promise.allSettled(queries.map((query) => runArm(query)));
+  const originalFailed = settled[0]?.status === 'rejected';
   const lists: SearchResult[][] = [];
   let originalEmbedding: Float32Array | null = null;
   let failedArms = 0;
+  const failureReasons: Partial<Record<QueryArmFailureReason, number>> = {};
   let retriedOriginal = false;
   let recoveredOriginal = false;
 
@@ -905,6 +941,8 @@ export async function runQueryVariantArmsFailOpen(
     const arm = settled[i];
     if (arm.status === 'rejected') {
       failedArms++;
+      const reason = arm.reason instanceof QueryArmError ? arm.reason.reason : 'unknown';
+      failureReasons[reason] = (failureReasons[reason] ?? 0) + 1;
       continue;
     }
     if (i === 0) originalEmbedding = arm.value.embedding;
@@ -932,6 +970,8 @@ export async function runQueryVariantArmsFailOpen(
     lists,
     originalEmbedding,
     failedArms,
+    failureReasons,
+    originalFailed,
     retriedOriginal,
     recoveredOriginal,
   };
@@ -1292,6 +1332,7 @@ export async function hybridSearch(
   //   - 'both': text + image vector searches in parallel; merged via weighted RRF
   let vectorLists: SearchResult[][] = [];
   let queryEmbedding: Float32Array | null = null;
+  let vectorArmsMeta: HybridSearchMeta['arms'] | undefined;
   let imageVectorList: SearchResult[] | null = null;
   let crossModalFellOpen = false;
 
@@ -1390,14 +1431,23 @@ export async function hybridSearch(
         queries,
         async (variantQuery) => {
           const precomputed = opts?._precomputedQueryEmbedding;
-          const embedding =
-            variantQuery === query
-              && precomputed
-              && sameEmbeddingSpace(precomputed.column, resolvedCol)
-              ? precomputed.embedding
-              : await embedQueryBounded(variantQuery, embedOpts, embedDl);
-          const list = await engine.searchVector(embedding, searchOpts);
-          return { embedding, list };
+          let embedding: Float32Array;
+          try {
+            embedding =
+              variantQuery === query
+                && precomputed
+                && sameEmbeddingSpace(precomputed.column, resolvedCol)
+                ? precomputed.embedding
+                : await embedQueryBounded(variantQuery, embedOpts, embedDl);
+          } catch (error) {
+            throw new QueryArmError(classifyEmbeddingArmFailure(error));
+          }
+          try {
+            const list = await engine.searchVector(embedding, searchOpts);
+            return { embedding, list };
+          } catch (error) {
+            throw new QueryArmError(classifyVectorArmFailure(error));
+          }
         },
         async (originalQuery) => {
           // Never extend the original absolute query-embed deadline. A retry
@@ -1430,11 +1480,25 @@ export async function hybridSearch(
       );
       queryEmbedding = variantArms.originalEmbedding;
       const textLists = variantArms.lists;
-      if (variantArms.failedArms > 0 && queries.length > 1) {
-        console.warn(
-          `[gbrain] query expansion vector arms degraded: failed=${variantArms.failedArms} total=${queries.length} ` +
-          `retried_original=${variantArms.retriedOriginal} recovered_original=${variantArms.recoveredOriginal}; keeping successful arms`,
-        );
+      if (queries.length > 1) {
+        vectorArmsMeta = {
+          status: variantArms.failedArms > 0 ? 'degraded' : 'ok',
+          used: queries.length - variantArms.failedArms,
+          total: queries.length,
+          failed: variantArms.failedArms,
+          failure_reasons: variantArms.failureReasons,
+          original_failed: variantArms.originalFailed,
+          retried_original: variantArms.retriedOriginal,
+          recovered_original: variantArms.recoveredOriginal,
+        };
+        if (vectorArmsMeta.status === 'degraded') {
+          console.warn(
+            `[gbrain] query expansion vector arms: status=degraded ` +
+            `used=${vectorArmsMeta.used} total=${vectorArmsMeta.total} failed=${vectorArmsMeta.failed} ` +
+            `reasons=${JSON.stringify(vectorArmsMeta.failure_reasons)} ` +
+            `retried_original=${variantArms.retriedOriginal} recovered_original=${variantArms.recoveredOriginal}`,
+          );
+        }
       }
       for (const list of textLists) {
         for (const r of list) {
@@ -1485,6 +1549,7 @@ export async function hybridSearch(
       vector_enabled: false,
       detail_resolved: detailResolved,
       expansion_applied: expansionApplied,
+      ...(vectorArmsMeta ? { arms: vectorArmsMeta } : {}),
       intent: suggestions.intent,
       mode: resolvedMode.resolved_mode,
       embedding_column: resolvedCol.name,
@@ -1711,6 +1776,7 @@ export async function hybridSearch(
     vector_enabled: true,
     detail_resolved: detailResolved,
     expansion_applied: expansionApplied,
+    ...(vectorArmsMeta ? { arms: vectorArmsMeta } : {}),
     intent: suggestions.intent,
     mode: resolvedMode.resolved_mode,
     embedding_column: resolvedCol.name,
@@ -1744,6 +1810,10 @@ export async function hybridSearch(
  * skipped vector search entirely (no embedding provider configured). In
  * that case the cache is also skipped — there's no embedding to key on.
  */
+export function shouldStoreSearchCache(meta: HybridSearchMeta | null): boolean {
+  return meta?.arms?.status !== 'degraded';
+}
+
 export async function hybridSearchCached(
   engine: BrainEngine,
   query: string,
@@ -1977,6 +2047,7 @@ export async function hybridSearchCached(
     vector_enabled: innerMeta?.vector_enabled ?? false,
     detail_resolved: innerMeta?.detail_resolved ?? null,
     expansion_applied: innerMeta?.expansion_applied ?? false,
+    ...(innerMeta?.arms ? { arms: innerMeta.arms } : {}),
     intent: innerMeta?.intent,
     cache: { status: cacheStatus },
     ...(innerMeta?.mode ? { mode: innerMeta.mode } : {}),
@@ -1999,7 +2070,8 @@ export async function hybridSearchCached(
     cacheStatus === 'miss' &&
     queryEmbedding &&
     results.length > 0 &&
-    (innerMeta?.vector_enabled ?? false)
+    (innerMeta?.vector_enabled ?? false) &&
+    shouldStoreSearchCache(innerMeta)
   ) {
     trackCacheWrite(
       cache

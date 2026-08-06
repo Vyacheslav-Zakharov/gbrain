@@ -43,6 +43,19 @@ interface Bucket {
   rank1_lt_solid: number;  // base_score < 0.6
   rank1_solid: number;     // 0.6 <= base_score < 0.85
   rank1_high: number;      // base_score >= 0.85
+  expansion_calls: number;
+  expansion_arms_total: number;
+  expansion_arms_failed: number;
+  expansion_partial_failures: number;
+  expansion_all_failures: number;
+  expansion_original_failed: number;
+  expansion_original_recovered: number;
+  expansion_embedding_timeout_failures: number;
+  expansion_embedding_rate_limit_failures: number;
+  expansion_embedding_provider_failures: number;
+  expansion_vector_timeout_failures: number;
+  expansion_vector_database_failures: number;
+  expansion_unknown_failures: number;
 }
 
 // T7 — coarse rank-1 score bands (mirror evidence.ts SOLID/HIGH floors).
@@ -103,6 +116,19 @@ class TelemetryWriter {
         rank1_lt_solid: 0,
         rank1_solid: 0,
         rank1_high: 0,
+        expansion_calls: 0,
+        expansion_arms_total: 0,
+        expansion_arms_failed: 0,
+        expansion_partial_failures: 0,
+        expansion_all_failures: 0,
+        expansion_original_failed: 0,
+        expansion_original_recovered: 0,
+        expansion_embedding_timeout_failures: 0,
+        expansion_embedding_rate_limit_failures: 0,
+        expansion_embedding_provider_failures: 0,
+        expansion_vector_timeout_failures: 0,
+        expansion_vector_database_failures: 0,
+        expansion_unknown_failures: 0,
       };
       this.buckets.set(key, b);
     }
@@ -113,6 +139,22 @@ class TelemetryWriter {
     b.sum_budget_dropped += Math.max(0, Math.floor(meta.token_budget?.dropped ?? 0));
     if (meta.cache?.status === 'hit') b.cache_hit += 1;
     if (meta.cache?.status === 'miss') b.cache_miss += 1;
+    if (meta.arms) {
+      const arms = meta.arms;
+      b.expansion_calls += 1;
+      b.expansion_arms_total += Math.max(0, Math.floor(arms.total));
+      b.expansion_arms_failed += Math.max(0, Math.floor(arms.failed));
+      if (arms.failed > 0 && arms.failed < arms.total) b.expansion_partial_failures += 1;
+      if (arms.total > 0 && arms.failed >= arms.total) b.expansion_all_failures += 1;
+      if (arms.original_failed) b.expansion_original_failed += 1;
+      if (arms.recovered_original) b.expansion_original_recovered += 1;
+      b.expansion_embedding_timeout_failures += arms.failure_reasons.embedding_timeout ?? 0;
+      b.expansion_embedding_rate_limit_failures += arms.failure_reasons.embedding_rate_limit ?? 0;
+      b.expansion_embedding_provider_failures += arms.failure_reasons.embedding_provider ?? 0;
+      b.expansion_vector_timeout_failures += arms.failure_reasons.vector_timeout ?? 0;
+      b.expansion_vector_database_failures += arms.failure_reasons.vector_database ?? 0;
+      b.expansion_unknown_failures += arms.failure_reasons.unknown ?? 0;
+    }
     // T7 — rank-1 base_score drift signal. Only counts queries that returned
     // a result (rank1_score present + finite).
     if (typeof opts.rank1_score === 'number' && Number.isFinite(opts.rank1_score)) {
@@ -156,8 +198,14 @@ class TelemetryWriter {
             await engine.executeRaw(
               `INSERT INTO search_telemetry
                  (date, mode, intent, count, sum_results, sum_tokens, sum_budget_dropped, cache_hit, cache_miss,
-                  sum_rank1_score, count_rank1, rank1_lt_solid, rank1_solid, rank1_high, first_seen, last_seen)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
+                  sum_rank1_score, count_rank1, rank1_lt_solid, rank1_solid, rank1_high,
+                  expansion_calls, expansion_arms_total, expansion_arms_failed, expansion_partial_failures,
+                  expansion_all_failures, expansion_original_failed, expansion_original_recovered,
+                  expansion_embedding_timeout_failures, expansion_embedding_rate_limit_failures,
+                  expansion_embedding_provider_failures, expansion_vector_timeout_failures,
+                  expansion_vector_database_failures, expansion_unknown_failures, first_seen, last_seen)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                       $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, now(), now())
                ON CONFLICT (date, mode, intent) DO UPDATE SET
                  count = search_telemetry.count + EXCLUDED.count,
                  sum_results = search_telemetry.sum_results + EXCLUDED.sum_results,
@@ -170,9 +218,27 @@ class TelemetryWriter {
                  rank1_lt_solid = search_telemetry.rank1_lt_solid + EXCLUDED.rank1_lt_solid,
                  rank1_solid = search_telemetry.rank1_solid + EXCLUDED.rank1_solid,
                  rank1_high = search_telemetry.rank1_high + EXCLUDED.rank1_high,
+                 expansion_calls = search_telemetry.expansion_calls + EXCLUDED.expansion_calls,
+                 expansion_arms_total = search_telemetry.expansion_arms_total + EXCLUDED.expansion_arms_total,
+                 expansion_arms_failed = search_telemetry.expansion_arms_failed + EXCLUDED.expansion_arms_failed,
+                 expansion_partial_failures = search_telemetry.expansion_partial_failures + EXCLUDED.expansion_partial_failures,
+                 expansion_all_failures = search_telemetry.expansion_all_failures + EXCLUDED.expansion_all_failures,
+                 expansion_original_failed = search_telemetry.expansion_original_failed + EXCLUDED.expansion_original_failed,
+                 expansion_original_recovered = search_telemetry.expansion_original_recovered + EXCLUDED.expansion_original_recovered,
+                 expansion_embedding_timeout_failures = search_telemetry.expansion_embedding_timeout_failures + EXCLUDED.expansion_embedding_timeout_failures,
+                 expansion_embedding_rate_limit_failures = search_telemetry.expansion_embedding_rate_limit_failures + EXCLUDED.expansion_embedding_rate_limit_failures,
+                 expansion_embedding_provider_failures = search_telemetry.expansion_embedding_provider_failures + EXCLUDED.expansion_embedding_provider_failures,
+                 expansion_vector_timeout_failures = search_telemetry.expansion_vector_timeout_failures + EXCLUDED.expansion_vector_timeout_failures,
+                 expansion_vector_database_failures = search_telemetry.expansion_vector_database_failures + EXCLUDED.expansion_vector_database_failures,
+                 expansion_unknown_failures = search_telemetry.expansion_unknown_failures + EXCLUDED.expansion_unknown_failures,
                  last_seen = now()`,
               [b.date, b.mode, b.intent, b.count, b.sum_results, b.sum_tokens, b.sum_budget_dropped, b.cache_hit, b.cache_miss,
-               b.sum_rank1_score, b.count_rank1, b.rank1_lt_solid, b.rank1_solid, b.rank1_high],
+               b.sum_rank1_score, b.count_rank1, b.rank1_lt_solid, b.rank1_solid, b.rank1_high,
+               b.expansion_calls, b.expansion_arms_total, b.expansion_arms_failed, b.expansion_partial_failures,
+               b.expansion_all_failures, b.expansion_original_failed, b.expansion_original_recovered,
+               b.expansion_embedding_timeout_failures, b.expansion_embedding_rate_limit_failures,
+               b.expansion_embedding_provider_failures, b.expansion_vector_timeout_failures,
+               b.expansion_vector_database_failures, b.expansion_unknown_failures],
             );
           } catch {
             // swallow — telemetry write must never break the hot path.
@@ -296,6 +362,24 @@ export interface StatsWindow {
   avg_rank1_score: number | null; // null when no rank-1 samples
   rank1_count: number;
   rank1_distribution: { lt_solid: number; solid: number; high: number };
+  expansion_arms: {
+    calls: number;
+    total: number;
+    failed: number;
+    partial_failure_calls: number;
+    all_failure_calls: number;
+    original_failed_calls: number;
+    original_recovered_calls: number;
+    degraded_call_rate: number;
+    failure_reasons: {
+      embedding_timeout: number;
+      embedding_rate_limit: number;
+      embedding_provider: number;
+      vector_timeout: number;
+      vector_database: number;
+      unknown: number;
+    };
+  };
 }
 
 export async function readSearchStats(
@@ -320,6 +404,19 @@ export async function readSearchStats(
       rank1_lt_solid: number;
       rank1_solid: number;
       rank1_high: number;
+      expansion_calls: number;
+      expansion_arms_total: number;
+      expansion_arms_failed: number;
+      expansion_partial_failures: number;
+      expansion_all_failures: number;
+      expansion_original_failed: number;
+      expansion_original_recovered: number;
+      expansion_embedding_timeout_failures: number;
+      expansion_embedding_rate_limit_failures: number;
+      expansion_embedding_provider_failures: number;
+      expansion_vector_timeout_failures: number;
+      expansion_vector_database_failures: number;
+      expansion_unknown_failures: number;
       first_seen: string;
       last_seen: string;
     }>(
@@ -334,7 +431,20 @@ export async function readSearchStats(
               COALESCE(SUM(count_rank1), 0)::int        AS count_rank1,
               COALESCE(SUM(rank1_lt_solid), 0)::int     AS rank1_lt_solid,
               COALESCE(SUM(rank1_solid), 0)::int        AS rank1_solid,
-              COALESCE(SUM(rank1_high), 0)::int         AS rank1_high,
+              COALESCE(SUM(rank1_high), 0)::int        AS rank1_high,
+              COALESCE(SUM(expansion_calls), 0)::int AS expansion_calls,
+              COALESCE(SUM(expansion_arms_total), 0)::int AS expansion_arms_total,
+              COALESCE(SUM(expansion_arms_failed), 0)::int AS expansion_arms_failed,
+              COALESCE(SUM(expansion_partial_failures), 0)::int AS expansion_partial_failures,
+              COALESCE(SUM(expansion_all_failures), 0)::int AS expansion_all_failures,
+              COALESCE(SUM(expansion_original_failed), 0)::int AS expansion_original_failed,
+              COALESCE(SUM(expansion_original_recovered), 0)::int AS expansion_original_recovered,
+              COALESCE(SUM(expansion_embedding_timeout_failures), 0)::int AS expansion_embedding_timeout_failures,
+              COALESCE(SUM(expansion_embedding_rate_limit_failures), 0)::int AS expansion_embedding_rate_limit_failures,
+              COALESCE(SUM(expansion_embedding_provider_failures), 0)::int AS expansion_embedding_provider_failures,
+              COALESCE(SUM(expansion_vector_timeout_failures), 0)::int AS expansion_vector_timeout_failures,
+              COALESCE(SUM(expansion_vector_database_failures), 0)::int AS expansion_vector_database_failures,
+              COALESCE(SUM(expansion_unknown_failures), 0)::int AS expansion_unknown_failures,
               MIN(first_seen)::text       AS first_seen,
               MAX(last_seen)::text        AS last_seen
        FROM search_telemetry
@@ -358,6 +468,21 @@ export async function readSearchStats(
     let r1_lt = 0;
     let r1_solid = 0;
     let r1_high = 0;
+    let armCalls = 0;
+    let armTotal = 0;
+    let armFailed = 0;
+    let armPartial = 0;
+    let armAll = 0;
+    let armOriginalFailed = 0;
+    let armOriginalRecovered = 0;
+    const armReasons = {
+      embedding_timeout: 0,
+      embedding_rate_limit: 0,
+      embedding_provider: 0,
+      vector_timeout: 0,
+      vector_database: 0,
+      unknown: 0,
+    };
 
     for (const r of rows) {
       total_calls += r.count;
@@ -371,6 +496,19 @@ export async function readSearchStats(
       r1_lt += r.rank1_lt_solid;
       r1_solid += r.rank1_solid;
       r1_high += r.rank1_high;
+      armCalls += r.expansion_calls;
+      armTotal += r.expansion_arms_total;
+      armFailed += r.expansion_arms_failed;
+      armPartial += r.expansion_partial_failures;
+      armAll += r.expansion_all_failures;
+      armOriginalFailed += r.expansion_original_failed;
+      armOriginalRecovered += r.expansion_original_recovered;
+      armReasons.embedding_timeout += r.expansion_embedding_timeout_failures;
+      armReasons.embedding_rate_limit += r.expansion_embedding_rate_limit_failures;
+      armReasons.embedding_provider += r.expansion_embedding_provider_failures;
+      armReasons.vector_timeout += r.expansion_vector_timeout_failures;
+      armReasons.vector_database += r.expansion_vector_database_failures;
+      armReasons.unknown += r.expansion_unknown_failures;
       intent_distribution[r.intent] = (intent_distribution[r.intent] ?? 0) + r.count;
       mode_distribution[r.mode] = (mode_distribution[r.mode] ?? 0) + r.count;
       if (r.first_seen && (!oldest_seen || r.first_seen < oldest_seen)) oldest_seen = r.first_seen;
@@ -394,6 +532,17 @@ export async function readSearchStats(
       avg_rank1_score: count_rank1 > 0 ? sum_rank1 / count_rank1 : null,
       rank1_count: count_rank1,
       rank1_distribution: { lt_solid: r1_lt, solid: r1_solid, high: r1_high },
+      expansion_arms: {
+        calls: armCalls,
+        total: armTotal,
+        failed: armFailed,
+        partial_failure_calls: armPartial,
+        all_failure_calls: armAll,
+        original_failed_calls: armOriginalFailed,
+        original_recovered_calls: armOriginalRecovered,
+        degraded_call_rate: armCalls > 0 ? (armPartial + armAll) / armCalls : 0,
+        failure_reasons: armReasons,
+      },
     };
   } catch {
     // Table missing or query failed — return empty stats rather than throw.
@@ -411,6 +560,16 @@ export async function readSearchStats(
       avg_rank1_score: null,
       rank1_count: 0,
       rank1_distribution: { lt_solid: 0, solid: 0, high: 0 },
+      expansion_arms: {
+        calls: 0, total: 0, failed: 0,
+        partial_failure_calls: 0, all_failure_calls: 0,
+        original_failed_calls: 0, original_recovered_calls: 0,
+        degraded_call_rate: 0,
+        failure_reasons: {
+          embedding_timeout: 0, embedding_rate_limit: 0, embedding_provider: 0,
+          vector_timeout: 0, vector_database: 0, unknown: 0,
+        },
+      },
     };
   }
 }

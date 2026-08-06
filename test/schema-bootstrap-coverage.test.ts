@@ -683,6 +683,21 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   'search_telemetry.rank1_lt_solid',
   'search_telemetry.rank1_solid',
   'search_telemetry.rank1_high',
+  // v139 — bounded query-expansion arm counters. search_telemetry remains
+  // migration-only; no schema-blob index forward-references these columns.
+  'search_telemetry.expansion_calls',
+  'search_telemetry.expansion_arms_total',
+  'search_telemetry.expansion_arms_failed',
+  'search_telemetry.expansion_partial_failures',
+  'search_telemetry.expansion_all_failures',
+  'search_telemetry.expansion_original_failed',
+  'search_telemetry.expansion_original_recovered',
+  'search_telemetry.expansion_embedding_timeout_failures',
+  'search_telemetry.expansion_embedding_rate_limit_failures',
+  'search_telemetry.expansion_embedding_provider_failures',
+  'search_telemetry.expansion_vector_timeout_failures',
+  'search_telemetry.expansion_vector_database_failures',
+  'search_telemetry.expansion_unknown_failures',
   // Schema-blob-not-yet-refreshed: each of these columns is added by a
   // migration but NOT (yet) referenced by `PGLITE_SCHEMA_SQL` (neither in a
   // CREATE TABLE body nor in any CREATE INDEX). Bootstrap doesn't need to

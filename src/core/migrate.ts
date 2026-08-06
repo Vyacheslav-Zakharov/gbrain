@@ -6147,6 +6147,27 @@ export const MIGRATIONS: Migration[] = [
         FOR EACH ROW EXECUTE FUNCTION portal_acl_audit_append_only();
     `,
   },
+  {
+    version: 139,
+    name: 'search_telemetry_query_arm_counters',
+    idempotent: true,
+    sql: `
+      ALTER TABLE search_telemetry
+        ADD COLUMN IF NOT EXISTS expansion_calls INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_arms_total INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_arms_failed INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_partial_failures INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_all_failures INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_original_failed INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_original_recovered INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_embedding_timeout_failures INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_embedding_rate_limit_failures INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_embedding_provider_failures INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_vector_timeout_failures INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_vector_database_failures INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS expansion_unknown_failures INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

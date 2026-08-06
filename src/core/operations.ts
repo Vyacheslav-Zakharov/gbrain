@@ -8,7 +8,7 @@ import { resolve, relative, sep } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
-import type { PageType } from './types.ts';
+import type { Chunk, PageType } from './types.ts';
 import { importFromContent } from './import-file.ts';
 import { writePageThrough } from './write-through.ts';
 import { hybridSearch, hybridSearchCached, stampContentFlags } from './search/hybrid.ts';
@@ -423,6 +423,8 @@ export interface OperationContext {
    * working without change).
    */
   brainId?: string;
+  /** Non-content MCP response metadata populated by operation handlers. */
+  responseMeta?: Record<string, unknown>;
   /**
    * v0.31 (eD4 / eE2): the in-DB tenancy axis for facts hot memory.
    * `sources.id` is TEXT (not INTEGER) — keep this as a string.
@@ -1597,6 +1599,21 @@ const search: Operation = {
   cliHints: { name: 'search', positional: ['query'] },
 };
 
+export function publishQueryArmsResponseMeta(
+  ctx: Pick<OperationContext, 'responseMeta'>,
+  meta: HybridSearchMeta | null,
+): void {
+  const arms = meta?.arms;
+  if (!arms || arms.status !== 'degraded') return;
+  ctx.responseMeta = {
+    ...(ctx.responseMeta ?? {}),
+    search: {
+      status: 'degraded',
+      arms: { used: arms.used, total: arms.total },
+    },
+  };
+}
+
 const query: Operation = {
   name: 'query',
   description: QUERY_DESCRIPTION,
@@ -1795,6 +1812,7 @@ const query: Operation = {
       // v0.43 — relational recall override. Omitted = smart default (mode bundle).
       relationalRetrieval: typeof p.relational === 'boolean' ? (p.relational as boolean) : undefined,
     });
+    publishQueryArmsResponseMeta(ctx, capturedMeta);
     const latency_ms = Date.now() - startedAt;
 
     // v0.37.0 (D11): op-layer last_retrieved_at write-back. Same shape as the
@@ -2751,9 +2769,18 @@ const resolve_slugs: Operation = {
   scope: 'read',
 };
 
+export type GetChunksItem = Omit<Chunk, 'embedding' | 'has_embedding'> & { has_embedding: boolean };
+
+export function formatChunksForCaller(chunks: Chunk[]): GetChunksItem[] {
+  return chunks.map(({ embedding, has_embedding, ...chunk }) => ({
+    ...chunk,
+    has_embedding: has_embedding ?? embedding !== null,
+  }));
+}
+
 const get_chunks: Operation = {
   name: 'get_chunks',
-  description: 'Get content chunks for a page within the caller source grant. Returned chunks include source_id.',
+  description: 'Get content chunks for a page within the caller source grant. Vector bytes are omitted; has_embedding reports stored-vector availability.',
   params: {
     slug: { type: 'string', required: true },
     source_id: { type: 'string', required: false, description: 'Read from one granted source. Use __all__ to read matching pages across the caller grant.' },
@@ -2762,7 +2789,8 @@ const get_chunks: Operation = {
     const sourceOpts = resolveRequestedScope(ctx, p.source_id as string | undefined);
     const requestedSlug = p.slug as string;
     const aliasResolution = await resolveReadSlugAlias(ctx.engine, requestedSlug, sourceOpts);
-    return ctx.engine.getChunks(aliasResolution.slug, aliasResolution.sourceOpts);
+    const chunks = await ctx.engine.getChunks(aliasResolution.slug, aliasResolution.sourceOpts);
+    return formatChunksForCaller(chunks);
   },
   scope: 'read',
 };

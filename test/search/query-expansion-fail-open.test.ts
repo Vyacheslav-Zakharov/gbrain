@@ -1,5 +1,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  QueryArmError,
+  classifyEmbeddingArmFailure,
+  classifyVectorArmFailure,
   makeQueryEmbedDeadline,
   makeQueryEmbedDeadlineAt,
   queryEmbedRetryBudgetMs,
@@ -34,11 +37,18 @@ describe('query expansion retry deadline', () => {
 });
 
 describe('multi-query vector arms fail open independently', () => {
+  test('maps raw stage errors to bounded reason classes without retaining messages', () => {
+    expect(classifyEmbeddingArmFailure(new Error('429 provider tenant secret detail'))).toBe('embedding_rate_limit');
+    expect(classifyEmbeddingArmFailure(new DOMException('raw query text', 'AbortError'))).toBe('embedding_timeout');
+    expect(classifyEmbeddingArmFailure(new Error('private provider host failed'))).toBe('embedding_provider');
+    expect(classifyVectorArmFailure(Object.assign(new Error('private SQL'), { code: '57014' }))).toBe('vector_timeout');
+    expect(classifyVectorArmFailure(new Error('relation private_acl_table failed'))).toBe('vector_database');
+  });
   test('keeps the original-query arm when one expanded arm rejects', async () => {
     const queries = ['original query', 'expanded one', 'expanded two'];
 
     const result = await runQueryVariantArmsFailOpen(queries, async (query) => {
-      if (query === 'expanded one') throw new Error('provider rate limit');
+      if (query === 'expanded one') throw new QueryArmError('embedding_rate_limit');
       return {
         embedding: new Float32Array([query === 'original query' ? 1 : 2]),
         list: [{ slug: query, score: 1 }] as any[],
@@ -51,7 +61,26 @@ describe('multi-query vector arms fail open independently', () => {
     ]);
     expect(result.originalEmbedding).toEqual(new Float32Array([1]));
     expect(result.failedArms).toBe(1);
+    expect(result.failureReasons).toEqual({ embedding_rate_limit: 1 });
     expect(result.retriedOriginal).toBe(false);
+  });
+
+  test('reports the successful-arm invariant and sanitized failure classes', async () => {
+    const result = await runQueryVariantArmsFailOpen(
+      ['original query', 'expanded one', 'expanded two'],
+      async (query) => {
+        if (query === 'expanded one') throw new QueryArmError('embedding_timeout');
+        if (query === 'expanded two') throw new QueryArmError('vector_database');
+        return {
+          embedding: new Float32Array([1]),
+          list: [{ slug: query, score: 1 }] as any[],
+        };
+      },
+    );
+
+    expect(result.lists.map((list) => list[0]?.slug)).toEqual(['original query']);
+    expect(result.failedArms).toBe(2);
+    expect(result.failureReasons).toEqual({ embedding_timeout: 1, vector_database: 1 });
   });
 
   test('reports no original embedding when only expansion arms survive', async () => {

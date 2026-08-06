@@ -89,7 +89,7 @@ describe('alias_resolved boost stage', () => {
 });
 
 describe('KNOBS_HASH_VERSION', () => {
-  it('is 12 (11→12 filtered-HNSW recall invalidates sparse pre-fix result sets)', () => {
-    expect(KNOBS_HASH_VERSION).toBe(12);
+  it('is 13 (12→13 degraded expansion result sets are invalidated)', () => {
+    expect(KNOBS_HASH_VERSION).toBe(13);
   });
 });

@@ -564,6 +564,8 @@ export interface Chunk {
   chunk_text: string;
   chunk_source: 'compiled_truth' | 'timeline' | 'fenced_code';
   embedding: Float32Array | null;
+  /** True when the persisted row has a vector, even when callers omit vector bytes. */
+  has_embedding?: boolean;
   model: string;
   token_count: number | null;
   embedded_at: Date | null;
@@ -1490,6 +1492,26 @@ export interface HybridSearchMeta {
   detail_resolved: 'low' | 'medium' | 'high' | null;
   /** True iff multi-query expansion (Haiku) actually fired and produced variants. */
   expansion_applied: boolean;
+  /** Multi-query vector-arm completeness. Omitted when no multi-arm run occurred. */
+  arms?: {
+    status: 'ok' | 'degraded';
+    used: number;
+    total: number;
+    failed: number;
+    original_failed?: boolean;
+    retried_original?: boolean;
+    recovered_original?: boolean;
+    /** Sanitized classes only; never raw provider/DB messages or query text. */
+    failure_reasons: Partial<Record<
+      | 'embedding_timeout'
+      | 'embedding_rate_limit'
+      | 'embedding_provider'
+      | 'vector_timeout'
+      | 'vector_database'
+      | 'unknown',
+      number
+    >>;
+  };
   /**
    * v0.32.x (search-lite): the intent the zero-LLM classifier inferred for
    * this query. Surfaced for debugging — agents and the `gbrain query`

@@ -213,6 +213,17 @@ export function buildOperationContext(
   };
 }
 
+export function applyContextResponseMeta(
+  result: ToolResult,
+  ctx: Pick<OperationContext, 'responseMeta'>,
+): ToolResult {
+  if (!ctx.responseMeta || Object.keys(ctx.responseMeta).length === 0) return result;
+  return {
+    ...result,
+    _meta: { ...(result._meta ?? {}), ...ctx.responseMeta },
+  };
+}
+
 /**
  * Resolve operation, validate params, build context, invoke handler, format result.
  *
@@ -265,7 +276,7 @@ export async function dispatchToolCall(
         ctx.logger.warn(`[mcp] _meta hook failed for ${name}: ${msg}; degrading to no-_meta`);
       }
     }
-    return out;
+    return applyContextResponseMeta(out, ctx);
   } catch (e: unknown) {
     if (e instanceof OperationError) {
       return { content: [{ type: 'text', text: JSON.stringify(e.toJSON(), null, 2) }], isError: true };
