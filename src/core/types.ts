@@ -558,6 +558,8 @@ export interface EmotionalWeightWriteRow {
 export interface Chunk {
   id: number;
   page_id: number;
+  /** Present on source-aware reads; omitted by legacy projections. */
+  source_id?: string;
   chunk_index: number;
   chunk_text: string;
   chunk_source: 'compiled_truth' | 'timeline' | 'fenced_code';

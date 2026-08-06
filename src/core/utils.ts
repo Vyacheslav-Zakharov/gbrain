@@ -287,6 +287,7 @@ export function rowToChunk(row: Record<string, unknown>, includeEmbedding = fals
   return {
     id: row.id as number,
     page_id: row.page_id as number,
+    ...(typeof row.source_id === 'string' ? { source_id: row.source_id } : {}),
     chunk_index: row.chunk_index as number,
     chunk_text: row.chunk_text as string,
     chunk_source: row.chunk_source as 'compiled_truth' | 'timeline' | 'fenced_code',

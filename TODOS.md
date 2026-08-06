@@ -90,6 +90,11 @@ job) and sync. See CLAUDE.md "Pace Mode".
     methods (`getChunks` / `getRawData` / `getVersions` / `resolveSlugs`) with `source_id = ANY($::text[])`
     precedence, and add federated/isolation tests + engine-parity arms.
   - **Depends on:** nothing; #2200 established the pattern and the `linkReadScopeOpts` helper.
+  - **2026-08-06 partial completion:** `get_chunks`, standalone `resolve_slugs`, and the explicit
+    `get_page.source_id` selector now route through `resolveRequestedScope`; `getChunks` has
+    Postgres/PGLite `sourceIds[]` parity and returns `source_id` per chunk. Regression coverage
+    pins grant fallback, explicit-source selection, and out-of-grant rejection. Remaining in this
+    item: `get_raw_data` and `get_versions` federated-array support.
 
 ## Spend-controls wave follow-ups (filed v0.42.45.0, #2139)
 

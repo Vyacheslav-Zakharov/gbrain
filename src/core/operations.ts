@@ -546,7 +546,7 @@ async function crossSourceLinkReadScopeOpts(ctx: OperationContext): Promise<{
  *
  * This is the SINGLE resolver for every read op that accepts a per-call
  * `source_id` / `all_sources` parameter (query, code_callers, code_callees,
- * get_page, search_by_image, code_blast, code_flow). Inlining the `__all__`
+ * get_page, get_chunks, resolve_slugs, search_by_image, code_blast, code_flow). Inlining the `__all__`
  * branch per handler is the bug class that leaked cross-source reads (#1924,
  * #1371): a remote client could pass `source_id: '__all__'` to opt out of its
  * grant, or pass an explicit out-of-grant `source_id` that was never checked.
@@ -573,7 +573,10 @@ export function resolveRequestedScope(
   }
   if (sourceIdParam !== undefined) {
     const allowed = ctx.auth?.allowedSources;
-    if (ctx.remote !== false && allowed && allowed.length > 0 && !allowed.includes(sourceIdParam)) {
+    const remoteAuthorized = allowed && allowed.length > 0
+      ? allowed.includes(sourceIdParam)
+      : ctx.sourceId === sourceIdParam;
+    if (ctx.remote !== false && !remoteAuthorized) {
       throw new OperationError(
         'permission_denied',
         `source '${sourceIdParam}' is outside your granted sources`,
@@ -719,6 +722,7 @@ const get_page: Operation = {
     slug: { type: 'string', required: true, description: 'Page slug' },
     fuzzy: { type: 'boolean', description: 'Enable fuzzy slug resolution (default: false)' },
     include_deleted: { type: 'boolean', description: 'v0.26.5: surface soft-deleted pages with deleted_at populated (default: false). Used by restore workflows.' },
+    source_id: { type: 'string', required: false, description: 'Read from one granted source. Use __all__ to search across the caller grant.' },
   },
   handler: async (ctx, p) => {
     const slug = p.slug as string;
@@ -730,7 +734,7 @@ const get_page: Operation = {
     // with a federated `allowedSources` grant (and no single ctx.sourceId) got
     // an UNSCOPED exact lookup — a cross-source read of any page by slug. getPage
     // now honors sourceIds[] (both engines), so the same scope closes both paths.
-    const sourceOpts = sourceScopeOpts(ctx);
+    const sourceOpts = resolveRequestedScope(ctx, p.source_id as string | undefined);
     const fuzzyScope = sourceOpts;
 
     let page = await ctx.engine.getPage(slug, { includeDeleted, ...sourceOpts });
@@ -2703,25 +2707,27 @@ const get_raw_data: Operation = {
 
 const resolve_slugs: Operation = {
   name: 'resolve_slugs',
-  description: 'Fuzzy-resolve a partial slug to matching page slugs',
+  description: 'Fuzzy-resolve a partial slug to matching page slugs within the caller source grant.',
   params: {
     partial: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Read from one granted source. Use __all__ to search across the caller grant.' },
   },
   handler: async (ctx, p) => {
-    return ctx.engine.resolveSlugs(p.partial as string);
+    const sourceOpts = resolveRequestedScope(ctx, p.source_id as string | undefined);
+    return ctx.engine.resolveSlugs(p.partial as string, sourceOpts);
   },
   scope: 'read',
 };
 
 const get_chunks: Operation = {
   name: 'get_chunks',
-  description: 'Get content chunks for a page',
+  description: 'Get content chunks for a page within the caller source grant. Returned chunks include source_id.',
   params: {
     slug: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Read from one granted source. Use __all__ to read matching pages across the caller grant.' },
   },
   handler: async (ctx, p) => {
-    // v0.31.8 (D20): thread ctx.sourceId.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
+    const sourceOpts = resolveRequestedScope(ctx, p.source_id as string | undefined);
     return ctx.engine.getChunks(p.slug as string, sourceOpts);
   },
   scope: 'read',

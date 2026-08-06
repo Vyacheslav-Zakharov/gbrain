@@ -1539,7 +1539,7 @@ export class PGLiteEngine implements BrainEngine {
     // `source_id = $N`. When neither is set, preserve the pre-fix unscoped
     // behavior so internal CLI callers (`gbrain query --resolve` etc.)
     // continue to walk every source.
-    const sources = opts?.sourceIds ?? null;
+    const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
     const scalar = opts?.sourceId ?? null;
     const scopeSql = sources
       ? ` AND source_id = ANY($${'__N__'}::text[])`
@@ -2247,14 +2247,18 @@ export class PGLiteEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
-    const sourceId = opts?.sourceId ?? 'default';
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Chunk[]> {
+    const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
+    const sourceId = opts?.sourceId ?? (sources ? null : 'default');
+    const scopeSql = sources
+      ? 'p.source_id = ANY($2::text[])'
+      : 'p.source_id = $2';
     const { rows } = await this.db.query(
-      `SELECT cc.* FROM content_chunks cc
+      `SELECT cc.*, p.source_id FROM content_chunks cc
        JOIN pages p ON p.id = cc.page_id
-       WHERE p.slug = $1 AND p.source_id = $2
-       ORDER BY cc.chunk_index`,
-      [slug, sourceId]
+       WHERE p.slug = $1 AND ${scopeSql}
+       ORDER BY p.source_id, cc.chunk_index`,
+      [slug, sources ?? sourceId]
     );
     return (rows as Record<string, unknown>[]).map(r => rowToChunk(r));
   }

@@ -1577,7 +1577,7 @@ export class PostgresEngine implements BrainEngine {
     // for back-compat with internal callers. The `deleted_at IS NULL`
     // filter excludes soft-deleted rows (v0.26.5) from fuzzy candidates
     // — they're not legitimate match targets for a remote `get_page`.
-    const sources = opts?.sourceIds ?? null;
+    const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
     const scalar = opts?.sourceId ?? null;
     const scopeFragment = sources
       ? sql` AND source_id = ANY(${sources}::text[])`
@@ -2289,14 +2289,18 @@ export class PostgresEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Chunk[]> {
     const sql = this.sql;
-    const sourceId = opts?.sourceId ?? 'default';
+    const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
+    const sourceId = opts?.sourceId ?? (sources ? null : 'default');
+    const scopeFragment = sources
+      ? sql` AND p.source_id = ANY(${sources}::text[])`
+      : sql` AND p.source_id = ${sourceId}`;
     const rows = await sql`
-      SELECT cc.* FROM content_chunks cc
+      SELECT cc.*, p.source_id FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
-      WHERE p.slug = ${slug} AND p.source_id = ${sourceId}
-      ORDER BY cc.chunk_index
+      WHERE p.slug = ${slug}${scopeFragment}
+      ORDER BY p.source_id, cc.chunk_index
     `;
     return rows.map((r) => rowToChunk(r as Record<string, unknown>));
   }
