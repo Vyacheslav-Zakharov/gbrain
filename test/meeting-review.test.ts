@@ -65,6 +65,12 @@ describe('meeting review queue', () => {
     expect((await listMeetingReviewItems({}, { paths })).total).toBe(1);
   });
 
+  test('finds a meeting by its stable id', async () => {
+    const list = await listMeetingReviewItems({ query: 'abcd1234' }, { paths });
+    expect(list.total).toBe(1);
+    expect(list.rows[0]?.id).toBe('abcd1234');
+  });
+
   test('filters meetings already present in ingest state', async () => {
     await writeFile(paths.ingestStatePath, JSON.stringify({ ingested: ['abcd1234'] }));
     expect((await listMeetingReviewItems({}, { paths })).total).toBe(0);

@@ -396,7 +396,7 @@ export async function listMeetingReviewItems(opts: MeetingReviewListOpts = {}, d
   const limit = Math.max(1, Math.min(200, requestedLimit));
   const candidates = [...(await mergeItems(paths)).values()]
     .filter(item => item.status === status)
-    .filter(item => !query || `${item.topic} ${item.slug} ${item.source} ${item.date}`.toLowerCase().includes(query))
+    .filter(item => !query || `${item.id} ${item.topic} ${item.slug} ${item.source} ${item.date}`.toLowerCase().includes(query))
     .sort((a, b) => `${b.date}:${b.id}`.localeCompare(`${a.date}:${a.id}`));
   const counts = {
     exception: candidates.filter(item => item.review_class === 'exception').length,
