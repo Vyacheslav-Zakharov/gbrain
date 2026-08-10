@@ -33,8 +33,11 @@ locks, stale-source checks, file read-back and rollback stay in one place.
    also escalates. **Non-response and abstention are never counted as reject.**
 5. **Admin.** Sees named votes, reason codes, comments, counts and the quorum
    threshold (or a plain facilitator label for shared `N≤2`). Can finalize ONLY
-   an escalated round, and only with a mandatory override reason
-   (≥ 8 characters), recorded in the audit ledger.
+   a non-stale escalated round, and only with a mandatory override reason
+   (≥ 8 characters), recorded in the audit ledger. A `stale_proposal` round has
+   no semantic accept/reject path: Admin atomically cancels the obsolete round
+   and, only when the proposal remains pending, opens a replacement frozen
+   against the current snapshot.
 6. **Human-only auto-finalize.** A vote counts toward a personal decision or
    shared quorum only when it is
    the active vote of an assignment in that round, `voter_kind='portal_user'`,
@@ -76,6 +79,7 @@ escalated ──(admin finalize + reason)──► finalizing ──────
 | `open` | `finalizing` | personal owner approve/reject, or shared `N>2` reaches strict-majority quorum | CAS on `(id, status, round_version)` |
 | `open` | `escalated` | personal abstain, shared `N≤2` finished voting, shared `N>2` exhausted without quorum, or deadline swept with missing votes | — |
 | `escalated` | `finalizing` | Admin finalize | escalated only; override reason ≥ 8 chars |
+| `escalated` | `cancelled` (+ new `open` round when still pending) | Admin reconciles `stale_proposal` | cancellation, optional replacement, and both audit events are one transaction; other escalation reasons are rejected |
 | `finalizing` | `finalized` | guarded publisher succeeded | proposal still `pending`, snapshot hash unchanged |
 | `finalizing` | `escalated` | publisher threw | `publication_failed` event recorded; canonical outcome is not reported as finalized |
 | `finalizing` | `escalated` | proposal changed under the round | `escalation_reason='stale_proposal'` |
@@ -104,7 +108,8 @@ Created by `src/schema.sql` (fresh installs), mirrored in
 
 Audit reuses the existing **`ai_review_events`** ledger with the round id in
 `details`: `round_opened`, `vote_cast`, `vote_replaced`, `round_escalated`,
-`round_finalized`, `round_override`, `publication_failed`, plus the publisher's
+`round_finalized`, `round_override`, `round_cancelled_stale`,
+`round_replaced_stale`, `publication_failed`, plus the publisher's
 own `accept` / `reject` rows. **Reviewer comments are NOT copied into the event
 details** (they can quote confidential source text); the event records
 `has_comment` and the reason code.

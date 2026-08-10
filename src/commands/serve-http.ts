@@ -143,6 +143,7 @@ import {
 } from '../core/meeting-review.ts';
 import {
   adminFinalizeRound,
+  adminReconcileStaleRound,
   castReviewerVote,
   ensurePendingReviewRounds,
   escalateOverdueRounds,
@@ -3719,6 +3720,18 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         actor: adminActor(req, res),
         action: String(req.body?.action ?? ''),
         reason: req.body?.reason,
+      }));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/rounds/:id/reconcile-stale', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await adminReconcileStaleRound(engine, {
+        roundId: Number(req.params.id),
+        actor: adminActor(req, res),
+        permissions: await loadUserPermissionsMap(),
       }));
     } catch (error) {
       sendReviewRoundError(res, error);

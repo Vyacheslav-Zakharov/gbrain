@@ -205,6 +205,8 @@ export const api = {
   reviewRound: (id: number) => apiFetch(`/admin/api/ai-review/rounds/${id}`),
   reviewRoundFinalize: (id: number, action: 'accepted' | 'rejected', reason: string) =>
     apiFetch(`/admin/api/ai-review/rounds/${id}/finalize`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
+  reviewRoundReconcileStale: (id: number) =>
+    apiFetch(`/admin/api/ai-review/rounds/${id}/reconcile-stale`, { method: 'POST', body: '{}' }),
   reviewRoundOpen: (target_type: string, target_id: number) =>
     apiFetch('/admin/api/ai-review/rounds', { method: 'POST', body: JSON.stringify({ target_type, target_id }) }),
   aiReviewConcepts: (params: { status?: string; q?: string; limit?: number } = {}) => {

@@ -9,6 +9,7 @@ const STATUS_TABS: Array<{ value: RoundStatus | 'active'; label: string }> = [
   { value: 'escalated', label: 'На решении' },
   { value: 'open', label: 'Идёт голосование' },
   { value: 'finalized', label: 'Завершены' },
+  { value: 'cancelled', label: 'Аннулированы' },
 ];
 
 const ESCALATION_LABELS: Record<string, string> = {
@@ -96,6 +97,7 @@ export function ReviewRoundsPage() {
   const [actionError, setActionError] = useState('');
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
   const [showDetail, setShowDetail] = useState(false);
 
   const load = useCallback(async () => {
@@ -147,7 +149,31 @@ export function ReviewRoundsPage() {
     }
   }, [load, reason, selected]);
 
-  const canFinalize = selected?.round.status === 'escalated';
+  const reconcileStale = useCallback(async () => {
+    if (!selected) return;
+    setBusy(true);
+    setActionError('');
+    try {
+      const result = await api.reviewRoundReconcileStale(selected.round.id) as {
+        proposalStatus?: string;
+        replacement?: { round?: { id?: number } } | null;
+      };
+      const replacementId = result.replacement?.round?.id;
+      setNotice(replacementId
+        ? `Старый раунд аннулирован. Для текущей редакции открыт раунд #${replacementId}.`
+        : `Старый раунд аннулирован. Текущее предложение уже имеет статус «${result.proposalStatus ?? 'неизвестно'}».`);
+      setSelected(null);
+      setShowDetail(false);
+      await load();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Не удалось закрыть устаревший раунд');
+    } finally {
+      setBusy(false);
+    }
+  }, [load, selected]);
+
+  const canFinalize = selected?.round.status === 'escalated' && selected.round.escalation_reason !== 'stale_proposal';
+  const canReconcileStale = selected?.round.status === 'escalated' && selected.round.escalation_reason === 'stale_proposal';
 
   return (
     <div className="ai-review">
@@ -159,6 +185,7 @@ export function ReviewRoundsPage() {
             с тремя и более проверяющими решение принимается по строгому большинству.
             Для одного-двух проверяющих и спорных случаев требуется фасилитатор.
           </p>
+          <p className="round-note">Нажмите строку, чтобы открыть голоса и действия.</p>
         </div>
         <div className="ai-review-count">
           {total === 0 ? '0 раундов' : `${offset + 1}–${Math.min(offset + rounds.length, total)} из ${total}`}
@@ -182,6 +209,7 @@ export function ReviewRoundsPage() {
       </div>
 
       {error && <div className="ai-review-error"><span>{error}</span><button type="button" onClick={() => setError('')}>×</button></div>}
+      {notice && <div className="receipt"><span>{notice}</span><button type="button" onClick={() => setNotice('')}>×</button></div>}
 
       <div className={`ai-review-grid ${showDetail ? 'show-detail' : ''}`}>
         <div className="proposal-list">
@@ -295,6 +323,30 @@ export function ReviewRoundsPage() {
                   </p>
                   {selected.round.final_reason && <p className="round-note">Причина: {selected.round.final_reason}</p>}
                 </div>
+              )}
+
+              {selected.round.status === 'cancelled' && (
+                <div className="receipt">
+                  <strong>Раунд аннулирован</strong>
+                  <p className="round-note">Голоса сохранены для аудита, но не применяются к текущей редакции предложения.</p>
+                </div>
+              )}
+
+              {canReconcileStale && (
+                <>
+                  {actionError && <div className="ai-review-inline-error"><span>{actionError}</span><button type="button" onClick={() => setActionError('')}>×</button></div>}
+                  <div className="receipt">
+                    <strong>Голоса относятся к старой редакции</strong>
+                    <p className="round-note">
+                      Принять или отклонить её нельзя. Старый раунд будет аннулирован; если предложение всё ещё ожидает проверки, для текущей редакции автоматически откроется новый раунд.
+                    </p>
+                  </div>
+                  <div className="review-actions">
+                    <button type="button" disabled={busy} onClick={() => void reconcileStale()}>
+                      Закрыть старый раунд и проверить текущую редакцию
+                    </button>
+                  </div>
+                </>
               )}
 
               {canFinalize && (

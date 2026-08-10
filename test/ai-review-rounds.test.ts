@@ -8,6 +8,7 @@ import { contentHash } from '../src/core/cycle/propose-takes.ts';
 import { ReviewConflictError } from '../src/core/ai-review.ts';
 import {
   adminFinalizeRound,
+  adminReconcileStaleRound,
   aggregateRoundById,
   castReviewerVote,
   conceptProposalPresentation,
@@ -202,6 +203,25 @@ describe('round creation', () => {
     const id = await seedTakeProposal();
     const { round } = await openTeamRound(id);
     expect(Date.parse(round.due_at) - Date.parse(round.opened_at)).toBe(6 * 3_600_000);
+  });
+
+  test('deadline config is resolved before the write transaction', async () => {
+    const id = await seedTakeProposal();
+    const originalGetConfig = engine.getConfig;
+    let receiver: unknown;
+    engine.getConfig = async function (key: string) {
+      receiver = this;
+      return key === 'ai_review.round_deadline_hours' ? '4' : null;
+    };
+    try {
+      const { round } = await openReviewRound(engine, {
+        targetType: 'take_proposal', targetId: id, permissions: PERMS, actor: 'system:test',
+      });
+      expect(receiver).toBe(engine);
+      expect(Date.parse(round.due_at) - Date.parse(round.opened_at)).toBe(4 * 3_600_000);
+    } finally {
+      engine.getConfig = originalGetConfig;
+    }
   });
 });
 
@@ -869,5 +889,102 @@ describe('admin escalation queue', () => {
     const after = await getReviewRoundDetail(engine, Number(round.id));
     expect(after.round.status).toBe('escalated');
     expect(after.round.escalation_reason).toBe('stale_proposal');
+  });
+
+  test('an admin reconciles a stale pending proposal into a fresh review round', async () => {
+    const id = await seedTakeProposal();
+    const { round } = await openTeamRound(id);
+    await engine.executeRaw(`UPDATE take_proposals SET content_hash='new-snapshot' WHERE id=$1`, [id]);
+    await engine.executeRaw(
+      `UPDATE ai_review_rounds SET status='escalated', escalation_reason='stale_proposal' WHERE id=$1`,
+      [round.id],
+    );
+
+    const result = await adminReconcileStaleRound(engine, {
+      roundId: Number(round.id), actor: 'admin-ui:abc', permissions: PERMS,
+    });
+
+    expect(result.cancelledRound).toMatchObject({ status: 'cancelled', escalation_reason: 'stale_proposal' });
+    expect(result.replacement?.round).toMatchObject({ status: 'open', proposal_snapshot_hash: 'new-snapshot' });
+    expect(result.replacement?.assignments.map(a => a.reviewer_email).sort()).toEqual([ANNA, BORIS]);
+    const active = await engine.executeRaw<{ id: number }>(
+      `SELECT id FROM ai_review_rounds WHERE target_type='take_proposal' AND target_id=$1
+        AND status IN ('open','escalated','finalizing')`, [id],
+    );
+    expect(active.map(row => Number(row.id))).toEqual([Number(result.replacement!.round.id)]);
+    const events = await engine.executeRaw<{ action: string; details: { replacement_round_id?: number } }>(
+      `SELECT action, details FROM ai_review_events WHERE target_type='take_proposal' AND target_id=$1 ORDER BY id`, [id],
+    );
+    expect(events.map(event => event.action)).toContain('round_cancelled_stale');
+    expect(events.find(event => event.action === 'round_replaced_stale')?.details.replacement_round_id)
+      .toBe(Number(result.replacement!.round.id));
+  });
+
+  test('a replacement failure rolls back stale cancellation and its audit event', async () => {
+    const id = await seedTakeProposal();
+    const { round } = await openTeamRound(id);
+    await engine.executeRaw(`UPDATE take_proposals SET content_hash='blocked-new-snapshot' WHERE id=$1`, [id]);
+    await engine.executeRaw(
+      `UPDATE ai_review_rounds SET status='escalated', escalation_reason='stale_proposal' WHERE id=$1`,
+      [round.id],
+    );
+    await engine.executeRaw(
+      `ALTER TABLE ai_review_rounds ADD CONSTRAINT test_block_replacement_snapshot
+        CHECK (proposal_snapshot_hash <> 'blocked-new-snapshot')`,
+    );
+
+    try {
+      await expect(adminReconcileStaleRound(engine, {
+        roundId: Number(round.id), actor: 'admin-ui:abc', permissions: PERMS,
+      })).rejects.toThrow();
+    } finally {
+      await engine.executeRaw(`ALTER TABLE ai_review_rounds DROP CONSTRAINT test_block_replacement_snapshot`);
+    }
+
+    const after = await getReviewRoundDetail(engine, Number(round.id));
+    expect(after.round).toMatchObject({ status: 'escalated', escalation_reason: 'stale_proposal' });
+    const cancellationEvents = await engine.executeRaw(
+      `SELECT id FROM ai_review_events WHERE target_type='take_proposal' AND target_id=$1
+        AND action IN ('round_cancelled_stale','round_replaced_stale')`, [id],
+    );
+    expect(cancellationEvents).toHaveLength(0);
+  });
+
+  test('an admin closes a stale terminal proposal without opening a replacement', async () => {
+    const id = await seedTakeProposal();
+    const { round } = await openTeamRound(id);
+    await engine.executeRaw(`UPDATE take_proposals SET status='accepted' WHERE id=$1`, [id]);
+    await engine.executeRaw(
+      `UPDATE ai_review_rounds SET status='escalated', escalation_reason='stale_proposal' WHERE id=$1`,
+      [round.id],
+    );
+
+    const result = await adminReconcileStaleRound(engine, {
+      roundId: Number(round.id), actor: 'admin-ui:abc', permissions: PERMS,
+    });
+
+    expect(result.cancelledRound.status).toBe('cancelled');
+    expect(result.replacement).toBeNull();
+    expect(result.proposalStatus).toBe('accepted');
+    const active = await engine.executeRaw(
+      `SELECT id FROM ai_review_rounds WHERE target_type='take_proposal' AND target_id=$1
+        AND status IN ('open','escalated','finalizing')`, [id],
+    );
+    expect(active).toHaveLength(0);
+  });
+
+  test('stale reconciliation cannot cancel another escalation class', async () => {
+    const id = await seedTakeProposal();
+    const { round } = await openTeamRound(id);
+    await engine.executeRaw(
+      `UPDATE ai_review_rounds SET status='escalated', escalation_reason='deadline_missed' WHERE id=$1`,
+      [round.id],
+    );
+
+    await expectConflict(() => adminReconcileStaleRound(engine, {
+      roundId: Number(round.id), actor: 'admin-ui:abc', permissions: PERMS,
+    }), 'round_not_stale');
+    const after = await getReviewRoundDetail(engine, Number(round.id));
+    expect(after.round).toMatchObject({ status: 'escalated', escalation_reason: 'deadline_missed' });
   });
 });

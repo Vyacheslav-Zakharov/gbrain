@@ -403,7 +403,7 @@ async function resolveSourceReviewPolicy(engine: BrainEngine, sourceId: string):
  * eligible reviewers is represented as an immediately escalated round so the
  * configuration gap is visible to Admin and can never auto-accept.
  */
-export async function openReviewRound(engine: BrainEngine, opts: OpenRoundOptions): Promise<OpenRoundResult> {
+async function openReviewRoundInTransaction(engine: BrainEngine, opts: OpenRoundOptions): Promise<OpenRoundResult> {
   const targetType = assertTargetType(opts.targetType);
   const targetId = Number(opts.targetId);
   if (!Number.isInteger(targetId) || targetId <= 0) {
@@ -430,51 +430,56 @@ export async function openReviewRound(engine: BrainEngine, opts: OpenRoundOption
   );
   if (existing[0]) throw new ReviewConflictError('an active review round already exists', 'round_already_open');
 
-  const deadlineHours = resolveRoundDeadlineHours(opts.deadlineHours ?? await resolveRoundDeadlineHoursFromConfig(engine));
+  const deadlineHours = resolveRoundDeadlineHours(opts.deadlineHours);
   const nowMs = opts.nowMs ?? Date.now();
   const dueAt = new Date(nowMs + deadlineHours * 3_600_000).toISOString();
   const actor = String(opts.actor || '').trim() || 'system';
 
-  return engine.transaction(async (tx) => {
-    const roundRows = await tx.executeRaw<ReviewRoundRow>(
-      `INSERT INTO ai_review_rounds
-         (target_type, target_id, source_id, proposal_snapshot_hash, policy_kind, status,
-          escalation_reason, opened_by, opened_at, due_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+  const roundRows = await engine.executeRaw<ReviewRoundRow>(
+    `INSERT INTO ai_review_rounds
+       (target_type, target_id, source_id, proposal_snapshot_hash, policy_kind, status,
+        escalation_reason, opened_by, opened_at, due_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     RETURNING *`,
+    [targetType, targetId, proposal.source_id, proposal.snapshot_hash, policyKind,
+      initialStatus, initialEscalationReason, actor,
+      new Date(nowMs).toISOString(), dueAt],
+  );
+  const round = normalizeRoundRow(roundRows[0]!);
+  const assignments: ReviewAssignmentRow[] = [];
+  for (const reviewer of reviewers) {
+    const rows = await engine.executeRaw<ReviewAssignmentRow>(
+      `INSERT INTO ai_review_assignments (round_id, reviewer_email, owns_source, weight, status)
+       VALUES ($1, $2, $3, 1, 'pending')
        RETURNING *`,
-      [targetType, targetId, proposal.source_id, proposal.snapshot_hash, policyKind,
-        initialStatus, initialEscalationReason, actor,
-        new Date(nowMs).toISOString(), dueAt],
+      [round.id, reviewer.email, reviewer.ownsSource],
     );
-    const round = normalizeRoundRow(roundRows[0]!);
-    const assignments: ReviewAssignmentRow[] = [];
-    for (const reviewer of reviewers) {
-      const rows = await tx.executeRaw<ReviewAssignmentRow>(
-        `INSERT INTO ai_review_assignments (round_id, reviewer_email, owns_source, weight, status)
-         VALUES ($1, $2, $3, 1, 'pending')
-         RETURNING *`,
-        [round.id, reviewer.email, reviewer.ownsSource],
-      );
-      assignments.push(normalizeAssignmentRow(rows[0]!));
-    }
-    await tx.executeRaw(
-      `INSERT INTO ai_review_events
-         (target_type, target_id, action, actor, previous_state, new_state, details)
-       VALUES ($1, $2, 'round_opened', $3, NULL, $4::text::jsonb, $5::text::jsonb)`,
-      [
-        targetType, targetId, actor,
-        stringifyJson({ status: initialStatus, policy_kind: policyKind, escalation_reason: initialEscalationReason }),
-        stringifyJson({
-          round_id: round.id,
-          source_id: proposal.source_id,
-          due_at: dueAt,
-          deadline_hours: deadlineHours,
-          reviewers: assignments.map(a => a.reviewer_email),
-        }),
-      ],
-    );
-    return { round, assignments };
-  });
+    assignments.push(normalizeAssignmentRow(rows[0]!));
+  }
+  await engine.executeRaw(
+    `INSERT INTO ai_review_events
+       (target_type, target_id, action, actor, previous_state, new_state, details)
+     VALUES ($1, $2, 'round_opened', $3, NULL, $4::text::jsonb, $5::text::jsonb)`,
+    [
+      targetType, targetId, actor,
+      stringifyJson({ status: initialStatus, policy_kind: policyKind, escalation_reason: initialEscalationReason }),
+      stringifyJson({
+        round_id: round.id,
+        source_id: proposal.source_id,
+        due_at: dueAt,
+        deadline_hours: deadlineHours,
+        reviewers: assignments.map(a => a.reviewer_email),
+      }),
+    ],
+  );
+  return { round, assignments };
+}
+
+export async function openReviewRound(engine: BrainEngine, opts: OpenRoundOptions): Promise<OpenRoundResult> {
+  const deadlineHours = resolveRoundDeadlineHours(
+    opts.deadlineHours ?? await resolveRoundDeadlineHoursFromConfig(engine),
+  );
+  return engine.transaction(tx => openReviewRoundInTransaction(tx, { ...opts, deadlineHours }));
 }
 
 export interface EnsurePendingRoundsResult {
@@ -1504,6 +1509,83 @@ export async function adminFinalizeRound(
     actor,
     reason,
     voters: assignments.map(a => a.reviewer_email),
+  });
+}
+
+export interface ReconcileStaleRoundResult {
+  cancelledRound: ReviewRoundRow;
+  proposalStatus: string;
+  replacement: OpenRoundResult | null;
+}
+
+/**
+ * Retire a round whose immutable proposal snapshot no longer matches. If the
+ * proposal is still pending, immediately freeze a fresh set of assignments for
+ * the current snapshot. Terminal proposals only need the obsolete round closed.
+ */
+export async function adminReconcileStaleRound(
+  engine: BrainEngine,
+  opts: { roundId: number; actor: string; permissions: ReviewerPermissionMap; nowMs?: number },
+): Promise<ReconcileStaleRoundResult> {
+  const actor = String(opts.actor || '').trim();
+  if (!actor) throw new ReviewConflictError('unauthenticated administrator', 'unauthenticated');
+  const nowMs = opts.nowMs ?? Date.now();
+  // Resolve config before opening the write transaction. A failed PostgreSQL
+  // config SELECT aborts its transaction even when the fallback is caught.
+  const deadlineHours = await resolveRoundDeadlineHoursFromConfig(engine);
+
+  return engine.transaction(async tx => {
+    const round = await loadRound(tx, Number(opts.roundId));
+    if (round.status !== 'escalated' || round.escalation_reason !== 'stale_proposal') {
+      throw new ReviewConflictError('only stale escalated rounds can be reconciled', 'round_not_stale');
+    }
+
+    let proposal: ProposalIdentity | null;
+    try {
+      proposal = await loadProposalIdentity(tx, round.target_type, round.target_id);
+    } catch (error) {
+      if (!(error instanceof ReviewConflictError) || error.code !== 'not_found') throw error;
+      proposal = null;
+    }
+    const proposalStatus = proposal?.status ?? 'missing';
+    const rows = await tx.executeRaw<ReviewRoundRow>(
+      `UPDATE ai_review_rounds
+          SET status = 'cancelled', closed_at = $3, finalizing_at = NULL,
+              round_version = round_version + 1
+        WHERE id = $1 AND status = 'escalated' AND escalation_reason = 'stale_proposal'
+          AND round_version = $2
+        RETURNING *`,
+      [round.id, round.round_version, new Date(nowMs).toISOString()],
+    );
+    if (!rows[0]) throw new ReviewConflictError('review round changed concurrently', 'concurrent_finalization');
+    const cancelledRound = normalizeRoundRow(rows[0]);
+    await recordEvent(tx, round, 'round_cancelled_stale', actor,
+      { status: round.status, snapshot_hash: round.proposal_snapshot_hash },
+      { status: 'cancelled' }, {
+        proposal_status: proposalStatus,
+        current_snapshot_hash: proposal?.snapshot_hash ?? null,
+        replacement_required: proposalStatus === 'pending',
+      });
+
+    if (!proposal || proposal.status !== 'pending') {
+      return { cancelledRound, proposalStatus, replacement: null };
+    }
+
+    const replacement = await openReviewRoundInTransaction(tx, {
+      targetType: round.target_type,
+      targetId: round.target_id,
+      permissions: opts.permissions,
+      actor,
+      nowMs,
+      deadlineHours,
+    });
+    await recordEvent(tx, round, 'round_replaced_stale', actor,
+      { status: 'cancelled' },
+      { status: replacement.round.status }, {
+        replacement_round_id: replacement.round.id,
+        replacement_snapshot_hash: replacement.round.proposal_snapshot_hash,
+      });
+    return { cancelledRound, proposalStatus, replacement };
   });
 }
 

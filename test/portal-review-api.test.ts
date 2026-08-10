@@ -174,6 +174,7 @@ describe('admin round routes', () => {
     expect(serveSource).toContain("app.get('/admin/api/ai-review/rounds/:id', requireAdmin,");
     expect(serveSource).toContain("app.post('/admin/api/ai-review/rounds/:id/finalize', requireAdmin, requireAdminSameOrigin,");
     expect(serveSource).toContain("app.post('/admin/api/ai-review/rounds', requireAdmin, requireAdminSameOrigin,");
+    expect(serveSource).toContain("app.post('/admin/api/ai-review/rounds/:id/reconcile-stale', requireAdmin, requireAdminSameOrigin,");
   });
 
   test('the reviewer list for a new round comes from the permissions file, not the request', () => {
@@ -181,17 +182,34 @@ describe('admin round routes', () => {
       serveSource.indexOf("app.post('/admin/api/ai-review/rounds', requireAdmin"),
       serveSource.indexOf("app.get('/admin/api/ai-review/rounds', requireAdmin"),
     );
-    expect(create).toContain('permissions: loadUserPermissionsMap()');
-    expect(create).toContain('actor: adminActor(req)');
+    expect(create).toContain('permissions: await loadUserPermissionsMap()');
+    expect(create).toContain('actor: adminActor(req, res)');
     expect(create).not.toContain('req.body?.reviewers');
     expect(create).not.toContain('req.body?.actor');
   });
 
   test('admin finalize always forwards a reason and a server-derived actor', () => {
     const finalize = serveSource.slice(serveSource.indexOf("app.post('/admin/api/ai-review/rounds/:id/finalize'"));
-    expect(finalize.slice(0, 700)).toContain('actor: adminActor(req)');
+    expect(finalize.slice(0, 700)).toContain('actor: adminActor(req, res)');
     expect(finalize.slice(0, 700)).toContain('reason: req.body?.reason');
     expect(adminApiSource).toContain("reviewRoundFinalize: (id: number, action: 'accepted' | 'rejected', reason: string)");
+  });
+
+  test('stale rounds expose a safe close-and-recheck path instead of semantic decision buttons', () => {
+    const reconcile = serveSource.slice(
+      serveSource.indexOf("app.post('/admin/api/ai-review/rounds/:id/reconcile-stale'"),
+      serveSource.indexOf("app.post('/admin/api/ai-review/rounds/sweep'"),
+    );
+    expect(reconcile).toContain('actor: adminActor(req, res)');
+    expect(reconcile).toContain('permissions: await loadUserPermissionsMap()');
+    expect(reconcile).not.toContain('req.body?.actor');
+    expect(reconcile).not.toContain('req.body?.reviewers');
+    expect(adminApiSource).toContain('reviewRoundReconcileStale: (id: number)');
+    expect(adminRoundReviewSource).toContain("selected.round.escalation_reason === 'stale_proposal'");
+    expect(adminRoundReviewSource).toContain('Закрыть старый раунд и проверить текущую редакцию');
+    expect(adminRoundReviewSource).toContain("value: 'cancelled', label: 'Аннулированы'");
+    expect(adminRoundReviewSource).toContain("const canFinalize = selected?.round.status === 'escalated' && selected.round.escalation_reason !== 'stale_proposal'");
+    expect(adminRoundReviewSource).toContain('Нажмите строку, чтобы открыть голоса и действия');
   });
 
   test('legacy direct take mutation routes cannot bypass a managed review round', () => {
@@ -240,7 +258,8 @@ describe('session capability', () => {
       serveSource.indexOf("app.get('/portal/api/session'"),
       serveSource.indexOf('// Portal reviewer API (multi-reviewer AI Review)'),
     );
-    expect(handler).toContain('const configured = Object.keys(loadUserPermissionsMap())');
+    expect(handler).toContain('const permissionMap = await loadUserPermissionsMap()');
+    expect(handler).toContain('const configured = Object.keys(permissionMap)');
     expect(handler).toContain('canReview: configured && writeSources.length > 0');
     expect(handler).toContain('readOnly: true');
   });
@@ -250,9 +269,7 @@ describe('session capability', () => {
       serveSource.indexOf('const getWriteSourceIdsForUser'),
       serveSource.indexOf('const managedAreaById'),
     );
-    expect(helper).toContain('entry.active === false');
-    expect(helper).toContain('entry.disabled === true');
-    expect(helper).toContain('return []');
+    expect(helper).toContain('portalAclAuthority.getWriteSourceIds(email)');
     expect(helper).not.toContain('getUserPermissions(email)');
   });
 });
