@@ -891,6 +891,29 @@ describe('admin escalation queue', () => {
     expect(after.round.escalation_reason).toBe('stale_proposal');
   });
 
+  test('a stale escalation cannot be finalized even if the proposal hash matches again', async () => {
+    const id = await seedTakeProposal();
+    const { round } = await openTeamRound(id);
+    await engine.executeRaw(
+      `UPDATE ai_review_rounds SET status='escalated', escalation_reason='stale_proposal' WHERE id=$1`,
+      [round.id],
+    );
+
+    await expectConflict(
+      () => adminFinalizeRound(engine, {
+        roundId: Number(round.id), actor: 'admin-ui:abc', action: 'accepted',
+        reason: 'Предложение возвращено к прежнему хешу',
+      }),
+      'stale_proposal',
+    );
+    const proposal = await engine.executeRaw<{ status: string }>(
+      `SELECT status FROM take_proposals WHERE id=$1`, [id],
+    );
+    expect(proposal[0]!.status).toBe('pending');
+    const after = await getReviewRoundDetail(engine, Number(round.id));
+    expect(after.round).toMatchObject({ status: 'escalated', escalation_reason: 'stale_proposal' });
+  });
+
   test('an admin reconciles a stale pending proposal into a fresh review round', async () => {
     const id = await seedTakeProposal();
     const { round } = await openTeamRound(id);

@@ -1502,6 +1502,12 @@ export async function adminFinalizeRound(
   if (round.status !== 'escalated') {
     throw new ReviewConflictError(`only escalated rounds can be finalized by hand (round is ${round.status})`, 'round_not_escalated');
   }
+  if (round.escalation_reason === 'stale_proposal') {
+    throw new ReviewConflictError(
+      'stale rounds must be reconciled instead of semantically finalized',
+      'stale_proposal',
+    );
+  }
   const { assignments } = await loadAggregationInputs(engine, Number(round.id));
   return finalizeRoundInternal(engine, round, {
     action,
