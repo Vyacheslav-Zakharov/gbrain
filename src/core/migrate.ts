@@ -6168,6 +6168,86 @@ export const MIGRATIONS: Migration[] = [
         ADD COLUMN IF NOT EXISTS expansion_unknown_failures INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    version: 140,
+    name: 'take_proposal_scan_observability',
+    idempotent: true,
+    sql: `
+      ALTER TABLE take_proposal_scans
+        ADD COLUMN IF NOT EXISTS suppressed_count INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS dispatch_status TEXT NOT NULL DEFAULT 'selected',
+        ADD COLUMN IF NOT EXISTS outcome TEXT,
+        ADD COLUMN IF NOT EXISTS actual_model_id TEXT,
+        ADD COLUMN IF NOT EXISTS stop_reason TEXT,
+        ADD COLUMN IF NOT EXISTS input_tokens INTEGER,
+        ADD COLUMN IF NOT EXISTS output_tokens INTEGER,
+        ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER,
+        ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER,
+        ADD COLUMN IF NOT EXISTS response_length INTEGER,
+        ADD COLUMN IF NOT EXISTS response_sha256 TEXT,
+        ADD COLUMN IF NOT EXISTS request_length INTEGER,
+        ADD COLUMN IF NOT EXISTS request_sha256 TEXT,
+        ADD COLUMN IF NOT EXISTS reserved_call_usd DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS actual_call_usd DOUBLE PRECISION,
+        ADD COLUMN IF NOT EXISTS reservation_released_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS usage_reconciled BOOLEAN NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS requested_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS parsed_count INTEGER NOT NULL DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS dropped_count INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE take_proposals
+        ADD COLUMN IF NOT EXISTS claim_class TEXT;
+
+      ALTER TABLE take_proposal_scans DROP CONSTRAINT IF EXISTS take_proposal_scans_dispatch_status_check;
+      ALTER TABLE take_proposal_scans ADD CONSTRAINT take_proposal_scans_dispatch_status_check
+        CHECK (dispatch_status IN ('selected','budget_blocked','provider_dispatched','provider_failed','provider_completed'));
+      ALTER TABLE take_proposal_scans DROP CONSTRAINT IF EXISTS take_proposal_scans_outcome_check;
+      ALTER TABLE take_proposal_scans ADD CONSTRAINT take_proposal_scans_outcome_check
+        CHECK (outcome IS NULL OR outcome IN ('budget_denied_before_call','provider_failed','model_empty_valid','model_nonempty_valid','parse_failed','schema_rows_dropped','provider_empty','truncated','refused','content_filtered','provider_incomplete','legacy_unverified','stale_running','runtime_failed'));
+      ALTER TABLE take_proposal_scans DROP CONSTRAINT IF EXISTS take_proposal_scans_stop_reason_check;
+      ALTER TABLE take_proposal_scans ADD CONSTRAINT take_proposal_scans_stop_reason_check
+        CHECK (stop_reason IS NULL OR stop_reason IN ('end','tool_calls','length','refusal','content_filter','other'));
+      ALTER TABLE take_proposal_scans DROP CONSTRAINT IF EXISTS take_proposal_scans_nonnegative_check;
+      ALTER TABLE take_proposal_scans ADD CONSTRAINT take_proposal_scans_nonnegative_check CHECK (
+        proposal_count >= 0 AND suppressed_count >= 0 AND parsed_count >= 0 AND dropped_count >= 0
+        AND (input_tokens IS NULL OR input_tokens >= 0) AND (output_tokens IS NULL OR output_tokens >= 0)
+        AND (cache_read_tokens IS NULL OR cache_read_tokens >= 0)
+        AND (cache_creation_tokens IS NULL OR cache_creation_tokens >= 0)
+        AND (response_length IS NULL OR response_length >= 0) AND (request_length IS NULL OR request_length >= 0)
+        AND (reserved_call_usd IS NULL OR reserved_call_usd >= 0)
+        AND (actual_call_usd IS NULL OR actual_call_usd >= 0)
+        AND reservation_released_usd >= 0
+      );
+      ALTER TABLE take_proposals DROP CONSTRAINT IF EXISTS take_proposals_claim_class_check;
+      ALTER TABLE take_proposals ADD CONSTRAINT take_proposals_claim_class_check
+        CHECK (claim_class IS NULL OR claim_class IN ('prediction','judgment','recommendation','bet'));
+
+      CREATE TABLE IF NOT EXISTS take_proposal_scan_attempts (
+        id BIGSERIAL PRIMARY KEY,
+        scan_id BIGINT NOT NULL REFERENCES take_proposal_scans(id) ON DELETE CASCADE,
+        proposal_run_id TEXT NOT NULL,
+        snapshot JSONB NOT NULL,
+        archived_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (scan_id, proposal_run_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_take_proposal_scan_attempts_scan
+        ON take_proposal_scan_attempts(scan_id, archived_at DESC);
+    `,
+    handler: async (engine) => {
+      if (engine.kind !== 'postgres') return;
+      await engine.executeRaw(`
+        DO $$
+        DECLARE has_bypass BOOLEAN;
+        BEGIN
+          SELECT rolbypassrls INTO has_bypass FROM pg_roles WHERE rolname = current_user;
+          IF NOT has_bypass THEN
+            RAISE EXCEPTION 'v140 take_proposal_scan_observability: role % does not have BYPASSRLS privilege — cannot enable RLS safely. Re-run as postgres (or another BYPASSRLS role). The migration will retry automatically.', current_user;
+          END IF;
+          ALTER TABLE take_proposal_scans ENABLE ROW LEVEL SECURITY;
+          ALTER TABLE take_proposal_scan_attempts ENABLE ROW LEVEL SECURITY;
+        END $$;
+      `);
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

@@ -756,12 +756,44 @@ CREATE TABLE IF NOT EXISTS take_proposal_scans (
   model_id          TEXT        NOT NULL,
   status            TEXT        NOT NULL DEFAULT 'running'
                                 CHECK (status IN ('running','completed','failed')),
-  proposal_count    INTEGER     NOT NULL DEFAULT 0,
+  proposal_count    INTEGER     NOT NULL DEFAULT 0 CHECK (proposal_count >= 0),
+  suppressed_count  INTEGER     NOT NULL DEFAULT 0 CHECK (suppressed_count >= 0),
   error_text        TEXT,
+  dispatch_status   TEXT        NOT NULL DEFAULT 'selected'
+                                CHECK (dispatch_status IN ('selected','budget_blocked','provider_dispatched','provider_failed','provider_completed')),
+  outcome           TEXT        CHECK (outcome IS NULL OR outcome IN ('budget_denied_before_call','provider_failed','model_empty_valid','model_nonempty_valid','parse_failed','schema_rows_dropped','provider_empty','truncated','refused','content_filtered','provider_incomplete','legacy_unverified','stale_running','runtime_failed')),
+  actual_model_id   TEXT,
+  stop_reason       TEXT        CHECK (stop_reason IS NULL OR stop_reason IN ('end','tool_calls','length','refusal','content_filter','other')),
+  input_tokens      INTEGER     CHECK (input_tokens IS NULL OR input_tokens >= 0),
+  output_tokens     INTEGER     CHECK (output_tokens IS NULL OR output_tokens >= 0),
+  cache_read_tokens INTEGER     CHECK (cache_read_tokens IS NULL OR cache_read_tokens >= 0),
+  cache_creation_tokens INTEGER CHECK (cache_creation_tokens IS NULL OR cache_creation_tokens >= 0),
+  response_length   INTEGER     CHECK (response_length IS NULL OR response_length >= 0),
+  response_sha256   TEXT,
+  request_length    INTEGER     CHECK (request_length IS NULL OR request_length >= 0),
+  request_sha256    TEXT,
+  reserved_call_usd DOUBLE PRECISION CHECK (reserved_call_usd IS NULL OR reserved_call_usd >= 0),
+  actual_call_usd   DOUBLE PRECISION CHECK (actual_call_usd IS NULL OR actual_call_usd >= 0),
+  reservation_released_usd DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (reservation_released_usd >= 0),
+  usage_reconciled  BOOLEAN     NOT NULL DEFAULT false,
+  requested_at      TIMESTAMPTZ,
+  parsed_count      INTEGER     NOT NULL DEFAULT 0 CHECK (parsed_count >= 0),
+  dropped_count     INTEGER     NOT NULL DEFAULT 0 CHECK (dropped_count >= 0),
   started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at      TIMESTAMPTZ,
   UNIQUE (source_id, page_slug, content_hash, prompt_version)
 );
+
+CREATE TABLE IF NOT EXISTS take_proposal_scan_attempts (
+  id              BIGSERIAL PRIMARY KEY,
+  scan_id         BIGINT      NOT NULL REFERENCES take_proposal_scans(id) ON DELETE CASCADE,
+  proposal_run_id TEXT        NOT NULL,
+  snapshot        JSONB       NOT NULL,
+  archived_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (scan_id, proposal_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_take_proposal_scan_attempts_scan
+  ON take_proposal_scan_attempts(scan_id, archived_at DESC);
 
 CREATE TABLE IF NOT EXISTS take_proposals (
   id                          BIGSERIAL PRIMARY KEY,
@@ -781,6 +813,7 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   holder                      TEXT         NOT NULL,
   weight                      REAL         NOT NULL,
   domain                      TEXT,
+  claim_class                 TEXT CHECK (claim_class IS NULL OR claim_class IN ('prediction','judgment','recommendation','bet')),
   dedup_against_fence_rows    JSONB,
   model_id                    TEXT         NOT NULL,
   acted_at                    TIMESTAMPTZ,
