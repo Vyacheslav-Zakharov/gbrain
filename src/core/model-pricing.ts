@@ -80,9 +80,12 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   // Conservative local cap estimate; verify against provider pricing before
   // treating this value as accounting truth.
   'google:gemini-2.5-flash':              { input:  1.00, output:  5.00 },
-  // Gemini 3.6 Flash standard paid tier: $1.50 in / $7.50 out per 1M
-  // tokens, verified 2026-08-05 against the official Gemini API pricing page.
+  // Gemini 3.6/3.7 Flash standard paid tier is temporarily discounted to
+  // $0.75 in / $3.75 out through 2026-12-31. Keep the post-promotion
+  // $1.50/$7.50 rates here so bounded production phases fail conservatively
+  // without requiring a date-sensitive pricing table.
   'google:gemini-3.6-flash':              { input:  1.50, output:  7.50 },
+  'google:gemini-3.7-flash':              { input:  1.50, output:  7.50 },
 
   // ── Together / DeepSeek (cross-modal-eval panel) ───────────────────────
   'together:meta-llama/Llama-3.3-70B-Instruct-Turbo': { input: 0.88, output: 0.88 },

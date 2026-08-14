@@ -84,6 +84,13 @@ describe('canonicalLookup — id normalization', () => {
     });
   });
 
+  test('Gemini 3.7 Flash is conservatively priced for bounded production phases', () => {
+    expect(canonicalLookup('google:gemini-3.7-flash')).toEqual({
+      input: 1.50,
+      output: 7.50,
+    });
+  });
+
   test('null / empty → undefined (no throw)', () => {
     expect(canonicalLookup(null)).toBeUndefined();
     expect(canonicalLookup(undefined)).toBeUndefined();
