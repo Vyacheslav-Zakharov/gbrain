@@ -6207,6 +6207,58 @@ const schema_explain_type: Operation = {
   },
 };
 
+/**
+ * Build a namespaced MCP compatibility alias without changing the canonical
+ * operation. Spreading the canonical contract preserves mutating/localOnly
+ * flags and future metadata; CLI hints are deliberately removed so aliases
+ * remain MCP-only and cannot collide with canonical CLI commands.
+ */
+function mcpCompatibilityAlias(
+  name: string,
+  canonical: Operation,
+  description: string,
+): Operation {
+  return {
+    ...canonical,
+    name,
+    description,
+    cliHints: undefined,
+  };
+}
+
+const gbrain_identity = mcpCompatibilityAlias(
+  'gbrain_identity', whoami,
+  'Namespaced compatibility alias for whoami. Returns the authenticated MCP identity and effective source grants.',
+);
+const gbrain_pages_list = mcpCompatibilityAlias(
+  'gbrain_pages_list', list_pages,
+  'Namespaced compatibility alias for list_pages. Lists pages using the canonical filters and source scope.',
+);
+const gbrain_search = mcpCompatibilityAlias(
+  'gbrain_search', search,
+  'Namespaced compatibility alias for search. Runs canonical keyword search over caller-visible sources.',
+);
+const gbrain_page_get = mcpCompatibilityAlias(
+  'gbrain_page_get', get_page,
+  'Namespaced compatibility alias for get_page. Reads one page using canonical visibility and source rules.',
+);
+const gbrain_schema_explain_type = mcpCompatibilityAlias(
+  'gbrain_schema_explain_type', schema_explain_type,
+  'Namespaced compatibility alias for schema_explain_type. Explains one active schema type.',
+);
+const gbrain_schema_graph = mcpCompatibilityAlias(
+  'gbrain_schema_graph', schema_graph,
+  'Namespaced compatibility alias for schema_graph. Returns the active schema relationship graph.',
+);
+const gbrain_page_put = mcpCompatibilityAlias(
+  'gbrain_page_put', put_page,
+  'Namespaced compatibility alias for put_page. Writes a page with canonical validation, source scope, and audit behavior.',
+);
+const gbrain_link_add = mcpCompatibilityAlias(
+  'gbrain_link_add', add_link,
+  'Namespaced compatibility alias for add_link. Creates a link with canonical provenance and source checks.',
+);
+
 const schema_review_orphans: Operation = {
   name: 'schema_review_orphans',
   description: 'v0.40.6.0: list pages with no active-pack type match. Returns {orphan_count, orphans: [{slug, source_id}]}.',
@@ -6647,7 +6699,10 @@ export const operations: Operation[] = [
   // v0.31.1 (Issue #734): thin-client banner identity packet (read-scope, banner-only)
   get_brain_identity,
   // PR1: skill catalog over MCP — discover + fetch host-repo skills (read-scope)
-  list_skills, get_skill, gbrain_skills_catalog, gbrain_skill_get, list_brain_skillpack, advisor,
+  list_skills, get_skill, gbrain_skills_catalog, gbrain_skill_get,
+  gbrain_identity, gbrain_pages_list, gbrain_search, gbrain_page_get,
+  gbrain_schema_explain_type, gbrain_schema_graph, gbrain_page_put, gbrain_link_add,
+  list_brain_skillpack, advisor,
   // v0.41.19.0: thin-client `gbrain status` payload (admin-scope, sync + cycle only)
   get_status_snapshot,
   // Sync
