@@ -2476,6 +2476,29 @@ const get_skill: Operation = {
   cliHints: { name: 'skill', positional: ['name'] },
 };
 
+// Uniquely namespaced compatibility aliases for MCP clients that reserve or
+// suppress the generic `list_skills` / `get_skill` names. Keep the canonical
+// operations unchanged and share their handlers so publish-gate, confinement,
+// scope, and response semantics cannot drift.
+const gbrain_skills_catalog: Operation = {
+  name: 'gbrain_skills_catalog',
+  description:
+    'Compatibility alias for list_skills. Lists the prose skills this GBrain server publishes, ' +
+    'including triggers and usable/unavailable tools.',
+  params: list_skills.params,
+  handler: list_skills.handler,
+  scope: list_skills.scope,
+};
+
+const gbrain_skill_get: Operation = {
+  name: 'gbrain_skill_get',
+  description:
+    'Compatibility alias for get_skill. Fetches one published GBrain prose skill by exact name.',
+  params: get_skill.params,
+  handler: get_skill.handler,
+  scope: get_skill.scope,
+};
+
 const list_brain_skillpack: Operation = {
   name: 'list_brain_skillpack',
   description:
@@ -6624,7 +6647,7 @@ export const operations: Operation[] = [
   // v0.31.1 (Issue #734): thin-client banner identity packet (read-scope, banner-only)
   get_brain_identity,
   // PR1: skill catalog over MCP — discover + fetch host-repo skills (read-scope)
-  list_skills, get_skill, list_brain_skillpack, advisor,
+  list_skills, get_skill, gbrain_skills_catalog, gbrain_skill_get, list_brain_skillpack, advisor,
   // v0.41.19.0: thin-client `gbrain status` payload (admin-scope, sync + cycle only)
   get_status_snapshot,
   // Sync

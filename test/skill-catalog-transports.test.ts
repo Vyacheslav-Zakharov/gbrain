@@ -108,6 +108,50 @@ describe('list_skills over dispatch', () => {
   });
 });
 
+describe('Claude-safe skill catalog aliases over dispatch', () => {
+  test('aliases fail closed when skill publishing is disabled', async () => {
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      await engine.setConfig('mcp.publish_skills', 'false');
+      for (const [name, params] of [
+        ['gbrain_skills_catalog', {}],
+        ['gbrain_skill_get', { name: 'brain-ops' }],
+      ] as const) {
+        const r = await call(name, params, {
+          remote: true,
+          auth: { token: 't', clientId: 'c', scopes: ['read'] },
+        });
+        expect(r.isError).toBe(true);
+        expect(r.body.error).toBe('permission_denied');
+      }
+    });
+  });
+
+  test('gbrain_skills_catalog returns the published catalog', async () => {
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      await engine.setConfig('mcp.publish_skills', 'true');
+      const r = await call('gbrain_skills_catalog', {}, {
+        remote: true,
+        auth: { token: 't', clientId: 'c', scopes: ['read'] },
+      });
+      expect(r.isError).toBe(false);
+      expect(r.body.skills.map((s: any) => s.name)).toContain('brain-ops');
+    });
+  });
+
+  test('gbrain_skill_get returns the requested prose skill', async () => {
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      await engine.setConfig('mcp.publish_skills', 'true');
+      const r = await call('gbrain_skill_get', { name: 'brain-ops' }, {
+        remote: true,
+        auth: { token: 't', clientId: 'c', scopes: ['read'] },
+      });
+      expect(r.isError).toBe(false);
+      expect(r.body.name).toBe('brain-ops');
+      expect(r.body.body).toContain('Brain-first lookup');
+    });
+  });
+});
+
 describe('get_skill over dispatch', () => {
   test('remote + ON returns prose body, frontmatter allowlisted (no writes_to/sources)', async () => {
     await withEnv({ GBRAIN_HOME: home }, async () => {

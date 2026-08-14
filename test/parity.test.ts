@@ -91,5 +91,11 @@ describe('operations contract parity', () => {
       expect(typeof tool.inputSchema.properties).toBe('object');
       expect(Array.isArray(tool.inputSchema.required)).toBe(true);
     }
+
+    const toolNames = tools.map(tool => tool.name);
+    expect(toolNames).toContain('gbrain_skills_catalog');
+    expect(toolNames).toContain('gbrain_skill_get');
+    expect(operationsByName.gbrain_skills_catalog.scope).toBe('read');
+    expect(operationsByName.gbrain_skill_get.scope).toBe('read');
   });
 });
