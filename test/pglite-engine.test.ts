@@ -109,6 +109,17 @@ describe('PGLiteEngine: Pages', () => {
     expect(people[0].title).toBe('Alice');
   });
 
+  test('listPages cluster-recency order prevents one newest cluster from consuming the limit', async () => {
+    await engine.putPage('decisions/older', { ...testPage, type: 'decision', title: 'Older decision' });
+    await engine.putPage('projects/newer-1', { ...testPage, title: 'Project 1' });
+    await engine.putPage('projects/newer-2', { ...testPage, title: 'Project 2' });
+    await engine.putPage('projects/newer-3', { ...testPage, title: 'Project 3' });
+
+    const selected = await engine.listPages({ sort: 'updated_desc_cluster', limit: 2 });
+    expect(selected.map(page => page.slug)).toContain('decisions/older');
+    expect(selected.filter(page => page.slug.startsWith('projects/'))).toHaveLength(1);
+  });
+
   test('listPages with tag filter', async () => {
     await engine.putPage('test/tagged', testPage);
     await engine.addTag('test/tagged', 'special');

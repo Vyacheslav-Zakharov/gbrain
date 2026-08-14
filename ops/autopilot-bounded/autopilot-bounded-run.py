@@ -139,6 +139,21 @@ def serializable_snapshot(value: dict) -> dict:
     }
 
 
+def has_new_review_targets(pre: dict, post: dict) -> bool:
+    return bool(
+        set(post["take_rows"]) - set(pre["take_rows"])
+        or set(post["concept_rows"]) - set(pre["concept_rows"])
+    )
+
+
+def settled_postflight_snapshot(conn, pre: dict, snapshot_fn=snapshot, sleep_fn=time.sleep) -> dict:
+    post = snapshot_fn(conn)
+    if has_new_review_targets(pre, post):
+        sleep_fn(POSTFLIGHT_SETTLE_SECONDS)
+        post = snapshot_fn(conn)
+    return post
+
+
 def evaluate_postflight(
     pre: dict,
     post: dict,
@@ -474,9 +489,7 @@ def run() -> int:
                 run_failed = True
                 break
 
-        if not run_failed:
-            time.sleep(POSTFLIGHT_SETTLE_SECONDS)
-        post = snapshot(conn)
+        post = settled_postflight_snapshot(conn, pre)
         atomic_json(run_dir / "post.json", serializable_snapshot(post))
 
         assessment = evaluate_postflight(

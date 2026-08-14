@@ -305,10 +305,12 @@ export interface PageFilters {
   /**
    * v0.29: ORDER BY enum. Default `updated_desc` matches pre-v0.29 behavior
    * (engines hardcoded `ORDER BY updated_at DESC`). New options: `updated_asc`,
-   * `created_desc`, `slug` (alphabetical, useful for stable pagination).
+   * `updated_desc_slug` (stable recency), `updated_desc_cluster` (stable
+   * top-level cluster round-robin by recency), `created_desc`, `slug`
+   * (alphabetical, useful for stable pagination).
    * Whitelisted enum — no SQL-injection risk; engines map to literal SQL fragments.
    */
-  sort?: 'updated_desc' | 'updated_asc' | 'created_desc' | 'slug';
+  sort?: 'updated_desc' | 'updated_desc_slug' | 'updated_desc_cluster' | 'updated_asc' | 'created_desc' | 'slug';
   /**
    * v0.31.12: filter to a specific source. When omitted, listPages returns
    * pages from all sources (pre-existing semantics). Use to scope embed/extract
@@ -343,6 +345,8 @@ export interface GetPageOpts {
 /** v0.29: literal ORDER BY fragments for the PageFilters.sort enum. Whitelisted. */
 export const PAGE_SORT_SQL: Record<NonNullable<PageFilters['sort']>, string> = {
   updated_desc: 'p.updated_at DESC',
+  updated_desc_slug: 'p.updated_at DESC, p.slug ASC',
+  updated_desc_cluster: "row_number() OVER (PARTITION BY p.source_id, split_part(p.slug, '/', 1) ORDER BY p.updated_at DESC, p.slug ASC), p.updated_at DESC, p.source_id ASC, p.slug ASC",
   updated_asc:  'p.updated_at ASC',
   created_desc: 'p.created_at DESC',
   slug:         'p.slug ASC',
