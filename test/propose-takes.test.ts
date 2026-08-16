@@ -20,6 +20,7 @@ import {
   parseExtractorOutput,
   parseExtractorResponse,
   parseProposeTakesBudget,
+  parseProposeTakesPageAllowlist,
   contentHash,
   proposalClaimHash,
   hasCompleteFence,
@@ -332,6 +333,38 @@ describe('parseProposeTakesBudget', () => {
   });
 });
 
+describe('parseProposeTakesPageAllowlist', () => {
+  test('accepts a bounded unique slug/hash array and rejects malformed identities', () => {
+    const hash = 'a'.repeat(64);
+    const otherHash = 'b'.repeat(64);
+    expect(parseProposeTakesPageAllowlist(undefined)).toBeUndefined();
+    expect(parseProposeTakesPageAllowlist(JSON.stringify([{ slug: 'meetings/2026-07-28-it', content_hash: hash }]))).toEqual([
+      { slug: 'meetings/2026-07-28-it', content_hash: hash },
+    ]);
+    expect(parseProposeTakesPageAllowlist('[]')).toBeNull();
+    expect(parseProposeTakesPageAllowlist('{"slug":"x"}')).toBeNull();
+    expect(parseProposeTakesPageAllowlist(JSON.stringify([{ slug: '../escape', content_hash: hash }]))).toBeNull();
+    expect(parseProposeTakesPageAllowlist(JSON.stringify([{ slug: 'meetings/a', content_hash: 'short' }]))).toBeNull();
+    expect(parseProposeTakesPageAllowlist(JSON.stringify([
+      { slug: 'meetings/a', content_hash: hash },
+      { slug: 'meetings/a', content_hash: hash },
+    ]))).toBeNull();
+    expect(parseProposeTakesPageAllowlist(JSON.stringify([
+      { slug: 'meetings/a', content_hash: hash },
+      { slug: 'meetings/b', content_hash: hash },
+    ]))).toBeNull();
+    expect(parseProposeTakesPageAllowlist(JSON.stringify([
+      { slug: 'meetings/a', content_hash: hash, extra: true },
+    ]))).toBeNull();
+    expect(parseProposeTakesPageAllowlist(JSON.stringify([{ slug: 'meetings/./a', content_hash: hash }]))).toBeNull();
+    expect(parseProposeTakesPageAllowlist(JSON.stringify([{ slug: 'meetings/a', content_hash: otherHash.toUpperCase() }]))).toBeNull();
+    expect(parseProposeTakesPageAllowlist(JSON.stringify(Array.from({ length: 11 }, (_, i) => ({
+      slug: `meetings/${i}`,
+      content_hash: i === 0 ? hash : `${i}`.padStart(64, '0'),
+    }))))).toBeNull();
+  });
+});
+
 // ─── parseExtractorOutput ───────────────────────────────────────────
 
 describe('parseExtractorOutput', () => {
@@ -562,6 +595,124 @@ describe('runPhaseProposeTakes — phase integration', () => {
     expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposal_scans')).length).toBe(1);
   });
 
+  test('immutable page allowlist dispatches only exact slug/hash matches', async () => {
+    const selectedBody = 'Meeting evidence with a durable recommendation.';
+    const pages = [
+      buildPage({ slug: 'meetings/selected', type: 'meeting', body: selectedBody }),
+      buildPage({ slug: 'digital/outside', type: 'system', body: 'Must not reach provider.' }),
+    ];
+    const { engine, captured } = buildMockEngine({ pages });
+    const called: string[] = [];
+    const result = await runPhaseProposeTakes(buildCtx(engine), {
+      pageAllowlist: [{ slug: 'meetings/selected', content_hash: contentHash(selectedBody) }],
+      extractor: async input => { called.push(input.pagePath); return proven([]); },
+    });
+    const details = result.details as Record<string, unknown>;
+    expect(result.status).toBe('ok');
+    expect(called).toEqual(['meetings/selected']);
+    expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposal_scans'))).toHaveLength(1);
+    expect(details.allowlist_requested).toBe(1);
+    expect(details.allowlist_verified).toBe(true);
+    expect(details.excluded_by_allowlist).toBe(1);
+  });
+
+  test('immutable page allowlist fails before scans/provider on missing slug or hash mismatch', async () => {
+    const body = 'Meeting evidence.';
+    for (const pageAllowlist of [
+      [{ slug: 'meetings/missing', content_hash: contentHash(body) }],
+      [{ slug: 'meetings/present', content_hash: '0'.repeat(64) }],
+    ]) {
+      const { engine, captured } = buildMockEngine({ pages: [buildPage({ slug: 'meetings/present', type: 'meeting', body })] });
+      let calls = 0;
+      const result = await runPhaseProposeTakes(buildCtx(engine), {
+        pageAllowlist,
+        extractor: async () => { calls += 1; return proven([]); },
+      });
+      expect(result.status).toBe('fail');
+      expect(calls).toBe(0);
+      expect(captured.some(c => c.sql.includes('INSERT INTO take_proposal_scans'))).toBe(false);
+      const details = result.details as Record<string, unknown>;
+      expect(details.allowlist_requested).toBe(1);
+      expect(details.allowlist_verified).toBe(false);
+      expect(details.reason).toMatch(/^page_allowlist_(?:missing_slug|content_hash_mismatch)$/);
+      expect(details.rollup_persisted).toBe(true);
+    }
+  });
+
+  test('malformed runtime pageAllowlist overrides cannot bypass a configured corpus', async () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    for (const pageAllowlist of [null, false, 0, {}, cyclic]) {
+      const { engine, captured, listPageFilters } = buildMockEngine({
+        pages: [buildPage({ slug: 'digital/unrestricted', body: 'Must not reach provider.' })],
+      });
+      let calls = 0;
+      const result = await runPhaseProposeTakes(buildCtx(engine), {
+        pageAllowlist: pageAllowlist as never,
+        extractor: async () => { calls += 1; return proven([]); },
+      });
+      expect(result.status).toBe('warn');
+      const details = result.details as Record<string, unknown>;
+      expect(details.reason).toBe('invalid_page_allowlist');
+      expect(details.allowlist_requested).toBe(0);
+      expect(details.allowlist_verified).toBe(false);
+      expect(listPageFilters).toHaveLength(0);
+      expect(calls).toBe(0);
+      expect(captured.some(c => c.sql.includes('INSERT INTO take_proposal_scans'))).toBe(false);
+    }
+
+    const malformedArrays = [
+      { value: [{ slug: '', content_hash: '' }], requested: 1 },
+      {
+        value: Array.from({ length: 11 }, (_, i) => ({
+          slug: `meetings/${i}`,
+          content_hash: `${i}`.padStart(64, '0'),
+        })),
+        requested: 11,
+      },
+    ];
+    for (const { value, requested } of malformedArrays) {
+      const { engine, captured, listPageFilters } = buildMockEngine({
+        pages: [buildPage({ slug: 'digital/unrestricted', body: 'Must not reach provider.' })],
+      });
+      let calls = 0;
+      const result = await runPhaseProposeTakes(buildCtx(engine), {
+        pageAllowlist: value as never,
+        extractor: async () => { calls += 1; return proven([]); },
+      });
+      const details = result.details as Record<string, unknown>;
+      expect(result.status).toBe('warn');
+      expect(details.reason).toBe('invalid_page_allowlist');
+      expect(details.allowlist_requested).toBe(requested);
+      expect(details.allowlist_verified).toBe(false);
+      expect(listPageFilters).toHaveLength(0);
+      expect(calls).toBe(0);
+      expect(captured.some(c => c.sql.includes('INSERT INTO take_proposal_scans'))).toBe(false);
+    }
+  });
+
+  test('immutable page allowlist refuses empty, generated, and over-limit corpora before scans/provider', async () => {
+    const cases = [
+      { page: buildPage({ slug: 'meetings/empty', type: 'meeting', body: '' }), pageLimit: 100, reason: 'page_allowlist_ineligible' },
+      { page: buildPage({ slug: 'automation/generated', type: 'status', body: 'Operational status.' }), pageLimit: 100, reason: 'page_allowlist_ineligible_or_over_limit' },
+      { page: buildPage({ slug: 'meetings/over-limit', type: 'meeting', body: 'Meeting evidence.' }), pageLimit: 0, reason: 'page_allowlist_ineligible_or_over_limit' },
+    ];
+    for (const { page, pageLimit, reason } of cases) {
+      const { engine, captured } = buildMockEngine({ pages: [page] });
+      let calls = 0;
+      const result = await runPhaseProposeTakes(buildCtx(engine), {
+        pageLimit,
+        pageAllowlist: [{ slug: page.slug, content_hash: contentHash(page.compiled_truth ?? '') }],
+        extractor: async () => { calls += 1; return proven([]); },
+      });
+      expect(result.status).toBe('fail');
+      expect((result.details as Record<string, unknown>).reason).toBe(reason);
+      expect((result.details as Record<string, unknown>).allowlist_verified).toBe(false);
+      expect(calls).toBe(0);
+      expect(captured.some(c => c.sql.includes('INSERT INTO take_proposal_scans'))).toBe(false);
+    }
+  });
+
   test('refuses provider call when dispatch telemetry cannot be durably confirmed', async () => {
     const pages = [buildPage({ slug: 'wiki/no-dispatch-receipt', body: 'A claim that must remain local.' })];
     const { engine } = buildMockEngine({ pages, denyDispatchTelemetry: true });
@@ -740,11 +891,16 @@ describe('runPhaseProposeTakes — phase integration', () => {
     expect((result.details as Record<string, unknown>).stale_running_closed).toBe(1);
   });
 
-  test('fails closed when a scoped list returns an excluded status page from another source', async () => {
-    const pages = [buildPage({ slug: 'wiki/wrong-source', body: 'Claim.', sourceId: 'other', type: 'status' })];
+  test('fails closed before allowlist filtering when a scoped list includes another source', async () => {
+    const selectedBody = 'Valid selected meeting evidence.';
+    const pages = [
+      buildPage({ slug: 'meetings/selected-valid', body: selectedBody, type: 'meeting' }),
+      buildPage({ slug: 'wiki/wrong-source', body: 'Claim.', sourceId: 'other', type: 'status' }),
+    ];
     const { engine, captured } = buildMockEngine({ pages });
     let calls = 0;
     const result = await runPhaseProposeTakes(buildCtx(engine), {
+      pageAllowlist: [{ slug: 'meetings/selected-valid', content_hash: contentHash(selectedBody) }],
       extractor: async () => { calls += 1; return []; },
     });
     expect(result.status).toBe('fail');

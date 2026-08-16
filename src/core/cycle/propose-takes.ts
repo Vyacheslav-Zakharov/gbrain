@@ -68,6 +68,8 @@ const PROPOSE_CHAT_FRAMING_TOKEN_CEILING = 1024;
 const PROPOSE_SCAN_LEASE_MINUTES = 30;
 const PROPOSE_TAKES_CANDIDATE_MULTIPLIER = 4;
 const PROPOSE_TAKES_MAX_CANDIDATES = 400;
+const PROPOSE_TAKES_MAX_ALLOWLIST_PAGES = 10;
+const PROPOSE_TAKES_PAGE_ALLOWLIST_ENV = 'GBRAIN_PROPOSE_TAKES_PAGE_ALLOWLIST_JSON';
 const PROPOSE_TAKES_GENERATED_PAGE_TYPES = new Set([
   'status',
   'project-status',
@@ -197,6 +199,43 @@ export function parseProposeTakesBudget(raw: string | null, fallback = 5.0): num
   if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+export interface ProposeTakesPageIdentity {
+  slug: string;
+  content_hash: string;
+}
+
+/** Strict one-shot corpus identity: bounded unique ASCII slugs plus SHA-256. */
+export function parseProposeTakesPageAllowlist(
+  raw: string | undefined,
+): ProposeTakesPageIdentity[] | null | undefined {
+  if (raw === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > PROPOSE_TAKES_MAX_ALLOWLIST_PAGES) return null;
+  const seenSlugs = new Set<string>();
+  const seenHashes = new Set<string>();
+  const identities: ProposeTakesPageIdentity[] = [];
+  for (const row of parsed) {
+    if (typeof row !== 'object' || row === null) return null;
+    const candidate = row as Record<string, unknown>;
+    if (Object.keys(candidate).sort().join(',') !== 'content_hash,slug') return null;
+    const slug = typeof candidate.slug === 'string' ? candidate.slug : '';
+    const content_hash = typeof candidate.content_hash === 'string' ? candidate.content_hash : '';
+    const pathSegments = slug.split('/');
+    if (!/^[a-z0-9][a-z0-9._/-]{0,511}$/.test(slug)
+      || pathSegments.some(segment => segment === '' || segment === '.' || segment === '..')) return null;
+    if (!/^[a-f0-9]{64}$/.test(content_hash) || seenSlugs.has(slug) || seenHashes.has(content_hash)) return null;
+    seenSlugs.add(slug);
+    seenHashes.add(content_hash);
+    identities.push({ slug, content_hash });
+  }
+  return identities;
 }
 
 function proposeMaxCallCostUsd(pricing: ModelPricing, prompt: string): number {
@@ -385,6 +424,8 @@ export interface ProposeTakesOpts extends BasePhaseOpts {
   repoPath?: string;
   /** Limit pages processed in this cycle (for triage / quick smoke). Default: 100. */
   pageLimit?: number;
+  /** Optional immutable one-shot corpus. Every slug/hash must match before scans/provider work. */
+  pageAllowlist?: readonly ProposeTakesPageIdentity[];
   /** Inject the LLM call for tests; production uses gateway.chat. */
   extractor?: ProposeTakesExtractor;
   /** Override prompt_version (tests). */
@@ -403,6 +444,9 @@ export interface ProposeTakesResult {
   eligible_pages: number;
   selected_pages: number;
   selected_clusters: number;
+  allowlist_requested: number;
+  allowlist_verified: boolean;
+  excluded_by_allowlist: number;
   pages_scanned: number;
   cache_hits: number;
   cache_misses: number;
@@ -695,6 +739,9 @@ class ProposeTakesPhase extends BaseCyclePhase {
       eligible_pages: 0,
       selected_pages: 0,
       selected_clusters: 0,
+      allowlist_requested: opts.pageAllowlist?.length ?? 0,
+      allowlist_verified: false,
+      excluded_by_allowlist: 0,
       pages_scanned: 0,
       cache_hits: 0,
       cache_misses: 0,
@@ -707,6 +754,29 @@ class ProposeTakesPhase extends BaseCyclePhase {
       budget_exhausted: false,
       warnings: [],
     };
+    const failBeforeDispatch = async (reason: string) => {
+      let rollupPersisted = false;
+      if (scope.sourceId) {
+        try {
+          const rollup = await upsertExtractRollup(engine, {
+            kind: 'takes.proposed', source_id: scope.sourceId, round_completed_delta: 0, halt_delta: 1,
+          });
+          rollupPersisted = rollup.ok;
+        } catch {
+          // Preserve the primary fail-closed reason and expose missing durable observability.
+        }
+      }
+      return {
+        summary: `propose_takes: refused (${reason})`,
+        details: {
+          ...result,
+          reason,
+          source_scope: sourceScopeLabel(scope),
+          rollup_persisted: rollupPersisted,
+        },
+        status: 'fail' as PhaseStatus,
+      };
+    };
 
     // Load pages eligible for proposal. Source-scoped per BaseCyclePhase.
     const pageFilters: PageFilters = {
@@ -715,6 +785,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
       sort: 'updated_desc_cluster',
     };
     const candidates: Page[] = await engine.listPages(pageFilters);
+    result.candidates_considered = candidates.length;
     const scopedCandidates: Page[] = [];
     for (const page of candidates) {
       if (!pageIsWithinSourceScope(page, scope)) {
@@ -724,15 +795,45 @@ class ProposeTakesPhase extends BaseCyclePhase {
         scopedCandidates.push(page);
       }
     }
-    const selection = selectProposeTakePagesWithDiagnostics(scopedCandidates, pageLimit);
-    const pages = selection.pages;
-    result.candidates_considered = candidates.length;
+    if (result.technical_failures > 0) {
+      return failBeforeDispatch('source_containment_violation');
+    }
+
+    let selectionCandidates = scopedCandidates;
+    if (opts.pageAllowlist !== undefined) {
+      const parsedAllowlist = parseProposeTakesPageAllowlist(JSON.stringify(opts.pageAllowlist));
+      if (!parsedAllowlist) return failBeforeDispatch('invalid_page_allowlist');
+      result.allowlist_requested = parsedAllowlist.length;
+      result.excluded_by_allowlist = Math.max(0, scopedCandidates.length - parsedAllowlist.length);
+      const bySlug = new Map(scopedCandidates.map(page => [page.slug, page]));
+      selectionCandidates = [];
+      for (const identity of parsedAllowlist) {
+        const page = bySlug.get(identity.slug);
+        if (!page) return failBeforeDispatch('page_allowlist_missing_slug');
+        const body = page.compiled_truth ?? '';
+        const actualHash = contentHash(body);
+        if (actualHash !== identity.content_hash) {
+          return failBeforeDispatch('page_allowlist_content_hash_mismatch');
+        }
+        if (body.trim().length === 0 || (skipPagesWithFence && hasCompleteFence(body))) {
+          return failBeforeDispatch('page_allowlist_ineligible');
+        }
+        selectionCandidates.push(page);
+      }
+    }
+
+    const selection = selectProposeTakePagesWithDiagnostics(selectionCandidates, pageLimit);
     result.excluded_generated_type = selection.diagnostics.excluded_generated_type;
     result.excluded_index = selection.diagnostics.excluded_index;
     result.exact_content_duplicates_suppressed = selection.diagnostics.exact_content_duplicates_suppressed;
     result.eligible_pages = selection.diagnostics.eligible_pages;
     result.selected_pages = selection.diagnostics.selected_pages;
     result.selected_clusters = selection.diagnostics.selected_clusters;
+    if (opts.pageAllowlist !== undefined && selection.pages.length !== opts.pageAllowlist.length) {
+      return failBeforeDispatch('page_allowlist_ineligible_or_over_limit');
+    }
+    result.allowlist_verified = opts.pageAllowlist !== undefined;
+    const pages = selection.pages;
 
     if (opts.reporter) {
       opts.reporter.start('propose_takes.pages' as never, pages.length);
@@ -1205,6 +1306,30 @@ export async function runPhaseProposeTakes(
 ) {
   const sourceId = ctx.sourceId;
   let reason: string | null = sourceId ? null : 'source_scope_required';
+  let pageAllowlist: readonly ProposeTakesPageIdentity[] | undefined;
+  let allowlistRequested = 0;
+  if (reason === null) {
+    try {
+      const raw = opts.pageAllowlist !== undefined
+        ? JSON.stringify(opts.pageAllowlist)
+        : process.env[PROPOSE_TAKES_PAGE_ALLOWLIST_ENV];
+      if (raw !== undefined) {
+        try {
+          const candidate = JSON.parse(raw);
+          if (Array.isArray(candidate)) {
+            allowlistRequested = Math.min(candidate.length, PROPOSE_TAKES_MAX_ALLOWLIST_PAGES + 1);
+          }
+        } catch {
+          // The strict parser below owns the refusal; this pass records only a bounded count.
+        }
+      }
+      const parsed = parseProposeTakesPageAllowlist(raw);
+      if (parsed === null) reason = 'invalid_page_allowlist';
+      else pageAllowlist = parsed;
+    } catch {
+      reason = 'invalid_page_allowlist';
+    }
+  }
   let budgetUsd = opts.budgetUsd;
   if (reason === null && budgetUsd !== undefined && (!Number.isFinite(budgetUsd) || budgetUsd < 0)) {
     reason = 'invalid_budget_override';
@@ -1246,11 +1371,17 @@ export async function runPhaseProposeTakes(
       status: rollupPersisted || !sourceId ? 'warn' as PhaseStatus : 'fail' as PhaseStatus,
       duration_ms: 0,
       summary: `propose_takes: refused (${reason})`,
-      details: { reason, source_scope: sourceId ?? null, rollup_persisted: rollupPersisted },
+      details: {
+        reason,
+        source_scope: sourceId ?? null,
+        rollup_persisted: rollupPersisted,
+        allowlist_requested: allowlistRequested,
+        allowlist_verified: false,
+      },
     };
   }
 
-  const resolvedOpts: ProposeTakesOpts = { ...opts, budgetUsd: budgetUsd!, model: model! };
+  const resolvedOpts: ProposeTakesOpts = { ...opts, pageAllowlist, budgetUsd: budgetUsd!, model: model! };
   return new ProposeTakesPhase().run(ctx, resolvedOpts);
 }
 
