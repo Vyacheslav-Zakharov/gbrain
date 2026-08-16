@@ -524,7 +524,11 @@ export async function defaultExtractor(
   };
 }
 
-/** Parse output while retaining whether [] was valid or merely lossy. */
+/**
+ * Parse output while retaining whether [] was valid or merely lossy.
+ * Accepts either a raw JSON array or one full-response lowercase `json` fence;
+ * prose around the payload and every non-array/schema-invalid shape stay failed.
+ */
 export function parseExtractorResponse(raw: string): ExtractorResult {
   const response_length = Buffer.byteLength(raw ?? '', 'utf8');
   const response_sha256 = createHash('sha256').update(raw ?? '').digest('hex');
@@ -534,7 +538,9 @@ export function parseExtractorResponse(raw: string): ExtractorResult {
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw.trim());
+    const trimmed = raw.trim();
+    const fenced = trimmed.match(/^```json\r?\n([\s\S]*?)\r?\n```$/);
+    parsed = JSON.parse(fenced?.[1] ?? trimmed);
   } catch {
     return { ...base, proposals: [], outcome: 'parse_failed' };
   }

@@ -344,9 +344,17 @@ describe('parseExtractorOutput', () => {
     expect(out[0]!.weight).toBe(0.65);
   });
 
-  test('rejects markdown code fences as non-JSON transport noise', () => {
+  test('accepts one full-response JSON fence while preserving strict row validation', () => {
     const raw = '```json\n[{"claim_text":"X","kind":"bet","claim_class":"bet","holder":"world","weight":0.8,"domain":"test"}]\n```';
-    expect(parseExtractorResponse(raw).outcome).toBe('parse_failed');
+    expect(parseExtractorResponse(raw)).toMatchObject({
+      outcome: 'model_nonempty_valid', parsed_count: 1, dropped_count: 0,
+      proposals: [{ claim_text: 'X', kind: 'bet', claim_class: 'bet', holder: 'world', weight: 0.8, domain: 'test' }],
+    });
+    expect(parseExtractorResponse('```json\n[]\n```')).toMatchObject({
+      outcome: 'model_empty_valid', proposals: [], parsed_count: 0, dropped_count: 0,
+      response_length: 14,
+      response_sha256: '637b552b1c40a64861d355a4f33b7fde79a2ca5cc476edca9b9e0e986786cb31',
+    });
   });
 
   test('rejects a single object because the top-level contract requires an array', () => {
