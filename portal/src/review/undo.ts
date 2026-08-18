@@ -1,7 +1,11 @@
-export const REVIEW_UNDO_WINDOW_MS = 5_000;
+export const REVIEW_UNDO_WINDOW_MS = 20_000;
 
 export function createUndoDeadline(nowMs = Date.now()): number {
   return nowMs + REVIEW_UNDO_WINDOW_MS;
+}
+
+export function isUndoDeadlineOpen(deadlineMs: number, nowMs = Date.now()): boolean {
+  return nowMs < deadlineMs;
 }
 
 export function undoSecondsRemaining(deadlineMs: number, nowMs = Date.now()): number {

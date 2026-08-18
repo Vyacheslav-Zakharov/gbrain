@@ -3,23 +3,32 @@ import {
   REVIEW_UNDO_WINDOW_MS,
   canCancelPendingDecision,
   createUndoDeadline,
+  isUndoDeadlineOpen,
   shouldApplyDetailsResponse,
   undoSecondsRemaining,
 } from '../portal/src/review/undo.ts';
 
 describe('review decision undo window', () => {
-  test('lasts exactly five seconds', () => {
-    expect(REVIEW_UNDO_WINDOW_MS).toBe(5_000);
-    expect(createUndoDeadline(10_000)).toBe(15_000);
+  test('lasts exactly twenty seconds', () => {
+    expect(REVIEW_UNDO_WINDOW_MS).toBe(20_000);
+    expect(createUndoDeadline(10_000)).toBe(30_000);
   });
 
   test('shows a ceiling countdown and reaches zero only at expiry', () => {
     const deadline = createUndoDeadline(10_000);
-    expect(undoSecondsRemaining(deadline, 10_000)).toBe(5);
-    expect(undoSecondsRemaining(deadline, 10_001)).toBe(5);
-    expect(undoSecondsRemaining(deadline, 14_001)).toBe(1);
-    expect(undoSecondsRemaining(deadline, 15_000)).toBe(0);
+    expect(undoSecondsRemaining(deadline, 10_000)).toBe(20);
+    expect(undoSecondsRemaining(deadline, 10_001)).toBe(20);
+    expect(undoSecondsRemaining(deadline, 29_001)).toBe(1);
     expect(undoSecondsRemaining(deadline, 30_000)).toBe(0);
+    expect(undoSecondsRemaining(deadline, 45_000)).toBe(0);
+  });
+
+  test('enforces the absolute deadline even when interval timers are delayed', () => {
+    const deadline = createUndoDeadline(10_000);
+    expect(isUndoDeadlineOpen(deadline, deadline - 1)).toBe(true);
+    expect(isUndoDeadlineOpen(deadline, deadline)).toBe(false);
+    expect(isUndoDeadlineOpen(deadline, deadline + 1)).toBe(false);
+    expect(isUndoDeadlineOpen(deadline, deadline + 60_000)).toBe(false);
   });
 
   test('never announces cancellation after submission has started', () => {

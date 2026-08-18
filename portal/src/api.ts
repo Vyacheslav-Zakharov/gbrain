@@ -94,7 +94,8 @@ export const portalApi = {
       body: JSON.stringify(body),
     });
     if (response.status === 401) {
-      window.location.assign('/login');
+      // Keep the staged payload in the current tab. The review UI offers
+      // re-authentication in a new tab, then an exact idempotent retry.
       throw new ReviewApiError('Требуется вход', 'unauthenticated', 401);
     }
     const payload = await response.json().catch(() => ({})) as { error?: string; message?: string };

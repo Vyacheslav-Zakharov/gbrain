@@ -42,3 +42,17 @@ export const REVIEW_ERROR_MESSAGES: Record<string, string> = {
 export function reviewErrorMessage(code: string | undefined, fallback: string): string {
   return (code && REVIEW_ERROR_MESSAGES[code]) || fallback;
 }
+
+const TERMINAL_REVIEW_ERROR_CODES = new Set([
+  'stale_proposal',
+  'round_closed',
+  'round_escalated',
+  'foreign_assignment',
+  'concurrent_vote',
+  'source_access_revoked',
+  'not_found',
+]);
+
+export function isTerminalReviewError(code: string | undefined): boolean {
+  return Boolean(code && TERMINAL_REVIEW_ERROR_CODES.has(code));
+}

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { deferReviewCard } from '../portal/src/review/queue.ts';
+import { advanceReviewCard, deferReviewCard, restoreReviewCard, shouldRefillReviewDeck } from '../portal/src/review/queue.ts';
 import type { ReviewDeckCard } from '../portal/src/review/types.ts';
 
 function card(id: number): ReviewDeckCard {
@@ -33,5 +33,43 @@ describe('reviewer queue deferral', () => {
   test('one or zero cards remain available rather than disappearing', () => {
     expect(deferReviewCard([])).toEqual([]);
     expect(deferReviewCard([card(1)]).map(item => item.assignment_id)).toEqual([1]);
+  });
+});
+
+describe('lazy review undo queue', () => {
+  test('advances immediately and can restore exactly the last staged card', () => {
+    const original = [card(1), card(2), card(3)];
+    const advanced = advanceReviewCard(original);
+    expect(advanced.current?.assignment_id).toBe(1);
+    expect(advanced.remaining.map(item => item.assignment_id)).toEqual([2, 3]);
+    expect(restoreReviewCard(advanced.current!, advanced.remaining).map(item => item.assignment_id)).toEqual([1, 2, 3]);
+  });
+
+  test('empty queues advance safely and restoration never duplicates the current card', () => {
+    expect(advanceReviewCard([])).toEqual({ current: null, remaining: [] });
+    expect(restoreReviewCard(card(2), [card(2), card(3)]).map(item => item.assignment_id)).toEqual([2, 3]);
+  });
+});
+
+describe('review deck refill gate', () => {
+  const exhaustedPartialBatch = {
+    loading: false,
+    busy: false,
+    voteInFlight: false,
+    hasPendingVote: false,
+    hasFailedVote: false,
+    cardCount: 0,
+    reviewed: 50,
+    total: 75,
+  };
+
+  test('waits for the final background vote before reloading a partial batch', () => {
+    expect(shouldRefillReviewDeck({ ...exhaustedPartialBatch, voteInFlight: true })).toBe(false);
+    expect(shouldRefillReviewDeck(exhaustedPartialBatch)).toBe(true);
+  });
+
+  test('never reloads over an undoable or failed vote', () => {
+    expect(shouldRefillReviewDeck({ ...exhaustedPartialBatch, hasPendingVote: true })).toBe(false);
+    expect(shouldRefillReviewDeck({ ...exhaustedPartialBatch, hasFailedVote: true })).toBe(false);
   });
 });

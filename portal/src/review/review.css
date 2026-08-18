@@ -52,6 +52,7 @@
 }
 
 .review-error { color: var(--danger); font-size: 14px; text-align: center; }
+.review-notice { margin: 0; color: var(--text-2); font-size: 14px; text-align: center; }
 
 .review-card {
   position: relative;
@@ -166,6 +167,11 @@
   white-space: nowrap;
 }
 .review-undo button:disabled { opacity: .5; cursor: default; }
+.review-undo-link {
+  color: var(--warning);
+  font-weight: 600;
+  white-space: nowrap;
+}
 
 .review-btn {
   border: 1px solid var(--border-strong);

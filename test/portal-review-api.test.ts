@@ -10,7 +10,7 @@
  */
 import { describe, expect, test } from 'bun:test';
 import { REJECT_REASONS, rejectReasonsFor } from '../src/core/ai-review-reasons.ts';
-import { REVIEW_REJECT_REASONS, reasonsForTarget } from '../portal/src/review/reasons.ts';
+import { REVIEW_REJECT_REASONS, isTerminalReviewError, reasonsForTarget } from '../portal/src/review/reasons.ts';
 import { isReviewRoute, REVIEW_ROUTE } from '../portal/src/review-route.ts';
 
 const serveSource = await Bun.file(new URL('../src/commands/serve-http.ts', import.meta.url)).text();
@@ -55,10 +55,13 @@ describe('portal reviewer routes', () => {
     expect(deckRoute).toContain('synchronizePendingReviewAssignments()');
   });
 
-  test('votes stay client-side for a 5-second undo window before submission', () => {
+  test('votes advance immediately with a 20-second lazy undo window', () => {
     expect(reviewAppSource).toContain('REVIEW_UNDO_WINDOW_MS');
-    expect(reviewAppSource).toContain('Отменить решение');
+    expect(reviewAppSource).toContain('Назад');
     expect(reviewAppSource).toContain('pendingVote');
+    expect(reviewAppSource).toContain('advanceReviewCard');
+    expect(reviewAppSource).toContain('restoreReviewCard');
+    expect(reviewAppSource).toContain('await commitPendingVoteNow()');
   });
 
   test('transient vote failures retry the same staged payload and idempotency key', () => {
@@ -70,6 +73,17 @@ describe('portal reviewer routes', () => {
     expect(reviewAppSource).toContain('Причина и комментарий сохранены');
   });
 
+  test('terminal vote responses never trap the reviewer behind a failed card', () => {
+    for (const code of ['stale_proposal', 'round_closed', 'round_escalated', 'foreign_assignment', 'concurrent_vote', 'source_access_revoked', 'not_found']) {
+      expect(isTerminalReviewError(code)).toBe(true);
+    }
+    for (const code of ['reason_code_required', 'reason_comment_required', 'idempotency_conflict', 'unauthenticated']) {
+      expect(isTerminalReviewError(code)).toBe(false);
+    }
+    expect(reviewAppSource).toContain('setTerminalNotice(message)');
+    expect(reviewAppSource).toContain('shouldRefillReviewDeck({');
+  });
+
   test('the rejection sheet keeps the comment and actions usable at short viewport heights', () => {
     expect(reviewAppSource).toContain('Текст страницы-источника');
     expect(reviewAppSource).not.toContain('Текст исходного документа');
@@ -79,6 +93,21 @@ describe('portal reviewer routes', () => {
     expect(reviewCssSource).toContain('resize: none');
     expect(reviewCssSource).toContain('min-height: 96px');
     expect(reviewCssSource).toContain('.review-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0; }');
+    expect(reviewAppSource).toContain('status={reviewStatus}');
+    expect(reviewSheetSource).toContain('{status}');
+    expect(reviewSheetSource).toContain("event.key === 'Escape' && !busy");
+    expect(reviewSheetSource).toContain('if (!busy && event.target === event.currentTarget) onCancel()');
+    expect(reviewSheetSource.match(/disabled=\{busy\}/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+
+  test('an expired session preserves the staged vote in this tab for re-authentication and exact retry', () => {
+    const voteMethod = portalApiSource.slice(
+      portalApiSource.indexOf('async reviewVote('),
+      portalApiSource.indexOf('async reviewSummary('),
+    );
+    expect(voteMethod).not.toContain("window.location.assign('/login')");
+    expect(reviewAppSource).toContain('Войти в новой вкладке');
+    expect(reviewAppSource).toContain("failedCode === 'unauthenticated'");
   });
 
   test('the details sheet keeps long source text scrollable while the close action stays visible', () => {
