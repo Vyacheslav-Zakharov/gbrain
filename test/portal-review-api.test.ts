@@ -61,6 +61,15 @@ describe('portal reviewer routes', () => {
     expect(reviewAppSource).toContain('pendingVote');
   });
 
+  test('transient vote failures retry the same staged payload and idempotency key', () => {
+    expect(reviewAppSource).toContain('submitReviewVoteWithRetry(() => portalApi.reviewVote(');
+    expect(reviewAppSource).toContain('pending.idempotencyKey');
+    expect(reviewAppSource).toContain('Повторяем сохранение решения');
+    expect(reviewAppSource).toContain('setFailedVote(pending)');
+    expect(reviewAppSource).toContain('commitVote(failedVote)');
+    expect(reviewAppSource).toContain('Причина и комментарий сохранены');
+  });
+
   test('the rejection sheet keeps the comment and actions usable at short viewport heights', () => {
     expect(reviewAppSource).toContain('Текст страницы-источника');
     expect(reviewAppSource).not.toContain('Текст исходного документа');

@@ -12,6 +12,7 @@ import {
 } from './undo';
 import { RejectReasonSheet } from './RejectReasonSheet';
 import { SwipeCard } from './SwipeCard';
+import { ReviewVoteRetryExhaustedError, submitReviewVoteWithRetry } from './vote-retry';
 import type { PortalSession } from '../types';
 import type { ReviewDeckCard, ReviewItemDetail } from './types';
 import './review.css';
@@ -44,6 +45,7 @@ export function ReviewApp() {
   const [details, setDetails] = useState<ReviewItemDetail | null>(null);
   const [announcement, setAnnouncement] = useState('');
   const [pendingVote, setPendingVote] = useState<PendingVote | null>(null);
+  const [failedVote, setFailedVote] = useState<PendingVote | null>(null);
   const [undoSeconds, setUndoSeconds] = useState(REVIEW_UNDO_WINDOW_MS / 1_000);
   const reducedMotion = useMemo(prefersReducedMotion, []);
   const committingVote = useRef(false);
@@ -84,11 +86,12 @@ export function ReviewApp() {
     setReviewed(current => current + 1);
     setDetails(null);
     setSheetOpen(false);
+    setFailedVote(null);
     attemptKey.current = newIdempotencyKey();
   }, []);
 
   const deferCard = useCallback(() => {
-    if (!card || busy || pendingVote) return;
+    if (!card || busy || pendingVote || failedVote) return;
     detailsRequestId.current += 1;
     setDetails(null);
     setSheetOpen(false);
@@ -98,15 +101,16 @@ export function ReviewApp() {
     setAnnouncement(cards.length > 1
       ? 'Карточка отложена в конец очереди. Голос не отправлен.'
       : 'Карточка отложена, но других карточек сейчас нет. Голос не отправлен.');
-  }, [busy, card, cards.length, pendingVote]);
+  }, [busy, card, cards.length, failedVote, pendingVote]);
 
   const commitVote = useCallback(async (pending: PendingVote) => {
     if (committingVote.current) return;
     committingVote.current = true;
     setBusy(true);
+    setFailedVote(null);
     setError('');
     try {
-      const result = await portalApi.reviewVote(
+      const result = await submitReviewVoteWithRetry(() => portalApi.reviewVote(
         pending.assignmentId,
         {
           decision: pending.decision,
@@ -115,7 +119,9 @@ export function ReviewApp() {
           proposal_snapshot_hash: pending.proposalSnapshotHash,
         },
         pending.idempotencyKey,
-      );
+      ), {
+        onRetry: () => setAnnouncement('Связь прервалась. Повторяем сохранение решения автоматически…'),
+      });
       setAnnouncement(
         pending.decision === 'abstain'
           ? result.round_status === 'escalated'
@@ -129,6 +135,13 @@ export function ReviewApp() {
       );
       dropCard();
     } catch (err) {
+      if (err instanceof ReviewVoteRetryExhaustedError) {
+        const message = 'Решение пока не сохранено. Причина и комментарий сохранены — повторите отправку.';
+        setFailedVote(pending);
+        setError('');
+        setAnnouncement(message);
+        return;
+      }
       const code = err instanceof ReviewApiError ? err.code : undefined;
       const message = reviewErrorMessage(code, err instanceof Error ? err.message : 'Не удалось сохранить голос');
       setError(message);
@@ -145,7 +158,7 @@ export function ReviewApp() {
   }, [dropCard]);
 
   const stageVote = useCallback((decision: 'approve' | 'reject' | 'abstain', reasonCode?: string, comment?: string) => {
-    if (!card || busy || pendingVote) return;
+    if (!card || busy || pendingVote || failedVote) return;
     const deadlineMs = createUndoDeadline();
     const pending: PendingVote = {
       assignmentId: card.assignment_id,
@@ -164,7 +177,7 @@ export function ReviewApp() {
     setSheetOpen(false);
     setError('');
     setAnnouncement(`${decision === 'abstain' ? 'Ответ' : 'Решение'} подготовлено. Его можно отменить в течение ${REVIEW_UNDO_WINDOW_MS / 1_000} секунд.`);
-  }, [busy, card, pendingVote]);
+  }, [busy, card, failedVote, pendingVote]);
 
   const cancelPendingVote = useCallback(() => {
     if (!canCancelPendingDecision(Boolean(pendingVoteRef.current), committingVote.current)) return;
@@ -172,6 +185,13 @@ export function ReviewApp() {
     setPendingVote(null);
     setUndoSeconds(REVIEW_UNDO_WINDOW_MS / 1_000);
     setAnnouncement('Решение отменено и не было отправлено.');
+  }, []);
+
+  const cancelFailedVote = useCallback(() => {
+    setFailedVote(null);
+    setError('');
+    attemptKey.current = newIdempotencyKey();
+    setAnnouncement('Неотправленное решение отменено. Можно выбрать новое.');
   }, []);
 
   useEffect(() => {
@@ -193,7 +213,7 @@ export function ReviewApp() {
   }, [commitVote, pendingVote]);
 
   const openDetails = useCallback(async () => {
-    if (!card || busy || pendingVote) return;
+    if (!card || busy || pendingVote || failedVote) return;
     const requestId = ++detailsRequestId.current;
     try {
       const response = await portalApi.reviewItem(card.assignment_id);
@@ -204,13 +224,13 @@ export function ReviewApp() {
       const code = err instanceof ReviewApiError ? err.code : undefined;
       setError(reviewErrorMessage(code, err instanceof Error ? err.message : 'Не удалось открыть подробности'));
     }
-  }, [busy, card, pendingVote]);
+  }, [busy, card, failedVote, pendingVote]);
 
   const handleIntent = useCallback((intent: GestureIntent) => {
     if (intent === 'approve') stageVote('approve');
-    else if (intent === 'reject' && !pendingVote) setSheetOpen(true);
+    else if (intent === 'reject' && !pendingVote && !failedVote) setSheetOpen(true);
     else if (intent === 'details') void openDetails();
-  }, [openDetails, pendingVote, stageVote]);
+  }, [failedVote, openDetails, pendingVote, stageVote]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -219,7 +239,7 @@ export function ReviewApp() {
         if (event.key === 'Escape') { event.preventDefault(); setDetails(null); }
         return;
       }
-      if (sheetOpen || pendingVote) return;
+      if (sheetOpen || pendingVote || failedVote) return;
       const target = event.target as HTMLElement | null;
       if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
 
@@ -230,7 +250,7 @@ export function ReviewApp() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [card, details, handleIntent, pendingVote, sheetOpen]);
+  }, [card, details, failedVote, handleIntent, pendingVote, sheetOpen]);
 
   return (
     <div className={`review-app ${reducedMotion ? 'reduced-motion' : ''}`}>
@@ -259,7 +279,7 @@ export function ReviewApp() {
               card={card}
               position={reviewed + 1}
               total={total}
-              busy={busy || Boolean(pendingVote)}
+              busy={busy || Boolean(pendingVote) || Boolean(failedVote)}
               reducedMotion={reducedMotion}
               onIntent={handleIntent}
             />
@@ -272,22 +292,29 @@ export function ReviewApp() {
                 <button type="button" disabled={busy} onClick={cancelPendingVote}>Отменить решение</button>
               </div>
             )}
+            {failedVote && !busy && (
+              <div className="review-undo">
+                <span>Решение не отправлено. Причина и комментарий сохранены.</span>
+                <button type="button" onClick={() => void commitVote(failedVote)}>Повторить сохранение</button>
+                <button type="button" onClick={cancelFailedVote}>Изменить решение</button>
+              </div>
+            )}
             <div className="review-actions">
-              <button type="button" className="review-btn danger" disabled={busy || Boolean(pendingVote)} onClick={() => setSheetOpen(true)}>
+              <button type="button" className="review-btn danger" disabled={busy || Boolean(pendingVote) || Boolean(failedVote)} onClick={() => setSheetOpen(true)}>
                 Отклонить
               </button>
-              <button type="button" className="review-btn ghost" disabled={busy || Boolean(pendingVote)} onClick={() => void openDetails()}>
+              <button type="button" className="review-btn ghost" disabled={busy || Boolean(pendingVote) || Boolean(failedVote)} onClick={() => void openDetails()}>
                 Детали
               </button>
-              <button type="button" className="review-btn approve" disabled={busy || Boolean(pendingVote)} onClick={() => stageVote('approve')}>
+              <button type="button" className="review-btn approve" disabled={busy || Boolean(pendingVote) || Boolean(failedVote)} onClick={() => stageVote('approve')}>
                 {busy ? 'Сохраняем…' : 'Подтвердить'}
               </button>
             </div>
             <div className="review-actions review-actions-secondary">
-              <button type="button" className="review-btn ghost" disabled={busy || Boolean(pendingVote)} onClick={deferCard}>
+              <button type="button" className="review-btn ghost" disabled={busy || Boolean(pendingVote) || Boolean(failedVote)} onClick={deferCard}>
                 Отложить
               </button>
-              <button type="button" className="review-btn ghost" disabled={busy || Boolean(pendingVote)} onClick={() => stageVote('abstain')}>
+              <button type="button" className="review-btn ghost" disabled={busy || Boolean(pendingVote) || Boolean(failedVote)} onClick={() => stageVote('abstain')}>
                 Не могу оценить
               </button>
             </div>
