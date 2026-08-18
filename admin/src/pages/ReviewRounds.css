@@ -11,3 +11,5 @@
 .round-matrix td.vote-reject{color:#ff7b72}
 .round-matrix td.vote-missing{color:#8b949e}
 .round-note{margin:10px 0 0;color:var(--text-muted,#8b949e);font-size:12px;line-height:1.5}
+.review-actions .reconcile{background:rgba(210,153,34,.14);border:1px solid rgba(210,153,34,.5);color:#f2cc60;border-radius:7px;padding:8px 12px;font:inherit;font-weight:600}
+.review-actions .reconcile:hover:not(:disabled){background:rgba(210,153,34,.22);border-color:#d29922}

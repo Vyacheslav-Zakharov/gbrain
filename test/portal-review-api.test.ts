@@ -19,6 +19,7 @@ const adminApiSource = await Bun.file(new URL('../admin/src/api.ts', import.meta
 const adminTakeReviewSource = await Bun.file(new URL('../admin/src/pages/AIReview.tsx', import.meta.url)).text();
 const adminConceptReviewSource = await Bun.file(new URL('../admin/src/pages/ConceptReview.tsx', import.meta.url)).text();
 const adminRoundReviewSource = await Bun.file(new URL('../admin/src/pages/ReviewRounds.tsx', import.meta.url)).text();
+const adminRoundReviewCssSource = await Bun.file(new URL('../admin/src/pages/ReviewRounds.css', import.meta.url)).text();
 const roundsSource = await Bun.file(new URL('../src/core/ai-review-rounds.ts', import.meta.url)).text();
 const portalAppSource = await Bun.file(new URL('../portal/src/PortalApp.tsx', import.meta.url)).text();
 const reviewAppSource = await Bun.file(new URL('../portal/src/review/ReviewApp.tsx', import.meta.url)).text();
@@ -71,6 +72,13 @@ describe('portal reviewer routes', () => {
     expect(reviewCssSource).toContain('.review-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0; }');
   });
 
+  test('the details sheet keeps long source text scrollable while the close action stays visible', () => {
+    expect(reviewAppSource).toContain('className="review-details-scroll"');
+    expect(reviewCssSource).toContain('.review-details-scroll {');
+    expect(reviewCssSource).toContain('min-height: 0;');
+    expect(reviewCssSource).toContain('overflow-y: auto;');
+  });
+
   test('defer is local navigation while cannot-assess is an abstain vote', () => {
     expect(reviewAppSource).toContain('Отложить');
     expect(reviewAppSource).toContain('setCards(deferReviewCard)');
@@ -80,6 +88,12 @@ describe('portal reviewer routes', () => {
     expect(portalApiSource).toContain("'approve' | 'reject' | 'abstain'");
     expect(adminRoundReviewSource).toContain("abstain: 'Не может оценить'");
     expect(adminRoundReviewSource).toContain("no_quorum: 'Кворум не достигнут'");
+  });
+
+  test('stale-round reconciliation uses an explicit readable warning action style', () => {
+    expect(adminRoundReviewSource).toContain('className="reconcile"');
+    expect(adminRoundReviewCssSource).toContain('.review-actions .reconcile{');
+    expect(adminRoundReviewCssSource).toContain('color:#f2cc60');
   });
 
   test('every reviewer endpoint requires a Portal session', () => {

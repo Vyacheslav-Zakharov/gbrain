@@ -342,7 +342,7 @@ export function ReviewRoundsPage() {
                     </p>
                   </div>
                   <div className="review-actions">
-                    <button type="button" disabled={busy} onClick={() => void reconcileStale()}>
+                    <button type="button" className="reconcile" disabled={busy} onClick={() => void reconcileStale()}>
                       Закрыть старый раунд и проверить текущую редакцию
                     </button>
                   </div>

@@ -256,6 +256,14 @@
 
 .review-sheet-actions { display: flex; gap: 8px; justify-content: flex-end; flex-shrink: 0; }
 
+.review-details-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .review-details-body {
   margin: 0;
   white-space: pre-wrap;

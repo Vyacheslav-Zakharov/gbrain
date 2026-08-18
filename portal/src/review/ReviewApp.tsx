@@ -306,7 +306,8 @@ export function ReviewApp() {
         <div className="review-sheet-backdrop" role="presentation" onClick={event => { if (event.target === event.currentTarget) setDetails(null); }}>
           <div className="review-sheet" role="dialog" aria-modal="true" aria-labelledby="review-details-title">
             <h2 id="review-details-title" className="review-sheet-title">{details.headline}</h2>
-            <section className="review-provenance" aria-labelledby="review-provenance-title">
+            <div className="review-details-scroll">
+              <section className="review-provenance" aria-labelledby="review-provenance-title">
               <h3 id="review-provenance-title">
                 {details.target_type === 'take_proposal' ? 'Источник утверждения' : 'Происхождение концепции'}
               </h3>
@@ -335,11 +336,12 @@ export function ReviewApp() {
               {details.target_type === 'concept_proposal' && details.evidence_count === 0 && details.provenance.supporting_sources.length === 0 && (
                 <p className="review-provenance-warning">Фрагменты-основания для этой концепции не были сохранены.</p>
               )}
-            </section>
-            <h3 className="review-details-heading">
-              {details.target_type === 'take_proposal' ? 'Текст страницы-источника' : 'Текст предлагаемой концепции'}
-            </h3>
-            <pre className="review-details-body">{details.detail || 'Исходный текст не найден.'}</pre>
+              </section>
+              <h3 className="review-details-heading">
+                {details.target_type === 'take_proposal' ? 'Текст страницы-источника' : 'Текст предлагаемой концепции'}
+              </h3>
+              <pre className="review-details-body">{details.detail || 'Исходный текст не найден.'}</pre>
+            </div>
             <div className="review-sheet-actions">
               <button type="button" className="review-btn ghost" onClick={() => setDetails(null)}>Закрыть</button>
             </div>
