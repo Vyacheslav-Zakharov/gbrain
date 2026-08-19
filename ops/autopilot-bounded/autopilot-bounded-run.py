@@ -11,32 +11,41 @@ import subprocess
 import sys
 import time
 from collections import Counter
+from decimal import Decimal
 from pathlib import Path
-
-import psycopg
-from psycopg.rows import dict_row
 
 STATE = Path.home() / ".gbrain" / "state" / "autopilot-bounded"
 HOLD = STATE / "HOLD.json"
 LOCK = STATE / "run.lock"
 EXPECTED_SOURCE_COMMIT = STATE / "expected-source-commit"
+RUNTIME_HASH_MANIFEST = STATE / "runtime.sha256"
+SOURCE_REPO = Path.home() / "work" / "gbrain"
+VENV = Path.home() / ".gbrain" / "autopilot-venv"
+GOVERNED_ENV_FILES = (Path.home() / ".gbrain" / "pg.sh", Path.home() / ".gbrain" / "env.sh")
 GBRAIN = Path.home() / ".bun" / "bin" / "gbrain"
 INSTALLED_CYCLE = Path.home() / ".bun" / "install" / "global" / "node_modules" / "gbrain" / "src" / "core" / "cycle.ts"
+INSTALLED_GATEWAY = Path.home() / ".bun" / "install" / "global" / "node_modules" / "gbrain" / "src" / "core" / "ai" / "gateway.ts"
 INSTALLED_SYNTH = Path.home() / ".bun" / "install" / "global" / "node_modules" / "gbrain" / "src" / "core" / "cycle" / "synthesize-concepts.ts"
 INSTALLED_PROPOSE = Path.home() / ".bun" / "install" / "global" / "node_modules" / "gbrain" / "src" / "core" / "cycle" / "propose-takes.ts"
-SOURCES = (
-    "internal-it",
-    "internal-production",
-    "internal-sales-marketing",
-    "internal-hr",
-    "internal-safety",
-    "shared",
-)
-PHASES = ("synthesize_concepts", "propose_takes")
-MAX_PENDING_TAKES = 20
+SOURCES = ("internal-it",)
+PHASES = ("propose_takes",)
+MAX_PROVIDER_PAGES = 5
+PILOT_MAX_ATTEMPTS = 3
+PILOT_AGGREGATE_COST_CAP_USD = 0.30
+PILOT_START_DATE = "2026-08-19"
+SAFE_RUNTIME_ERROR_CODES = frozenset({
+    "governed_environment_load_failed",
+    "governed_environment_schema_invalid",
+    "pilot_venv_site_packages_missing",
+    "pilot_psycopg_import_failed",
+    "pilot_psycopg_version_mismatch",
+})
+NONTERMINAL_JOB_STATES = ("waiting", "active", "delayed", "waiting-children", "paused")
+MAX_PENDING_TAKES = 10
 MAX_PENDING_CONCEPTS = 10
 MAX_NEW_TAKES = 10
-MAX_NEW_CONCEPTS = 5
+MAX_NEW_CONCEPTS = 0
+CONFIGURED_COST_ENVELOPE_USD = 0.10
 PHASE_TIMEOUT_SECONDS = 20 * 60
 TOTAL_WALL_SECONDS = 45 * 60
 POSTFLIGHT_SETTLE_SECONDS = 75
@@ -45,6 +54,18 @@ REQUIRED_RUNTIME_FILES = {
     "src/core/cycle.ts": INSTALLED_CYCLE,
     "src/core/cycle/synthesize-concepts.ts": INSTALLED_SYNTH,
     "src/core/cycle/propose-takes.ts": INSTALLED_PROPOSE,
+}
+EXTERNAL_RUNTIME_FILES = {
+    "gateway": INSTALLED_GATEWAY,
+    "runner": Path.home() / ".gbrain" / "autopilot-bounded-run.py",
+    "service": Path.home() / ".config" / "systemd" / "user" / "gbrain-autopilot.service",
+    "timer": Path.home() / ".config" / "systemd" / "user" / "gbrain-autopilot.timer",
+}
+EXTERNAL_RUNTIME_SOURCE_FILES = {
+    "gateway": "src/core/ai/gateway.ts",
+    "runner": "ops/autopilot-bounded/autopilot-bounded-run.py",
+    "service": "ops/autopilot-bounded/gbrain-autopilot.service",
+    "timer": "ops/autopilot-bounded/gbrain-autopilot.timer",
 }
 
 
@@ -55,14 +76,219 @@ def row_sha256(value: str) -> str:
 def atomic_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    with tmp.open("w") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def atomic_json_exclusive(path: Path, payload: object) -> None:
+    data = (json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n").encode()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb", closefd=False) as handle:
+            handle.write(data)
+            handle.flush()
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def pilot_attempt_records(state: Path = STATE) -> list[dict]:
+    records: list[dict] = []
+    for path in sorted(state.glob("pilot-attempted-*.json")):
+        match = re.fullmatch(r"pilot-attempted-(\d{4}-\d{2}-\d{2})\.json", path.name)
+        try:
+            stat = path.stat()
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid pilot marker {path.name}") from exc
+        if not match or (stat.st_mode & 0o777) != 0o600 or stat.st_uid != os.getuid():
+            raise ValueError(f"invalid pilot marker metadata {path.name}")
+        required = {
+            "status", "pilot_attempt", "utc_day", "source_id", "run_id",
+            "reserved_budget_usd", "receipt",
+        }
+        if set(payload) != required or payload.get("status") != "attempted":
+            raise ValueError(f"invalid pilot marker schema {path.name}")
+        if payload.get("utc_day") != match.group(1) or payload.get("source_id") != "internal-it":
+            raise ValueError(f"invalid pilot marker scope {path.name}")
+        if payload["utc_day"] < PILOT_START_DATE:
+            raise ValueError(f"pilot marker predates commissioned boundary {path.name}")
+        if payload.get("reserved_budget_usd") != "0.10":
+            raise ValueError(f"invalid pilot marker reservation {path.name}")
+        records.append(payload)
+    attempts = [r.get("pilot_attempt") for r in records]
+    if attempts != list(range(1, len(records) + 1)) or len({r["utc_day"] for r in records}) != len(records):
+        raise ValueError("pilot marker sequence is not contiguous and unique")
+    return records
+
+
+def pilot_capacity(state: Path = STATE) -> dict:
+    records = pilot_attempt_records(state)
+    reserved = sum((Decimal(r["reserved_budget_usd"]) for r in records), Decimal("0"))
+    return {
+        "attempts": len(records),
+        "reserved_budget_usd": f"{reserved:.2f}",
+        "next_attempt_allowed": (
+            len(records) < PILOT_MAX_ATTEMPTS
+            and reserved + Decimal("0.10") <= Decimal("0.30")
+        ),
+    }
+
+
+def count_pilot_attempts(state: Path = STATE) -> int:
+    return pilot_capacity(state)["attempts"]
+
+
+def begin_pilot_attempt(
+    *, state: Path, hold_path: Path, utc_day: str, run_id: str, source: str,
+    attempt_number: int, receipt_path: Path,
+) -> Path:
+    marker = state / f"pilot-attempted-{utc_day}.json"
+    atomic_json(hold_path, {
+        "status": "hold",
+        "reason": "pilot_cycle_in_progress",
+        "run_id": run_id,
+        "source_id": source,
+        "pilot_attempt": attempt_number,
+        "receipt": str(receipt_path),
+    })
+    atomic_json_exclusive(marker, {
+        "status": "attempted",
+        "pilot_attempt": attempt_number,
+        "utc_day": utc_day,
+        "source_id": source,
+        "run_id": run_id,
+        "reserved_budget_usd": "0.10",
+        "receipt": str(receipt_path),
+    })
+    return marker
+
+
+def verify_runtime_hash_manifest(
+    manifest: Path,
+    deployed_files: dict[str, Path],
+    source_files: dict[str, str],
+    source_repo: Path,
+    expected_commit: str,
+) -> list[str]:
+    failures: list[str] = []
+    try:
+        stat = manifest.stat()
+        lines = manifest.read_text().splitlines()
+    except OSError:
+        return ["runtime_manifest_unreadable"]
+    if (stat.st_mode & 0o777) != 0o600 or stat.st_uid != os.getuid():
+        failures.append("runtime_manifest_permissions")
+    parsed: dict[str, str] = {}
+    for line in lines:
+        match = re.fullmatch(r"([0-9a-f]{64})  (/.+)", line)
+        if not match or match.group(2) in parsed:
+            failures.append("runtime_manifest_schema")
+            continue
+        parsed[match.group(2)] = match.group(1)
+    if set(parsed) != {str(path) for path in deployed_files.values()}:
+        failures.append("runtime_manifest_file_set")
+    if set(source_files) != set(deployed_files):
+        failures.append("runtime_source_file_set")
+
+    commit_valid = re.fullmatch(r"[0-9a-f]{40}", expected_commit) is not None
+    if commit_valid:
+        try:
+            resolved = subprocess.run(
+                ["git", "-C", str(source_repo), "rev-parse", "--verify", f"{expected_commit}^{{commit}}"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            ).stdout.strip()
+            commit_valid = resolved == expected_commit
+        except (OSError, subprocess.SubprocessError):
+            commit_valid = False
+    if not commit_valid:
+        failures.append("runtime_source_commit_unavailable")
+
+    for name, path in deployed_files.items():
+        try:
+            actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            actual = None
+        expected = parsed.get(str(path))
+        if expected != actual:
+            failures.append(f"runtime_hash_mismatch:{name}")
+
+        source_path = source_files.get(name)
+        source_hash = None
+        source_path_valid = isinstance(source_path, str) and re.fullmatch(
+            r"(?!/)(?!.*(?:^|/)\.\.(?:/|$)).+", source_path,
+        ) is not None
+        if commit_valid and source_path_valid:
+            try:
+                blob = subprocess.run(
+                    ["git", "-C", str(source_repo), "show", f"{expected_commit}:{source_path}"],
+                    check=True,
+                    capture_output=True,
+                    timeout=10,
+                ).stdout
+                source_hash = hashlib.sha256(blob).hexdigest()
+            except (OSError, subprocess.SubprocessError):
+                source_hash = None
+        if expected != source_hash:
+            failures.append(f"runtime_source_hash_mismatch:{name}")
+    return sorted(set(failures))
+
+
+def hold_payload_for_receipt(receipt: dict, receipt_path: Path) -> dict:
+    if receipt.get("stop_reasons"):
+        return receipt
+    return {
+        "status": "hold",
+        "reason": "pilot_cycle_complete",
+        "run_id": receipt.get("run_id"),
+        "receipt": str(receipt_path),
+        "next_action": "governed_clearance_required",
+    }
+
+
+def exception_hold_payload(existing: dict | None, exc: Exception) -> dict:
+    identity: dict = {}
+    previous_reason = None
+    if isinstance(existing, dict) and existing.get("reason") == "pilot_cycle_in_progress":
+        previous_reason = "pilot_cycle_in_progress"
+        for key in ("run_id", "source_id", "pilot_attempt", "receipt"):
+            if key in existing:
+                identity[key] = existing[key]
+    error_code = str(exc) if isinstance(exc, RuntimeError) and str(exc) in SAFE_RUNTIME_ERROR_CODES else None
+    return {
+        "status": "hold",
+        "reason": "runner_exception",
+        "previous_reason": previous_reason,
+        **identity,
+        "error_type": type(exc).__name__,
+        **({"error_code": error_code} if error_code else {}),
+        "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+    }
 
 
 def snapshot(conn: psycopg.Connection) -> dict:
     with conn.cursor() as cur:
-        cur.execute("SELECT status, count(*)::int AS count FROM minion_jobs WHERE status IN ('waiting','active','delayed') GROUP BY status ORDER BY status")
+        cur.execute(
+            "SELECT status, count(*)::int AS count FROM minion_jobs WHERE status = ANY(%s) GROUP BY status ORDER BY status",
+            (list(NONTERMINAL_JOB_STATES),),
+        )
         jobs = {r["status"]: r["count"] for r in cur.fetchall()}
         cur.execute("SELECT source_id, status, count(*)::int AS count FROM take_proposals GROUP BY source_id,status ORDER BY source_id,status")
         takes = {(r["source_id"], r["status"]): r["count"] for r in cur.fetchall()}
@@ -313,10 +539,17 @@ def phase_result(report: dict | None, phase: str) -> dict | None:
 def phase_result_acceptable(report: dict | None, phase: str, result: dict | None) -> bool:
     if not report or not result or report.get("status") not in {"clean", "partial"}:
         return False
+    details = result.get("details")
+    if phase == "propose_takes":
+        if not isinstance(details, dict):
+            return False
+        for key in ("selected_pages", "pages_scanned"):
+            count = details.get(key)
+            if not isinstance(count, int) or isinstance(count, bool) or count < 0 or count > MAX_PROVIDER_PAGES:
+                return False
     status = result.get("status")
     if status in {"ok", "skipped"}:
         return True
-    details = result.get("details")
     if (
         phase != "propose_takes"
         or report.get("status") != "partial"
@@ -339,6 +572,57 @@ def phase_result_acceptable(report: dict | None, phase: str, result: dict | None
     )
 
 
+def load_governed_environment() -> None:
+    shell = subprocess.run(
+        [
+            "/bin/bash",
+            "-c",
+            'set -ae; for governed_file in "$@"; do source "$governed_file"; done; env -0',
+            "autopilot-env-loader",
+            *(str(path) for path in GOVERNED_ENV_FILES),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=10,
+        check=False,
+    )
+    if shell.returncode != 0:
+        raise RuntimeError("governed_environment_load_failed")
+    loaded: dict[str, str] = {}
+    try:
+        for item in shell.stdout.split(b"\0"):
+            if not item:
+                continue
+            key, value = item.decode("utf-8").split("=", 1)
+            if not key:
+                raise ValueError
+            loaded[key] = value
+    except (UnicodeDecodeError, ValueError):
+        raise RuntimeError("governed_environment_schema_invalid") from None
+    os.environ.update(loaded)
+
+
+def load_pinned_psycopg() -> None:
+    site_packages = VENV / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    if not site_packages.is_dir():
+        raise RuntimeError("pilot_venv_site_packages_missing")
+    sys.path.insert(0, str(site_packages))
+    try:
+        import psycopg as loaded_psycopg
+        from psycopg.rows import dict_row as loaded_dict_row
+    except ImportError:
+        raise RuntimeError("pilot_psycopg_import_failed") from None
+    if loaded_psycopg.__version__ != "3.3.4":
+        raise RuntimeError("pilot_psycopg_version_mismatch")
+    globals()["psycopg"] = loaded_psycopg
+    globals()["dict_row"] = loaded_dict_row
+
+
+def load_runtime_dependencies() -> None:
+    load_governed_environment()
+    load_pinned_psycopg()
+
+
 def run() -> int:
     STATE.mkdir(parents=True, exist_ok=True)
     os.chmod(STATE, 0o700)
@@ -351,25 +635,72 @@ def run() -> int:
 
     now = dt.datetime.now(dt.timezone.utc)
     day = now.date().isoformat()
-    attempted = STATE / f"attempted-{day}.json"
+    attempted = STATE / f"pilot-attempted-{day}.json"
+    legacy_attempted = STATE / f"attempted-{day}.json"
     if HOLD.exists():
         print(json.dumps({"status": "refused", "reason": "durable_hold", "hold": str(HOLD)}))
         return 2
-    if attempted.exists():
-        print(json.dumps({"status": "skipped", "reason": "daily_cap", "ledger": str(attempted)}))
+    if attempted.exists() or legacy_attempted.exists():
+        blocking_ledger = attempted if attempted.exists() else legacy_attempted
+        atomic_json(HOLD, {"status": "hold", "reason": "daily_cap", "ledger": str(blocking_ledger)})
+        print(json.dumps({"status": "skipped", "reason": "daily_cap", "ledger": str(blocking_ledger)}))
         return 0
 
+    try:
+        capacity = pilot_capacity()
+    except ValueError as exc:
+        atomic_json(HOLD, {"status": "hold", "reason": "pilot_ledger_invalid", "error": str(exc)})
+        print(json.dumps({"status": "refused", "reason": "pilot_ledger_invalid"}))
+        return 2
+    pilot_attempts_before = capacity["attempts"]
+    if not capacity["next_attempt_allowed"]:
+        atomic_json(HOLD, {"status": "hold", "reason": "pilot_attempt_or_aggregate_cap", **capacity})
+        print(json.dumps({"status": "refused", "reason": "pilot_attempt_or_aggregate_cap", **capacity}))
+        return 2
+
     override = os.environ.get("GBRAIN_AUTOPILOT_SOURCE")
-    source = override or SOURCES[now.toordinal() % len(SOURCES)]
+    source = override or SOURCES[0]
     if source not in SOURCES:
+        atomic_json(HOLD, {"status": "hold", "reason": "source_not_allowlisted"})
         print(json.dumps({"status": "refused", "reason": "source_not_allowlisted"}))
         return 2
+
+    started = dt.datetime.now(dt.timezone.utc)
+    run_id = started.strftime("%Y%m%dT%H%M%SZ") + f"-{source}"
+    run_dir = STATE / run_id
+    run_dir.mkdir(mode=0o700)
+    receipt_path = run_dir / "receipt.json"
+    begin_pilot_attempt(
+        state=STATE,
+        hold_path=HOLD,
+        utc_day=day,
+        run_id=run_id,
+        source=source,
+        attempt_number=pilot_attempts_before + 1,
+        receipt_path=receipt_path,
+    )
+
+    def refuse_attempt(reason: str, **details: object) -> int:
+        receipt = {
+            "status": "refused",
+            "run_id": run_id,
+            "source_id": source,
+            "reason": reason,
+            "pilot_attempt": pilot_attempts_before + 1,
+            "ended_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            **details,
+        }
+        atomic_json(receipt_path, receipt)
+        atomic_json(HOLD, receipt)
+        print(json.dumps(receipt, ensure_ascii=False))
+        return 2
+
+    load_runtime_dependencies()
 
     try:
         guard_manifest = json.loads(GUARD_MANIFEST.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        print(json.dumps({"status": "refused", "reason": "guard_manifest_unreadable", "error_type": type(exc).__name__}))
-        return 2
+        return refuse_attempt("guard_manifest_unreadable", error_type=type(exc).__name__)
     guard_files = guard_manifest.get("files") if isinstance(guard_manifest, dict) else None
     hash_mismatches = []
     for relative_path, runtime_path in REQUIRED_RUNTIME_FILES.items():
@@ -381,8 +712,7 @@ def run() -> int:
         if not expected or actual != expected:
             hash_mismatches.append({"path": relative_path, "expected": expected, "actual": actual})
     if hash_mismatches:
-        print(json.dumps({"status": "refused", "reason": "runtime_guard_hash_mismatch", "files": hash_mismatches}))
-        return 2
+        return refuse_attempt("runtime_guard_hash_mismatch", files=hash_mismatches)
     guard_source_commit = guard_manifest.get("source_commit")
     try:
         expected_source_commit = EXPECTED_SOURCE_COMMIT.read_text().strip()
@@ -392,14 +722,17 @@ def run() -> int:
         expected_source_commit = ""
         pin_permissions_valid = False
     if not pin_permissions_valid or not isinstance(guard_source_commit, str) or len(guard_source_commit) != 40 or guard_source_commit != expected_source_commit:
-        print(json.dumps({"status": "refused", "reason": "guard_source_commit_mismatch"}))
-        return 2
+        return refuse_attempt("guard_source_commit_mismatch")
 
-    started = dt.datetime.now(dt.timezone.utc)
-    run_id = started.strftime("%Y%m%dT%H%M%SZ") + f"-{source}"
-    run_dir = STATE / run_id
-    run_dir.mkdir(mode=0o700)
-    atomic_json(attempted, {"run_id": run_id, "source_id": source, "started_at": started.isoformat(), "status": "started"})
+    runtime_hash_failures = verify_runtime_hash_manifest(
+        RUNTIME_HASH_MANIFEST,
+        EXTERNAL_RUNTIME_FILES,
+        EXTERNAL_RUNTIME_SOURCE_FILES,
+        SOURCE_REPO,
+        expected_source_commit,
+    )
+    if runtime_hash_failures:
+        return refuse_attempt("external_runtime_hash_mismatch", failures=runtime_hash_failures)
 
     with psycopg.connect("", row_factory=dict_row) as conn:
         pre = snapshot(conn)
@@ -409,6 +742,12 @@ def run() -> int:
         pending_concepts = sum(v for (s, status), v in pre["concepts"].items() if status == "pending")
         config = pre["config"]
         gates = {
+            "configured_phases": list(PHASES),
+            "provider_page_cap": MAX_PROVIDER_PAGES,
+            "pilot_attempt": pilot_attempts_before + 1,
+            "pilot_attempt_cap": PILOT_MAX_ATTEMPTS,
+            "pilot_reserved_before_usd": capacity["reserved_budget_usd"],
+            "pilot_reserved_after_usd": f"{Decimal(capacity['reserved_budget_usd']) + Decimal('0.10'):.2f}",
             "nonterminal_jobs": nonterminal,
             "pending_takes": pending_takes,
             "pending_concepts": pending_concepts,
@@ -419,6 +758,9 @@ def run() -> int:
             "enrich_thin": config.get("cycle.enrich_thin.enabled"),
             "runtime_guard_source_commit": guard_source_commit,
             "runtime_guard_hash_parity": True,
+            "external_runtime_source_commit": expected_source_commit,
+            "external_runtime_source_hash_parity": True,
+            "external_runtime_hash_parity": True,
         }
         failures = []
         if nonterminal != 0:
@@ -438,10 +780,9 @@ def run() -> int:
         if config.get("cycle.enrich_thin.enabled") != "false":
             failures.append("enrich_thin_not_false")
         if failures:
-            receipt = {"status": "refused", "run_id": run_id, "source_id": source, "gates": gates, "failures": failures}
-            atomic_json(run_dir / "receipt.json", receipt)
+            receipt = {"status": "refused", "run_id": run_id, "source_id": source, "gates": gates, "failures": failures, "ended_at": dt.datetime.now(dt.timezone.utc).isoformat()}
+            atomic_json(receipt_path, receipt)
             atomic_json(HOLD, receipt)
-            atomic_json(attempted, {**receipt, "ended_at": dt.datetime.now(dt.timezone.utc).isoformat()})
             print(json.dumps(receipt, ensure_ascii=False))
             return 2
 
@@ -457,8 +798,19 @@ def run() -> int:
                 break
             timeout = min(PHASE_TIMEOUT_SECONDS, remaining)
             command = [str(GBRAIN), "dream", "--json", "--source", source, "--phase", phase]
+            child_env = os.environ.copy()
+            child_env["GBRAIN_PROPOSE_TAKES_PAGE_LIMIT"] = str(MAX_PROVIDER_PAGES)
+            child_env["GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES"] = str(MAX_NEW_TAKES)
+            child_env["GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS"] = "1"
             try:
-                proc = subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False)
+                proc = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                    check=False,
+                    env=child_env,
+                )
                 rc = proc.returncode
             except subprocess.TimeoutExpired as exc:
                 proc = None
@@ -513,17 +865,21 @@ def run() -> int:
             "stop_reasons": stop_reasons,
             "auto_accept_publish_verified": assessment["auto_accept_publish_verified"],
             "auto_drain": False,
+            "configured_phases": list(PHASES),
+            "provider_page_cap": MAX_PROVIDER_PAGES,
+            "pilot_attempt": pilot_attempts_before + 1,
+            "pilot_attempt_cap": PILOT_MAX_ATTEMPTS,
+            "pilot_aggregate_cost_cap_usd": PILOT_AGGREGATE_COST_CAP_USD,
+            "pilot_reserved_after_usd": f"{Decimal(capacity['reserved_budget_usd']) + Decimal('0.10'):.2f}",
             "daily_run_cap": 1,
             "review_capacity": {"gross_new_takes": MAX_NEW_TAKES, "gross_new_concepts": MAX_NEW_CONCEPTS},
             "walltime_cap_minutes": 45,
-            "configured_cost_envelope_usd": 0.35,
+            "configured_cost_envelope_usd": CONFIGURED_COST_ENVELOPE_USD,
             "actual_spend_usd": None,
-            "actual_spend_note": "propose_takes tracker is not exposed; do not treat configured envelope as invoice attribution",
+            "actual_spend_note": "usage-accounted phase estimate is in phase details; authoritative provider invoice attribution is unavailable",
         }
-        atomic_json(run_dir / "receipt.json", receipt)
-        atomic_json(attempted, receipt)
-        if stop_reasons:
-            atomic_json(HOLD, receipt)
+        atomic_json(receipt_path, receipt)
+        atomic_json(HOLD, hold_payload_for_receipt(receipt, receipt_path))
         print(json.dumps(receipt, ensure_ascii=False))
         return 2 if stop_reasons else 0
 
@@ -534,12 +890,17 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as exc:
-        receipt = {
-            "status": "hold",
-            "reason": "runner_exception",
-            "error_type": type(exc).__name__,
-            "recorded_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-        }
+        try:
+            existing_hold = json.loads(HOLD.read_text()) if HOLD.is_file() else None
+        except (OSError, json.JSONDecodeError):
+            existing_hold = None
+        receipt = exception_hold_payload(existing_hold, exc)
+        linked_receipt = Path(receipt.get("receipt", ""))
+        if linked_receipt.name == "receipt.json" and linked_receipt.is_relative_to(STATE):
+            try:
+                atomic_json(linked_receipt, receipt)
+            except OSError:
+                pass
         atomic_json(HOLD, receipt)
         print(json.dumps(receipt, ensure_ascii=False))
         raise SystemExit(2)

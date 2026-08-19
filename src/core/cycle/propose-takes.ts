@@ -67,6 +67,9 @@ const PROPOSE_TAKES_CANDIDATE_MULTIPLIER = 4;
 const PROPOSE_TAKES_MAX_CANDIDATES = 400;
 const PROPOSE_TAKES_MAX_ALLOWLIST_PAGES = 10;
 const PROPOSE_TAKES_PAGE_ALLOWLIST_ENV = 'GBRAIN_PROPOSE_TAKES_PAGE_ALLOWLIST_JSON';
+const PROPOSE_TAKES_PAGE_LIMIT_ENV = 'GBRAIN_PROPOSE_TAKES_PAGE_LIMIT';
+const PROPOSE_TAKES_MAX_NEW_TAKES_ENV = 'GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES';
+const PROPOSE_TAKES_WRITE_ATTEMPTS_ENV = 'GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS';
 const PROPOSE_TAKES_GENERATED_PAGE_TYPES = new Set([
   'status',
   'project-status',
@@ -235,6 +238,30 @@ export function parseProposeTakesPageAllowlist(
   return identities;
 }
 
+/** Strict operator cap for bounded provider dispatches. */
+export function parseProposeTakesPageLimit(raw: string | undefined): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!/^[1-9]\d*$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 100 ? parsed : null;
+}
+
+/** Strict operator cap for pending proposals persisted by one phase run. */
+export function parseProposeTakesMaxNewTakes(raw: string | undefined): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!/^[1-9]\d*$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= 100 ? parsed : null;
+}
+
+/** Strict upper bound for application-level claim-write attempts. */
+export function parseProposeTakesWriteAttempts(raw: string | undefined): number | null | undefined {
+  if (raw === undefined) return undefined;
+  if (!/^[1-9]\d*$/.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed <= PENDING_CLAIM_WRITE_ATTEMPTS ? parsed : null;
+}
+
 function proposeMaxCallCostUsd(pricing: ModelPricing, prompt: string): number {
   const inputTokenCeiling = Buffer.byteLength(prompt, 'utf8') + PROPOSE_CHAT_FRAMING_TOKEN_CEILING;
   return (
@@ -264,6 +291,13 @@ class PendingClaimWriteConflict extends Error {
   constructor() {
     super('pending claim changed concurrently');
     this.name = 'PendingClaimWriteConflict';
+  }
+}
+
+class ProposalOutputCapExceeded extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProposalOutputCapExceeded';
   }
 }
 
@@ -450,6 +484,10 @@ export interface ProposeTakesOpts extends BasePhaseOpts {
   repoPath?: string;
   /** Limit pages processed in this cycle (for triage / quick smoke). Default: 100. */
   pageLimit?: number;
+  /** Hard cap on new pending proposals persisted by this phase run. */
+  maxNewTakes?: number;
+  /** Upper bound on claim-write transaction attempts; governed pilot uses one. */
+  writeAttempts?: number;
   /** Optional immutable one-shot corpus. Every slug/hash must match before scans/provider work. */
   pageAllowlist?: readonly ProposeTakesPageIdentity[];
   /** Inject the LLM call for tests; production uses gateway.chat. */
@@ -478,6 +516,8 @@ export interface ProposeTakesResult {
   cache_misses: number;
   proposals_inserted: number;
   proposals_suppressed: number;
+  max_new_takes: number | null;
+  output_cap_exhausted: boolean;
   valid_completed: number;
   technical_failures: number;
   stale_running_closed: number;
@@ -581,6 +621,7 @@ export async function defaultExtractor(
     messages: [{ role: 'user', content: prompt }],
     ...(input.modelHint ? { model: input.modelHint } : {}),
     maxTokens: PROPOSE_MAX_OUTPUT_TOKENS,
+    maxRetries: 0,
   });
   const parsed = parseExtractorResponse(result.text);
   const stopOutcome: ExtractorOutcome | null =
@@ -751,6 +792,8 @@ class ProposeTakesPhase extends BaseCyclePhase {
     const extractor = opts.extractor ?? defaultExtractor;
     const promptVersion = opts.promptVersion ?? PROPOSE_TAKES_PROMPT_VERSION;
     const pageLimit = opts.pageLimit ?? 100;
+    const maxNewTakes = opts.maxNewTakes;
+    const writeAttempts = opts.writeAttempts ?? PENDING_CLAIM_WRITE_ATTEMPTS;
     const skipPagesWithFence = opts.skipPagesWithFence ?? false;
     const modelId = opts.model ?? (opts.extractor ? 'anthropic:claude-sonnet-4-6' : getChatModel());
     const pricing = canonicalLookup(modelId);
@@ -778,6 +821,8 @@ class ProposeTakesPhase extends BaseCyclePhase {
       cache_misses: 0,
       proposals_inserted: 0,
       proposals_suppressed: 0,
+      max_new_takes: maxNewTakes ?? null,
+      output_cap_exhausted: false,
       valid_completed: 0,
       technical_failures: 0,
       stale_running_closed: 0,
@@ -871,6 +916,10 @@ class ProposeTakesPhase extends BaseCyclePhase {
     }
 
     for (const page of pages) {
+      if (maxNewTakes !== undefined && result.proposals_inserted >= maxNewTakes) {
+        result.output_cap_exhausted = true;
+        break;
+      }
       result.pages_scanned += 1;
       this.tick(opts);
 
@@ -1109,12 +1158,21 @@ class ProposeTakesPhase extends BaseCyclePhase {
       const proposals = extraction.proposals;
       let pageSuppressedCount = 0;
       try {
+        const remainingCapacity = maxNewTakes === undefined
+          ? Number.POSITIVE_INFINITY
+          : maxNewTakes - result.proposals_inserted;
+        if (proposals.length > remainingCapacity) {
+          result.output_cap_exhausted = true;
+          throw new ProposalOutputCapExceeded(
+            `proposal output cap exceeded on ${page.slug}: ${proposals.length} > remaining ${remainingCapacity}`,
+          );
+        }
 
       // Proposal writes, supersession, audit rows and terminal scan telemetry
       // share one attempt-fenced transaction. A late or reclaimed attempt fails
       // before any proposal mutation and cannot partially commit.
       let committed: { inserted: number; suppressed: number } | undefined;
-      for (let attempt = 1; attempt <= PENDING_CLAIM_WRITE_ATTEMPTS; attempt += 1) {
+      for (let attempt = 1; attempt <= writeAttempts; attempt += 1) {
         try {
           committed = await withPageLock(
             `ai-review-page:${sourceId}:${page.slug}`,
@@ -1220,7 +1278,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
           );
           break;
         } catch (error) {
-          if (!(error instanceof PendingClaimWriteConflict) || attempt === PENDING_CLAIM_WRITE_ATTEMPTS) throw error;
+          if (!(error instanceof PendingClaimWriteConflict) || attempt === writeAttempts) throw error;
         }
       }
       if (!committed) throw new PendingClaimWriteConflict();
@@ -1259,6 +1317,7 @@ class ProposeTakesPhase extends BaseCyclePhase {
         }
         result.technical_failures += 1;
         result.warnings.push(`post-provider processing failed on ${page.slug}: ${msg}`);
+        if (err instanceof ProposalOutputCapExceeded) break;
         continue;
       }
     }
@@ -1361,6 +1420,36 @@ export async function runPhaseProposeTakes(
       reason = 'invalid_page_allowlist';
     }
   }
+  let pageLimit = opts.pageLimit;
+  if (reason === null && process.env[PROPOSE_TAKES_PAGE_LIMIT_ENV] !== undefined) {
+    const parsed = parseProposeTakesPageLimit(process.env[PROPOSE_TAKES_PAGE_LIMIT_ENV]);
+    if (parsed === null) reason = 'invalid_page_limit';
+    else if (parsed !== undefined) pageLimit = pageLimit === undefined ? parsed : Math.min(pageLimit, parsed);
+  }
+  let maxNewTakes = opts.maxNewTakes;
+  if (reason === null && maxNewTakes !== undefined
+    && (!Number.isInteger(maxNewTakes) || maxNewTakes <= 0 || maxNewTakes > 100)) {
+    reason = 'invalid_max_new_takes';
+  }
+  if (reason === null && process.env[PROPOSE_TAKES_MAX_NEW_TAKES_ENV] !== undefined) {
+    const parsed = parseProposeTakesMaxNewTakes(process.env[PROPOSE_TAKES_MAX_NEW_TAKES_ENV]);
+    if (parsed === null) reason = 'invalid_max_new_takes';
+    else if (parsed !== undefined) {
+      maxNewTakes = maxNewTakes === undefined ? parsed : Math.min(maxNewTakes, parsed);
+    }
+  }
+  let writeAttempts = opts.writeAttempts;
+  if (reason === null && writeAttempts !== undefined
+    && (!Number.isInteger(writeAttempts) || writeAttempts <= 0 || writeAttempts > PENDING_CLAIM_WRITE_ATTEMPTS)) {
+    reason = 'invalid_write_attempts';
+  }
+  if (reason === null && process.env[PROPOSE_TAKES_WRITE_ATTEMPTS_ENV] !== undefined) {
+    const parsed = parseProposeTakesWriteAttempts(process.env[PROPOSE_TAKES_WRITE_ATTEMPTS_ENV]);
+    if (parsed === null) reason = 'invalid_write_attempts';
+    else if (parsed !== undefined) {
+      writeAttempts = writeAttempts === undefined ? parsed : Math.min(writeAttempts, parsed);
+    }
+  }
   let budgetUsd = opts.budgetUsd;
   if (reason === null && budgetUsd !== undefined && (!Number.isFinite(budgetUsd) || budgetUsd < 0)) {
     reason = 'invalid_budget_override';
@@ -1412,7 +1501,10 @@ export async function runPhaseProposeTakes(
     };
   }
 
-  const resolvedOpts: ProposeTakesOpts = { ...opts, pageAllowlist, budgetUsd: budgetUsd!, model: model! };
+  const resolvedOpts: ProposeTakesOpts = {
+    ...opts, pageAllowlist, pageLimit, maxNewTakes, writeAttempts,
+    budgetUsd: budgetUsd!, model: model!,
+  };
   return new ProposeTakesPhase().run(ctx, resolvedOpts);
 }
 

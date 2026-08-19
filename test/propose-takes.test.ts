@@ -31,10 +31,17 @@ import {
   selectProposeTakePagesWithDiagnostics,
   PROPOSE_TAKES_PROMPT_VERSION,
   EXTRACT_TAKES_PROMPT,
+  defaultExtractor,
   type ProposeTakesExtractor,
   type ExtractorResult,
   type ProposedTake,
 } from '../src/core/cycle/propose-takes.ts';
+import {
+  __setChatTransportForTests,
+  __setGenerateTextTransportForTests,
+  __setResolveChatProviderForTests,
+  chat as gatewayChat,
+} from '../src/core/ai/gateway.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PAGE_SORT_SQL, type Page, type PageFilters } from '../src/core/types.ts';
@@ -71,6 +78,61 @@ test('take extractor preserves source meaning but returns claim text in Russian'
   expect(EXTRACT_TAKES_PROMPT).toContain("kind         ('take' | 'bet')");
   expect(EXTRACT_TAKES_PROMPT).toContain("claim_class  ('prediction' | 'judgment' | 'recommendation' | 'bet')");
   expect(PROPOSE_TAKES_PROMPT_VERSION).toBe('v0.36.1.10-operational-recommendations-v1');
+});
+
+test('production take extractor explicitly disables provider SDK retries', async () => {
+  let observedMaxRetries: unknown;
+  __setChatTransportForTests(async (opts) => {
+    observedMaxRetries = (opts as any).maxRetries;
+    return {
+      text: '[]',
+      blocks: [{ type: 'text', text: '[]' }],
+      stopReason: 'end',
+      usage: { input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'test:model',
+      recipeId: 'test',
+    } as any;
+  });
+  try {
+    await defaultExtractor({
+      pagePath: 'synthetic/page',
+      pageBody: 'synthetic body',
+      existingTakes: [],
+      rejectedClaims: [],
+    });
+  } finally {
+    __setChatTransportForTests(null);
+  }
+  expect(observedMaxRetries).toBe(0);
+});
+
+test('gateway forwards zero retries into the final AI SDK invocation', async () => {
+  let observedSdkArgs: any;
+  __setResolveChatProviderForTests(async () => ({
+    model: { synthetic: true },
+    recipe: { id: 'test', touchpoints: { chat: { supports_prompt_cache: false } } },
+    modelId: 'model',
+  } as any));
+  __setGenerateTextTransportForTests(async (args: any) => {
+    observedSdkArgs = args;
+    return {
+      content: [{ type: 'text', text: '[]' }],
+      usage: { inputTokens: 1, outputTokens: 1 },
+      finishReason: 'stop',
+    } as any;
+  });
+  try {
+    const result = await gatewayChat({
+      model: 'test:model',
+      messages: [{ role: 'user', content: 'synthetic request' }],
+      maxRetries: 0,
+    });
+    expect(result.text).toBe('[]');
+  } finally {
+    __setGenerateTextTransportForTests(null);
+    __setResolveChatProviderForTests(null);
+  }
+  expect(observedSdkArgs?.maxRetries).toBe(0);
 });
 
 test('take extractor calibrates durable operational recommendations against a synthetic golden set', () => {
@@ -789,6 +851,145 @@ describe('runPhaseProposeTakes — phase integration', () => {
     }
   });
 
+  test('strict runtime page limit caps provider dispatches', async () => {
+    const previous = process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT;
+    process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT = '5';
+    try {
+      const pages = Array.from({ length: 6 }, (_, i) =>
+        buildPage({ slug: `meetings/pilot-${i}`, type: 'meeting', body: `Meeting evidence ${i}.` }));
+      const { engine } = buildMockEngine({ pages });
+      let calls = 0;
+      const result = await runPhaseProposeTakes(buildCtx(engine), {
+        budgetUsd: 100,
+        pageLimit: 100,
+        extractor: async () => { calls += 1; return proven([]); },
+      });
+
+      expect(result.status).toBe('ok');
+      expect(calls).toBe(5);
+      expect((result.details as Record<string, unknown>).selected_pages).toBe(5);
+    } finally {
+      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT;
+      else process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT = previous;
+    }
+  });
+
+  test('invalid runtime page limit refuses before scan or provider dispatch', async () => {
+    const previous = process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT;
+    try {
+      for (const value of ['', '0', '-1', '5.0', '101', ' 5']) {
+        process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT = value;
+        const { engine, captured, listPageFilters } = buildMockEngine({
+          pages: [buildPage({ slug: 'meetings/must-not-run', body: 'Meeting evidence.' })],
+        });
+        let calls = 0;
+        const result = await runPhaseProposeTakes(buildCtx(engine), {
+          pageLimit: 1,
+          extractor: async () => { calls += 1; return proven([]); },
+        });
+
+        expect(result.status).toBe('warn');
+        expect((result.details as Record<string, unknown>).reason).toBe('invalid_page_limit');
+        expect(listPageFilters).toHaveLength(0);
+        expect(calls).toBe(0);
+        expect(captured.some(c => c.sql.includes('INSERT INTO take_proposal_scans'))).toBe(false);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT;
+      else process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT = previous;
+    }
+  });
+
+  test('strict runtime output cap rejects an over-cap response before proposal persistence', async () => {
+    const previous = process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
+    process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = '10';
+    try {
+      const { engine, captured } = buildMockEngine({
+        pages: [buildPage({ slug: 'meetings/output-cap', body: 'Synthetic operational evidence.' })],
+      });
+      const proposals: ProposedTake[] = Array.from({ length: 11 }, (_, i) => ({
+        claim_text: `Synthetic bounded proposal ${i + 1}`,
+        kind: 'take', claim_class: 'recommendation', holder: 'brain', weight: 0.5, domain: 'operations',
+      }));
+      let calls = 0;
+      const result = await runPhaseProposeTakes(buildCtx(engine), {
+        budgetUsd: 100,
+        maxNewTakes: 100,
+        extractor: async () => { calls += 1; return proven(proposals); },
+      });
+
+      const details = result.details as Record<string, unknown>;
+      expect(calls).toBe(1);
+      expect(result.status).toBe('fail');
+      expect(details.max_new_takes).toBe(10);
+      expect(details.proposals_inserted).toBe(0);
+      expect(details.technical_failures).toBe(1);
+      expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(0);
+    } finally {
+      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
+      else process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = previous;
+    }
+  });
+
+  test('reaching the runtime output cap stops later provider dispatches', async () => {
+    const previous = process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
+    process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = '10';
+    try {
+      const { engine, captured } = buildMockEngine({
+        pages: [
+          buildPage({ slug: 'alpha/output-cap', body: 'First operational evidence.' }),
+          buildPage({ slug: 'beta/must-not-dispatch', body: 'Second operational evidence.' }),
+        ],
+      });
+      const proposals: ProposedTake[] = Array.from({ length: 10 }, (_, i) => ({
+        claim_text: `Synthetic capped proposal ${i + 1}`,
+        kind: 'take', claim_class: 'recommendation', holder: 'brain', weight: 0.5, domain: 'operations',
+      }));
+      let calls = 0;
+      const result = await runPhaseProposeTakes(buildCtx(engine), {
+        budgetUsd: 100,
+        pageLimit: 2,
+        extractor: async () => { calls += 1; return proven(proposals); },
+      });
+
+      const details = result.details as Record<string, unknown>;
+      expect(calls).toBe(1);
+      expect(result.status).toBe('ok');
+      expect(details.proposals_inserted).toBe(10);
+      expect(details.output_cap_exhausted).toBe(true);
+      expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(10);
+    } finally {
+      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
+      else process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = previous;
+    }
+  });
+
+  test('invalid runtime output cap refuses before scan or provider dispatch', async () => {
+    const previous = process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
+    try {
+      for (const value of ['', '0', '-1', '10.0', '101', ' 10']) {
+        process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = value;
+        const { engine, captured, listPageFilters } = buildMockEngine({
+          pages: [buildPage({ slug: 'meetings/must-not-run-output', body: 'Meeting evidence.' })],
+        });
+        let calls = 0;
+        const result = await runPhaseProposeTakes(buildCtx(engine), {
+          maxNewTakes: 1,
+          extractor: async () => { calls += 1; return proven([]); },
+        });
+
+        expect(result.status).toBe('warn');
+        expect((result.details as Record<string, unknown>).reason).toBe('invalid_max_new_takes');
+        expect(listPageFilters).toHaveLength(0);
+        expect(calls).toBe(0);
+        expect(captured.some(c => c.sql.includes('INSERT INTO take_proposal_scans'))).toBe(false);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
+      else process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = previous;
+    }
+  });
+
   test('refuses provider call when dispatch telemetry cannot be durably confirmed', async () => {
     const pages = [buildPage({ slug: 'wiki/no-dispatch-receipt', body: 'A claim that must remain local.' })];
     const { engine } = buildMockEngine({ pages, denyDispatchTelemetry: true });
@@ -857,6 +1058,32 @@ describe('runPhaseProposeTakes — phase integration', () => {
     expect(result.status).toBe('ok');
     expect((result.details as Record<string, unknown>).proposals_inserted).toBe(1);
     expect(transactionAttempts()).toBe(3); // stale-check + failed atomic write + retry
+  });
+
+  test('runtime write-attempt cap disables application transaction retries', async () => {
+    const previous = process.env.GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS;
+    process.env.GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS = '1';
+    try {
+      const pages = [buildPage({ slug: 'wiki/no-write-retry', body: 'One governed claim.' })];
+      const { engine, captured, transactionAttempts } = buildMockEngine({ pages, insertConflicts: 1 });
+      let calls = 0;
+      const result = await runPhaseProposeTakes(buildCtx(engine), {
+        extractor: async () => {
+          calls += 1;
+          return proven([
+            { claim_text: 'No application retry claim', kind: 'take', claim_class: 'judgment', holder: 'brain', weight: 0.7, domain: 'test' },
+          ]);
+        },
+      });
+
+      expect(calls).toBe(1);
+      expect(result.status).toBe('fail');
+      expect(transactionAttempts()).toBe(2); // stale-check + exactly one atomic write
+      expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(1);
+    } finally {
+      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS;
+      else process.env.GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS = previous;
+    }
   });
 
   test('cache hit: page already in take_proposals is skipped', async () => {

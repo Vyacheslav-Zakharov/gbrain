@@ -6,16 +6,52 @@ It intentionally does **not** run the continuous `gbrain autopilot` loop.
 ## Contract
 
 - systemd timer: daily at `03:15` local time with up to 10 minutes randomized delay;
-- one UTC-day attempt ledger prevents duplicate manual or timer starts;
-- one source per run, selected from the hard-coded allowlist;
-- phases: `synthesize_concepts`, then `propose_takes`;
-- no `extract_atoms`, auto-drain, grading, acceptance, publication, or Minion fan-out;
+- one mode-`0600` `pilot-attempted-YYYY-MM-DD.json` marker is created once and
+  never replaced; terminal evidence is written separately to the run receipt;
+  the legacy same-day ledger check prevents duplicate manual or timer starts;
+- the commissioned pilot boundary is `2026-08-19`: earlier legacy canaries do
+  not count toward this pilot, while a dedicated marker before the boundary is
+  invalid and fails closed;
+- exactly three attempted cycles are allowed; each immutable marker reserves
+  `$0.10`, and the reconciled reservation must remain at or below `$0.30`;
+  malformed, missing-sequence, duplicate-day, wrong-mode, or wrong-scope
+  markers fail closed; failures after marker creation consume an attempt;
+- source is hard-coded to `internal-it`;
+- phase: exactly `propose_takes`; the tuple is hard-coded and pinned by a
+  regression test so runtime environment cannot widen the recurring scope;
+- no `synthesize_concepts`, `extract_atoms`, auto-drain, grading, acceptance,
+  publication, or Minion fan-out;
+- producer dispatch is capped at five selected pages through a strict
+  `GBRAIN_PROPOSE_TAKES_PAGE_LIMIT=5` boundary; malformed values fail before
+  scan claims or provider work;
+- producer persistence is capped at ten new pending Takes through strict
+  `GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES=10`; reaching ten stops later provider
+  dispatches, while a response larger than the remaining capacity fails the
+  scan before any proposal from that response is persisted;
+- the production proposal extractor passes `maxRetries=0` to the AI SDK, and
+  `GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS=1` disables claim-write transaction
+  retries; provider transport, application, and whole-cycle retries are all
+  disabled for the pilot;
 - per-phase timeout: 20 minutes; internal phase wall-time: 45 minutes; systemd timeout: 50 minutes, preserving a 5-minute postflight/HOLD margin;
-- preflight refuses nonterminal jobs, pending Takes >20, pending Concepts >10, config drift, missing/mismatched mode-600 `~/.gbrain/state/autopilot-bounded/expected-source-commit`, or SHA-256 mismatch between the installed cycle files and the exact update-guard manifest;
+- preflight refuses every defined nonterminal job state (`waiting`, `active`,
+  `delayed`, `waiting-children`, `paused`), pending Takes >10, pending Concepts
+  >10, config drift, missing/mismatched mode-600
+  `~/.gbrain/state/autopilot-bounded/expected-source-commit`, SHA-256 mismatch
+  between installed cycle files and the exact update-guard manifest, or drift
+  in the runner/wrapper/service/timer chain;
 - postflight always takes an initial snapshot; if any new Take/Concept proposal exists, it waits 75 seconds (longer than the 60-second assignment synchronizer interval) and resnapshots even when a phase is partial/failed, so delayed review-round writes cannot race past the receipt; failures with no new review target are not delayed; settlement improves attribution but never clears an independent phase failure, so a failed phase with one exact late assignment remains `phase_failure` rather than `automatic_owner_decision`;
-- postflight creates `HOLD.json` on phase failure, any cross-source proposal/canonical fingerprint change, any review event other than (a) the exact one-to-one `system:propose_takes` supersede event paired with an allowed source-local transition or (b) the exact one-to-one `system:assignment-sync` `round_opened` event with validated state/detail shape for each new source-local pending proposal, any disallowed proposal mutation/deletion, any canonical Take/Concept full-row SHA-256 change, >10 gross new Take proposal IDs, or >5 gross new Concept proposal IDs; the only accepted `warn` is `propose_takes` under top-level `partial`, with exact `budget_exhausted=true`, 1–10 reported inserted proposals, exactly one warning matching the producer's complete budget-exhaustion format, and a postflight-equal count of actual new source-local pending Take IDs, because this is the expected hard-cap stop after bounded positive progress;
-- configured phase envelope is `$0.35/run` (`$0.25` Concepts + `$0.10` Takes); both proposal phases use strict canonical-model-priced pre-dispatch worst-case reservations, while combined actual invoice attribution remains incomplete and must not be claimed as exact provider spend;
-- all generated review objects must remain `pending` and canonical Concepts are not published.
+- postflight creates `HOLD.json` on phase failure, any cross-source proposal/canonical fingerprint change, any review event other than (a) the exact one-to-one `system:propose_takes` supersede event paired with an allowed source-local transition or (b) the exact one-to-one `system:assignment-sync` `round_opened` event with validated state/detail shape for each new source-local pending proposal, any disallowed proposal mutation/deletion, any canonical Take/Concept full-row SHA-256 change, >10 gross new Take proposal IDs, or any new Concept proposal ID; the only accepted `warn` is `propose_takes` under top-level `partial`, with exact `budget_exhausted=true`, 1–10 reported inserted proposals, exactly one warning matching the producer's complete budget-exhaustion format, and a postflight-equal count of actual new source-local pending Take IDs, because this is the expected hard-cap stop after bounded positive progress;
+- configured recurring envelope is `$0.10/run` for Takes. The existing Concept
+  budget config is still read back as a drift signal, but the Concept phase is
+  not in the executable tuple;
+- all generated Take review objects must remain `pending`; no Concept proposal
+  may be generated by this runner.
+- before any guard, DB, or provider-capable work, the runner durably writes an
+  in-progress `HOLD.json` and then its immutable attempt marker. The HOLD is
+  finalized after success or ordinary failure; timeout, termination, SIGKILL,
+  or host failure leaves the in-progress HOLD fail-closed;
+  another UTC-day cycle requires a new governed clearance. After the third
+  attempt, the pilot remains held pending a separate governance decision.
 
 ## Required DB configuration
 
@@ -31,18 +67,29 @@ cycle.enrich_thin.enabled=false
 
 ```text
 ~/.gbrain/autopilot-bounded-run.py
-~/.gbrain/autopilot-bounded-run.sh
 ~/.gbrain/autopilot-venv/  # dedicated Python venv; require psycopg[binary]==3.3.4
 ~/.config/systemd/user/gbrain-autopilot.service
 ~/.config/systemd/user/gbrain-autopilot.timer
 ~/.gbrain/state/autopilot-bounded/
+~/.gbrain/state/autopilot-bounded/runtime.sha256
 ```
 
-The installed files must be byte-identical to this directory's Git-backed copies. Provision the runner dependency in an isolated venv before any canary:
+The installed files must be byte-identical to this directory's Git-backed
+copies. systemd always reaches the runner after HOLD clearance; the runner first
+creates durable in-progress HOLD/attempt evidence, then requires the manifest
+to be owner-controlled, mode `0600`, complete, identical to installed bytes,
+and identical to the same paths in `~/work/gbrain` at the pinned exact commit.
+The private commit-derived manifest must also attest `src/core/ai/gateway.ts`,
+which carries `maxRetries=0` to the provider SDK, together with the service,
+timer, and stdlib-first runner; the update guard independently attests the
+cycle and proposal files. Provision the runner dependency in an isolated venv
+before any canary:
 
 ```bash
-python3 -m venv ~/.gbrain/autopilot-venv
+/usr/bin/python3 -m venv ~/.gbrain/autopilot-venv
 ~/.gbrain/autopilot-venv/bin/pip install 'psycopg[binary]==3.3.4'
+test "$(~/.gbrain/autopilot-venv/bin/python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = \
+  "$(/usr/bin/python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 ~/.gbrain/autopilot-venv/bin/python -c 'import psycopg; assert psycopg.__version__ == "3.3.4"'
 ```
 
@@ -53,8 +100,26 @@ Only after exact-SHA runtime deployment, source-scope dry-run, config read-back,
 ```bash
 install -m 600 /dev/null ~/.gbrain/state/autopilot-bounded/expected-source-commit
 printf '%s\n' "$DEPLOYED_COMMIT" > ~/.gbrain/state/autopilot-bounded/expected-source-commit
+runtime_manifest=~/.gbrain/state/autopilot-bounded/runtime.sha256
+runtime_manifest_tmp="${runtime_manifest}.tmp"
+source_repo=~/work/gbrain
+: > "$runtime_manifest_tmp"
+while IFS='|' read -r source_path installed_path; do
+  expected_hash="$(git -C "$source_repo" show "$DEPLOYED_COMMIT:$source_path" | sha256sum | cut -d' ' -f1)"
+  test "$(sha256sum "$installed_path" | cut -d' ' -f1)" = "$expected_hash"
+  printf '%s  %s\n' "$expected_hash" "$installed_path" >> "$runtime_manifest_tmp"
+done <<EOF
+src/core/ai/gateway.ts|$HOME/.bun/install/global/node_modules/gbrain/src/core/ai/gateway.ts
+ops/autopilot-bounded/autopilot-bounded-run.py|$HOME/.gbrain/autopilot-bounded-run.py
+ops/autopilot-bounded/gbrain-autopilot.service|$HOME/.config/systemd/user/gbrain-autopilot.service
+ops/autopilot-bounded/gbrain-autopilot.timer|$HOME/.config/systemd/user/gbrain-autopilot.timer
+EOF
+chmod 600 "$runtime_manifest_tmp"
+mv "$runtime_manifest_tmp" "$runtime_manifest"
 test "$(cat ~/.gbrain/state/autopilot-bounded/expected-source-commit)" = \
   "$(jq -r .source_commit ~/.gbrain/update-guard/gbrain-customizations/0.42.53.0/manifest.json)"
+touch ~/.gbrain/autopilot-bounded.log ~/.gbrain/autopilot-bounded.err
+chmod 600 ~/.gbrain/autopilot-bounded.log ~/.gbrain/autopilot-bounded.err
 systemctl --user daemon-reload
 systemctl --user enable --now gbrain-autopilot.timer
 ```
@@ -72,8 +137,9 @@ systemctl --user status gbrain-autopilot.timer --no-pager
 systemctl --user list-timers gbrain-autopilot.timer --no-pager
 python3 -m py_compile ~/.gbrain/autopilot-bounded-run.py
 systemd-analyze --user verify ~/.config/systemd/user/gbrain-autopilot.service ~/.config/systemd/user/gbrain-autopilot.timer
-stat -c '%a %n' ~/.gbrain/autopilot-bounded-run.sh  # require executable mode (700 or 755)
-sha256sum ~/.gbrain/autopilot-bounded-run.{sh,py}
+stat -c '%a %n' ~/.gbrain/state/autopilot-bounded/runtime.sha256  # require 600
+stat -c '%a %n' ~/.gbrain/autopilot-bounded.log ~/.gbrain/autopilot-bounded.err  # require 600
+sha256sum --strict --status --check ~/.gbrain/state/autopilot-bounded/runtime.sha256
 ```
 
 Inspect the newest `~/.gbrain/state/autopilot-bounded/<run-id>/receipt.json` and require:
@@ -88,7 +154,12 @@ deltas.canonical_take_row_changes=0
 deltas.canonical_concept_row_changes=0
 deltas.nonterminal_jobs=0
 len(deltas.gross_new_take_ids)<=10
-len(deltas.gross_new_concept_ids)<=5
+len(deltas.gross_new_concept_ids)==0
+configured_phases=["propose_takes"]
+provider_page_cap=5
+external_runtime_source_commit=<exact reviewed SHA>
+external_runtime_source_hash_parity=true
+external_runtime_hash_parity=true
 auto_accept_publish_verified=true
 auto_drain=false
 ```

@@ -6,7 +6,8 @@ ConditionPathExists=!%h/.gbrain/state/autopilot-bounded/HOLD.json
 
 [Service]
 Type=oneshot
-ExecStart=%h/.gbrain/autopilot-bounded-run.sh
+UMask=0077
+ExecStart=/usr/bin/python3 %h/.gbrain/autopilot-bounded-run.py
 TimeoutStartSec=50min
 KillMode=control-group
 StandardOutput=append:%h/.gbrain/autopilot-bounded.log
