@@ -10,6 +10,7 @@ import {
   getMeetingReviewItem,
   isCanonicalMeetingPersonSlug,
   listMeetingReviewItems,
+  MEETING_INTERNAL_SOURCE_OPTIONS,
   rejectMeetingReview,
   saveMeetingReviewResolution,
   type MeetingReviewPaths,
@@ -217,6 +218,14 @@ describe('meeting review queue', () => {
     await expect(saveMeetingReviewResolution('abcd1234', {
       expected_generated_at: '2026-07-30T00:00:00Z', route_source: 'internal-secret', note: '',
     }, 'reviewer@example.com', { paths })).rejects.toThrow('invalid internal source');
+  });
+
+  test('offers logistics and motor transport as a canonical meeting route', () => {
+    expect(MEETING_INTERNAL_SOURCE_OPTIONS).toContainEqual({
+      id: 'internal-logistics',
+      label: 'Логистика и автотранспорт',
+      description: 'Автотранспорт, рейсы, ремонты, топливо, телематика и логистические процессы.',
+    });
   });
 
   test('uses the exact producer-compatible canonical person slug predicate', () => {

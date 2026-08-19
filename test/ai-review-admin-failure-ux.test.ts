@@ -98,6 +98,7 @@ describe('AI Review admin failure UX', () => {
     const serveSource = readFileSync(new URL('../src/commands/serve-http.ts', import.meta.url), 'utf8');
     expect(source).toContain('api.meetingReviewSources');
     expect(source).toContain('api.meetingReviewEntities');
+    expect(source).toContain("'internal-logistics': 'Логистика и автотранспорт'");
     expect(source).toContain('api.meetingReviewResolution');
     expect(source).toContain('Предварительно предложено');
     expect(source).toContain('Не выбрано');

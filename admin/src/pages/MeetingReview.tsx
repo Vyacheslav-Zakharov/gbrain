@@ -80,6 +80,7 @@ const SOURCE_LABELS: Record<string, string> = {
   'internal-accounting': 'Бухгалтерия',
   'internal-hr': 'Кадры',
   'internal-legal': 'Юридическая служба',
+  'internal-logistics': 'Логистика и автотранспорт',
   'internal-procurement': 'Снабжение и закупки',
   'internal-production': 'Производство',
   'internal-sales-marketing': 'Продажи и маркетинг',

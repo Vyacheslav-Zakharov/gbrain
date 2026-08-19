@@ -13,6 +13,7 @@ export const MEETING_INTERNAL_SOURCE_OPTIONS = [
   { id: 'internal-accounting', label: 'Бухгалтерия', description: 'Учёт, налоги, платежи и финансовая отчётность.' },
   { id: 'internal-hr', label: 'Кадры', description: 'Персонал, роли, аттестация и кадровые решения.' },
   { id: 'internal-legal', label: 'Юридическая служба', description: 'Договоры, претензии и правовые вопросы.' },
+  { id: 'internal-logistics', label: 'Логистика и автотранспорт', description: 'Автотранспорт, рейсы, ремонты, топливо, телематика и логистические процессы.' },
   { id: 'internal-procurement', label: 'Снабжение и закупки', description: 'Поставщики, закупки, заявки и условия поставки.' },
   { id: 'internal-production', label: 'Производство', description: 'Оборудование, ремонты, ТОиР и производственные процессы.' },
   { id: 'internal-sales-marketing', label: 'Продажи и маркетинг', description: 'Клиенты, продажи, дебиторка и коммерческие условия.' },
