@@ -238,15 +238,31 @@ test('proposal selection does not collapse suffix-related pages with different e
   ]);
 });
 
-test('proposal selection pays for only one exact-content copy per source', () => {
+test('proposal selection pays for only one exact compiled-truth copy despite stale stored hashes', () => {
   const pages = [
-    buildPage({ slug: 'digital/systems/zup-change', body: 'canonical evidence', contentHash: 'sha256:shared', type: 'system' }),
-    buildPage({ slug: 'ит/digital/systems/zup-change', body: 'routed evidence', contentHash: 'sha256:shared', type: 'system' }),
+    buildPage({ slug: 'digital/systems/zup-change', body: 'same exact evidence', contentHash: 'sha256:stale-a', type: 'system' }),
+    buildPage({ slug: 'ит/digital/systems/zup-change', body: 'same exact evidence', contentHash: 'sha256:stale-b', type: 'system' }),
   ];
 
-  expect(selectProposeTakePages(pages, 10).map(page => page.slug)).toEqual([
+  const selection = selectProposeTakePagesWithDiagnostics(pages, 10);
+  expect(selection.pages.map(page => page.slug)).toEqual([
     'digital/systems/zup-change',
   ]);
+  expect(selection.diagnostics.exact_content_duplicates_suppressed).toBe(1);
+});
+
+test('proposal selection does not collapse distinct compiled truth when stored hashes collide', () => {
+  const pages = [
+    buildPage({ slug: 'digital/systems/zup-change', body: 'canonical evidence', contentHash: 'sha256:stale-shared', type: 'system' }),
+    buildPage({ slug: 'ит/digital/systems/zup-change', body: 'different routed evidence', contentHash: 'sha256:stale-shared', type: 'system' }),
+  ];
+
+  const selection = selectProposeTakePagesWithDiagnostics(pages, 10);
+  expect(selection.pages.map(page => page.slug)).toEqual([
+    'digital/systems/zup-change',
+    'ит/digital/systems/zup-change',
+  ]);
+  expect(selection.diagnostics.exact_content_duplicates_suppressed).toBe(0);
 });
 
 test('proposal selection round-robins top-level clusters while preserving recency within each cluster', () => {

@@ -86,7 +86,7 @@ function proposalSelectionCluster(slug: string): string {
 
 function hasSameExactContent(left: Page, right: Page): boolean {
   if ((left.source_id ?? '') !== (right.source_id ?? '')) return false;
-  return Boolean(left.content_hash && left.content_hash === right.content_hash);
+  return (left.compiled_truth ?? '') === (right.compiled_truth ?? '');
 }
 
 function pageIsWithinSourceScope(
