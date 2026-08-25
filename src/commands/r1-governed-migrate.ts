@@ -6,6 +6,7 @@ import { configureGateway, embed, resetGateway } from '../core/ai/gateway.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import {
   R1_BACKUP_COLUMN,
+  R1_ADVISORY_LOCK_KEY,
   R1_COMPLETED_KEY,
   R1_SHADOW_COLUMN,
   R1_STATE_KEY,
@@ -14,6 +15,8 @@ import {
   R1_WRITER_FENCE_KEY,
   R1_WRITER_FENCE_TABLES,
   assertR1DatabaseTarget,
+  assertR1CompletionReality,
+  assertR1EnvTarget,
   assertReadyForCutover,
   buildCutoverStatements,
   buildRollbackStatements,
@@ -27,6 +30,7 @@ import {
   type R1CutoverStatus,
   type R1MigrationArgs,
   type R1MigrationIdentity,
+  type R1CompletionReality,
 } from '../core/r1-governed-migration.ts';
 
 interface ColumnRow { type: string }
@@ -136,6 +140,57 @@ async function activeEmbedJobs(sql: Sql): Promise<number> {
   return Number(rows[0]?.n ?? 0);
 }
 
+function parseRegistryColumns(raw: string | null): string[] {
+  if (!raw) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { throw new Error('embedding_columns registry is corrupt'); }
+  const names = Array.isArray(parsed)
+    ? parsed.map((entry) => typeof entry === 'string' ? entry : (entry && typeof entry === 'object' ? String((entry as any).column ?? '') : ''))
+    : parsed && typeof parsed === 'object' ? Object.keys(parsed as Record<string, unknown>) : [];
+  return [...new Set(names.filter((name) => name && name !== 'embedding'))].sort();
+}
+
+async function readCompletionReality(sql: Sql): Promise<R1CompletionReality> {
+  const signature = `${R1_TARGET_MODEL}:${R1_TARGET_DIMENSIONS}`;
+  const counts = (await sql.unsafe(`
+    SELECT
+      (SELECT count(*)::int FROM content_chunks) AS content_total,
+      (SELECT count(embedding)::int FROM content_chunks) AS content_populated,
+      (SELECT count(${R1_BACKUP_COLUMN})::int FROM facts) AS facts_expected,
+      (SELECT count(embedding)::int FROM facts) AS facts_populated,
+      (SELECT count(*)::int FROM query_cache) AS query_cache_rows,
+      (SELECT count(embedding)::int FROM takes) AS takes_populated,
+      (SELECT count(*)::int FROM pages p WHERE p.embedding_signature=$1 AND EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND (c.embedding IS NULL OR c.model<>$2))) AS false_target_signatures,
+      (SELECT count(*)::int FROM pages p WHERE p.embedding_signature IS NULL AND EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id)) AS null_signatures_with_chunks`,
+    [signature, R1_TARGET_MODEL],
+  ) as Array<Record<string, number>>)[0] ?? {};
+  const sample = (await sql.unsafe(`SELECT id,chunk_text FROM content_chunks WHERE embedding IS NOT NULL ORDER BY id LIMIT 1`) as Array<{ id: number; chunk_text: string }>)[0];
+  let vectorRoundtripOk = false;
+  if (sample) {
+    const vectors = await embed([sample.chunk_text], { embeddingModel: R1_TARGET_MODEL, dimensions: R1_TARGET_DIMENSIONS, inputType: 'query', maxRetries: 1 });
+    const hits = await sql.unsafe(`SELECT id FROM content_chunks WHERE embedding IS NOT NULL ORDER BY embedding <=> $1::vector LIMIT 1`, [vectorLiteral(vectors[0])]) as Array<{ id: number }>;
+    vectorRoundtripOk = hits.length === 1;
+  }
+  return {
+    current_model: await getConfig(sql, 'embedding_model'),
+    current_dimensions: Number(await getConfig(sql, 'embedding_dimensions')) || null,
+    content_primary_type: await columnType(sql, 'content_chunks', 'embedding'),
+    content_total: Number(counts.content_total ?? 0), content_populated: Number(counts.content_populated ?? 0),
+    facts_primary_type: await columnType(sql, 'facts', 'embedding'),
+    facts_expected: Number(counts.facts_expected ?? 0), facts_populated: Number(counts.facts_populated ?? 0),
+    query_cache_type: await columnType(sql, 'query_cache', 'embedding'), query_cache_rows: Number(counts.query_cache_rows ?? 0),
+    takes_populated: Number(counts.takes_populated ?? 0),
+    image_type: await columnType(sql, 'content_chunks', 'embedding_image'),
+    multimodal_type: await columnType(sql, 'content_chunks', 'embedding_multimodal'),
+    false_target_signatures: Number(counts.false_target_signatures ?? 0),
+    null_signatures_with_chunks: Number(counts.null_signatures_with_chunks ?? 0),
+    active_embed_jobs: await activeEmbedJobs(sql),
+    custom_registry_columns: parseRegistryColumns(await getConfig(sql, 'embedding_columns')),
+    scalar_watermark: Number(await getConfig(sql, 'version')),
+    vector_roundtrip_ok: vectorRoundtripOk,
+  };
+}
+
 async function existingFenceTables(sql: Sql): Promise<string[]> {
   const out: string[] = [];
   for (const table of R1_WRITER_FENCE_TABLES) if (await tableExists(sql, table)) out.push(table);
@@ -161,6 +216,7 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
   if (!args.expectedCandidateSha || !args.implementationChecksum) {
     throw new Error('--prepare requires --expected-candidate-sha and --implementation-checksum');
   }
+  assertR1EnvTarget(process.env, 'target');
   const identity = buildR1MigrationIdentity(args.expectedCandidateSha, args.implementationChecksum);
   const fingerprint = identityFingerprint(identity);
   const currentStateRaw = await getConfig(sql, R1_STATE_KEY);
@@ -220,6 +276,7 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
     batches++;
     state.updated_at = nowIso();
     await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
+    if (args.stopAfterBatches > 0 && batches >= args.stopAfterBatches) throw new Error(`R1_CONTROLLED_STOP_AFTER_BATCHES:${batches}`);
     if (args.paceMs > 0) await Bun.sleep(args.paceMs);
   }
   while (true) {
@@ -242,6 +299,7 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
     batches++;
     state.updated_at = nowIso();
     await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
+    if (args.stopAfterBatches > 0 && batches >= args.stopAfterBatches) throw new Error(`R1_CONTROLLED_STOP_AFTER_BATCHES:${batches}`);
     if (args.paceMs > 0) await Bun.sleep(args.paceMs);
   }
   await sql.unsafe(`CREATE INDEX IF NOT EXISTS idx_chunks_${R1_SHADOW_COLUMN} ON content_chunks USING hnsw (${R1_SHADOW_COLUMN} vector_cosine_ops) WHERE ${R1_SHADOW_COLUMN} IS NOT NULL`);
@@ -253,25 +311,30 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
 
 async function cutover(sql: Sql, args: R1MigrationArgs): Promise<Record<string, unknown>> {
   if (!args.yes) throw new Error('--cutover requires --yes');
-  if (process.env.GBRAIN_EMBEDDING_MODEL !== R1_TARGET_MODEL || process.env.GBRAIN_EMBEDDING_DIMENSIONS !== String(R1_TARGET_DIMENSIONS)) {
-    throw new Error(`Cutover requires GBRAIN_EMBEDDING_MODEL=${R1_TARGET_MODEL} and GBRAIN_EMBEDDING_DIMENSIONS=${R1_TARGET_DIMENSIONS}`);
-  }
+  assertR1EnvTarget(process.env, 'target');
   const stateRaw = await getConfig(sql, R1_STATE_KEY);
   if (!stateRaw) throw new Error('No active R1 migration marker');
   const state = JSON.parse(stateRaw) as StateEnvelope;
   if (args.expectedCandidateSha && state.identity.candidate_sha !== args.expectedCandidateSha) throw new Error('Candidate SHA differs from active marker');
   const status = await readStatus(sql);
-  assertReadyForCutover(status);
-  await sql.begin(async (tx) => {
-    await tx.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
-    for (const statement of buildCutoverStatements()) await tx.unsafe(statement);
-    await tx.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.enabled','false') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
-    await tx.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.model','voyage:rerank-2.5') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
-  });
+  const alreadyCutover = status.content_chunks.primary_type === 'vector(768)' && (status.content_chunks as any).backup_type === 'vector(1280)';
+  if (!alreadyCutover) {
+    assertReadyForCutover(status);
+    state.phase = 'cutover'; state.updated_at = nowIso();
+    await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
+    await sql.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
+      for (const statement of buildCutoverStatements()) await tx.unsafe(statement);
+      await tx.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.enabled','false') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
+      await tx.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.model','voyage:rerank-2.5') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
+    });
+  }
+  const completion = await readCompletionReality(sql);
+  assertR1CompletionReality(completion);
   state.phase = 'completed'; state.updated_at = nowIso();
-  await setConfig(sql, R1_COMPLETED_KEY, JSON.stringify({ ...state, completed_at: nowIso() }));
+  await setConfig(sql, R1_COMPLETED_KEY, JSON.stringify({ ...state, completed_at: nowIso(), completion }));
   await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
-  return { status: 'cutover_complete', state, ...(await readStatus(sql)) };
+  return { status: 'cutover_complete', state, completion, ...(await readStatus(sql)) };
 }
 
 async function disableFence(sql: Sql, args: R1MigrationArgs): Promise<Record<string, unknown>> {
@@ -288,9 +351,7 @@ async function rollback(sql: Sql, args: R1MigrationArgs): Promise<Record<string,
   if (!stateRaw) throw new Error('No R1 migration marker available for rollback');
   const state = JSON.parse(stateRaw) as StateEnvelope;
   if (state.phase !== 'completed') throw new Error(`Rollback requires completed cutover state, got ${state.phase}`);
-  if (process.env.GBRAIN_EMBEDDING_MODEL !== state.from_model || process.env.GBRAIN_EMBEDDING_DIMENSIONS !== String(state.from_dimensions)) {
-    throw new Error(`Rollback requires GBRAIN_EMBEDDING_MODEL=${state.from_model} and GBRAIN_EMBEDDING_DIMENSIONS=${state.from_dimensions}`);
-  }
+  assertR1EnvTarget(process.env, 'source', state.from_model, state.from_dimensions);
   const status = await readStatus(sql);
   if (!status.writer_fence_active) throw new Error('Rollback requires the writer fence to remain active');
   if (status.content_chunks.primary_type !== 'vector(768)' || (status.content_chunks as any).backup_type !== 'vector(1280)') {
@@ -319,7 +380,13 @@ async function main(): Promise<void> {
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
   assertR1DatabaseTarget(databaseUrl, args.target, process.env.R1_MIGRATION_CLONE_ACK, process.env.R1_MIGRATION_PRODUCTION_GO);
   const sql = postgres(databaseUrl, { max: 1, connect_timeout: 10, idle_timeout: 30 });
+  let lockHeld = false;
   try {
+    if (args.mode !== 'status' && args.mode !== 'dry-run') {
+      const lock = await sql.unsafe('SELECT pg_try_advisory_lock($1) AS ok', [R1_ADVISORY_LOCK_KEY]) as Array<{ ok: boolean }>;
+      if (lock[0]?.ok !== true) throw new Error('Another Avers R1 migration runner holds the global lock');
+      lockHeld = true;
+    }
     const result = args.mode === 'status' || args.mode === 'dry-run'
       ? { status: args.mode, ...(await readStatus(sql)), active_embed_jobs: await activeEmbedJobs(sql) }
       : args.mode === 'prepare' ? await prepare(sql, args)
@@ -331,6 +398,7 @@ async function main(): Promise<void> {
     process.stdout.write(output);
   } finally {
     resetGateway();
+    if (lockHeld) await sql.unsafe('SELECT pg_advisory_unlock($1)', [R1_ADVISORY_LOCK_KEY]).catch(() => {});
     await sql.end({ timeout: 5 });
   }
 }

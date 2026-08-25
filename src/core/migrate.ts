@@ -1,6 +1,6 @@
 import type { BrainEngine } from './engine.ts';
 import { slugifyPath } from './sync.ts';
-import { resolveMigrationFence, type MigrationFenceStatus } from './migration-fence.ts';
+import { assertSchemaMutationAllowed, resolveMigrationFence, type MigrationFenceStatus } from './migration-fence.ts';
 
 /**
  * Schema migrations — run automatically on initSchema().
@@ -6581,6 +6581,7 @@ export function isDeadlockError(err: unknown): boolean {
 }
 
 export async function runMigrations(engine: BrainEngine): Promise<{ applied: number; current: number }> {
+  assertSchemaMutationAllowed();
   const currentStr = await engine.getConfig('version');
   const current = parseInt(currentStr || '1', 10);
 

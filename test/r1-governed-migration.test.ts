@@ -12,18 +12,21 @@ import {
   parseR1MigrationArgs,
   R1_WRITER_FENCE_TABLES,
   assertReadyForCutover,
+  assertR1EnvTarget,
+  assertR1CompletionReality,
   resolveContentPlaneCounts,
 } from '../src/core/r1-governed-migration.ts';
 
 describe('R1 governed embedding migration contract', () => {
   test('accepts exactly one explicit mode and bounded pacing', () => {
     expect(parseR1MigrationArgs(['--status'])).toMatchObject({ mode: 'status', batchSize: 64, paceMs: 0 });
-    expect(parseR1MigrationArgs(['--prepare', '--yes', '--batch-size', '32', '--pace-ms', '25'])).toMatchObject({
-      mode: 'prepare', yes: true, batchSize: 32, paceMs: 25,
+    expect(parseR1MigrationArgs(['--prepare', '--yes', '--batch-size', '32', '--pace-ms', '25', '--stop-after-batches', '2'])).toMatchObject({
+      mode: 'prepare', yes: true, batchSize: 32, paceMs: 25, stopAfterBatches: 2,
     });
     expect(() => parseR1MigrationArgs(['--prepare', '--cutover'])).toThrow('exactly one mode');
     expect(() => parseR1MigrationArgs(['--prepare', '--batch-size', '0'])).toThrow('--batch-size');
     expect(() => parseR1MigrationArgs(['--prepare', '--pace-ms', '-1'])).toThrow('--pace-ms');
+    expect(() => parseR1MigrationArgs(['--prepare', '--target', 'production', '--stop-after-batches', '1'])).toThrow('clone-only');
   });
 
   test('requires explicit clone identity or separately guarded production acknowledgement', () => {
@@ -96,5 +99,33 @@ describe('R1 governed embedding migration contract', () => {
   test('status preserves total chunk count before the shadow column exists', () => {
     expect(resolveContentPlaneCounts(null, undefined, 4746)).toEqual({ total: 4746, populated: 0 });
     expect(resolveContentPlaneCounts('vector(768)', { total: 4746, populated: 120 }, 4746)).toEqual({ total: 4746, populated: 120 });
+  });
+
+  test('refuses conflicting embedding environment before mutation', () => {
+    expect(() => assertR1EnvTarget({ GBRAIN_EMBEDDING_MODEL: 'zeroentropyai:zembed-1' }, 'target')).toThrow('conflicts');
+    expect(() => assertR1EnvTarget({ GBRAIN_EMBEDDING_MODEL: 'google:gemini-embedding-001', GBRAIN_EMBEDDING_DIMENSIONS: '768' }, 'target')).not.toThrow();
+    expect(() => assertR1EnvTarget({ GBRAIN_EMBEDDING_MODEL: 'zeroentropyai:zembed-1', GBRAIN_EMBEDDING_DIMENSIONS: '1280' }, 'source', 'zeroentropyai:zembed-1', 1280)).not.toThrow();
+  });
+
+  test('completion is derived from database reality, signatures, registry, watermark, and smoke', () => {
+    const good = {
+      current_model: 'google:gemini-embedding-001', current_dimensions: 768,
+      content_primary_type: 'vector(768)', content_total: 4746, content_populated: 4746,
+      facts_primary_type: 'vector(768)', facts_expected: 68, facts_populated: 68,
+      query_cache_type: 'vector(768)', query_cache_rows: 0,
+      takes_populated: 0, image_type: 'vector(1024)', multimodal_type: 'vector(1024)',
+      false_target_signatures: 0, null_signatures_with_chunks: 0,
+      active_embed_jobs: 0, custom_registry_columns: [], scalar_watermark: 140,
+      vector_roundtrip_ok: true,
+    };
+    expect(() => assertR1CompletionReality(good)).not.toThrow();
+    expect(() => assertR1CompletionReality({ ...good, null_signatures_with_chunks: 1 })).toThrow('signature');
+    expect(() => assertR1CompletionReality({ ...good, custom_registry_columns: ['embedding_other'] })).toThrow('registry');
+    expect(() => assertR1CompletionReality({ ...good, scalar_watermark: 141 })).toThrow('watermark');
+  });
+
+  test('writer manifest covers background job control as well as content planes', () => {
+    expect(R1_WRITER_FENCE_TABLES).toContain('minion_jobs');
+    expect(R1_WRITER_FENCE_TABLES).toContain('mcp_request_log');
   });
 });

@@ -3,6 +3,7 @@ import { GBrainError, type EngineConfig } from './types.ts';
 import { SCHEMA_SQL } from './schema-embedded.ts';
 import type { BrainEngine } from './engine.ts';
 import { verifySchema } from './schema-verify.ts';
+import { assertSchemaMutationAllowed } from './migration-fence.ts';
 
 let sql: ReturnType<typeof postgres> | null = null;
 let connectedUrl: string | null = null;
@@ -303,6 +304,7 @@ export async function disconnect(): Promise<void> {
 }
 
 export async function initSchema(): Promise<void> {
+  assertSchemaMutationAllowed();
   const conn = getConnection();
   // Advisory lock prevents concurrent initSchema() calls from deadlocking
   await conn`SELECT pg_advisory_lock(42)`;

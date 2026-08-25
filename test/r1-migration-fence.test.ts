@@ -39,5 +39,7 @@ describe('R1 automatic migration fence', () => {
     for (const rel of ['../src/core/postgres-engine.ts', '../src/core/pglite-engine.ts']) {
       expect(readFileSync(new URL(rel, import.meta.url), 'utf8')).toContain('assertSchemaMutationAllowed');
     }
+    expect(readFileSync(new URL('../src/core/db.ts', import.meta.url), 'utf8')).toContain('assertSchemaMutationAllowed');
+    expect(readFileSync(new URL('../src/core/migrate.ts', import.meta.url), 'utf8')).toContain('assertSchemaMutationAllowed');
   });
 });

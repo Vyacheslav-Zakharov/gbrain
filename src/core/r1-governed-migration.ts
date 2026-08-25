@@ -14,7 +14,9 @@ export const R1_WRITER_FENCE_TABLES = [
   'pages', 'content_chunks', 'facts', 'takes', 'links', 'timeline_entries',
   'query_cache', 'sources', 'source_sync_state', 'source_ingest_runs',
   'source_ingest_run_items', 'take_proposals', 'concept_proposals',
+  'minion_jobs', 'mcp_request_log', 'ingest_log', 'eval_candidates',
 ] as const;
+export const R1_ADVISORY_LOCK_KEY = 7_671_003_001;
 
 export type R1MigrationMode = 'status' | 'dry-run' | 'prepare' | 'cutover' | 'rollback' | 'disable-fence';
 export type R1Target = 'clone' | 'production';
@@ -26,6 +28,7 @@ export interface R1MigrationArgs {
   noEmbed: boolean;
   batchSize: number;
   paceMs: number;
+  stopAfterBatches: number;
   receipt?: string;
   expectedCandidateSha?: string;
   implementationChecksum?: string;
@@ -53,6 +56,9 @@ export function parseR1MigrationArgs(argv: string[]): R1MigrationArgs {
   }
   const targetRaw = argValue(argv, '--target') ?? 'clone';
   if (targetRaw !== 'clone' && targetRaw !== 'production') throw new Error('--target must be clone or production');
+  const stopAfterBatches = Number(argValue(argv, '--stop-after-batches') ?? '0');
+  if (!Number.isInteger(stopAfterBatches) || stopAfterBatches < 0 || stopAfterBatches > 10_000) throw new Error('--stop-after-batches must be in [0,10000]');
+  if (targetRaw === 'production' && stopAfterBatches > 0) throw new Error('--stop-after-batches is clone-only');
   const receipt = argValue(argv, '--receipt');
   if (argv.includes('--receipt') && !receipt) throw new Error('--receipt requires a path');
   return {
@@ -62,6 +68,7 @@ export function parseR1MigrationArgs(argv: string[]): R1MigrationArgs {
     noEmbed: argv.includes('--no-embed'),
     batchSize,
     paceMs,
+    stopAfterBatches,
     ...(receipt ? { receipt } : {}),
     ...(argValue(argv, '--expected-candidate-sha') ? { expectedCandidateSha: argValue(argv, '--expected-candidate-sha') } : {}),
     ...(argValue(argv, '--implementation-checksum') ? { implementationChecksum: argValue(argv, '--implementation-checksum') } : {}),
@@ -83,6 +90,23 @@ export function assertR1DatabaseTarget(
     throw new Error('Refusing production target without separate explicit G5 production GO');
   }
   return parsed;
+}
+
+export function assertR1EnvTarget(
+  env: NodeJS.ProcessEnv,
+  expected: 'target' | 'source',
+  sourceModel?: string,
+  sourceDimensions?: number,
+): void {
+  const model = expected === 'target' ? R1_TARGET_MODEL : sourceModel;
+  const dimensions = expected === 'target' ? R1_TARGET_DIMENSIONS : sourceDimensions;
+  if (!model || !dimensions) throw new Error('Source embedding identity is required');
+  if (env.GBRAIN_EMBEDDING_MODEL && env.GBRAIN_EMBEDDING_MODEL !== model) {
+    throw new Error(`GBRAIN_EMBEDDING_MODEL conflicts with the ${expected} migration identity`);
+  }
+  if (env.GBRAIN_EMBEDDING_DIMENSIONS && env.GBRAIN_EMBEDDING_DIMENSIONS !== String(dimensions)) {
+    throw new Error(`GBRAIN_EMBEDDING_DIMENSIONS conflicts with the ${expected} migration identity`);
+  }
 }
 
 export interface R1MigrationIdentity {
@@ -160,6 +184,42 @@ export interface R1CutoverStatus {
   facts: { total_populated: number; shadow_populated: number; primary_type: string | null; shadow_type: string | null };
   query_cache: { primary_type: string | null };
   takes: { total_populated: number; primary_type: string | null };
+}
+
+export interface R1CompletionReality {
+  current_model: string | null;
+  current_dimensions: number | null;
+  content_primary_type: string | null;
+  content_total: number;
+  content_populated: number;
+  facts_primary_type: string | null;
+  facts_expected: number;
+  facts_populated: number;
+  query_cache_type: string | null;
+  query_cache_rows: number;
+  takes_populated: number;
+  image_type: string | null;
+  multimodal_type: string | null;
+  false_target_signatures: number;
+  null_signatures_with_chunks: number;
+  active_embed_jobs: number;
+  custom_registry_columns: string[];
+  scalar_watermark: number;
+  vector_roundtrip_ok: boolean;
+}
+
+export function assertR1CompletionReality(r: R1CompletionReality): void {
+  if (r.current_model !== R1_TARGET_MODEL || r.current_dimensions !== R1_TARGET_DIMENSIONS) throw new Error('completion config identity mismatch');
+  if (r.content_primary_type !== 'vector(768)' || r.content_populated !== r.content_total) throw new Error('completion content plane mismatch');
+  if (r.facts_primary_type !== 'vector(768)' || r.facts_populated !== r.facts_expected) throw new Error('completion facts plane mismatch');
+  if (r.query_cache_type !== 'vector(768)' || r.query_cache_rows !== 0) throw new Error('completion query cache mismatch');
+  if (r.takes_populated !== 0) throw new Error('completion takes disposition mismatch');
+  if (r.image_type !== 'vector(1024)' || r.multimodal_type !== 'vector(1024)') throw new Error('completion image plane drift');
+  if (r.false_target_signatures !== 0 || r.null_signatures_with_chunks !== 0) throw new Error('completion page signature mismatch');
+  if (r.active_embed_jobs !== 0) throw new Error('completion active embedding jobs remain');
+  if (r.custom_registry_columns.length !== 0) throw new Error(`completion embedding registry unresolved: ${r.custom_registry_columns.join(',')}`);
+  if (r.scalar_watermark !== 140) throw new Error(`completion scalar watermark drifted to ${r.scalar_watermark}`);
+  if (!r.vector_roundtrip_ok) throw new Error('completion vector roundtrip failed');
 }
 
 export function assertReadyForCutover(status: R1CutoverStatus): void {
