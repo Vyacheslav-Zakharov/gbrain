@@ -43,6 +43,20 @@ bun test test/r1-provider-degradation.serial.test.ts
 
 Coverage: timeout, 429, authentication, malformed payload, and connection refusal. Every case must return the lexical canary, set `vector_enabled=false`, and expose one sanitized reason.
 
+Dispatch-level tests additionally require both MCP-facing `search` and `query` handlers to publish:
+
+```json
+{
+  "search": {
+    "status": "degraded",
+    "fallback": "fts",
+    "reason": "embedding_rate_limit",
+    "failure_reasons": { "embedding_rate_limit": 1 },
+    "arms": { "used": 0, "total": 1, "failed": 1 }
+  }
+}
+```
+
 ## Operator checks
 
 1. Confirm the degradation class from caller `_meta` and the structured warning.
@@ -78,6 +92,7 @@ Production activation still requires the governed release gate and owner GO. Thi
 ## Known limitations
 
 - FTS-only cannot recover semantic synonym/paraphrase recall.
+- The proven floor is for text hybrid search when the embedding/vector arm fails. A failure in `searchKeyword()` itself, an invalid/unknown embedding-column registry entry, or an image-only direct path can still fail the whole call and requires separate handling.
 - Additive-column search disables semantic query cache in the current fork.
 - Additive content search does not migrate `facts.embedding`, `query_cache.embedding`, or the currently empty `takes.embedding` plane.
 - `takes.embedding` must remain unpopulated until separately re-dispositioned.
