@@ -120,6 +120,7 @@ async function main(): Promise<void> {
   const model = arg('--model') ?? 'zeroentropyai:zembed-1';
   const dimensions = Number(arg('--dimensions') ?? '1280');
   const column = arg('--column') ?? 'embedding';
+  const ftsOnly = process.argv.includes('--fts-only');
   const databaseUrl = process.env.DATABASE_URL;
   if (!corpusPath || !outputPath || !databaseUrl) throw new Error('--corpus, --output, and DATABASE_URL are required');
   if (!Number.isInteger(dimensions) || dimensions < 1) throw new Error('--dimensions must be a positive integer');
@@ -137,15 +138,20 @@ async function main(): Promise<void> {
     const results: CorpusResult[] = [];
     for (const row of rows) {
       let meta: HybridSearchMeta | undefined;
-      const hits = await hybridSearch(engine, row.query, {
-        limit: row.k,
-        expansion: false,
-        relationalRetrieval: false,
-        graph_signals: false,
-        ...(row.source_id ? { sourceId: row.source_id } : {}),
-        embeddingColumn: column,
-        onMeta: (value) => { meta = value; },
-      });
+      const hits = ftsOnly
+        ? await engine.searchKeyword(row.query, {
+            limit: row.k,
+            ...(row.source_id ? { sourceId: row.source_id } : {}),
+          })
+        : await hybridSearch(engine, row.query, {
+            limit: row.k,
+            expansion: false,
+            relationalRetrieval: false,
+            graph_signals: false,
+            ...(row.source_id ? { sourceId: row.source_id } : {}),
+            embeddingColumn: column,
+            onMeta: (value) => { meta = value; },
+          });
       results.push(evaluateCorpusResult(row, hits, meta));
     }
     const report = {
@@ -155,6 +161,7 @@ async function main(): Promise<void> {
       model,
       dimensions,
       column,
+      retrieval_mode: ftsOnly ? 'fts_only' : 'hybrid',
       summary: summarizeCorpus(results),
       results,
     };
