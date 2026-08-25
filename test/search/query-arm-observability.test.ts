@@ -30,7 +30,35 @@ describe('caller-visible query arm degradation', () => {
     expect(out._meta).toEqual({
       search: {
         status: 'degraded',
-        arms: { used: 1, total: 3 },
+        reason: 'embedding_timeout',
+        failure_reasons: { embedding_timeout: 2 },
+        arms: { used: 1, total: 3, failed: 2 },
+      },
+    });
+  });
+
+  test('publishes an explicit FTS fallback and reason for a failed single arm', () => {
+    const ctx = { responseMeta: undefined } as any;
+    publishQueryArmsResponseMeta(ctx, {
+      vector_enabled: false,
+      detail_resolved: null,
+      expansion_applied: false,
+      arms: {
+        status: 'degraded',
+        used: 0,
+        total: 1,
+        failed: 1,
+        original_failed: true,
+        failure_reasons: { embedding_rate_limit: 1 },
+      },
+    });
+    expect(ctx.responseMeta).toEqual({
+      search: {
+        status: 'degraded',
+        fallback: 'fts',
+        reason: 'embedding_rate_limit',
+        failure_reasons: { embedding_rate_limit: 1 },
+        arms: { used: 0, total: 1, failed: 1 },
       },
     });
   });

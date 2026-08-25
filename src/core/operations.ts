@@ -1593,6 +1593,7 @@ const search: Operation = {
     const latency_ms = Date.now() - startedAt;
     bumpLastRetrievedAt(ctx.engine, results.map((r) => r.page_id));
     maybeCaptureSearch(ctx, queryText, results, latency_ms, true, capturedMeta);
+    publishQueryArmsResponseMeta(ctx, capturedMeta);
     return results;
   },
   scope: 'read',
@@ -1605,11 +1606,20 @@ export function publishQueryArmsResponseMeta(
 ): void {
   const arms = meta?.arms;
   if (!arms || arms.status !== 'degraded') return;
+  const failureReasons = Object.fromEntries(
+    Object.entries(arms.failure_reasons)
+      .filter(([, count]) => typeof count === 'number' && count > 0)
+      .sort(([a, countA], [b, countB]) => (countB ?? 0) - (countA ?? 0) || a.localeCompare(b)),
+  );
+  const reason = Object.keys(failureReasons)[0] ?? 'unknown';
   ctx.responseMeta = {
     ...(ctx.responseMeta ?? {}),
     search: {
       status: 'degraded',
-      arms: { used: arms.used, total: arms.total },
+      ...(meta?.vector_enabled === false ? { fallback: 'fts' } : {}),
+      reason,
+      failure_reasons: failureReasons,
+      arms: { used: arms.used, total: arms.total, failed: arms.failed },
     },
   };
 }

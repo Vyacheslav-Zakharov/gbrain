@@ -7,6 +7,7 @@ import {
   configureGateway,
   resetGateway,
 } from '../src/core/ai/gateway.ts';
+import { operationsByName } from '../src/core/operations.ts';
 
 let engine: PGLiteEngine;
 
@@ -78,6 +79,36 @@ describe('R1 provider-down emergency behavior', () => {
         original_failed: true,
       });
       expect(meta?.arms?.failure_reasons).toEqual({ [item.expectedReason]: 1 });
+    });
+  }
+
+  for (const operationName of ['search', 'query'] as const) {
+    test(`${operationName} operation publishes caller-visible FTS degradation`, async () => {
+      configureFailingEmbed(new Error('HTTP 429 too many requests'));
+      const ctx: any = {
+        engine,
+        config: { engine: 'pglite' as const, eval: { capture: false } },
+        logger: { info: () => {}, warn: () => {}, error: () => {} },
+        dryRun: false,
+        remote: true,
+        sourceId: 'default',
+        responseMeta: undefined,
+      };
+      const params = operationName === 'query'
+        ? { query: 'R1 fail open canary', expand: false, use_cache: false, limit: 5 }
+        : { query: 'R1 fail open canary', limit: 5 };
+
+      const results = await operationsByName[operationName].handler(ctx as any, params);
+      expect((results as Array<{ slug: string }>).some((row) => row.slug === 'r1-fail-open-canary')).toBe(true);
+      expect(ctx.responseMeta).toEqual({
+        search: {
+          status: 'degraded',
+          fallback: 'fts',
+          reason: 'embedding_rate_limit',
+          failure_reasons: { embedding_rate_limit: 1 },
+          arms: { used: 0, total: 1, failed: 1 },
+        },
+      });
     });
   }
 });
