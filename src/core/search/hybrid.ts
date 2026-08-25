@@ -1480,7 +1480,11 @@ export async function hybridSearch(
       );
       queryEmbedding = variantArms.originalEmbedding;
       const textLists = variantArms.lists;
-      if (queries.length > 1) {
+      // Emit arm metadata for every multi-query run AND for a failed single
+      // original arm. The latter is the provider-outage path: keyword fallback
+      // must be caller-visible instead of looking like an intentional
+      // keyword-only search.
+      if (queries.length > 1 || variantArms.failedArms > 0) {
         vectorArmsMeta = {
           status: variantArms.failedArms > 0 ? 'degraded' : 'ok',
           used: queries.length - variantArms.failedArms,

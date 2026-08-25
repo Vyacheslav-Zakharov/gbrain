@@ -1496,7 +1496,7 @@ export interface HybridSearchMeta {
   detail_resolved: 'low' | 'medium' | 'high' | null;
   /** True iff multi-query expansion (Haiku) actually fired and produced variants. */
   expansion_applied: boolean;
-  /** Multi-query vector-arm completeness. Omitted when no multi-arm run occurred. */
+  /** Vector-arm completeness. Emitted for multi-query runs and any failed single arm. */
   arms?: {
     status: 'ok' | 'degraded';
     used: number;
