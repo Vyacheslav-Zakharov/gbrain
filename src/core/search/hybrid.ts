@@ -33,7 +33,7 @@ import { loadConfigWithEngine } from '../config.ts';
 import { dedupResults } from './dedup.ts';
 import { applyReranker } from './rerank.ts';
 import { autoDetectDetail, classifyQuery, isAmbiguousModalityQuery } from './query-intent.ts';
-import { isTitlePhraseMatch } from './title-match.ts';
+import { isTitleCoverageMatch, isTitlePhraseMatch } from './title-match.ts';
 import { normalizeAlias } from './alias-normalize.ts';
 import { stampEvidence } from './evidence.ts';
 import { expandAnchors, hydrateChunks } from './two-pass.ts';
@@ -330,7 +330,7 @@ export function applyTitleBoost(
     if (!Number.isFinite(r.score)) continue;
     if (floorThreshold !== undefined && r.score < floorThreshold) continue;
     if (!r.title) continue;
-    if (isTitlePhraseMatch(query, r.title)) {
+    if (isTitlePhraseMatch(query, r.title) || isTitleCoverageMatch(query, r.title)) {
       r.score *= factor;
       r.title_match_boost = factor; // attribution stamp (v0.40.4 convention)
     }

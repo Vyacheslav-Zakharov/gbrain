@@ -89,5 +89,20 @@ export function isTitlePhraseMatch(query: string, title: string): boolean {
   return containsTokenRun(tTokens, qTokens);
 }
 
+/**
+ * Conservative unordered fallback for longer titles. It exists for mixed
+ * RU/English names where query reordering and one inflected Russian token can
+ * defeat both contiguous-title matching and strict websearch AND semantics.
+ * At least four unique title content tokens and 80% title coverage are
+ * required, so short generic titles never receive this boost.
+ */
+export function isTitleCoverageMatch(query: string, title: string): boolean {
+  const querySet = new Set(contentTokens(tokenizeTitle(query)));
+  const titleTokens = [...new Set(contentTokens(tokenizeTitle(title)))];
+  if (titleTokens.length < 4) return false;
+  const matched = titleTokens.filter((token) => querySet.has(token)).length;
+  return matched >= 4 && matched / titleTokens.length >= 0.8;
+}
+
 // Exported for unit tests.
 export const __test__ = { tokenizeTitle, contentTokens, containsTokenRun, STOPWORDS, MIN_CONTENT_TOKENS };

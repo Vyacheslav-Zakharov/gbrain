@@ -7,7 +7,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { isTitlePhraseMatch, tokenizeTitle, __test__ } from '../../src/core/search/title-match.ts';
+import { isTitleCoverageMatch, isTitlePhraseMatch, tokenizeTitle, __test__ } from '../../src/core/search/title-match.ts';
 
 describe('isTitlePhraseMatch — positive (the incident)', () => {
   const MINGTANG = 'The Mingtang (明堂) — Indoor Greek Amphitheater for Adversarial Debate';
@@ -64,5 +64,18 @@ describe('tokenizeTitle', () => {
   });
   test('MIN_CONTENT_TOKENS is 2 (the precision floor)', () => {
     expect(__test__.MIN_CONTENT_TOKENS).toBe(2);
+  });
+});
+
+describe('isTitleCoverageMatch — long-title recall guard', () => {
+  test('matches the R1 Google regression when stable title tokens survive reordering and morphology', () => {
+    expect(isTitleCoverageMatch(
+      'коллективный AI review портал GBrain UX',
+      'GBrain — UX коллективного AI review',
+    )).toBe(true);
+  });
+  test('does not turn short or low-coverage titles into bag-of-words boosts', () => {
+    expect(isTitleCoverageMatch('admin portal notes', 'Admin Portal')).toBe(false);
+    expect(isTitleCoverageMatch('amphitheater indoor', 'The Indoor X Greek Amphitheater')).toBe(false);
   });
 });
