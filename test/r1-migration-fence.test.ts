@@ -41,5 +41,8 @@ describe('R1 automatic migration fence', () => {
     }
     expect(readFileSync(new URL('../src/core/db.ts', import.meta.url), 'utf8')).toContain('assertSchemaMutationAllowed');
     expect(readFileSync(new URL('../src/core/migrate.ts', import.meta.url), 'utf8')).toContain('assertSchemaMutationAllowed');
+    const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+    expect(cli).toContain("throw new Error(`MIGRATION_FENCE_ACTIVE");
+    expect(cli).toContain("if (message.startsWith('MIGRATION_FENCE_ACTIVE')) throw err");
   });
 });

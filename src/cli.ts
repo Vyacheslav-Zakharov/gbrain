@@ -2174,7 +2174,7 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
     const { tryRunPendingMigrations } = await import('./core/migrate.ts');
     const result = await tryRunPendingMigrations(engine);
     if (result.status === 'fenced') {
-      console.warn(`  MIGRATION_FENCE_ACTIVE (${result.source}): automatic schema migration skipped.`);
+      throw new Error(`MIGRATION_FENCE_ACTIVE (${result.source}): refusing non-probe startup while automatic schema mutation is fenced.`);
     } else if (result.status === 'persistent') {
       console.warn(
         '  Schema migrations are pending. Another process attempted to apply them ' +
@@ -2192,8 +2192,11 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
     }
     // 'ok', 'not_needed', 'race_resolved' → silent (the common-case outcomes).
   } catch (err) {
+    // The R1 deployment fence is fail-closed for every non-probe startup.
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith('MIGRATION_FENCE_ACTIVE')) throw err;
     // Last-resort defense in case the helper itself throws unexpectedly.
-    console.warn(`  Schema probe failed (unexpected): ${(err as Error).message}`);
+    console.warn(`  Schema probe failed (unexpected): ${message}`);
     console.warn('  Re-run: `gbrain apply-migrations --yes`');
   }
 
