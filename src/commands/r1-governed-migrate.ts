@@ -312,6 +312,7 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
 async function cutover(sql: Sql, args: R1MigrationArgs): Promise<Record<string, unknown>> {
   if (!args.yes) throw new Error('--cutover requires --yes');
   assertR1EnvTarget(process.env, 'target');
+  await probeTarget();
   const stateRaw = await getConfig(sql, R1_STATE_KEY);
   if (!stateRaw) throw new Error('No active R1 migration marker');
   const state = JSON.parse(stateRaw) as StateEnvelope;
