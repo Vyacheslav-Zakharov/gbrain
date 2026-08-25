@@ -2173,7 +2173,9 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
   try {
     const { tryRunPendingMigrations } = await import('./core/migrate.ts');
     const result = await tryRunPendingMigrations(engine);
-    if (result.status === 'persistent') {
+    if (result.status === 'fenced') {
+      console.warn(`  MIGRATION_FENCE_ACTIVE (${result.source}): automatic schema migration skipped.`);
+    } else if (result.status === 'persistent') {
       console.warn(
         '  Schema migrations are pending. Another process attempted to apply them ' +
         'but the migration didn\'t complete within the retry window. This is usually transient.',

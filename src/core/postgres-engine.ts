@@ -25,6 +25,8 @@ import { normalizeWeightForStorage } from './takes-fence.ts';
 import { executeRawJsonb } from './sql-query.ts';
 import { sanitizeForJsonb, buildLinkRows, buildTimelineRows, buildTakeRows } from './batch-rows.ts';
 import { runMigrations } from './migrate.ts';
+import { assertSchemaMutationAllowed } from './migration-fence.ts';
+import { getFtsLanguage, applyFtsLanguagePolicy } from './fts-language.ts';
 import { SCHEMA_SQL } from './schema-embedded.ts';
 import { verifySchema } from './schema-verify.ts';
 import { applyChunkEmbeddingIndexPolicy, dropZombieIndexes } from './vector-index.ts';
@@ -76,7 +78,7 @@ export function getPostgresSchema(
     throw new Error(`Invalid embedding dimensions: ${dims}`);
   }
   const sanitizedModel = escapeSqlStringLiteral(String(model));
-  return applyChunkEmbeddingIndexPolicy(SCHEMA_SQL, parsedDims)
+  return applyFtsLanguagePolicy(applyChunkEmbeddingIndexPolicy(SCHEMA_SQL, parsedDims))
     .replace(/vector\(1536\)/g, `vector(${parsedDims})`)
     .replace(/'text-embedding-3-large'/g, `'${sanitizedModel}'`)
     .replace(/\('embedding_dimensions', '1536'\)/g, `('embedding_dimensions', '${parsedDims}')`);
@@ -272,6 +274,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async initSchema(): Promise<void> {
+    assertSchemaMutationAllowed();
     // v0.30.1 (X1): route DDL through the direct pool when ConnectionManager
     // is in dual-pool mode. The pooler's 2-min statement_timeout truncates
     // SCHEMA_SQL replays + migrations on Supabase; the direct pool gets
@@ -1712,11 +1715,11 @@ export class PostgresEngine implements BrainEngine {
           p.slug, p.id as page_id, p.title, p.type, p.source_id,
           p.effective_date, p.effective_date_source,
           cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-          ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) * ${sourceFactorCase} AS score
+          ts_rank(cc.search_vector, websearch_to_tsquery('${getFtsLanguage()}', $1)) * ${sourceFactorCase} AS score
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
         JOIN sources s ON s.id = p.source_id
-        WHERE cc.search_vector @@ websearch_to_tsquery('english', $1)
+        WHERE cc.search_vector @@ websearch_to_tsquery('${getFtsLanguage()}', $1)
           ${typeClause}
           ${typesClause}
           ${excludeSlugsClause}
@@ -1850,12 +1853,12 @@ export class PostgresEngine implements BrainEngine {
         p.slug, p.id as page_id, p.title, p.type, p.source_id,
         p.effective_date, p.effective_date_source,
         cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-        ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) * ${sourceFactorCase} AS score,
+        ts_rank(cc.search_vector, websearch_to_tsquery('${getFtsLanguage()}', $1)) * ${sourceFactorCase} AS score,
         false AS stale
       FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
       JOIN sources s ON s.id = p.source_id
-      WHERE cc.search_vector @@ websearch_to_tsquery('english', $1)
+      WHERE cc.search_vector @@ websearch_to_tsquery('${getFtsLanguage()}', $1)
         ${typeClause}
         ${typesClause}
         ${excludeSlugsClause}

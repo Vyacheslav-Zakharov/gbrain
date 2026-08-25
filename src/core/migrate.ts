@@ -1,5 +1,6 @@
 import type { BrainEngine } from './engine.ts';
 import { slugifyPath } from './sync.ts';
+import { resolveMigrationFence, type MigrationFenceStatus } from './migration-fence.ts';
 
 /**
  * Schema migrations — run automatically on initSchema().
@@ -6488,6 +6489,7 @@ export async function hasPendingMigrations(engine: BrainEngine): Promise<boolean
 export type TryRunPendingMigrationsResult =
   | { status: 'ok'; attempts: number }
   | { status: 'not_needed' }
+  | { status: 'fenced'; source: 'env' | 'file' }
   | { status: 'race_resolved'; attempts: number; pollIterations: number }
   | { status: 'persistent'; attempts: number; pollIterations: number; error: Error }
   | { status: 'error'; error: Error };
@@ -6502,6 +6504,7 @@ export interface TryRunPendingMigrationsOpts {
     hasPending?: () => Promise<boolean>;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
+    isMigrationFenced?: () => MigrationFenceStatus;
   };
 }
 
@@ -6509,6 +6512,8 @@ export async function tryRunPendingMigrations(
   engine: BrainEngine,
   opts: TryRunPendingMigrationsOpts = {},
 ): Promise<TryRunPendingMigrationsResult> {
+  const fence = opts._hooks?.isMigrationFenced?.() ?? resolveMigrationFence();
+  if (fence.active && fence.source) return { status: 'fenced', source: fence.source };
   const deadlineMs = opts.deadlineMs ?? 5000;
   const pollIntervalMs = opts.pollIntervalMs ?? 250;
   const retryBackoffMs = opts.retryBackoffMs ?? 250;

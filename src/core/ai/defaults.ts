@@ -12,10 +12,9 @@
  * install AND every doctor consistency check.
  */
 
-// v0.36.0 chose ZeroEntropy as the system default after evals showed
-// 11/20 wins vs OpenAI (6) and Voyage (4) on real-corpus benchmarks.
-// 1280 is the closest analog to legacy OpenAI 1536d while staying on
-// the high-recall section of ZE's Matryoshka curve. Valid ZE Matryoshka
-// steps: {2560, 1280, 640, 320, 160, 80, 40} — see ai/dims.ts.
-export const DEFAULT_EMBEDDING_MODEL = 'zeroentropyai:zembed-1';
-export const DEFAULT_EMBEDDING_DIMENSIONS = 1280;
+// Avers R1 ZeroEntropy exit: owner-approved target and fresh/configless
+// fallback. The live corpus is migrated under the governed runner; these
+// constants prevent fresh init or a missing config plane from reactivating
+// hosted ZeroEntropy after its 2026-09-04 shutdown.
+export const DEFAULT_EMBEDDING_MODEL = 'google:gemini-embedding-001';
+export const DEFAULT_EMBEDDING_DIMENSIONS = 768;

@@ -3,6 +3,7 @@
 import postgres, { type Sql } from 'postgres';
 import { writeFileSync } from 'node:fs';
 import { configureGateway, embed, resetGateway } from '../core/ai/gateway.ts';
+import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import {
   R1_BACKUP_COLUMN,
   R1_COMPLETED_KEY,
@@ -336,5 +337,5 @@ async function main(): Promise<void> {
 
 if (import.meta.main) main().catch((error) => {
   process.stderr.write(`[avers-r1-migrate] ERROR: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
+  setCliExitVerdict(1);
 });

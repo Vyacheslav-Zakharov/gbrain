@@ -64,7 +64,7 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       expansion: false,
       searchLimit: 10,
       reranker_enabled: false,
-      reranker_model: 'zeroentropyai:zerank-2',
+      reranker_model: 'voyage:rerank-2.5',
       reranker_top_n_in: 30,
       reranker_top_n_out: null,
       reranker_timeout_ms: 5000,
@@ -84,8 +84,7 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
   });
 
   test('balanced bundle values are canonical', () => {
-    // v0.36.0.0 (D6): reranker_enabled flipped from false → true. The 60%
-    // top-1 reshuffle reaches the 80% of installs that stay on `balanced`.
+    // Avers R1: reranker remains disabled until separately approved.
     expect(MODE_BUNDLES.balanced).toEqual({
       cache_enabled: true,
       cache_similarity_threshold: 0.92,
@@ -94,8 +93,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       tokenBudget: 12000,
       expansion: false,
       searchLimit: 25,
-      reranker_enabled: true,
-      reranker_model: 'zeroentropyai:zerank-2',
+      reranker_enabled: false,
+      reranker_model: 'voyage:rerank-2.5',
       // v0.42.3.0 D4: topNIn = searchLimit (25), was 30.
       reranker_top_n_in: 25,
       reranker_top_n_out: null,
@@ -124,8 +123,8 @@ describe('SEARCH_MODES + MODE_BUNDLES canonical shape', () => {
       tokenBudget: undefined,
       expansion: true,
       searchLimit: 50,
-      reranker_enabled: true,
-      reranker_model: 'zeroentropyai:zerank-2',
+      reranker_enabled: false,
+      reranker_model: 'voyage:rerank-2.5',
       // v0.42.3.0 D4: topNIn = searchLimit (50), was 30.
       reranker_top_n_in: 50,
       reranker_top_n_out: null,
@@ -295,12 +294,11 @@ describe('v0.40.6.1 — reranker_timeout_ms threads recipe default through resol
     expect(r.reranker_timeout_ms).toBe(100);
   });
 
-  test('ZE (no recipe default) regression: still gets bundle default of 5000ms', () => {
-    // ZeroEntropy's recipe does not declare default_timeout_ms — its hosted
-    // path is fast enough that the bundle default suffices.
+  test('reranker without a recipe timeout still gets bundle default of 5000ms', () => {
+    // The dormant Voyage default uses the bundle timeout unless overridden.
     const r = resolveSearchMode({
       mode: 'balanced',
-      overrides: { reranker_model: 'zeroentropyai:zerank-2' },
+      overrides: { reranker_model: 'voyage:rerank-2.5' },
     });
     expect(r.reranker_timeout_ms).toBe(5000);
   });
@@ -408,8 +406,8 @@ describe('knobsHash determinism + cross-mode separation (CDX-4)', () => {
     // Voyage v3+), so rows keyed on pre-fix document-side query vectors
     // must not be served to post-fix lookups. Filtered-HNSW recall fix:
     // bumped 11→12 so sparse pre-fix result sets cannot mask the fix.
-    // 12→13 invalidates rows written from degraded expansion arms.
-    expect(KNOBS_HASH_VERSION).toBe(13);
+    // 12→13 invalidates degraded expansion rows; Avers R1 13→14 isolates FTS language.
+    expect(KNOBS_HASH_VERSION).toBe(14);
   });
 
   test('T1 (codex): floor_ratio set vs unset produces DIFFERENT hashes (cache contamination prevention)', () => {
@@ -574,8 +572,8 @@ describe('v0.40.4 — graph_signals knob', () => {
 });
 
 describe('v0.42.3.0 — autocut knobs', () => {
-  test('KNOBS_HASH_VERSION is 13 (12→13 degraded expansion cache invalidation)', () => {
-    expect(KNOBS_HASH_VERSION).toBe(13);
+  test('KNOBS_HASH_VERSION is 14 (Avers R1 FTS-language cache isolation)', () => {
+    expect(KNOBS_HASH_VERSION).toBe(14);
   });
 
   test('bundle defaults: conservative off, balanced/tokenmax on @0.20', () => {

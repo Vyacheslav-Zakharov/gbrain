@@ -26,6 +26,7 @@
 import { createHash } from 'crypto';
 import { CR_MODES, type CRMode } from '../types.ts';
 import { getRecipe } from '../ai/recipes/index.ts';
+import { getFtsLanguage } from '../fts-language.ts';
 
 /**
  * Look up the `reranker.default_timeout_ms` declared by the resolved
@@ -103,10 +104,8 @@ export interface ModeBundle {
    */
   reranker_enabled: boolean;
   /**
-   * Provider:model for the reranker. Default `'zeroentropyai:zerank-2'`.
-   * Other ZE rerankers (`zerank-1`, `zerank-1-small`) work via the same
-   * recipe; future Cohere/Voyage rerankers drop in as new recipes
-   * declaring `touchpoints.reranker`.
+   * Provider:model for the reranker. Avers R1 keeps reranking disabled in
+   * every bundle and moves the dormant default off hosted ZeroEntropy.
    */
   reranker_model: string;
   /** Candidates to send upstream (default 30). The full result list always
@@ -294,7 +293,7 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // v0.35.0.0+: reranker off — conservative is cost-sensitive; reranker
     // spend doesn't fit the tier's value prop.
     reranker_enabled: false,
-    reranker_model: 'zeroentropyai:zerank-2',
+    reranker_model: 'voyage:rerank-2.5',
     reranker_top_n_in: 30,
     reranker_top_n_out: null,
     reranker_timeout_ms: 5000,
@@ -343,8 +342,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // src/core/search/rerank.ts fail-open contract: log to audit JSONL,
     // return input order unchanged. Opt out with
     // `gbrain config set search.reranker.enabled false`.
-    reranker_enabled: true,
-    reranker_model: 'zeroentropyai:zerank-2',
+    reranker_enabled: false,
+    reranker_model: 'voyage:rerank-2.5',
     // v0.42.3.0 D4: topNIn = searchLimit (25) so the cross-encoder scores
     // every result the limit slice will return — no unscored tail for autocut
     // to wrongly drop (Codex #2). Was 30; tracking searchLimit is the
@@ -398,8 +397,8 @@ export const MODE_BUNDLES: Readonly<Record<SearchMode, Readonly<ModeBundle>>> = 
     // better ordering of a large candidate set is where rerankers earn
     // their fee. ~$0.0003/query at this shape; rounding error vs the
     // tier's $700/mo @ Opus pairing per CLAUDE.md cost matrix.
-    reranker_enabled: true,
-    reranker_model: 'zeroentropyai:zerank-2',
+    reranker_enabled: false,
+    reranker_model: 'voyage:rerank-2.5',
     // v0.42.3.0 D4: topNIn = searchLimit (50) so every returned result is
     // cross-encoder scored — closes the Codex #2 recall gap where autocut
     // would drop the deliberately-preserved un-reranked tail (results 31-50).
@@ -754,7 +753,9 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // not mask the corrected retrieval path until their TTL expires.
 // v13: invalidate rows written from degraded expansion arms; new writes skip
 // degraded result sets so a transient timeout cannot poison semantic cache.
-export const KNOBS_HASH_VERSION = 13;
+// v14: include the validated FTS configuration so a language switch cannot
+// serve pre-reindex cache rows from a different lexical space.
+export const KNOBS_HASH_VERSION = 14;
 
 /**
  * v0.36 (D8 / CDX-2) — second-arg context for the cache key. The
@@ -870,6 +871,7 @@ export function knobsHash(
     // test/model-pricing.test.ts-style drift guards and the mode tests.
     `rel=${knobs.relationalRetrieval ? 1 : 0}`,
     `reld=${knobs.relational_retrieval_depth ?? 2}`,
+    `fts=${getFtsLanguage()}`,
   ];
   const h = createHash('sha256');
   h.update(parts.join('|'));

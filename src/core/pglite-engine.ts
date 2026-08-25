@@ -20,6 +20,8 @@ import { MAX_SEARCH_LIMIT, clampSearchLimit } from './engine.ts';
 import { withRetry, BULK_RETRY_OPTS, resolveBulkRetryOpts, computeNextDelay, type BatchAuditSite } from './retry.ts';
 import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatchExhausted } from './audit/batch-retry-audit.ts';
 import { runMigrations } from './migrate.ts';
+import { assertSchemaMutationAllowed } from './migration-fence.ts';
+import { getFtsLanguage } from './fts-language.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
@@ -364,6 +366,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async initSchema(): Promise<void> {
+    assertSchemaMutationAllowed();
     // Tier 3: snapshot was loaded into PGlite — schema + migrations already
     // applied. Nothing to do. Returns immediately.
     if (this._snapshotLoaded) {
@@ -1658,14 +1661,14 @@ export class PGLiteEngine implements BrainEngine {
            p.slug, p.id as page_id, p.title, p.type, p.source_id,
            p.effective_date, p.effective_date_source,
            cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-           ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) * ${sourceFactorCase} AS score,
+           ts_rank(cc.search_vector, websearch_to_tsquery('${getFtsLanguage()}', $1)) * ${sourceFactorCase} AS score,
            CASE WHEN p.updated_at < (
              SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
            ) THEN true ELSE false END AS stale
          FROM content_chunks cc
          JOIN pages p ON p.id = cc.page_id
          JOIN sources s ON s.id = p.source_id
-         WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}${extraFilter} ${hardExcludeClause} ${visibilityClause}
+         WHERE cc.search_vector @@ websearch_to_tsquery('${getFtsLanguage()}', $1) ${detailFilter}${extraFilter} ${hardExcludeClause} ${visibilityClause}
            -- v0.27.1: hide image rows from default text-keyword search so
            -- OCR text doesn't drown text-page hits. Image-similarity queries
            -- run a separate vector path on embedding_image.
@@ -1890,14 +1893,14 @@ export class PGLiteEngine implements BrainEngine {
          p.slug, p.id as page_id, p.title, p.type, p.source_id,
          p.effective_date, p.effective_date_source,
          cc.id as chunk_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-         ts_rank(cc.search_vector, websearch_to_tsquery('english', $1)) * ${sourceFactorCase} AS score,
+         ts_rank(cc.search_vector, websearch_to_tsquery('${getFtsLanguage()}', $1)) * ${sourceFactorCase} AS score,
          CASE WHEN p.updated_at < (
            SELECT MAX(te.created_at) FROM timeline_entries te WHERE te.page_id = p.id
          ) THEN true ELSE false END AS stale
        FROM content_chunks cc
        JOIN pages p ON p.id = cc.page_id
        JOIN sources s ON s.id = p.source_id
-       WHERE cc.search_vector @@ websearch_to_tsquery('english', $1) ${detailFilter}${extraFilter} ${hardExcludeClause} ${visibilityClause}
+       WHERE cc.search_vector @@ websearch_to_tsquery('${getFtsLanguage()}', $1) ${detailFilter}${extraFilter} ${hardExcludeClause} ${visibilityClause}
        ORDER BY score DESC
        LIMIT $2 OFFSET $3`,
       params
