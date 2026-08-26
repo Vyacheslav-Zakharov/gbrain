@@ -24,13 +24,16 @@ import {
   buildWriterFenceDropSql,
   buildWriterFenceSql,
   identityFingerprint,
+  isExactR1WriterFence,
   parseR1MigrationArgs,
+  resolveR1WriterFenceTables,
   resolveContentPlaneCounts,
   vectorLiteral,
   type R1CutoverStatus,
   type R1MigrationArgs,
   type R1MigrationIdentity,
   type R1CompletionReality,
+  type R1WriterFenceRow,
 } from '../core/r1-governed-migration.ts';
 
 interface ColumnRow { type: string }
@@ -87,14 +90,26 @@ async function readStatus(sql: Sql): Promise<Record<string, unknown> & R1Cutover
     ? await countPlane(sql, 'facts', 'embedding', R1_SHADOW_COLUMN)
     : { total: Number((await sql.unsafe('SELECT count(embedding)::int AS n FROM facts') as Array<{ n: number }>)[0]?.n ?? 0), populated: 0 };
   const takesPopulated = Number((await sql.unsafe('SELECT count(embedding)::int AS n FROM takes') as Array<{ n: number }>)[0]?.n ?? 0);
-  const triggerCount = Number((await sql.unsafe(
-    `SELECT count(*)::int AS n FROM pg_trigger WHERE NOT tgisinternal AND tgname LIKE 'avers_r1_writer_fence_%'`,
-  ) as Array<{ n: number }>)[0]?.n ?? 0);
+  const triggerRows = await sql.unsafe(
+    `SELECT n.nspname AS schema, c.relname AS table, t.tgname AS trigger,
+            pn.nspname AS function_schema, p.proname AS function_name, t.tgenabled AS enabled,
+            pg_get_triggerdef(t.oid) AS definition
+       FROM pg_trigger t
+       JOIN pg_class c ON c.oid=t.tgrelid
+       JOIN pg_namespace n ON n.oid=c.relnamespace
+       JOIN pg_proc p ON p.oid=t.tgfoid
+       JOIN pg_namespace pn ON pn.oid=p.pronamespace
+      WHERE NOT t.tgisinternal AND t.tgname LIKE 'avers_r1_writer_fence_%'
+      ORDER BY c.relname`,
+  ) as R1WriterFenceRow[];
   const model = await getConfig(sql, 'embedding_model');
   const dims = await getConfig(sql, 'embedding_dimensions');
   const markerRaw = await getConfig(sql, R1_STATE_KEY);
   let marker: unknown = null;
   try { marker = markerRaw ? JSON.parse(markerRaw) : null; } catch { marker = { corrupt: true }; }
+  const expectedFenceTables = resolveR1WriterFenceTables(marker);
+  const writerFenceActive = (await getConfig(sql, R1_WRITER_FENCE_KEY)) === 'active'
+    && isExactR1WriterFence(expectedFenceTables, triggerRows);
   return {
     schema_version: 1,
     target_model: R1_TARGET_MODEL,
@@ -102,8 +117,8 @@ async function readStatus(sql: Sql): Promise<Record<string, unknown> & R1Cutover
     current_model: model,
     current_dimensions: dims ? Number(dims) : null,
     marker,
-    writer_fence_active: (await getConfig(sql, R1_WRITER_FENCE_KEY)) === 'active' && triggerCount > 0,
-    writer_fence_trigger_count: triggerCount,
+    writer_fence_active: writerFenceActive,
+    writer_fence_trigger_count: triggerRows.length,
     content_chunks: {
       total: contentCounts.total,
       shadow_populated: contentCounts.populated,

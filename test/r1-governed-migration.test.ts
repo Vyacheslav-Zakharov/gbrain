@@ -14,6 +14,8 @@ import {
   assertReadyForCutover,
   assertR1EnvTarget,
   assertR1CompletionReality,
+  isExactR1WriterFence,
+  resolveR1WriterFenceTables,
   resolveContentPlaneCounts,
 } from '../src/core/r1-governed-migration.ts';
 
@@ -127,5 +129,38 @@ describe('R1 governed embedding migration contract', () => {
   test('writer manifest covers background job control as well as content planes', () => {
     expect(R1_WRITER_FENCE_TABLES).toContain('minion_jobs');
     expect(R1_WRITER_FENCE_TABLES).toContain('mcp_request_log');
+  });
+
+  test('writer fence is active only when every expected trigger is present and hardened', () => {
+    const row = (table: string) => ({
+      table, trigger: `avers_r1_writer_fence_${table}`, schema: 'public', function_schema: 'public', function_name: 'avers_r1_writer_fence_guard', enabled: 'O',
+      definition: `CREATE TRIGGER avers_r1_writer_fence_${table} BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON public.${table} FOR EACH STATEMENT EXECUTE FUNCTION avers_r1_writer_fence_guard()`,
+    });
+    expect(isExactR1WriterFence(['pages', 'facts'], [row('pages'), row('facts')])).toBe(true);
+    expect(isExactR1WriterFence([], [])).toBe(false);
+    expect(isExactR1WriterFence(['pages', 'pages'], [row('pages')])).toBe(false);
+    expect(isExactR1WriterFence(['pages', 'facts'], [row('pages')])).toBe(false);
+    expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), enabled: 'D' }])).toBe(false);
+    expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), function_name: 'other' }])).toBe(false);
+    expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), function_schema: 'other' }])).toBe(false);
+  });
+
+  test('writer fence marker table inventory rejects missing, empty, mixed, or duplicate lists', () => {
+    expect(resolveR1WriterFenceTables({ writer_fence_tables: ['pages', 'facts'] })).toEqual(['pages', 'facts']);
+    expect(resolveR1WriterFenceTables(null)).toEqual([]);
+    expect(resolveR1WriterFenceTables({})).toEqual([]);
+    expect(resolveR1WriterFenceTables({ writer_fence_tables: [] })).toEqual([]);
+    expect(resolveR1WriterFenceTables({ writer_fence_tables: ['pages', 7] })).toEqual([]);
+    expect(resolveR1WriterFenceTables({ writer_fence_tables: ['pages', 'pages'] })).toEqual([]);
+  });
+
+  test('cutover and rollback clear signatures for source-incomplete pages', () => {
+    for (const joined of [
+      buildCutoverStatements().join('\n'),
+      buildRollbackStatements('zeroentropyai:zembed-1', 1280, 'zeroentropyai:zerank-2', false).join('\n'),
+    ]) {
+      expect(joined).toContain('CASE WHEN EXISTS');
+      expect(joined).toContain('ELSE NULL END');
+    }
   });
 });

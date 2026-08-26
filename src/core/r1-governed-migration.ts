@@ -163,6 +163,44 @@ export function buildWriterFenceDropSql(tables: string[]): string {
   return `${unique.map((table) => `DROP TRIGGER IF EXISTS avers_r1_writer_fence_${table} ON ${table};`).join('\n')}\nDROP FUNCTION IF EXISTS avers_r1_writer_fence_guard();`;
 }
 
+export interface R1WriterFenceRow {
+  table: string;
+  trigger: string;
+  schema: string;
+  function_schema: string;
+  function_name: string;
+  enabled: string;
+  definition: string;
+}
+
+export function resolveR1WriterFenceTables(marker: unknown): string[] {
+  if (!marker || typeof marker !== 'object') return [];
+  const tables = (marker as { writer_fence_tables?: unknown }).writer_fence_tables;
+  if (!Array.isArray(tables) || tables.length === 0) return [];
+  if (!tables.every((table): table is string => typeof table === 'string' && IDENTIFIER.test(table))) return [];
+  if (new Set(tables).size !== tables.length) return [];
+  return tables;
+}
+
+export function isExactR1WriterFence(expectedTables: string[], rows: R1WriterFenceRow[]): boolean {
+  const expected = [...new Set(expectedTables)].sort();
+  if (expected.length === 0 || expected.length !== expectedTables.length) return false;
+  if (rows.length !== expected.length) return false;
+  const byTable = new Map(rows.map((row) => [row.table, row]));
+  return expected.every((table) => {
+    const row = byTable.get(table);
+    if (!row) return false;
+    const definition = row.definition.toUpperCase();
+    return row.schema === 'public'
+      && row.trigger === `avers_r1_writer_fence_${table}`
+      && row.function_schema === 'public'
+      && row.function_name === 'avers_r1_writer_fence_guard'
+      && row.enabled === 'O'
+      && definition.includes('BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE')
+      && definition.includes('FOR EACH STATEMENT');
+  });
+}
+
 export function vectorLiteral(vector: Float32Array): string {
   if (vector.length !== R1_TARGET_DIMENSIONS) throw new Error(`Expected ${R1_TARGET_DIMENSIONS} dimensions, got ${vector.length}`);
   return `[${Array.from(vector).join(',')}]`;
@@ -267,7 +305,7 @@ export function buildCutoverStatements(): string[] {
     `INSERT INTO config(key,value) VALUES ('embedding_model','${R1_TARGET_MODEL}') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`,
     `INSERT INTO config(key,value) VALUES ('embedding_dimensions','${R1_TARGET_DIMENSIONS}') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`,
     `INSERT INTO config(key,value) VALUES ('search_embedding_column','embedding') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`,
-    `UPDATE pages p SET embedding_signature='${signature}' WHERE EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id) AND NOT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NULL)`,
+    `UPDATE pages p SET embedding_signature=CASE WHEN EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id) AND NOT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NULL) THEN '${signature}' ELSE NULL END`,
   ];
 }
 
@@ -306,6 +344,6 @@ export function buildRollbackStatements(
     `INSERT INTO config(key,value) VALUES ('search_embedding_column','embedding') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`,
     `INSERT INTO config(key,value) VALUES ('search.reranker.model','${priorRerankerModel}') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`,
     `INSERT INTO config(key,value) VALUES ('search.reranker.enabled','${String(priorRerankerEnabled)}') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`,
-    `UPDATE pages p SET embedding_signature='${signature}' WHERE EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id) AND NOT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NULL)`,
+    `UPDATE pages p SET embedding_signature=CASE WHEN EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id) AND NOT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND c.embedding IS NULL) THEN '${signature}' ELSE NULL END`,
   ];
 }
