@@ -10,6 +10,8 @@
 # Invoked separately by run-unit-parallel.sh after the parallel pass succeeds.
 
 set -euo pipefail
+# Direct serial entrypoint is hermetic too; never inherit live production state.
+unset DATABASE_URL GBRAIN_DATABASE_URL GBRAIN_HOME
 
 cd "$(dirname "$0")/.."
 

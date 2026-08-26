@@ -22,8 +22,16 @@
 #   .context/test-shards/        per-shard logs + exit codes (cleared at start)
 
 set -uo pipefail
+# Every unit/serial lane is hermetic; never inherit live production state.
+unset DATABASE_URL GBRAIN_DATABASE_URL GBRAIN_HOME
 
 cd "$(dirname "$0")/.."
+mkdir -p .context
+command -v flock >/dev/null 2>&1 || { echo "ERROR: flock is required for the test-run lock" >&2; exit 3; }
+exec 8>.context/test-run.lock
+flock -n 8 || { echo "ERROR: another repository test workload is already active in this worktree" >&2; exit 75; }
+GBRAIN_TEST_RUN_ID="${GBRAIN_TEST_RUN_ID:-$(date +%s)-$$}"
+export GBRAIN_TEST_RUN_ID
 
 # ──────────────────────────────────────────────────────────────────────────
 # CPU detection: Apple Silicon perf cores → Mac total physical → nproc → 4.
@@ -71,6 +79,14 @@ if [ -z "${SHARDS_OVERRIDE:-}" ] && [ -z "${SHARDS:-}" ] && [ "$N" -gt 4 ]; then
 fi
 
 INTRA_CONC="${MAX_CONCURRENCY_OVERRIDE:-${GBRAIN_TEST_MAX_CONCURRENCY:-4}}"
+# The host bounded wrapper marks production-adjacent runs explicitly. On that
+# path, keep one shard and one active Bun process regardless of CPU count or
+# caller overrides; five-file process recycling provides progress without
+# aggregate RSS fan-out. Hosted CI does not set this marker and keeps its normal parallelism.
+if [ "${HERMES_BOUNDED_TEST_ACTIVE:-0}" = "1" ]; then
+  N=1
+  INTRA_CONC=1
+fi
 # v0.40.10 flake-hardening: bump per-shard cap 600 → 1500 (was 900). At
 # 4-shard default each shard runs 159 files / ~2420 tests with internal
 # wallclock 960-1020s. The 900s value (sized for 8-shard's ~80 files /
@@ -78,7 +94,13 @@ INTRA_CONC="${MAX_CONCURRENCY_OVERRIDE:-${GBRAIN_TEST_MAX_CONCURRENCY:-4}}"
 # had completed in 968s. 1500s cap gives ~55% headroom over observed
 # 4-shard wallclock; real hangs still hit it. Override via
 # GBRAIN_TEST_SHARD_TIMEOUT=N.
-SHARD_TIMEOUT="${GBRAIN_TEST_SHARD_TIMEOUT:-1500}"
+DEFAULT_SHARD_TIMEOUT=1500
+[ "${HERMES_BOUNDED_TEST_ACTIVE:-0}" = "1" ] && DEFAULT_SHARD_TIMEOUT=2700
+SHARD_TIMEOUT="${GBRAIN_TEST_SHARD_TIMEOUT:-$DEFAULT_SHARD_TIMEOUT}"
+SHARD_KILL_AFTER="${GBRAIN_TEST_SHARD_KILL_AFTER:-30}"
+if ! printf '%s' "$SHARD_KILL_AFTER" | grep -qE '^[0-9]+$' || [ "$SHARD_KILL_AFTER" -lt 1 ]; then
+  echo "ERROR: invalid shard kill-after: $SHARD_KILL_AFTER" >&2; exit 2
+fi
 
 # ──────────────────────────────────────────────────────────────────────────
 # Output directories. Prefer workspace-local .context/, fall back to /tmp.
@@ -100,8 +122,8 @@ rm -f "$LOG_DIR"/shard-*.log "$LOG_DIR"/shard-*.exit "$LOG_DIR"/shard-*.wedged 2
 : > "$SUMMARY_FILE"
 
 # ──────────────────────────────────────────────────────────────────────────
-# Resolve `timeout` command. macOS without coreutils has neither; we degrade
-# to bg-pid + sleep cap. For now, prefer gtimeout (brew coreutils) → timeout.
+# Resolve `timeout` command with process-group TERM→KILL support.
+# Prefer gtimeout (macOS coreutils) → timeout.
 # ──────────────────────────────────────────────────────────────────────────
 TIMEOUT_BIN=""
 if command -v gtimeout >/dev/null 2>&1; then TIMEOUT_BIN="gtimeout"
@@ -109,7 +131,7 @@ elif command -v timeout >/dev/null 2>&1; then TIMEOUT_BIN="timeout"
 fi
 
 START_TS=$(date +%s)
-echo "[unit-parallel] N=$N shards | --max-concurrency=$INTRA_CONC | timeout=${SHARD_TIMEOUT}s | logs=$LOG_DIR" >&2
+echo "[unit-parallel] N=$N shards | --max-concurrency=$INTRA_CONC | timeout=${SHARD_TIMEOUT}s | kill-after=${SHARD_KILL_AFTER}s | logs=$LOG_DIR" >&2
 
 if [ "$DRY_RUN" = "1" ]; then
   echo "[unit-parallel] dry-run: would spawn $N shards with the above settings."
@@ -120,6 +142,8 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
+[ -n "$TIMEOUT_BIN" ] || { echo "ERROR: GNU timeout/gtimeout is required for descendant-safe shard termination" >&2; exit 3; }
+
 # ──────────────────────────────────────────────────────────────────────────
 # Spawn shards. Each child captures its own exit code into a sentinel file
 # so $? is recoverable per-shard (we never trust `wait`'s aggregate value).
@@ -128,24 +152,11 @@ SHARD_PIDS=()
 for i in $(seq 1 "$N"); do
   (
     SHARD_LOG="$LOG_DIR/shard-$i.log"
-    if [ -n "$TIMEOUT_BIN" ]; then
-      "$TIMEOUT_BIN" "${SHARD_TIMEOUT}s" \
-        env SHARD="$i/$N" \
-        bash scripts/run-unit-shard.sh --max-concurrency="$INTRA_CONC" \
-        > "$SHARD_LOG" 2>&1
-    else
+    rc=0
+    "$TIMEOUT_BIN" --signal=TERM --kill-after="${SHARD_KILL_AFTER}s" "${SHARD_TIMEOUT}s" \
       env SHARD="$i/$N" \
-        bash scripts/run-unit-shard.sh --max-concurrency="$INTRA_CONC" \
-        > "$SHARD_LOG" 2>&1 &
-      pid=$!
-      ( sleep "$SHARD_TIMEOUT" && kill -TERM "$pid" 2>/dev/null && \
-        sleep 5 && kill -KILL "$pid" 2>/dev/null ) &
-      cap_pid=$!
-      wait "$pid" 2>/dev/null
-      kill "$cap_pid" 2>/dev/null
-      wait "$cap_pid" 2>/dev/null
-    fi
-    rc=$?
+      bash scripts/run-unit-shard.sh --max-concurrency="$INTRA_CONC" \
+      > "$SHARD_LOG" 2>&1 || rc=$?
     echo "$rc" > "$LOG_DIR/shard-$i.exit"
     [ "$rc" = "124" ] && echo "WEDGED" > "$LOG_DIR/shard-$i.wedged"
   ) &

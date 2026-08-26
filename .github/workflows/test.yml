@@ -6,6 +6,12 @@ name: Test
 # Actions tab (Run workflow) / `gh workflow run test.yml`.
 on:
   workflow_dispatch:
+    inputs:
+      force_full:
+        description: Ignore a prior content-hash pass and execute every gated job for this exact SHA
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -51,6 +57,7 @@ jobs:
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
       - name: Lookup actions/cache for ci-pass-<hash>
         id: lookup
+        if: inputs.force_full != true
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
         with:
           key: ci-pass-${{ steps.compute.outputs.hash }}
@@ -230,7 +237,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────
   cache-write:
     needs: [cache-check, gitleaks, verify, serial-tests, slow-eval-longmemeval, slow-entity-resolve-perf, test]
-    if: success() && needs.cache-check.outputs.hit != 'true'
+    if: success() && needs.cache-check.outputs.hit != 'true' && inputs.force_full != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -259,6 +266,7 @@ jobs:
     steps:
       - name: Aggregate result
         run: |
+          CACHE_CHECK="${{ needs.cache-check.result }}"
           HIT="${{ needs.cache-check.outputs.hit }}"
           GITLEAKS="${{ needs.gitleaks.result }}"
           VERIFY="${{ needs.verify.result }}"
@@ -266,8 +274,12 @@ jobs:
           SLOW_EVAL="${{ needs.slow-eval-longmemeval.result }}"
           SLOW_PERF="${{ needs.slow-entity-resolve-perf.result }}"
           TEST="${{ needs.test.result }}"
-          echo "cache-check.hit=$HIT"
+          echo "cache-check.result=$CACHE_CHECK  cache-check.hit=$HIT"
           echo "gitleaks=$GITLEAKS  verify=$VERIFY  serial-tests=$SERIAL  slow-eval-longmemeval=$SLOW_EVAL  slow-entity-resolve-perf=$SLOW_PERF  test=$TEST"
+          if [ "$CACHE_CHECK" != "success" ]; then
+            echo "✗ cache-check did not succeed (got $CACHE_CHECK) — CI fail"
+            exit 1
+          fi
           if [ "$HIT" = "true" ]; then
             echo "✓ cache HIT for hash ${{ needs.cache-check.outputs.hash }} — CI green"
             exit 0
@@ -280,3 +292,35 @@ jobs:
             fi
           done
           echo "✓ all gated jobs succeeded — CI green"
+
+  exact-sha-receipt:
+    needs: [cache-check, test-status]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Write exact-SHA gate receipt
+        env:
+          GATE_RESULT: ${{ needs.test-status.result }}
+          CACHE_HIT: ${{ needs.cache-check.outputs.hit }}
+          CONTENT_HASH: ${{ needs.cache-check.outputs.hash }}
+          FORCE_FULL: ${{ inputs.force_full }}
+          CANDIDATE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          mkdir -p exact-sha-receipt
+          CHECKED_OUT_SHA=$(git rev-parse HEAD)
+          test "$CHECKED_OUT_SHA" = "$CANDIDATE_SHA"
+          TREE_SHA=$(git rev-parse 'HEAD^{tree}')
+          export CHECKED_OUT_SHA TREE_SHA
+          python3 -c 'import json, os, pathlib; result=os.environ["GATE_RESULT"]; data={"candidate_sha":os.environ["CANDIDATE_SHA"],"checked_out_sha":os.environ["CHECKED_OUT_SHA"],"tree_sha":os.environ["TREE_SHA"],"ref":os.environ["REF_NAME"],"run_id":int(os.environ["RUN_ID"]),"run_attempt":int(os.environ["RUN_ATTEMPT"]),"force_full":os.environ.get("FORCE_FULL","").lower()=="true","cache_hit":os.environ.get("CACHE_HIT","")=="true","content_hash":os.environ.get("CONTENT_HASH", ""),"gate_result":result,"complete":result=="success"}; pathlib.Path("exact-sha-receipt/receipt.json").write_text(json.dumps(data,sort_keys=True,indent=2)+"\n",encoding="utf-8")'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: exact-sha-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: exact-sha-receipt/receipt.json
+          retention-days: 30
+          if-no-files-found: error

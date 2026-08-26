@@ -63,6 +63,10 @@ describe('failing-on-purpose', () => {
   writeFileSync(join(TMPROOT, 'test', 'b-pass.test.ts'), passing);
   writeFileSync(join(TMPROOT, 'test', 'c-pass.test.ts'), passing);
   writeFileSync(join(TMPROOT, 'test', 'd-fail.test.ts'), failing);
+  writeFileSync(
+    join(TMPROOT, 'test', 'e-env.serial.test.ts'),
+    `import { expect, test } from 'bun:test';\ntest('serial lane strips ambient production state', () => { expect(process.env.DATABASE_URL).toBeUndefined(); expect(process.env.GBRAIN_HOME).toBeUndefined(); });`,
+  );
 });
 
 afterAll(() => {
@@ -73,7 +77,7 @@ function runWrapper(extraArgs: string[] = []): { code: number; stdout: string; s
   const result = spawnSync(
     'bash',
     [join(TMPROOT, 'scripts', 'run-unit-parallel.sh'), '--shards', '2', ...extraArgs],
-    { cwd: TMPROOT, encoding: 'utf-8', env: { ...process.env } },
+    { cwd: TMPROOT, encoding: 'utf-8', env: { ...process.env, DATABASE_URL: 'postgresql://production.invalid/live', GBRAIN_HOME: '/production/brain' } },
   );
   return {
     code: result.status ?? -1,
@@ -81,6 +85,35 @@ function runWrapper(extraArgs: string[] = []): { code: number; stdout: string; s
     stderr: result.stderr || '',
   };
 }
+
+describe('run-serial-tests.sh environment isolation', () => {
+  it('strips ambient production database and brain-home variables on the direct entrypoint', () => {
+    const result = spawnSync('bash', [join(TMPROOT, 'scripts', 'run-serial-tests.sh')], {
+      cwd: TMPROOT,
+      encoding: 'utf-8',
+      env: { ...process.env, DATABASE_URL: 'postgresql://production.invalid/live', GBRAIN_HOME: '/production/brain' },
+    });
+    expect(result.status).toBe(0);
+  });
+});
+
+describe('run-unit-parallel.sh shared-host sizing', () => {
+  it('defaults to one shard and one active Bun process when the bounded marker is active', () => {
+    const result = spawnSync(
+      'bash',
+      [join(TMPROOT, 'scripts', 'run-unit-parallel.sh'), '--dry-run'],
+      {
+        cwd: TMPROOT,
+        encoding: 'utf-8',
+        env: { ...process.env, HERMES_BOUNDED_TEST_ACTIVE: '1', SHARDS: '', GBRAIN_TEST_MAX_CONCURRENCY: '' },
+      },
+    );
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain('N=1 shards');
+    expect(result.stderr).toContain('--max-concurrency=1');
+    expect(result.stderr).toContain('timeout=2700s');
+  });
+});
 
 describe('run-unit-parallel.sh exit-code propagation (a)', () => {
   it('exits non-zero when any shard contains a failing test', () => {

@@ -9,13 +9,25 @@ Seven test command tiers, each with a clear scope:
 
 | Command | What it runs | Wallclock | When to use |
 |---|---|---|---|
-| `bun run test` | Parallel unit-test fast loop. 8-shard fan-out via `scripts/run-unit-parallel.sh`, then a serial pass over `*.serial.test.ts`. Excludes `*.slow.test.ts` and `test/e2e/*`. No pre-checks, no typecheck. | ~85s on a Mac dev box (3650+ tests) | Inner edit loop. Default. |
+| `bun run test` | Parallel unit-test fast loop via `scripts/run-unit-parallel.sh`, then a serial pass. Each shard recycles Bun after small file batches so PGLite/WASM high-water memory returns to the OS. Under `hermes-bounded-test`, fan-out is forced to 1×1. | Host-dependent | Inner edit loop only after targeted tests. |
 | `bun run verify` | CI's authoritative pre-test gate set, fanned out in parallel by `scripts/run-verify-parallel.sh`: the full `check:*` battery (~30 checks — privacy, jsonb, progress, source-id, test-isolation, wasm, …) plus `bun run typecheck`. The `CHECKS` array in that script is the single source of truth — CI literally calls `bun run verify` in a dedicated job. | ~16s (parallel; typecheck dominates) | Before pushing; before `/ship`. |
 | `bun run test:full` | `verify && bun run test && bun run test:slow && [smart e2e]`. The local equivalent of "everything CI runs." Smart e2e: runs e2e only when `DATABASE_URL` is set; else loud skip notice to stderr. | ~3-5min depending on slow + e2e | Pre-merge sanity, before opening a PR. |
 | `bun run test:slow` | Just the `*.slow.test.ts` set (intentional cold-path correctness checks). | seconds-to-minutes | When touching slow-path code. |
 | `bun run test:serial` | Just the `*.serial.test.ts` set (cross-file-contention quarantine; one bun process per file for true module-registry isolation). | ~1s per quarantined file | Debugging a specific quarantined file. |
 | `bun run test:e2e` | Real Postgres E2E. Requires Docker + `DATABASE_URL`. Sequential. | ~5-10min | Pre-ship; nightly. |
 | `bun run check:all` | The historical pre-check scripts (22, chained sequentially in package.json). Overlaps `verify` heavily but is NOT a superset — `verify`'s `CHECKS` array in `scripts/run-verify-parallel.sh` (~30 entries incl. typecheck) is the authoritative gate; `check:all` keeps a few local-only extras (trailing-newline, exports-count, no-legacy-getconnection). | ~10s | Local-only sweep for the extras. |
+
+### Production-adjacent host policy
+
+- Start with explicit test files. Do not run the broad loop after every edit.
+- Broad non-Docker unit work on a shared host must use `hermes-bounded-test`; its marker forces one shard and one active Bun process, recycled after each small batch.
+- `GBRAIN_TEST_BATCH_SIZE` defaults to 5 files per Bun process; `GBRAIN_TEST_COLD_BATCH_SIZE` defaults to 1 for migration/bootstrap files.
+- Every batch has an independent wall-clock cap (`GBRAIN_TEST_BATCH_TIMEOUT`, default 300s) and TERM→KILL grace (`GBRAIN_TEST_BATCH_KILL_AFTER`, default 20s). GNU `timeout`/`gtimeout` and `flock` are mandatory; missing containment primitives fail closed.
+- Batch receipts are written to `.context/test-batches/<run-id>/<shard>.jsonl`; direct shard runs generate a unique run id, while the parallel wrapper exports one shared id and holds a same-worktree run lock. A final `complete:true` row means every selected batch was attempted; `rc:0` is still required for success.
+- Unit and direct serial boundaries unset `DATABASE_URL`, `GBRAIN_DATABASE_URL`, and `GBRAIN_HOME` so ambient production state cannot be reached.
+- Docker-backed broad CI is not allowed on the shared application server: dockerd-created containers do not inherit a user-systemd wrapper's cgroup. Use the manual hosted `Test` workflow or an independently contained runner.
+
+For release-grade evidence, push a clean immutable commit and dispatch `test.yml` with `force_full=true`. The workflow uploads an `exact-sha-receipt-*` artifact containing candidate SHA, tree SHA, run identity, cache state, and aggregate gate result.
 
 ### CI vs local: intentionally divergent file sets
 
