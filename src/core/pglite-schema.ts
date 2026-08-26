@@ -1616,7 +1616,7 @@ CREATE TRIGGER portal_acl_audit_append_only_guard
 
 /**
  * Return the PGLite schema SQL with embedding vector dim + model name substituted.
- * Defaults come from the AI gateway (v0.36+: zeroentropyai:zembed-1 / 1280d).
+ * Defaults come from the AI gateway (Avers R1: Google gemini-embedding-001 / 768d).
  *
  * v0.37.x fix wave: defaults track gateway constants instead of stale v0.13
  * OpenAI literals so the pre-computed `PGLITE_SCHEMA_SQL` constant doesn't

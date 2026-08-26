@@ -1,4 +1,5 @@
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from 'fs';
+import { createHash } from 'node:crypto';
 import { isAbsolute, join } from 'path';
 import { homedir } from 'os';
 import type { EngineConfig, EmbeddingColumnConfig } from './types.ts';
@@ -41,7 +42,7 @@ export interface GBrainConfig {
    * merge → buildGatewayConfig env dict → recipe reads ZEROENTROPY_API_KEY.
    */
   zeroentropy_api_key?: string;
-  /** AI gateway config (v0.14+). v0.36+ default: "zeroentropyai:zembed-1" / 1280 / "anthropic:claude-haiku-4-5-20251001". */
+  /** AI gateway config (v0.14+). Avers R1 default: "google:gemini-embedding-001" / 768. */
   embedding_model?: string;
   embedding_dimensions?: number;
   /**
@@ -412,6 +413,35 @@ export function loadConfigFileOnly(): GBrainConfig | null {
   } catch {
     return null;
   }
+}
+
+export interface StrictConfigFileSnapshot {
+  config: GBrainConfig | null;
+  sha256: string;
+}
+
+/** Migration/release loader: only an absent file is acceptable; every other read/parse failure is fatal. */
+export function loadConfigFileSnapshotStrict(): StrictConfigFileSnapshot {
+  let raw: string;
+  try {
+    raw = readFileSync(getConfigPath(), 'utf-8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { config: null, sha256: 'absent' };
+    throw new Error('Unable to read config.json for governed migration', { cause: error });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error('Invalid config.json for governed migration', { cause: error });
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('config.json must contain a JSON object for governed migration');
+  }
+  return {
+    config: migrateLegacyEmbeddingConfig(parsed as Record<string, unknown>) as unknown as GBrainConfig,
+    sha256: createHash('sha256').update(raw).digest('hex'),
+  };
 }
 
 /**

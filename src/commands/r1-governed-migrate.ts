@@ -4,6 +4,7 @@ import postgres, { type Sql } from 'postgres';
 import { writeFileSync } from 'node:fs';
 import { configureGateway, embed, resetGateway } from '../core/ai/gateway.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { loadConfigFileSnapshotStrict } from '../core/config.ts';
 import {
   R1_BACKUP_COLUMN,
   R1_ADVISORY_LOCK_KEY,
@@ -16,6 +17,9 @@ import {
   R1_WRITER_FENCE_TABLES,
   assertR1DatabaseTarget,
   assertR1CompletionReality,
+  assertR1RegistrySafeForPrepare,
+  assertR1NonDbRuntimeConfig,
+  assertR1ZeroZeRuntimeConfig,
   assertR1EnvTarget,
   assertReadyForCutover,
   buildCutoverStatements,
@@ -26,6 +30,7 @@ import {
   identityFingerprint,
   isExactR1WriterFence,
   parseR1MigrationArgs,
+  parseR1EmbeddingRegistry,
   resolveR1WriterFenceTables,
   resolveContentPlaneCounts,
   vectorLiteral,
@@ -50,6 +55,7 @@ interface StateEnvelope {
   prior_reranker_model: string;
   prior_reranker_enabled: boolean;
   writer_fence_tables: string[];
+  rollback_file_config_sha256?: string;
 }
 
 function nowIso(): string { return new Date().toISOString(); }
@@ -156,13 +162,61 @@ async function activeEmbedJobs(sql: Sql): Promise<number> {
 }
 
 function parseRegistryColumns(raw: string | null): string[] {
-  if (!raw) return [];
-  let parsed: unknown;
-  try { parsed = JSON.parse(raw); } catch { throw new Error('embedding_columns registry is corrupt'); }
-  const names = Array.isArray(parsed)
-    ? parsed.map((entry) => typeof entry === 'string' ? entry : (entry && typeof entry === 'object' ? String((entry as any).column ?? '') : ''))
-    : parsed && typeof parsed === 'object' ? Object.keys(parsed as Record<string, unknown>) : [];
-  return [...new Set(names.filter((name) => name && name !== 'embedding'))].sort();
+  return Object.keys(parseR1EmbeddingRegistry(raw)).sort();
+}
+
+async function validateR1CutoverRuntimePlanes(sql: Sql, expectedFileSha256?: string, requireTargetDb = false): Promise<string> {
+  const fileSnapshot = loadConfigFileSnapshotStrict();
+  if (expectedFileSha256 !== undefined && fileSnapshot.sha256 !== expectedFileSha256) {
+    throw new Error('config.json changed during governed cutover');
+  }
+  const fileConfig = fileSnapshot.config;
+  const dbRegistry = parseR1EmbeddingRegistry(await getConfig(sql, 'embedding_columns'));
+  const dbSelectedColumn = await getConfig(sql, 'search_embedding_column');
+  assertR1RegistrySafeForPrepare(
+    dbRegistry,
+    fileConfig?.embedding_columns,
+    dbSelectedColumn,
+    fileConfig?.search_embedding_column,
+  );
+  const nonDbRuntime = {
+    file_embedding_model: fileConfig?.embedding_model,
+    file_embedding_dimensions: fileConfig?.embedding_dimensions,
+    file_search_embedding_column: fileConfig?.search_embedding_column,
+    file_embedding_columns: fileConfig?.embedding_columns,
+    file_provider_base_urls: fileConfig?.provider_base_urls,
+    env_embedding_model: process.env.GBRAIN_EMBEDDING_MODEL,
+    env_embedding_dimensions: process.env.GBRAIN_EMBEDDING_DIMENSIONS,
+  };
+  if (requireTargetDb) {
+    assertR1ZeroZeRuntimeConfig({
+      db_embedding_model: await getConfig(sql, 'embedding_model'),
+      db_embedding_dimensions: Number(await getConfig(sql, 'embedding_dimensions')) || null,
+      db_reranker_model: await getConfig(sql, 'search.reranker.model'),
+      db_embedding_columns: dbRegistry,
+      ...nonDbRuntime,
+    });
+  } else {
+    assertR1NonDbRuntimeConfig(nonDbRuntime);
+  }
+  return fileSnapshot.sha256;
+}
+
+async function assertSourceDbIdentity(sql: Sql, status: Record<string, unknown> & R1CutoverStatus, expectedModel: string, expectedDimensions: number): Promise<void> {
+  if (await getConfig(sql, 'embedding_model') !== expectedModel || Number(await getConfig(sql, 'embedding_dimensions')) !== expectedDimensions) throw new Error('source DB embedding identity mismatch');
+  const expectedType = `vector(${expectedDimensions})`;
+  if (status.content_chunks.primary_type !== expectedType || status.facts.primary_type !== expectedType || status.query_cache.primary_type !== expectedType) throw new Error('source physical vector planes do not match DB dimensions');
+}
+
+function validateR1RollbackRuntimePlanes(state: StateEnvelope, expectedFileSha256?: string): string {
+  const snapshot = loadConfigFileSnapshotStrict();
+  if (expectedFileSha256 !== undefined && snapshot.sha256 !== expectedFileSha256) throw new Error('config.json changed during governed rollback');
+  const config = snapshot.config;
+  if (!config || config.embedding_model !== state.from_model || config.embedding_dimensions !== state.from_dimensions) throw new Error('rollback requires durable source embedding identity in config.json');
+  if (config.search_embedding_column && config.search_embedding_column !== 'embedding') throw new Error('rollback config.json selects a non-primary embedding column');
+  if (Object.keys(config.embedding_columns ?? {}).length > 0) throw new Error('rollback config.json contains unresolved embedding columns');
+  assertR1EnvTarget(process.env, 'source', state.from_model, state.from_dimensions);
+  return snapshot.sha256;
 }
 
 async function readCompletionReality(sql: Sql): Promise<R1CompletionReality> {
@@ -189,6 +243,7 @@ async function readCompletionReality(sql: Sql): Promise<R1CompletionReality> {
   return {
     current_model: await getConfig(sql, 'embedding_model'),
     current_dimensions: Number(await getConfig(sql, 'embedding_dimensions')) || null,
+    reranker_model: await getConfig(sql, 'search.reranker.model'),
     content_primary_type: await columnType(sql, 'content_chunks', 'embedding'),
     content_total: Number(counts.content_total ?? 0), content_populated: Number(counts.content_populated ?? 0),
     facts_primary_type: await columnType(sql, 'facts', 'embedding'),
@@ -247,8 +302,13 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
     throw new Error('Dim-pinned baseline does not match the approved catalog');
   }
   if (statusBefore.takes.total_populated !== 0) throw new Error('takes.embedding became populated; STOP');
+  const fromModel = String(statusBefore.current_model ?? '');
+  const fromDimensions = Number(statusBefore.current_dimensions ?? 0);
+  if (fromModel !== 'zeroentropyai:zembed-1' || fromDimensions !== 1280) throw new Error('Approved ZE source config identity is missing or drifted');
+  await assertSourceDbIdentity(sql, statusBefore, fromModel, fromDimensions);
   const jobs = await activeEmbedJobs(sql);
   if (jobs > 0) throw new Error(`Refusing while ${jobs} embedding-producing job(s) are active/waiting`);
+  await validateR1CutoverRuntimePlanes(sql);
   await probeTarget();
 
   await sql.unsafe(`ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS ${R1_SHADOW_COLUMN} vector(${R1_TARGET_DIMENSIONS})`);
@@ -259,9 +319,9 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
   const startedAt = currentStateRaw ? (JSON.parse(currentStateRaw) as StateEnvelope).started_at : nowIso();
   const state: StateEnvelope = {
     schema_version: 1, identity, fingerprint, phase: 'preparing', started_at: startedAt, updated_at: nowIso(),
-    from_model: String(statusBefore.current_model ?? 'unknown'),
-    from_dimensions: Number(statusBefore.current_dimensions ?? 0),
-    prior_reranker_model: await getConfig(sql, 'search.reranker.model') ?? 'zeroentropyai:zerank-2',
+    from_model: fromModel,
+    from_dimensions: fromDimensions,
+    prior_reranker_model: await getConfig(sql, 'search.reranker.model') ?? 'voyage:rerank-2.5',
     prior_reranker_enabled: (await getConfig(sql, 'search.reranker.enabled')) === 'true',
     writer_fence_tables: fenceTables,
   };
@@ -327,6 +387,7 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
 async function cutover(sql: Sql, args: R1MigrationArgs): Promise<Record<string, unknown>> {
   if (!args.yes) throw new Error('--cutover requires --yes');
   assertR1EnvTarget(process.env, 'target');
+  const fileSha256 = await validateR1CutoverRuntimePlanes(sql);
   await probeTarget();
   const stateRaw = await getConfig(sql, R1_STATE_KEY);
   if (!stateRaw) throw new Error('No active R1 migration marker');
@@ -334,22 +395,38 @@ async function cutover(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
   if (args.expectedCandidateSha && state.identity.candidate_sha !== args.expectedCandidateSha) throw new Error('Candidate SHA differs from active marker');
   const status = await readStatus(sql);
   const alreadyCutover = status.content_chunks.primary_type === 'vector(768)' && (status.content_chunks as any).backup_type === 'vector(1280)';
-  if (!alreadyCutover) {
-    assertReadyForCutover(status);
-    state.phase = 'cutover'; state.updated_at = nowIso();
-    await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
-    await sql.begin(async (tx) => {
+  if (!alreadyCutover) assertReadyForCutover(status);
+  await sql.begin(async (tx) => {
+    const lockedSql = tx as unknown as Sql;
+    await tx.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
+    await validateR1CutoverRuntimePlanes(lockedSql, fileSha256);
+    if (!alreadyCutover) {
+      const lockedStatus = await readStatus(lockedSql);
+      assertReadyForCutover(lockedStatus);
+      await assertSourceDbIdentity(lockedSql, lockedStatus, state.from_model, state.from_dimensions);
+      state.phase = 'cutover'; state.updated_at = nowIso();
+      await setConfig(lockedSql, R1_STATE_KEY, JSON.stringify(state));
       await tx.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
       for (const statement of buildCutoverStatements()) await tx.unsafe(statement);
       await tx.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.enabled','false') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
       await tx.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.model','voyage:rerank-2.5') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
-    });
-  }
-  const completion = await readCompletionReality(sql);
-  assertR1CompletionReality(completion);
-  state.phase = 'completed'; state.updated_at = nowIso();
-  await setConfig(sql, R1_COMPLETED_KEY, JSON.stringify({ ...state, completed_at: nowIso(), completion }));
-  await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
+    }
+    await setConfig(lockedSql, 'embedding_columns', '{}');
+    await setConfig(lockedSql, 'search_embedding_column', 'embedding');
+    await validateR1CutoverRuntimePlanes(lockedSql, fileSha256, true);
+  });
+  let completion!: R1CompletionReality;
+  await sql.begin(async (tx) => {
+    const lockedSql = tx as unknown as Sql;
+    await tx.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
+    await validateR1CutoverRuntimePlanes(lockedSql, fileSha256, true);
+    completion = await readCompletionReality(lockedSql);
+    assertR1CompletionReality(completion);
+    await validateR1CutoverRuntimePlanes(lockedSql, fileSha256, true);
+    state.phase = 'completed'; state.updated_at = nowIso();
+    await setConfig(lockedSql, R1_COMPLETED_KEY, JSON.stringify({ ...state, completed_at: nowIso(), file_config_sha256: fileSha256, completion }));
+    await setConfig(lockedSql, R1_STATE_KEY, JSON.stringify(state));
+  });
   return { status: 'cutover_complete', state, completion, ...(await readStatus(sql)) };
 }
 
@@ -361,22 +438,40 @@ async function disableFence(sql: Sql, args: R1MigrationArgs): Promise<Record<str
   return { status: 'writer_fence_disabled', ...(await readStatus(sql)) };
 }
 
+async function assertRollbackReality(sql: Sql, state: StateEnvelope): Promise<void> {
+  const expectedSourceType = `vector(${state.from_dimensions})`;
+  const status = await readStatus(sql);
+  if (!status.writer_fence_active) throw new Error('rollback reality lost the writer fence');
+  if (status.content_chunks.primary_type !== expectedSourceType || await columnType(sql, 'content_chunks', 'embedding_g768_r1') !== 'vector(768)') throw new Error('rollback content plane mismatch');
+  if (status.facts.primary_type !== expectedSourceType || await columnType(sql, 'facts', 'embedding_g768_r1') !== 'vector(768)') throw new Error('rollback facts plane mismatch');
+  if (status.query_cache.primary_type !== expectedSourceType || await columnType(sql, 'query_cache', 'embedding_g768_r1') !== 'vector(768)' || status.query_cache.rows !== 0) throw new Error('rollback query-cache plane mismatch');
+  if (await getConfig(sql, 'embedding_model') !== state.from_model || Number(await getConfig(sql, 'embedding_dimensions')) !== state.from_dimensions) throw new Error('rollback embedding config identity mismatch');
+  if (await getConfig(sql, 'search_embedding_column') !== 'embedding') throw new Error('rollback selected embedding column mismatch');
+  if (await getConfig(sql, 'search.reranker.model') !== state.prior_reranker_model || await getConfig(sql, 'search.reranker.enabled') !== String(state.prior_reranker_enabled)) throw new Error('rollback reranker config mismatch');
+}
+
 async function rollback(sql: Sql, args: R1MigrationArgs): Promise<Record<string, unknown>> {
   if (!args.yes) throw new Error('--rollback requires --yes');
   const stateRaw = await getConfig(sql, R1_STATE_KEY);
   if (!stateRaw) throw new Error('No R1 migration marker available for rollback');
   const state = JSON.parse(stateRaw) as StateEnvelope;
-  if (state.phase !== 'completed') throw new Error(`Rollback requires completed cutover state, got ${state.phase}`);
-  assertR1EnvTarget(process.env, 'source', state.from_model, state.from_dimensions);
+  if (state.phase !== 'completed' && state.phase !== 'cutover') throw new Error(`Rollback requires completed or schema-cutover state, got ${state.phase}`);
+  const rollbackFileSha256 = validateR1RollbackRuntimePlanes(state);
   const status = await readStatus(sql);
   if (!status.writer_fence_active) throw new Error('Rollback requires the writer fence to remain active');
-  if (status.content_chunks.primary_type !== 'vector(768)' || (status.content_chunks as any).backup_type !== 'vector(1280)') {
+  if (status.content_chunks.primary_type !== 'vector(768)' || (status.content_chunks as any).backup_type !== `vector(${state.from_dimensions})`) {
     throw new Error('Content vector planes are not in the expected post-cutover state');
   }
-  if (status.facts.primary_type !== 'vector(768)' || (status.facts as any).backup_type !== 'vector(1280)') {
+  if (status.facts.primary_type !== 'vector(768)' || (status.facts as any).backup_type !== `vector(${state.from_dimensions})`) {
     throw new Error('Fact vector planes are not in the expected post-cutover state');
   }
+  if (status.query_cache.primary_type !== 'vector(768)' || status.query_cache.backup_type !== `vector(${state.from_dimensions})`) {
+    throw new Error('Query-cache vector planes are not in the expected post-cutover state');
+  }
   await sql.begin(async (tx) => {
+    const lockedSql = tx as unknown as Sql;
+    await tx.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
+    validateR1RollbackRuntimePlanes(state, rollbackFileSha256);
     await tx.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
     for (const statement of buildRollbackStatements(
       state.from_model,
@@ -384,9 +479,13 @@ async function rollback(sql: Sql, args: R1MigrationArgs): Promise<Record<string,
       state.prior_reranker_model,
       state.prior_reranker_enabled,
     )) await tx.unsafe(statement);
+    await assertRollbackReality(lockedSql, state);
+    validateR1RollbackRuntimePlanes(state, rollbackFileSha256);
+    state.phase = 'rolled_back'; state.updated_at = nowIso();
+    state.rollback_file_config_sha256 = rollbackFileSha256;
+    await tx.unsafe('DELETE FROM config WHERE key=$1', [R1_COMPLETED_KEY]);
+    await setConfig(lockedSql, R1_STATE_KEY, JSON.stringify(state));
   });
-  state.phase = 'rolled_back'; state.updated_at = nowIso();
-  await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
   return { status: 'rollback_complete', state, ...(await readStatus(sql)) };
 }
 

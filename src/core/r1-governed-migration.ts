@@ -1,5 +1,6 @@
 /** Avers R1 collision-safe Google embedding migration primitives. */
 import { createHash } from 'node:crypto';
+import { validateColumnConfig, validateColumnKey } from './search/embedding-column.ts';
 
 export const R1_LINEAGE = 'avers-fork-0.42.53-r1';
 export const R1_OPERATION_ID = 'avers:r1:ze-exit:google-g768:v1';
@@ -220,13 +221,14 @@ export interface R1CutoverStatus {
   writer_fence_active: boolean;
   content_chunks: { total: number; shadow_populated: number; primary_type: string | null; shadow_type: string | null };
   facts: { total_populated: number; shadow_populated: number; primary_type: string | null; shadow_type: string | null };
-  query_cache: { primary_type: string | null };
+  query_cache: { primary_type: string | null; backup_type?: string | null; rows?: number };
   takes: { total_populated: number; primary_type: string | null };
 }
 
 export interface R1CompletionReality {
   current_model: string | null;
   current_dimensions: number | null;
+  reranker_model: string | null;
   content_primary_type: string | null;
   content_total: number;
   content_populated: number;
@@ -246,8 +248,177 @@ export interface R1CompletionReality {
   vector_roundtrip_ok: boolean;
 }
 
+export interface R1ZeroZeRuntimeConfig {
+  db_embedding_model: string | null;
+  db_embedding_dimensions: number | null;
+  db_reranker_model: string | null;
+  db_embedding_columns?: Record<string, { provider?: string; dimensions?: number; type?: string }>;
+  file_embedding_model?: string;
+  file_embedding_dimensions?: number;
+  file_search_embedding_column?: string;
+  file_embedding_columns?: Record<string, { provider?: string; dimensions?: number; type?: string }>;
+  file_provider_base_urls?: Record<string, string>;
+  env_embedding_model?: string;
+  env_embedding_dimensions?: string;
+}
+
+export type R1EmbeddingRegistry = Record<string, { provider?: string; dimensions?: number; type?: string }>;
+
+function normalizeR1RegistryEntry(name: string, value: unknown): R1EmbeddingRegistry[string] {
+  try {
+    validateColumnKey(name);
+    validateColumnConfig(name, value);
+  } catch (error) {
+    throw new Error(`embedding_columns.${name} is invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const entry = value as { provider: string; dimensions: number; type: 'vector' | 'halfvec' };
+  return { provider: entry.provider, dimensions: entry.dimensions, type: entry.type };
+}
+
+function assertNoDuplicateJsonKeys(raw: string): void {
+  let index = 0;
+  const whitespace = (): void => { while (/\s/.test(raw[index] ?? '')) index += 1; };
+  const stringToken = (): string => {
+    const start = index++;
+    while (index < raw.length) {
+      if (raw[index] === '\\') { index += 2; continue; }
+      if (raw[index++] === '"') return JSON.parse(raw.slice(start, index)) as string;
+    }
+    throw new Error('unterminated JSON string');
+  };
+  const value = (): void => {
+    whitespace();
+    if (raw[index] === '{') {
+      index += 1;
+      const keys = new Set<string>();
+      whitespace();
+      if (raw[index] === '}') { index += 1; return; }
+      while (index < raw.length) {
+        whitespace();
+        if (raw[index] !== '"') throw new Error('invalid JSON object key');
+        const key = stringToken();
+        if (keys.has(key)) throw new Error(`duplicate JSON key: ${key}`);
+        keys.add(key);
+        whitespace();
+        if (raw[index++] !== ':') throw new Error('invalid JSON object separator');
+        value();
+        whitespace();
+        if (raw[index] === '}') { index += 1; return; }
+        if (raw[index++] !== ',') throw new Error('invalid JSON object delimiter');
+      }
+      throw new Error('unterminated JSON object');
+    }
+    if (raw[index] === '[') {
+      index += 1;
+      whitespace();
+      if (raw[index] === ']') { index += 1; return; }
+      while (index < raw.length) {
+        value();
+        whitespace();
+        if (raw[index] === ']') { index += 1; return; }
+        if (raw[index++] !== ',') throw new Error('invalid JSON array delimiter');
+      }
+      throw new Error('unterminated JSON array');
+    }
+    if (raw[index] === '"') { stringToken(); return; }
+    while (index < raw.length && !/[\s,}\]]/.test(raw[index])) index += 1;
+  };
+  value();
+  whitespace();
+  if (index !== raw.length) throw new Error('trailing JSON data');
+}
+
+export function parseR1EmbeddingRegistry(raw: string | null): R1EmbeddingRegistry {
+  if (raw === null) return {};
+  let parsed: unknown;
+  try {
+    assertNoDuplicateJsonKeys(raw);
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`embedding_columns registry is corrupt: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const out = new Map<string, R1EmbeddingRegistry[string]>();
+  if (Array.isArray(parsed)) {
+    for (const value of parsed) {
+      if (typeof value === 'string') {
+        try { validateColumnKey(value); } catch { throw new Error('embedding_columns legacy array contains an invalid column'); }
+        if (out.has(value)) throw new Error('embedding_columns legacy array contains a duplicate column');
+        out.set(value, {});
+        continue;
+      }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('embedding_columns legacy array contains an invalid entry');
+      const name = (value as Record<string, unknown>).column;
+      if (typeof name !== 'string' || out.has(name)) throw new Error('embedding_columns legacy array contains an invalid or duplicate column');
+      out.set(name, normalizeR1RegistryEntry(name, value));
+    }
+    return Object.fromEntries(out);
+  }
+  if (!parsed || typeof parsed !== 'object') throw new Error('embedding_columns registry must be an object or supported legacy array');
+  for (const [name, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (out.has(name)) throw new Error(`embedding_columns contains a duplicate column: ${name}`);
+    out.set(name, normalizeR1RegistryEntry(name, value));
+  }
+  return Object.fromEntries(out);
+}
+
+export function assertR1RegistrySafeForPrepare(
+  dbRegistry: R1EmbeddingRegistry | undefined,
+  fileRegistry: R1EmbeddingRegistry | undefined,
+  dbSelectedColumn?: string | null,
+  fileSelectedColumn?: string,
+): void {
+  const dbNames = Object.keys(dbRegistry ?? {});
+  if (dbNames.length > 0) throw new Error(`DB embedding registry requires explicit R1 disposition before prepare: ${dbNames.sort().join(',')}`);
+  const fileNames = Object.keys(fileRegistry ?? {});
+  if (fileNames.length > 0) throw new Error(`file embedding registry requires explicit R1 disposition before prepare: ${fileNames.sort().join(',')}`);
+  if (dbSelectedColumn && dbSelectedColumn !== 'embedding') throw new Error(`DB selected embedding column requires explicit R1 disposition before prepare: ${dbSelectedColumn}`);
+  if (fileSelectedColumn && fileSelectedColumn !== 'embedding') throw new Error(`file selected embedding column requires explicit R1 disposition before prepare: ${fileSelectedColumn}`);
+}
+
+function isZeroEntropyModel(value: string | null | undefined): boolean {
+  return typeof value === 'string' && value.trim().toLowerCase().startsWith('zeroentropyai:');
+}
+
+export function assertR1NonDbRuntimeConfig(r: Omit<R1ZeroZeRuntimeConfig, 'db_embedding_model' | 'db_embedding_dimensions' | 'db_reranker_model' | 'db_embedding_columns'>): void {
+  if (r.file_embedding_model !== undefined && r.file_embedding_model !== R1_TARGET_MODEL) throw new Error(`file embedding model overrides the R1 target: ${r.file_embedding_model}`);
+  if (r.file_embedding_dimensions !== undefined && r.file_embedding_dimensions !== R1_TARGET_DIMENSIONS) throw new Error(`file embedding dimensions override the R1 target: ${r.file_embedding_dimensions}`);
+  if (r.env_embedding_model !== undefined && r.env_embedding_model !== R1_TARGET_MODEL) throw new Error(`env embedding model overrides the R1 target: ${r.env_embedding_model}`);
+  if (r.env_embedding_dimensions !== undefined && Number(r.env_embedding_dimensions) !== R1_TARGET_DIMENSIONS) throw new Error(`env embedding dimensions override the R1 target: ${r.env_embedding_dimensions}`);
+
+  for (const [key, value] of Object.entries(r.file_provider_base_urls ?? {})) {
+    if (key.toLowerCase() === 'zeroentropyai' || String(value).toLowerCase().includes('zeroentropy')) {
+      throw new Error(`hosted ZeroEntropy base URL override remains configured: ${key}`);
+    }
+  }
+  for (const [name, value] of Object.entries(r.file_embedding_columns ?? {})) {
+    if (isZeroEntropyModel(value.provider)) throw new Error(`custom embedding column still targets hosted ZeroEntropy: ${name}`);
+    if (name === 'embedding'
+      && (value.provider !== R1_TARGET_MODEL || value.dimensions !== R1_TARGET_DIMENSIONS || value.type !== 'vector')) {
+      throw new Error('file embedding registry primary override does not match the R1 target');
+    }
+  }
+  const selected = r.file_search_embedding_column?.trim();
+  if (selected && selected !== 'embedding') throw new Error(`custom embedding column remains selected after R1 cutover: ${selected}`);
+}
+
+/** Fail closed on every runtime config plane that could reactivate hosted ZE after cutover. */
+export function assertR1ZeroZeRuntimeConfig(r: R1ZeroZeRuntimeConfig): void {
+  if (r.db_embedding_model !== R1_TARGET_MODEL) throw new Error(`DB embedding model is not ${R1_TARGET_MODEL}`);
+  if (r.db_embedding_dimensions !== R1_TARGET_DIMENSIONS) throw new Error(`DB embedding dimensions are not ${R1_TARGET_DIMENSIONS}`);
+  if (r.db_reranker_model !== 'voyage:rerank-2.5') throw new Error(`DB reranker model is not the governed target: ${r.db_reranker_model}`);
+  for (const [name, value] of Object.entries(r.db_embedding_columns ?? {})) {
+    if (isZeroEntropyModel(value.provider)) throw new Error(`DB embedding registry still targets hosted ZeroEntropy: ${name}`);
+    if (name === 'embedding'
+      && (value.provider !== R1_TARGET_MODEL || value.dimensions !== R1_TARGET_DIMENSIONS || value.type !== 'vector')) {
+      throw new Error('DB embedding registry primary override does not match the R1 target');
+    }
+  }
+  assertR1NonDbRuntimeConfig(r);
+}
+
 export function assertR1CompletionReality(r: R1CompletionReality): void {
   if (r.current_model !== R1_TARGET_MODEL || r.current_dimensions !== R1_TARGET_DIMENSIONS) throw new Error('completion config identity mismatch');
+  if (r.reranker_model !== 'voyage:rerank-2.5') throw new Error('completion reranker identity mismatch');
   if (r.content_primary_type !== 'vector(768)' || r.content_populated !== r.content_total) throw new Error('completion content plane mismatch');
   if (r.facts_primary_type !== 'vector(768)' || r.facts_populated !== r.facts_expected) throw new Error('completion facts plane mismatch');
   if (r.query_cache_type !== 'vector(768)' || r.query_cache_rows !== 0) throw new Error('completion query cache mismatch');

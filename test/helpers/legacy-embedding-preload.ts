@@ -3,18 +3,17 @@
  * so tests written before v0.37 (with hardcoded `new Float32Array(1536)`
  * fixtures) keep working without per-file edits.
  *
- * v0.37 fix wave changed the canonical gateway defaults to
- * `zeroentropyai:zembed-1` / 1280-d (matching the system default chosen
- * in v0.36.0). Tests that don't explicitly configure the gateway
+ * Avers R1 changed the canonical gateway defaults to
+ * `google:gemini-embedding-001` / 768-d. Tests that don't explicitly configure the gateway
  * previously got 1536-d schemas via the stale `getPGLiteSchema()`
  * default; v0.37 fixed that so the schema tracks the gateway default
- * (1280 out of the box). Tests with 1536-d fixtures need the schema to
+ * (768 out of the box). Tests with 1536-d fixtures need the schema to
  * stay at 1536 — this preload pins it.
  *
  * Imported by `bunfig.toml` via `preload = ["./test/helpers/legacy-embedding-preload.ts"]`.
  *
- * Tests that need a different embedding shape (the new v0.37 tests,
- * future ZE-1280 tests, or specific-provider tests) should call
+ * Tests that need a different embedding shape (Google-768 tests,
+ * legacy ZE-1280 tests, or specific-provider tests) should call
  * `configureGateway()` explicitly in their own beforeAll, which
  * overwrites this preload.
  */
@@ -49,7 +48,7 @@ applyLegacy();
 // future ZE-1280 tests) call `configureGateway()` in their own
 // beforeAll AFTER this beforeEach runs. Order is:
 //   1. legacy preload beforeEach → applyLegacy (1536)
-//   2. file-local beforeAll → may overwrite to ZE/1280
+//   2. file-local beforeAll → may overwrite to its explicit provider/dimensions
 // Since beforeAll runs once per file BEFORE the first beforeEach,
 // file-local beforeAll wins for that file's tests. ✓
 beforeEach(() => {

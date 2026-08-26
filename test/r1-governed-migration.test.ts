@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import {
   R1_LINEAGE,
   R1_OPERATION_ID,
@@ -10,10 +13,13 @@ import {
   buildRollbackStatements,
   buildWriterFenceSql,
   parseR1MigrationArgs,
+  parseR1EmbeddingRegistry,
   R1_WRITER_FENCE_TABLES,
   assertReadyForCutover,
   assertR1EnvTarget,
   assertR1CompletionReality,
+  assertR1ZeroZeRuntimeConfig,
+  assertR1RegistrySafeForPrepare,
   isExactR1WriterFence,
   resolveR1WriterFenceTables,
   resolveContentPlaneCounts,
@@ -87,6 +93,7 @@ describe('R1 governed embedding migration contract', () => {
     expect(R1_WRITER_FENCE_TABLES).toContain('take_proposals');
   });
 
+
   test('rollback restores ZE primary columns and config while retaining Google columns for evidence', () => {
     const joined = buildRollbackStatements('zeroentropyai:zembed-1', 1280, 'zeroentropyai:zerank-2', false).join('\n');
     expect(joined).toContain('ALTER TABLE content_chunks RENAME COLUMN embedding TO embedding_g768_r1');
@@ -111,7 +118,7 @@ describe('R1 governed embedding migration contract', () => {
 
   test('completion is derived from database reality, signatures, registry, watermark, and smoke', () => {
     const good = {
-      current_model: 'google:gemini-embedding-001', current_dimensions: 768,
+      current_model: 'google:gemini-embedding-001', current_dimensions: 768, reranker_model: 'voyage:rerank-2.5',
       content_primary_type: 'vector(768)', content_total: 4746, content_populated: 4746,
       facts_primary_type: 'vector(768)', facts_expected: 68, facts_populated: 68,
       query_cache_type: 'vector(768)', query_cache_rows: 0,
@@ -122,8 +129,103 @@ describe('R1 governed embedding migration contract', () => {
     };
     expect(() => assertR1CompletionReality(good)).not.toThrow();
     expect(() => assertR1CompletionReality({ ...good, null_signatures_with_chunks: 1 })).toThrow('signature');
-    expect(() => assertR1CompletionReality({ ...good, custom_registry_columns: ['embedding_other'] })).toThrow('registry');
+    expect(() => assertR1CompletionReality({ ...good, custom_registry_columns: ['embedding_legacy'] })).toThrow('registry');
+    expect(() => assertR1CompletionReality({ ...good, reranker_model: 'zeroentropyai:zerank-2' })).toThrow('reranker');
     expect(() => assertR1CompletionReality({ ...good, scalar_watermark: 141 })).toThrow('watermark');
+  });
+
+  test('post-cutover runtime planes reject every effective ZE fallback or override', () => {
+    const good = {
+      db_embedding_model: R1_TARGET_MODEL,
+      db_embedding_dimensions: R1_TARGET_DIMENSIONS,
+      db_reranker_model: 'voyage:rerank-2.5',
+      db_embedding_columns: undefined,
+      file_embedding_model: undefined,
+      file_embedding_dimensions: undefined,
+      file_search_embedding_column: undefined,
+      file_embedding_columns: undefined,
+      file_provider_base_urls: undefined,
+      env_embedding_model: undefined,
+      env_embedding_dimensions: undefined,
+    };
+    expect(() => assertR1ZeroZeRuntimeConfig(good)).not.toThrow();
+    expect(() => assertR1ZeroZeRuntimeConfig({ ...good, db_embedding_model: 'zeroentropyai:zembed-1' })).toThrow('DB embedding model');
+    expect(() => assertR1ZeroZeRuntimeConfig({ ...good, file_embedding_model: 'zeroentropyai:zembed-1' })).toThrow('file embedding model');
+    expect(() => assertR1ZeroZeRuntimeConfig({ ...good, env_embedding_model: 'zeroentropyai:zembed-1' })).toThrow('env embedding model');
+    expect(() => assertR1ZeroZeRuntimeConfig({ ...good, db_reranker_model: 'zeroentropyai:zerank-2' })).toThrow('reranker');
+    expect(() => assertR1ZeroZeRuntimeConfig({ ...good, db_reranker_model: 'cohere:rerank-v3.5' })).toThrow('reranker');
+    expect(() => assertR1ZeroZeRuntimeConfig({
+      ...good,
+      db_embedding_columns: { embedding: { provider: 'zeroentropyai:zembed-1', dimensions: 1280, type: 'vector' as const } },
+    })).toThrow('DB embedding registry');
+    expect(() => assertR1ZeroZeRuntimeConfig({ ...good, file_provider_base_urls: { zeroentropyai: 'https://example.invalid' } })).toThrow('base URL');
+    expect(() => assertR1ZeroZeRuntimeConfig({
+      ...good,
+      file_search_embedding_column: 'embedding_legacy',
+      file_embedding_columns: { embedding_legacy: { provider: 'zeroentropyai:zembed-1', dimensions: 1280, type: 'vector' as const } },
+    })).toThrow('custom embedding column');
+  });
+
+  test('prepare refuses any DB/file embedding registry before schema mutation', () => {
+    expect(() => assertR1RegistrySafeForPrepare(undefined, undefined)).not.toThrow();
+    expect(() => assertR1RegistrySafeForPrepare({ embedding: { provider: 'zeroentropyai:zembed-1' } }, undefined)).toThrow('DB embedding registry');
+    expect(() => assertR1RegistrySafeForPrepare(undefined, { embedding_voyage: { provider: 'voyage:voyage-4' } })).toThrow('file embedding registry');
+    expect(() => assertR1RegistrySafeForPrepare(undefined, undefined, 'embedding_legacy')).toThrow('DB selected embedding column');
+    expect(() => assertR1RegistrySafeForPrepare(undefined, undefined, undefined, 'embedding_legacy')).toThrow('file selected embedding column');
+  });
+
+  test('registry parser rejects scalar, null, malformed and lossy legacy entries', () => {
+    expect(parseR1EmbeddingRegistry(null)).toEqual({});
+    expect(parseR1EmbeddingRegistry('{}')).toEqual({});
+    expect(parseR1EmbeddingRegistry('["embedding_legacy"]')).toEqual({ embedding_legacy: {} });
+    expect(parseR1EmbeddingRegistry('[{"column":"embedding_legacy","provider":"voyage:voyage-4","dimensions":768,"type":"vector"}]'))
+      .toEqual({ embedding_legacy: { provider: 'voyage:voyage-4', dimensions: 768, type: 'vector' } });
+    const prototypeKey = parseR1EmbeddingRegistry('{"__proto__":{"provider":"voyage:voyage-4","dimensions":768,"type":"vector"}}');
+    expect(Object.hasOwn(prototypeKey, '__proto__')).toBe(true);
+    expect(Object.keys(prototypeKey)).toEqual(['__proto__']);
+    expect(() => assertR1RegistrySafeForPrepare(prototypeKey, undefined)).toThrow('DB embedding registry');
+    for (const raw of [
+      'null', '1', '"embedding"', '[null]', '[{}]', '["x","x"]', '{"Bad-Column":{}}',
+      '{"embedding":null}', '{"embedding":{"dimensions":"768"}}',
+      '{"embedding":{"provider":"voyage","dimensions":768,"type":"vector"}}',
+      '{"embedding":{"provider":"voyage:voyage-4","dimensions":8193,"type":"vector"}}',
+      '{"embedding":{"provider":"voyage:voyage-4","dimensions":768,"type":"cosine"}}',
+      '{"embedding":{"provider":"voyage:v1","provider":"google:v2","dimensions":768,"type":"vector"}}',
+      '{"embedding":{"provider":"voyage:v1","dimensions":768,"type":"vector"},"embedding":{"provider":"google:v2","dimensions":768,"type":"vector"}}',
+    ]) {
+      expect(() => parseR1EmbeddingRegistry(raw)).toThrow('embedding_columns');
+    }
+  });
+
+  test('fixed runner checks file/env/base-url runtime planes before stamping completion', () => {
+    const source = readFileSync(resolve(import.meta.dir, '../src/commands/r1-governed-migrate.ts'), 'utf8');
+    const cutoverSource = source.slice(source.indexOf('async function cutover('), source.indexOf('async function disableFence('));
+    const validation = cutoverSource.indexOf('validateR1CutoverRuntimePlanes(sql)');
+    const transactionValidation = cutoverSource.indexOf('validateR1CutoverRuntimePlanes(lockedSql');
+    const schemaCutover = cutoverSource.indexOf('buildCutoverStatements()');
+    const completedMarker = cutoverSource.indexOf("state.phase = 'completed'");
+    expect(source).toContain('loadConfigFileSnapshotStrict()');
+    expect(source).not.toContain('loadConfigFileOnly()');
+    expect(source).toContain("setConfig(lockedSql, 'embedding_columns', '{}')");
+    expect(source.indexOf('validateR1CutoverRuntimePlanes(sql);')).toBeLessThan(source.indexOf('ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS'));
+    expect(source).toContain('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
+    expect(cutoverSource.match(/LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE/g)).toHaveLength(2);
+    expect(validation).toBeGreaterThan(0);
+    expect(transactionValidation).toBeGreaterThan(validation);
+    expect(transactionValidation).toBeLessThan(schemaCutover);
+    expect(completedMarker).toBeGreaterThan(cutoverSource.lastIndexOf('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE'));
+    expect(cutoverSource.indexOf('setConfig(lockedSql, R1_COMPLETED_KEY')).toBeGreaterThan(completedMarker);
+    expect(cutoverSource).toContain('file_config_sha256: fileSha256');
+    expect(source).toContain("db_embedding_model: await getConfig(sql, 'embedding_model')");
+    expect(source).toContain("db_reranker_model: await getConfig(sql, 'search.reranker.model')");
+    expect(source).toContain('await assertSourceDbIdentity(lockedSql, lockedStatus, state.from_model, state.from_dimensions)');
+    expect(source).toContain("state.phase !== 'completed' && state.phase !== 'cutover'");
+    expect(source).toContain('status.query_cache.primary_type');
+    expect(source).toContain('await assertRollbackReality(lockedSql, state)');
+    expect(source).toContain("DELETE FROM config WHERE key=$1', [R1_COMPLETED_KEY]");
+    expect(source).toContain('rollback_file_config_sha256 = rollbackFileSha256');
+    expect(source).toContain('const rollbackFileSha256 = validateR1RollbackRuntimePlanes(state)');
+    expect(source.match(/validateR1RollbackRuntimePlanes\(state, rollbackFileSha256\)/g)).toHaveLength(2);
   });
 
   test('writer manifest covers background job control as well as content planes', () => {

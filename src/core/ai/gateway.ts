@@ -90,8 +90,9 @@ function withDefaultTimeout(caller: AbortSignal | undefined, timeoutMs: number):
 }
 
 const MAX_CHARS = 8000;
-// v0.36.0.0 (D3 + D4): ZeroEntropy zembed-1 at 1280d via Matryoshka is the
-// new default for embedding. Real-corpus benchmark across 20 queries:
+// Historical v0.36.0.0 benchmark selected ZeroEntropy zembed-1 at 1280d.
+// Avers R1 now binds the fresh/configless default in defaults.ts to the
+// owner-approved Google gemini-embedding-001 768d target. Historical benchmark:
 //   - ZE wins 11/20 (OpenAI 6, Voyage 4)
 //   - 442ms avg vs OpenAI 973ms (2.2x faster)
 //   - $0.05/M tokens vs OpenAI $0.13/M (2.6x cheaper at regular pricing)
@@ -100,8 +101,6 @@ const MAX_CHARS = 8000;
 // -> faster queries) while staying in the high-recall zone of the Matryoshka
 // curve. 1024 (Voyage's step) is NOT a valid ZE dim — see
 // src/core/ai/dims.ts:ZEROENTROPY_VALID_DIMS.
-// New installs without ZEROENTROPY_API_KEY size for 1280d anyway — the
-// AIConfigError surfaces at first embed with a paste-ready setup hint.
 // Re-exported from the leaf `defaults.ts` so heavy schema/registry modules
 // don't transitively load every provider SDK just to read the defaults.
 export { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './defaults.ts';
@@ -111,7 +110,7 @@ const DEFAULT_CHAT_MODEL = 'anthropic:claude-sonnet-4-6';
 // v0.35.0.0+: reranker default. Used only when search.reranker.enabled is set
 // AND no explicit reranker_model is configured. Mode bundles' per-mode
 // `reranker_model` default to this same value but can be overridden.
-const DEFAULT_RERANKER_MODEL = 'zeroentropyai:zerank-2';
+const DEFAULT_RERANKER_MODEL = 'voyage:rerank-2.5';
 
 let _config: AIGatewayConfig | null = null;
 const _modelCache = new Map<string, any>();

@@ -379,8 +379,8 @@ export class PGLiteEngine implements BrainEngine {
     await this.applyForwardReferenceBootstrap();
 
     // Resolve embedding dim/model from gateway. v0.37 fix wave: fallbacks
-    // track the canonical defaults in `ai/defaults.ts` (zeroentropyai:zembed-1
-    // / 1280d) instead of the stale v0.13 OpenAI literals, AND we store the
+    // track the canonical defaults in `ai/defaults.ts` (Google 768d for Avers
+    // R1) instead of the stale v0.13 OpenAI literals, AND we store the
     // full `provider:model` string in the DB config table — consumers like
     // ze-switch, doctor, and recommendation-context expect the provider
     // prefix. (Round-1 CDX-4 + A.8.)

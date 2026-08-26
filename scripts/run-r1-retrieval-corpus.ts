@@ -117,8 +117,8 @@ function arg(name: string): string | undefined {
 async function main(): Promise<void> {
   const corpusPath = arg('--corpus');
   const outputPath = arg('--output');
-  const model = arg('--model') ?? 'zeroentropyai:zembed-1';
-  const dimensions = Number(arg('--dimensions') ?? '1280');
+  const model = arg('--model') ?? 'google:gemini-embedding-001';
+  const dimensions = Number(arg('--dimensions') ?? '768');
   const column = arg('--column') ?? 'embedding';
   const ftsOnly = process.argv.includes('--fts-only');
   const databaseUrl = process.env.DATABASE_URL;
