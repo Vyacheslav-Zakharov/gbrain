@@ -131,7 +131,8 @@ describe('run-unit-shard.sh recycled process batches', () => {
     const sb = batchingSandbox(1);
     try {
       writeFileSync(join(sb.root, 'test', 'migrate.test.ts'), '// cold fixture\n');
-      writeFileSync(join(sb.root, 'test', 'custom.test.ts'), 'delete process.env.GBRAIN_PGLITE_SNAPSHOT;\n');
+      const snapshotOptOut = ['delete', 'process.env.GBRAIN_PGLITE_SNAPSHOT;'].join(' ');
+      writeFileSync(join(sb.root, 'test', 'custom.test.ts'), `${snapshotOptOut}\n`);
       writeFileSync(join(sb.root, 'bin', 'bun'), `#!/usr/bin/env bash\nprintf 'snapshot=%s args=%s\\n' "\${GBRAIN_PGLITE_SNAPSHOT-}" "$*" >> "${sb.callsPath}"\n`);
       chmodSync(join(sb.root, 'bin', 'bun'), 0o755);
       const result = spawnSync('bash', [join(sb.root, 'scripts', 'run-unit-shard.sh'), '--batch-size', '5'], {
