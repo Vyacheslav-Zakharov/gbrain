@@ -29,6 +29,7 @@
 
 import { describe, it, expect, beforeAll } from 'bun:test';
 import { execFileSync } from 'child_process';
+import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
@@ -98,6 +99,12 @@ describe('test-shard.sh — exclusion contract', () => {
       }
     }
     expect(seen.size).toBeGreaterThan(0);
+  });
+
+  it('runs each CI-selected file in a fresh Bun process by default', () => {
+    const source = readFileSync(SHARD_SH, 'utf8');
+    expect(source).toContain('GBRAIN_TEST_BATCH_SIZE="${GBRAIN_CI_BATCH_SIZE:-1}"');
+    expect(source).toContain('scripts/run-unit-shard.sh --files-from-stdin');
   });
 });
 
