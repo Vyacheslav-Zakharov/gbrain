@@ -22,6 +22,7 @@ let paths: MeetingReviewPaths;
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'gbrain-meeting-review-test-'));
+  await mkdir('/tmp/meeting-ingest', { recursive: true });
   previewRoot = await mkdtemp('/tmp/meeting-ingest/test-review-');
   paths = {
     reportsDir: join(root, 'reports'),
