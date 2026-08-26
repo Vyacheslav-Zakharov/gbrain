@@ -183,15 +183,15 @@ if [ "\${1:-}" = "--push-only" ]; then
 fi
 
 _msg="\${1:?usage: brain-commit-push.sh <message> <path> [paths...]}"; shift || true
+# EXPLICIT paths only — validate before any fetch/pull so an invalid invocation
+# has no remote side effects and deterministically exits 2.
+if [ "$#" -eq 0 ]; then
+  echo "refusing blind 'git add -A' — pass explicit path(s) to commit" >&2; exit 2
+fi
 # Pull first so the local tree is current before we stage.
 git fetch origin >/dev/null 2>&1 || true
 git pull --rebase origin "$_branch" || { git rebase --abort >/dev/null 2>&1 || true; echo "rebase conflict: manual attention needed" >&2; exit 3; }
 
-# EXPLICIT paths only — never a blind 'git add -A' (would risk committing
-# secrets, temp files, or unrelated edits).
-if [ "$#" -eq 0 ]; then
-  echo "refusing blind 'git add -A' — pass explicit path(s) to commit" >&2; exit 2
-fi
 git add -- "$@"
 if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
 git commit -m "$_msg"

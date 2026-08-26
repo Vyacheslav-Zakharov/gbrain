@@ -13,7 +13,7 @@ import { hardenBrainRepo } from '../src/core/brain-repo-durability.ts';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-C', cwd, '-c', 'protocol.file.allow=always', ...args], {
-    stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8', env: process.env,
   }).trim();
 }
 function originHead(bare: string): string {
@@ -45,7 +45,12 @@ beforeEach(async () => {
   writeFileSync(join(work, 'README.md'), 'init\n');
   git(work, 'add', 'README.md'); git(work, 'commit', '-qm', 'init'); git(work, 'push', '-q', 'origin', 'main');
   git(work, 'remote', 'set-head', 'origin', 'main');
-  await hardenBrainRepo({ repoPath: work, sourceId: 'wiki', pat: 'ghp_x', installCron: false });
+  await hardenBrainRepo({ repoPath: work, sourceId: 'wiki', pat: 'ghp_x', installCron: false, verify: false });
+  git(work, 'add', 'scripts/brain-commit-push.sh', 'AGENTS.md');
+  // --no-verify does not bypass post-commit; disable hooks for this setup-only
+  // commit so no background push races the explicit fixture push below.
+  git(work, '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'install durability fixture');
+  git(work, 'push', '-q', 'origin', 'main');
 });
 afterEach(() => {
   if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
@@ -81,7 +86,10 @@ describe('brain-commit-push.sh (D13 guarantee)', () => {
     expect(code).not.toBe(0); // committed but push failed → loud failure
   });
 
-  test('refuses a blind add (no explicit path)', () => {
+  test('refuses a blind add before any remote access (no explicit path)', () => {
+    // An unreachable origin proves validation happens before fetch/pull. The old
+    // ordering returned remote/rebase code 3 here instead of deterministic 2.
+    git(work, 'remote', 'set-url', 'origin', join(root, 'blind-add-must-not-touch-origin.git'));
     let code = 0;
     try {
       execFileSync('bash', [join(work, 'scripts', 'brain-commit-push.sh'), 'msg'], {
@@ -118,6 +126,6 @@ describe('post-commit hook (D9 local, D7 self-contained)', () => {
       if (existsSync(log) && readFileSync(log, 'utf-8').includes('NEEDS ATTENTION')) { found = true; break; }
       await new Promise(r => setTimeout(r, 150));
     }
-    expect(found).toBe(true);
+    expect(found, existsSync(log) ? readFileSync(log, 'utf-8') : `missing log: ${log}`).toBe(true);
   });
 });
