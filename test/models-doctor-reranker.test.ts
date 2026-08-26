@@ -47,14 +47,11 @@ describe('resolveLiveRerankerModel — divergence fix', () => {
     expect(resolved).toBe('llama-server-reranker:qwen3-reranker-4b');
   });
 
-  test('returns the mode-bundle default when no override is set (balanced enables zerank-2)', async () => {
-    // balanced mode bundle has reranker_enabled: true + reranker_model:
-    // 'zeroentropyai:zerank-2' baked in. Pre-fix this case returned
-    // undefined; post-fix doctor sees what search actually uses.
+  test('returns undefined when no override is set because balanced reranking is disabled', async () => {
     configureGateway({ env: {} });
     const engine = makeEngineStub({});
     const resolved = await resolveLiveRerankerModel(engine);
-    expect(resolved).toBe('zeroentropyai:zerank-2');
+    expect(resolved).toBeUndefined();
   });
 
   test('returns undefined when reranker is explicitly disabled via config', async () => {
@@ -77,13 +74,10 @@ describe('resolveLiveRerankerModel — divergence fix', () => {
     expect(resolved).toBe('llama-server-reranker:my-alias');
   });
 
-  test('engine.getConfig throws per-key → still returns mode-bundle default (live search behavior)', async () => {
-    // Verifies the divergence fix is "graceful all the way down": if the DB
-    // is intermittently failing, doctor still reports what live search
-    // would resolve to, not undefined. `loadSearchModeConfig` swallows
-    // per-key getConfig errors via its internal safeGet wrapper, so the
-    // mode bundle default surfaces normally — doctor reports the truth
-    // about what would happen at search time.
+  test('engine.getConfig throws per-key → returns disabled bundle behavior', async () => {
+    // Verifies the divergence fix is graceful: loadSearchModeConfig swallows
+    // per-key getConfig errors and resolves the same disabled balanced bundle
+    // that live search would use when no config can be read.
     configureGateway({ env: { ZEROENTROPY_API_KEY: 'sk-test' } });
     const engine = {
       async getConfig(): Promise<string | null> {
@@ -91,9 +85,6 @@ describe('resolveLiveRerankerModel — divergence fix', () => {
       },
     } as any;
     const resolved = await resolveLiveRerankerModel(engine);
-    // balanced mode bundle is the safety fallback when search.mode is unset
-    // (and here, every config read failed) — and balanced enables
-    // zeroentropyai:zerank-2 by default.
-    expect(resolved).toBe('zeroentropyai:zerank-2');
+    expect(resolved).toBeUndefined();
   });
 });

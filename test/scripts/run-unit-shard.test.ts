@@ -109,6 +109,31 @@ describe('run-unit-shard.sh recycled process batches', () => {
     } finally { rmSync(sb.root, { recursive: true, force: true }); }
   });
 
+  it('runs an explicit stdin file set, including CI-selected slow files', () => {
+    const sb = batchingSandbox(3);
+    try {
+      writeFileSync(join(sb.root, 'test', 'ci.slow.test.ts'), '// CI slow fixture\n');
+      writeFileSync(join(sb.root, 'bin', 'bun'), `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${sb.callsPath}"\n`);
+      chmodSync(join(sb.root, 'bin', 'bun'), 0o755);
+      const result = spawnSync(
+        'bash',
+        [join(sb.root, 'scripts', 'run-unit-shard.sh'), '--files-from-stdin', '--batch-size', '2'],
+        {
+          cwd: sb.root,
+          encoding: 'utf-8',
+          input: 'test/1.test.ts\ntest/ci.slow.test.ts\n',
+          env: { ...process.env, PATH: `${join(sb.root, 'bin')}:${process.env.PATH ?? ''}`, SHARD: '7/10', GBRAIN_TEST_RUN_ID: 'ci-run' },
+        },
+      );
+      expect(result.status).toBe(0);
+      const calls = readFileSync(sb.callsPath, 'utf-8').trim().split('\n');
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toContain('test/1.test.ts');
+      expect(calls[0]).toContain('test/ci.slow.test.ts');
+      expect(calls[0]).not.toContain('test/2.test.ts');
+    } finally { rmSync(sb.root, { recursive: true, force: true }); }
+  });
+
   it('continues later batches after the first failure and returns the first non-zero rc', () => {
     const sb = batchingSandbox(4);
     try {

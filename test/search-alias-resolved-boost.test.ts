@@ -89,7 +89,7 @@ describe('alias_resolved boost stage', () => {
 });
 
 describe('KNOBS_HASH_VERSION', () => {
-  it('is 13 (12→13 degraded expansion result sets are invalidated)', () => {
-    expect(KNOBS_HASH_VERSION).toBe(13);
+  it('is 14 (13→14 FTS-language cache isolation)', () => {
+    expect(KNOBS_HASH_VERSION).toBe(14);
   });
 });

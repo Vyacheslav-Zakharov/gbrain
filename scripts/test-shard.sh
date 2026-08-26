@@ -106,6 +106,13 @@ if [ "$SHARD_COUNT" -eq 0 ]; then
   exit 0
 fi
 
-# Convert newline-separated file list to argv. xargs handles the
-# whitespace correctly without word-splitting on spaces in paths.
-printf '%s\n' "$SHARD_FILES" | xargs bun test --timeout=60000
+# Preserve the LPT-selected CI file set (including slow tests), but recycle Bun
+# between small batches so module mocks/PGLite high-water state cannot leak
+# across the entire ~100-file shard process. The shared runner also strips
+# ambient production DB/brain variables and records batch receipts.
+printf '%s\n' "$SHARD_FILES" | \
+  SHARD="$SHARD_INDEX/$TOTAL_SHARDS" \
+  GBRAIN_TEST_RUN_ID="${GITHUB_RUN_ID:-ci}-${GITHUB_RUN_ATTEMPT:-0}-${SHARD_INDEX}" \
+  GBRAIN_TEST_BATCH_SIZE="${GBRAIN_CI_BATCH_SIZE:-5}" \
+  GBRAIN_TEST_COLD_BATCH_SIZE="${GBRAIN_CI_COLD_BATCH_SIZE:-1}" \
+  scripts/run-unit-shard.sh --files-from-stdin

@@ -187,8 +187,9 @@ jobs:
       - run: bun test test/entity-resolve-perf.slow.test.ts --timeout=300000
 
   test:
-    # Pure matrix shard — no verify, no serial. Each shard runs its slice
-    # of the unit test set under one `bun test` invocation.
+    # Pure matrix shard — no verify, no serial. Each shard keeps its LPT slice
+    # but recycles Bun between small batches to prevent module/mock leakage and
+    # PGLite/WASM high-water retention across ~100 files.
     #
     # 10 shards (was 6) drops per-shard total from 532s → 287s. With the two
     # dedicated jobs (slow-eval-longmemeval, slow-entity-resolve-perf) also

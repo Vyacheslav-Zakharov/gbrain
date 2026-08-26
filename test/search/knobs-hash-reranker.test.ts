@@ -43,7 +43,7 @@ function baseKnobs(): ResolvedSearchKnobs {
 }
 
 describe('KNOBS_HASH_VERSION + version invariants', () => {
-  test('version is 13 (…; 11→12 filtered-HNSW recall; 12→13 degraded-arm cache guard)', () => {
+  test('version is 14 (13→14 Avers R1 FTS-language cache isolation)', () => {
     // v0.35.0.0: 1→2 to fold reranker fields. v0.35.6.0: 2→3 to fold
     // floor_ratio. v0.36 wave: piggybacks on v=3 with 7 cross-modal knobs
     // (D2) PLUS column + provider context (D8/CDX-2 cross-column isolation).
@@ -62,8 +62,8 @@ describe('KNOBS_HASH_VERSION + version invariants', () => {
     // query-side vectors for asymmetric providers, so rows keyed on
     // pre-fix document-side query vectors must not be served. Filtered-HNSW
     // recall fix: 11→12 so sparse pre-fix result sets cannot mask the fix.
-    // Degraded expansion writes are excluded from cache in 12→13.
-    expect(KNOBS_HASH_VERSION).toBe(13);
+    // Degraded expansion writes are excluded from cache in 12→13. FTS language is keyed in 13→14.
+    expect(KNOBS_HASH_VERSION).toBe(14);
   });
 
   test('hash is 16 hex chars regardless of reranker config', () => {
@@ -112,10 +112,12 @@ describe('Each reranker field flips the hash (cache-row separation)', () => {
 
 describe('mid-deploy invariant (CDX2-F12)', () => {
   test('tokenmax-with-reranker vs tokenmax-without-reranker → distinct hashes', () => {
-    // tokenmax mode bundle has reranker on. An operator who flips it off
-    // via `gbrain config set search.reranker.enabled false` produces a
+    // Avers R1 defaults reranking off. An operator who explicitly enables it produces a
     // different cache row, not a shared one.
-    const tokenmaxOn = knobsHash(resolveSearchMode({ mode: 'tokenmax' }));
+    const tokenmaxOn = knobsHash(resolveSearchMode({
+      mode: 'tokenmax',
+      overrides: { reranker_enabled: true },
+    }));
     const tokenmaxOff = knobsHash(resolveSearchMode({
       mode: 'tokenmax',
       overrides: { reranker_enabled: false },

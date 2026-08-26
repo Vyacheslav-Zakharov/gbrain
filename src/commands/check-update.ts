@@ -116,6 +116,14 @@ export function extractChangelogBetween(changelog: string, from: string, to: str
   return entries.join('\n').trim();
 }
 
+const CHANGELOG_DIFF_MAX_CHARS = 24_000;
+const CHANGELOG_TRUNCATION_MARKER = '\n\n[truncated: full changelog omitted]';
+
+export function boundChangelogDiff(changelogDiff: string): string {
+  if (changelogDiff.length <= CHANGELOG_DIFF_MAX_CHARS) return changelogDiff;
+  return changelogDiff.slice(0, CHANGELOG_DIFF_MAX_CHARS) + CHANGELOG_TRUNCATION_MARKER;
+}
+
 /**
  * Fetch the latest release and write the self-upgrade cache (the marker line
  * read by the CLI startup hook). Fail-open: on any network failure we cache
@@ -199,7 +207,7 @@ export async function runCheckUpdate(args: string[]) {
 
   let changelogDiff = '';
   if (updateAvailable) {
-    changelogDiff = await fetchChangelog(VERSION, latestVersion);
+    changelogDiff = boundChangelogDiff(await fetchChangelog(VERSION, latestVersion));
   }
 
   const result: CheckUpdateResult = {

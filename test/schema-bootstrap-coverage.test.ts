@@ -168,6 +168,11 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // SCHEMA_SQL replay creates the index. Powers `gbrain extract --stale` + the
   // `links_extraction_lag` doctor check.
   { kind: 'column', table: 'pages', column: 'links_extracted_at' },
+  // v129/v134 — additive columns on tables that already exist in older
+  // source-ingest / review brains. CREATE TABLE IF NOT EXISTS cannot add them.
+  { kind: 'column', table: 'source_base_views', column: 'primary_key_field' },
+  { kind: 'column', table: 'source_base_views', column: 'updated_at_field' },
+  { kind: 'column', table: 'concept_proposals', column: 'source_takes' },
   // v125 — append-only source-ingest run ledger. Brains that already applied
   // v120 before the ledger DDL was folded in can have profiles/sync state but
   // no run-items table; bootstrap must create it before schema/migration replay.
@@ -259,6 +264,9 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       ALTER TABLE pages DROP COLUMN IF EXISTS corpus_generation;
       DROP INDEX IF EXISTS pages_links_extracted_at_idx;
       ALTER TABLE pages DROP COLUMN IF EXISTS links_extracted_at;
+      ALTER TABLE source_base_views DROP COLUMN IF EXISTS primary_key_field;
+      ALTER TABLE source_base_views DROP COLUMN IF EXISTS updated_at_field;
+      ALTER TABLE concept_proposals DROP COLUMN IF EXISTS source_takes;
       DROP INDEX IF EXISTS source_ingest_run_items_run_idx;
       DROP INDEX IF EXISTS source_ingest_run_items_external_idx;
       DROP TABLE IF EXISTS source_ingest_run_items;

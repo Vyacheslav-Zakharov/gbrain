@@ -16,6 +16,7 @@ COLD_BATCH_SIZE="${GBRAIN_TEST_COLD_BATCH_SIZE:-1}"
 BATCH_TIMEOUT="${GBRAIN_TEST_BATCH_TIMEOUT:-300}"
 BATCH_KILL_AFTER="${GBRAIN_TEST_BATCH_KILL_AFTER:-20}"
 DRY_RUN=0
+FILES_FROM_STDIN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --max-concurrency) MAX_CONC="$2"; shift 2 ;;
@@ -23,6 +24,7 @@ while [ $# -gt 0 ]; do
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
     --batch-size=*) BATCH_SIZE="${1#*=}"; shift ;;
     --dry-run-list) DRY_RUN=1; shift ;;
+    --files-from-stdin) FILES_FROM_STDIN=1; shift ;;
     *) echo "ERROR: unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -39,7 +41,11 @@ while IFS= read -r f; do all_files+=("$f"); done < <(
 )
 
 files=()
-if [ -n "${SHARD:-}" ]; then
+if [ "$FILES_FROM_STDIN" -eq 1 ]; then
+  while IFS= read -r f; do
+    [ -n "$f" ] && files+=("$f")
+  done
+elif [ -n "${SHARD:-}" ]; then
   shard_n=${SHARD%/*}; shard_m=${SHARD#*/}
   if ! valid_positive "$shard_n" || ! valid_positive "$shard_m" || [ "$shard_n" -gt "$shard_m" ]; then
     echo "ERROR: invalid SHARD=$SHARD (expected N/M with 1<=N<=M)" >&2; exit 1
