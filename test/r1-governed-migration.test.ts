@@ -26,6 +26,7 @@ import {
   resolveContentPlaneCounts,
   assertR1FenceDisableAuthority,
   identityFingerprint,
+  writeR1BytesFully,
 } from '../src/core/r1-governed-migration.ts';
 
 describe('R1 governed embedding migration contract', () => {
@@ -306,7 +307,8 @@ describe('R1 governed embedding migration contract', () => {
       .toBeGreaterThan(disableSource.indexOf("if (!status.writer_fence_active)"));
     expect(source).toContain("openSync(args.receipt, 'wx', 0o600)");
     expect(source.indexOf("openSync(args.receipt, 'wx', 0o600)")).toBeLessThan(source.indexOf('const sql = postgres(databaseUrl'));
-    expect(source).toContain('writeSync(receiptFd, output');
+    expect(source).toContain("writeR1BytesFully(Buffer.from(output, 'utf8')");
+    expect(source).toContain("writeR1BytesFully(Buffer.from(incomplete, 'utf8')");
     expect(source).toContain('fsyncSync(receiptFd)');
     expect(source).toContain("status: 'incomplete'");
     expect(source).toContain("'operation_not_dispatched'");
@@ -349,6 +351,22 @@ describe('R1 governed embedding migration contract', () => {
     expect(resolveR1WriterFenceTables({ writer_fence_tables: [] })).toEqual([]);
     expect(resolveR1WriterFenceTables({ writer_fence_tables: ['pages', 7] })).toEqual([]);
     expect(resolveR1WriterFenceTables({ writer_fence_tables: ['pages', 'pages'] })).toEqual([]);
+  });
+
+  test('receipt writer loops through legal short writes and rejects zero progress', () => {
+    const bytes = Buffer.from('receipt-✓', 'utf8');
+    const destination = Buffer.alloc(bytes.length);
+    const calls: Array<{ offset: number; length: number; position: number }> = [];
+    writeR1BytesFully(bytes, (buffer, offset, length, position) => {
+      const written = Math.min(2, length);
+      destination.set(buffer.subarray(offset, offset + written), position);
+      calls.push({ offset, length, position });
+      return written;
+    });
+    expect(destination.equals(bytes)).toBe(true);
+    expect(calls.length).toBeGreaterThan(1);
+    expect(calls.at(-1)!.position + Math.min(2, calls.at(-1)!.length)).toBe(bytes.length);
+    expect(() => writeR1BytesFully(bytes, () => 0)).toThrow('R1_RECEIPT_SHORT_WRITE');
   });
 
   test('dedicated destructive PostgreSQL regression refuses non-disposable targets before setup', () => {

@@ -19,6 +19,18 @@ export const R1_WRITER_FENCE_TABLES = [
 ] as const;
 export const R1_ADVISORY_LOCK_KEY = 7_671_003_001;
 
+export type R1ByteWriter = (buffer: Uint8Array, offset: number, length: number, position: number) => number;
+export function writeR1BytesFully(bytes: Uint8Array, writer: R1ByteWriter): void {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const written = writer(bytes, offset, bytes.byteLength - offset, offset);
+    if (!Number.isInteger(written) || written <= 0 || written > bytes.byteLength - offset) {
+      throw new Error('R1_RECEIPT_SHORT_WRITE');
+    }
+    offset += written;
+  }
+}
+
 let fenceLiftAfterDropHookForTests: (() => void) | null = null;
 let receiptFinalizeHookForTests: (() => void) | null = null;
 export function __setR1FenceLiftAfterDropHookForTests(hook: (() => void) | null): void {

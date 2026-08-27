@@ -157,7 +157,11 @@ done
 # Step 3: smoke-test run-e2e.sh argv + shard handling.
 echo "[ci-local] Smoke: run-e2e.sh argv + shard..."
 SMOKE_NO_ARGS=$(bash scripts/run-e2e.sh --dry-run-list | wc -l | tr -d ' ')
-EXPECTED_ALL=$(ls test/e2e/*.test.ts | wc -l | tr -d ' ')
+R1_DEDICATED_E2E='test/e2e/r1-fence-lift-postgres.test.ts'
+EXPECTED_ALL=0
+for f in test/e2e/*.test.ts; do
+  [ "$f" = "$R1_DEDICATED_E2E" ] || EXPECTED_ALL=$((EXPECTED_ALL + 1))
+done
 if [ "$SMOKE_NO_ARGS" != "$EXPECTED_ALL" ]; then
   echo "[ci-local] ERROR: --dry-run-list (no args) printed $SMOKE_NO_ARGS, expected $EXPECTED_ALL" >&2
   exit 1
@@ -165,6 +169,16 @@ fi
 SMOKE_ONE_ARG=$(bash scripts/run-e2e.sh --dry-run-list test/e2e/sync.test.ts)
 if [ "$SMOKE_ONE_ARG" != "test/e2e/sync.test.ts" ]; then
   echo "[ci-local] ERROR: --dry-run-list with 1 arg printed '$SMOKE_ONE_ARG'" >&2
+  exit 1
+fi
+SMOKE_DEDICATED=$(bash scripts/run-e2e.sh --dry-run-list "$R1_DEDICATED_E2E")
+if [ -n "$SMOKE_DEDICATED" ]; then
+  echo "[ci-local] ERROR: dedicated R1 E2E leaked into canonical runner: '$SMOKE_DEDICATED'" >&2
+  exit 1
+fi
+SMOKE_MIXED=$(bash scripts/run-e2e.sh --dry-run-list "$R1_DEDICATED_E2E" test/e2e/sync.test.ts)
+if [ "$SMOKE_MIXED" != "test/e2e/sync.test.ts" ]; then
+  echo "[ci-local] ERROR: mixed dedicated/ordinary selection printed '$SMOKE_MIXED'" >&2
   exit 1
 fi
 SHARD_TOTAL=$(( $(SHARD=1/4 bash scripts/run-e2e.sh --dry-run-list | wc -l) + \

@@ -36,6 +36,7 @@ import {
   resolveContentPlaneCounts,
   runR1FenceLiftAfterDropHookForTests,
   runR1ReceiptFinalizeHookForTests,
+  writeR1BytesFully,
   vectorLiteral,
   type R1CutoverStatus,
   type R1MigrationArgs,
@@ -595,7 +596,8 @@ async function main(): Promise<void> {
       runR1ReceiptFinalizeHookForTests();
       if (receiptFd !== null) {
         ftruncateSync(receiptFd, 0);
-        writeSync(receiptFd, output, 0, 'utf8');
+        writeR1BytesFully(Buffer.from(output, 'utf8'), (buffer, offset, length, position) =>
+          writeSync(receiptFd!, buffer, offset, length, position));
         fsyncSync(receiptFd);
         receiptFinalized = true;
       }
@@ -621,7 +623,8 @@ async function main(): Promise<void> {
           implementation_checksum: args.implementationChecksum ?? null,
         }, null, 2)}\n`;
         ftruncateSync(receiptFd, 0);
-        writeSync(receiptFd, incomplete, 0, 'utf8');
+        writeR1BytesFully(Buffer.from(incomplete, 'utf8'), (buffer, offset, length, position) =>
+          writeSync(receiptFd!, buffer, offset, length, position));
         fsyncSync(receiptFd);
         receiptFinalized = true;
       } catch {
