@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
 import {
@@ -23,6 +24,8 @@ import {
   isExactR1WriterFence,
   resolveR1WriterFenceTables,
   resolveContentPlaneCounts,
+  assertR1FenceDisableAuthority,
+  identityFingerprint,
 } from '../src/core/r1-governed-migration.ts';
 
 describe('R1 governed embedding migration contract', () => {
@@ -134,6 +137,49 @@ describe('R1 governed embedding migration contract', () => {
     expect(() => assertR1CompletionReality({ ...good, scalar_watermark: 141 })).toThrow('watermark');
   });
 
+  test('writer-fence lift requires exact completed migration identity and receipt', () => {
+    const identity = buildR1MigrationIdentity('a'.repeat(40), 'b'.repeat(64));
+    const fingerprint = identityFingerprint(identity);
+    const completion = {
+      current_model: R1_TARGET_MODEL, current_dimensions: R1_TARGET_DIMENSIONS, reranker_model: 'voyage:rerank-2.5',
+      content_primary_type: 'vector(768)', content_total: 10, content_populated: 10,
+      facts_primary_type: 'vector(768)', facts_expected: 3, facts_populated: 3,
+      query_cache_type: 'vector(768)', query_cache_rows: 0, takes_populated: 0,
+      image_type: 'vector(1024)', multimodal_type: 'vector(1024)', false_target_signatures: 0,
+      null_signatures_with_chunks: 0, active_embed_jobs: 0, custom_registry_columns: [], scalar_watermark: 140,
+      vector_roundtrip_ok: true,
+    };
+    const state = { identity, fingerprint, phase: 'completed', writer_fence_tables: [...R1_WRITER_FENCE_TABLES] };
+    const completed = { ...state, completed_at: '2026-08-27T00:00:00.000Z', file_config_sha256: 'c'.repeat(64), completion };
+    expect(() => assertR1FenceDisableAuthority(state, completed, {
+      expectedCandidateSha: identity.candidate_sha,
+      implementationChecksum: identity.implementation_checksum,
+    })).not.toThrow();
+    expect(() => assertR1FenceDisableAuthority({ ...state, phase: 'cutover' }, completed, {
+      expectedCandidateSha: identity.candidate_sha, implementationChecksum: identity.implementation_checksum,
+    })).toThrow('completed state');
+    expect(() => assertR1FenceDisableAuthority(state, { ...completed, fingerprint: 'd'.repeat(64) }, {
+      expectedCandidateSha: identity.candidate_sha, implementationChecksum: identity.implementation_checksum,
+    })).toThrow('completion marker identity');
+    expect(() => assertR1FenceDisableAuthority(state, completed, {
+      expectedCandidateSha: 'e'.repeat(40), implementationChecksum: identity.implementation_checksum,
+    })).toThrow('candidate SHA');
+    expect(() => assertR1FenceDisableAuthority(state, completed, {
+      expectedCandidateSha: identity.candidate_sha, implementationChecksum: 'f'.repeat(64),
+    })).toThrow('implementation checksum');
+    const alteredIdentity = { ...identity, lineage: 'foreign-lineage' };
+    expect(() => assertR1FenceDisableAuthority({
+      ...state, identity: alteredIdentity, fingerprint: identityFingerprint(alteredIdentity),
+    }, {
+      ...completed, identity: alteredIdentity, fingerprint: identityFingerprint(alteredIdentity),
+    }, {
+      expectedCandidateSha: identity.candidate_sha, implementationChecksum: identity.implementation_checksum,
+    })).toThrow('canonical migration identity');
+    expect(() => assertR1FenceDisableAuthority(state, completed, {
+      expectedCandidateSha: identity.candidate_sha,
+    })).toThrow('requires');
+  });
+
   test('post-cutover runtime planes reject every effective ZE fallback or override', () => {
     const good = {
       db_embedding_model: R1_TARGET_MODEL,
@@ -224,6 +270,7 @@ describe('R1 governed embedding migration contract', () => {
   test('fixed runner checks file/env/base-url runtime planes before stamping completion', () => {
     const source = readFileSync(resolve(import.meta.dir, '../src/commands/r1-governed-migrate.ts'), 'utf8');
     const cutoverSource = source.slice(source.indexOf('async function cutover('), source.indexOf('async function disableFence('));
+    const disableSource = source.slice(source.indexOf('async function disableFence('), source.indexOf('async function assertRollbackReality('));
     const validation = cutoverSource.indexOf('validateR1CutoverRuntimePlanes(sql)');
     const transactionValidation = cutoverSource.indexOf('validateR1CutoverRuntimePlanes(lockedSql');
     const schemaCutover = cutoverSource.indexOf('buildCutoverStatements()');
@@ -250,6 +297,21 @@ describe('R1 governed embedding migration contract', () => {
     expect(source).toContain('rollback_file_config_sha256 = rollbackFileSha256');
     expect(source).toContain('const rollbackFileSha256 = validateR1RollbackRuntimePlanes(state)');
     expect(source.match(/validateR1RollbackRuntimePlanes\(state, rollbackFileSha256\)/g)).toHaveLength(2);
+    expect(disableSource.indexOf('assertR1FenceDisableAuthority(state, completed, args)')).toBeGreaterThan(0);
+    expect(disableSource.indexOf('const freshCompletion = await readCompletionReality(lockedSql)'))
+      .toBeGreaterThan(disableSource.indexOf('assertR1FenceDisableAuthority(state, completed, args)'));
+    expect(disableSource.indexOf("if (!status.writer_fence_active)"))
+      .toBeGreaterThan(disableSource.indexOf('const freshCompletion = await readCompletionReality(lockedSql)'));
+    expect(disableSource.indexOf('buildWriterFenceDropSql(stampedTables)'))
+      .toBeGreaterThan(disableSource.indexOf("if (!status.writer_fence_active)"));
+    expect(source).toContain("openSync(args.receipt, 'wx', 0o600)");
+    expect(source.indexOf("openSync(args.receipt, 'wx', 0o600)")).toBeLessThan(source.indexOf('const sql = postgres(databaseUrl'));
+    expect(source).toContain('writeSync(receiptFd, output');
+    expect(source).toContain('fsyncSync(receiptFd)');
+    expect(source).toContain("status: 'incomplete'");
+    expect(source).toContain("'operation_not_dispatched'");
+    expect(source).toContain("'operation_completed'");
+    expect(source).toContain("'operation_outcome_unknown'");
   });
 
   test('writer manifest covers background job control as well as content planes', () => {
@@ -260,6 +322,8 @@ describe('R1 governed embedding migration contract', () => {
   test('writer fence is active only when every expected trigger is present and hardened', () => {
     const row = (table: string) => ({
       table, trigger: `avers_r1_writer_fence_${table}`, schema: 'public', function_schema: 'public', function_name: 'avers_r1_writer_fence_guard', enabled: 'O',
+      function_volatility: 'v', function_security_definer: false,
+      function_definition: `CREATE OR REPLACE FUNCTION public.avers_r1_writer_fence_guard() RETURNS trigger LANGUAGE plpgsql AS $function$ BEGIN IF current_setting('avers.r1_migration_runner', true) IS DISTINCT FROM 'on' THEN RAISE EXCEPTION 'AVERS_R1_WRITER_FENCE_ACTIVE' USING ERRCODE = '55000'; END IF; RETURN NULL; END; $function$`,
       definition: `CREATE TRIGGER avers_r1_writer_fence_${table} BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON public.${table} FOR EACH STATEMENT EXECUTE FUNCTION avers_r1_writer_fence_guard()`,
     });
     expect(isExactR1WriterFence(['pages', 'facts'], [row('pages'), row('facts')])).toBe(true);
@@ -269,6 +333,13 @@ describe('R1 governed embedding migration contract', () => {
     expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), enabled: 'D' }])).toBe(false);
     expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), function_name: 'other' }])).toBe(false);
     expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), function_schema: 'other' }])).toBe(false);
+    expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), function_volatility: 's' }])).toBe(false);
+    expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), function_security_definer: true }])).toBe(false);
+    expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), function_definition: 'CREATE FUNCTION public.avers_r1_writer_fence_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$' }])).toBe(false);
+    expect(isExactR1WriterFence(['pages'], [{
+      ...row('pages'),
+      definition: `CREATE TRIGGER avers_r1_writer_fence_pages BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON public.pages FOR EACH STATEMENT WHEN (false) EXECUTE FUNCTION avers_r1_writer_fence_guard()`,
+    }])).toBe(false);
   });
 
   test('writer fence marker table inventory rejects missing, empty, mixed, or duplicate lists', () => {
@@ -278,6 +349,19 @@ describe('R1 governed embedding migration contract', () => {
     expect(resolveR1WriterFenceTables({ writer_fence_tables: [] })).toEqual([]);
     expect(resolveR1WriterFenceTables({ writer_fence_tables: ['pages', 7] })).toEqual([]);
     expect(resolveR1WriterFenceTables({ writer_fence_tables: ['pages', 'pages'] })).toEqual([]);
+  });
+
+  test('dedicated destructive PostgreSQL regression refuses non-disposable targets before setup', () => {
+    const { R1_FENCE_LIFT_TEST_ACK: _dropAck, ...env } = process.env;
+    const result = spawnSync(process.execPath, [
+      'test', resolve(import.meta.dir, 'e2e/r1-fence-lift-postgres.test.ts'), '--timeout=5000',
+    ], {
+      cwd: resolve(import.meta.dir, '..'),
+      env: { ...env, DATABASE_URL: 'postgresql://example:example@203.0.113.1/production' },
+      encoding: 'utf8', timeout: 10_000,
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('refuses non-disposable target');
   });
 
   test('cutover and rollback clear signatures for source-incomplete pages', () => {

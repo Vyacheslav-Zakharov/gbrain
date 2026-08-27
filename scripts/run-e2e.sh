@@ -99,6 +99,19 @@ else
   files=(test/e2e/*.test.ts)
 fi
 
+# This release-safety test requires a dedicated database named gbrain_clone and
+# is gated by the r1-fence-lift-postgres workflow job. The shared canonical E2E
+# database is gbrain_test; running it here would fail the runner's clone-target
+# guard or collide with shared destructive setup. Exclude it for both the full
+# glob and argv-selected paths; the workflow aggregates its dedicated job.
+r1_fence_lift_test='test/e2e/r1-fence-lift-postgres.test.ts'
+filtered=()
+for f in "${files[@]}"; do
+  [ "$f" = "$r1_fence_lift_test" ] || filtered+=("$f")
+done
+files=("${filtered[@]:-}")
+if [ "${#files[@]}" -eq 1 ] && [ -z "${files[0]}" ]; then files=(); fi
+
 # SHARD env (e.g. SHARD=1/4) keeps every M-th file starting at index N (1-indexed).
 # Used by scripts/ci-local.sh to fan 4 shards in parallel against 4 postgres
 # containers. Sequential execution within a shard is preserved (the TRUNCATE

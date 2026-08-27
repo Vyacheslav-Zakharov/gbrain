@@ -19,6 +19,21 @@ export const R1_WRITER_FENCE_TABLES = [
 ] as const;
 export const R1_ADVISORY_LOCK_KEY = 7_671_003_001;
 
+let fenceLiftAfterDropHookForTests: (() => void) | null = null;
+let receiptFinalizeHookForTests: (() => void) | null = null;
+export function __setR1FenceLiftAfterDropHookForTests(hook: (() => void) | null): void {
+  fenceLiftAfterDropHookForTests = hook;
+}
+export function runR1FenceLiftAfterDropHookForTests(): void {
+  fenceLiftAfterDropHookForTests?.();
+}
+export function __setR1ReceiptFinalizeHookForTests(hook: (() => void) | null): void {
+  receiptFinalizeHookForTests = hook;
+}
+export function runR1ReceiptFinalizeHookForTests(): void {
+  receiptFinalizeHookForTests?.();
+}
+
 export type R1MigrationMode = 'status' | 'dry-run' | 'prepare' | 'cutover' | 'rollback' | 'disable-fence';
 export type R1Target = 'clone' | 'production';
 
@@ -170,6 +185,9 @@ export interface R1WriterFenceRow {
   schema: string;
   function_schema: string;
   function_name: string;
+  function_definition: string;
+  function_volatility: string;
+  function_security_definer: boolean;
   enabled: string;
   definition: string;
 }
@@ -187,18 +205,37 @@ export function isExactR1WriterFence(expectedTables: string[], rows: R1WriterFen
   const expected = [...new Set(expectedTables)].sort();
   if (expected.length === 0 || expected.length !== expectedTables.length) return false;
   if (rows.length !== expected.length) return false;
+  const canonicalFunction = `CREATE OR REPLACE FUNCTION PUBLIC.AVERS_R1_WRITER_FENCE_GUARD()
+RETURNS TRIGGER
+LANGUAGE PLPGSQL
+AS $FUNCTION$
+BEGIN
+IF CURRENT_SETTING('AVERS.R1_MIGRATION_RUNNER', TRUE) IS DISTINCT FROM 'ON' THEN
+RAISE EXCEPTION 'AVERS_R1_WRITER_FENCE_ACTIVE' USING ERRCODE = '55000';
+END IF;
+RETURN NULL;
+END;
+$FUNCTION$`;
+  const normalize = (value: string): string => value.toUpperCase().replace(/\s+/g, ' ').trim().replace(/;$/, '');
+  const canonicalFunctionDefinition = normalize(canonicalFunction);
   const byTable = new Map(rows.map((row) => [row.table, row]));
   return expected.every((table) => {
     const row = byTable.get(table);
     if (!row) return false;
-    const definition = row.definition.toUpperCase();
+    const canonicalTriggerDefinition = normalize(
+      `CREATE TRIGGER avers_r1_writer_fence_${table}
+       BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON public.${table}
+       FOR EACH STATEMENT EXECUTE FUNCTION avers_r1_writer_fence_guard()`,
+    );
     return row.schema === 'public'
       && row.trigger === `avers_r1_writer_fence_${table}`
       && row.function_schema === 'public'
       && row.function_name === 'avers_r1_writer_fence_guard'
+      && row.function_volatility === 'v'
+      && row.function_security_definer === false
+      && normalize(row.function_definition) === canonicalFunctionDefinition
       && row.enabled === 'O'
-      && definition.includes('BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE')
-      && definition.includes('FOR EACH STATEMENT');
+      && normalize(row.definition) === canonicalTriggerDefinition;
   });
 }
 
@@ -429,6 +466,53 @@ export function assertR1CompletionReality(r: R1CompletionReality): void {
   if (r.custom_registry_columns.length !== 0) throw new Error(`completion embedding registry unresolved: ${r.custom_registry_columns.join(',')}`);
   if (r.scalar_watermark !== 140) throw new Error(`completion scalar watermark drifted to ${r.scalar_watermark}`);
   if (!r.vector_roundtrip_ok) throw new Error('completion vector roundtrip failed');
+}
+
+interface R1FenceDisableMarker {
+  identity?: R1MigrationIdentity;
+  fingerprint?: string;
+  phase?: string;
+  writer_fence_tables?: string[];
+  completed_at?: string;
+  file_config_sha256?: string;
+  completion?: R1CompletionReality;
+}
+
+/** Refuse writer-fence lift unless the active state and completion receipt are exact. */
+export function assertR1FenceDisableAuthority(
+  state: R1FenceDisableMarker,
+  completed: R1FenceDisableMarker,
+  args: Pick<R1MigrationArgs, 'expectedCandidateSha' | 'implementationChecksum'>,
+): void {
+  if (!args.expectedCandidateSha || !args.implementationChecksum) {
+    throw new Error('--disable-fence requires candidate SHA and implementation checksum');
+  }
+  if (!state.identity || !completed.identity) throw new Error('writer-fence lift requires migration identity');
+  if (state.identity.candidate_sha !== args.expectedCandidateSha) throw new Error('writer-fence lift candidate SHA mismatch');
+  if (state.identity.implementation_checksum !== args.implementationChecksum) throw new Error('writer-fence lift implementation checksum mismatch');
+  const canonicalIdentity = buildR1MigrationIdentity(args.expectedCandidateSha, args.implementationChecksum);
+  const expectedFingerprint = identityFingerprint(canonicalIdentity);
+  if (identityFingerprint(state.identity) !== expectedFingerprint) throw new Error('writer-fence lift canonical migration identity mismatch');
+  if (state.fingerprint !== expectedFingerprint) throw new Error('writer-fence lift state fingerprint mismatch');
+  if (state.phase !== 'completed') throw new Error('writer-fence lift requires completed state');
+  if (completed.fingerprint !== expectedFingerprint
+    || identityFingerprint(completed.identity) !== expectedFingerprint) {
+    throw new Error('writer-fence lift completion marker identity mismatch');
+  }
+  if (completed.phase !== 'completed') throw new Error('writer-fence lift completion marker phase mismatch');
+  if (typeof completed.completed_at !== 'string' || !Number.isFinite(Date.parse(completed.completed_at))) {
+    throw new Error('writer-fence lift completion timestamp is invalid');
+  }
+  if (!completed.file_config_sha256 || !/^[0-9a-f]{64}$/.test(completed.file_config_sha256)) {
+    throw new Error('writer-fence lift file config fingerprint is invalid');
+  }
+  if (!completed.completion) throw new Error('writer-fence lift completion reality is missing');
+  assertR1CompletionReality(completed.completion);
+  const stateTables = resolveR1WriterFenceTables(state);
+  const completedTables = resolveR1WriterFenceTables(completed);
+  if (stateTables.length === 0 || JSON.stringify(completedTables) !== JSON.stringify(stateTables)) {
+    throw new Error('writer-fence lift stamped inventory mismatch');
+  }
 }
 
 export function assertReadyForCutover(status: R1CutoverStatus): void {

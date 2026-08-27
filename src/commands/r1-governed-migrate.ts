@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /** Fixed Avers R1 Google migration runner. Production requires separate G5 GO. */
 import postgres, { type Sql } from 'postgres';
-import { writeFileSync } from 'node:fs';
+import { closeSync, fsyncSync, ftruncateSync, openSync, writeSync } from 'node:fs';
 import { configureGateway, embed, resetGateway } from '../core/ai/gateway.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { loadConfigFileSnapshotStrict } from '../core/config.ts';
@@ -17,6 +17,7 @@ import {
   R1_WRITER_FENCE_TABLES,
   assertR1DatabaseTarget,
   assertR1CompletionReality,
+  assertR1FenceDisableAuthority,
   assertR1RegistrySafeForPrepare,
   assertR1NonDbRuntimeConfig,
   assertR1ZeroZeRuntimeConfig,
@@ -33,6 +34,8 @@ import {
   parseR1EmbeddingRegistry,
   resolveR1WriterFenceTables,
   resolveContentPlaneCounts,
+  runR1FenceLiftAfterDropHookForTests,
+  runR1ReceiptFinalizeHookForTests,
   vectorLiteral,
   type R1CutoverStatus,
   type R1MigrationArgs,
@@ -130,8 +133,10 @@ async function readStatus(sql: Sql): Promise<Record<string, unknown> & R1Cutover
   const takesPopulated = Number((await sql.unsafe('SELECT count(embedding)::int AS n FROM takes') as Array<{ n: number }>)[0]?.n ?? 0);
   const triggerRows = await sql.unsafe(
     `SELECT n.nspname AS schema, c.relname AS table, t.tgname AS trigger,
-            pn.nspname AS function_schema, p.proname AS function_name, t.tgenabled AS enabled,
-            pg_get_triggerdef(t.oid) AS definition
+            pn.nspname AS function_schema, p.proname AS function_name,
+            pg_get_functiondef(p.oid) AS function_definition,
+            p.provolatile AS function_volatility, p.prosecdef AS function_security_definer,
+            t.tgenabled AS enabled, pg_get_triggerdef(t.oid) AS definition
        FROM pg_trigger t
        JOIN pg_class c ON c.oid=t.tgrelid
        JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -299,9 +304,13 @@ async function existingFenceTables(sql: Sql): Promise<string[]> {
   return out;
 }
 
-async function probeTarget(): Promise<void> {
+function configureTargetGateway(): void {
   if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) throw new Error('GOOGLE_GENERATIVE_AI_API_KEY is required');
   configureGateway({ embedding_model: R1_TARGET_MODEL, embedding_dimensions: R1_TARGET_DIMENSIONS, env: { ...process.env } });
+}
+
+async function probeTarget(): Promise<void> {
+  configureTargetGateway();
   const vectors = await embed(['gbrain Avers R1 migration probe'], {
     embeddingModel: R1_TARGET_MODEL,
     dimensions: R1_TARGET_DIMENSIONS,
@@ -466,12 +475,44 @@ async function cutover(sql: Sql, args: R1MigrationArgs, lockBackendPid: number):
 
 async function disableFence(sql: Sql, args: R1MigrationArgs, lockBackendPid: number): Promise<Record<string, unknown>> {
   if (!args.yes) throw new Error('--disable-fence requires --yes');
-  const existing = await existingFenceTables(sql);
+  configureTargetGateway();
+  let stampedTables: string[] = [];
+  let disabledStatus: Record<string, unknown> & R1CutoverStatus | null = null;
   await withR1MutationTransaction(sql, lockBackendPid, async (lockedSql) => {
-    await lockedSql.unsafe(buildWriterFenceDropSql(existing));
+    await lockedSql.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
+    const stateRaw = await getConfig(lockedSql, R1_STATE_KEY);
+    const completedRaw = await getConfig(lockedSql, R1_COMPLETED_KEY);
+    if (!stateRaw || !completedRaw) throw new Error('writer-fence lift requires state and completion markers');
+    let state: StateEnvelope;
+    let completed: StateEnvelope & { completed_at: string; file_config_sha256: string; completion: R1CompletionReality };
+    try {
+      state = JSON.parse(stateRaw) as StateEnvelope;
+      completed = JSON.parse(completedRaw) as StateEnvelope & { completed_at: string; file_config_sha256: string; completion: R1CompletionReality };
+    } catch {
+      throw new Error('writer-fence lift markers are corrupt');
+    }
+    assertR1FenceDisableAuthority(state, completed, args);
+    const fileSha256 = await validateR1CutoverRuntimePlanes(lockedSql, completed.file_config_sha256, true);
+    if (fileSha256 !== completed.file_config_sha256) throw new Error('writer-fence lift file config fingerprint mismatch');
+    const freshCompletion = await readCompletionReality(lockedSql);
+    assertR1CompletionReality(freshCompletion);
+    if (JSON.stringify(freshCompletion) !== JSON.stringify(completed.completion)) {
+      throw new Error('writer-fence lift completion reality drifted');
+    }
+    const status = await readStatus(lockedSql);
+    if (!status.writer_fence_active) throw new Error('writer-fence lift requires the exact active stamped fence');
+    stampedTables = [...state.writer_fence_tables];
+    await lockedSql.unsafe(buildWriterFenceDropSql(stampedTables));
+    runR1FenceLiftAfterDropHookForTests();
     await setConfig(lockedSql, R1_WRITER_FENCE_KEY, 'disabled');
+    disabledStatus = await readStatus(lockedSql);
+    if (disabledStatus.writer_fence_active || disabledStatus.writer_fence_trigger_count !== 0) {
+      throw new Error('writer-fence lift transaction did not remove the exact fence');
+    }
   });
-  return { status: 'writer_fence_disabled', ...(await readStatus(sql)) };
+  const finalStatus = disabledStatus as (Record<string, unknown> & R1CutoverStatus) | null;
+  if (!finalStatus) throw new Error('writer-fence lift transaction returned no status');
+  return { status: 'writer_fence_disabled', writer_fence_tables: stampedTables, ...finalStatus };
 }
 
 async function assertRollbackReality(sql: Sql, state: StateEnvelope): Promise<void> {
@@ -529,29 +570,70 @@ async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
   assertR1DatabaseTarget(databaseUrl, args.target, process.env.R1_MIGRATION_CLONE_ACK, process.env.R1_MIGRATION_PRODUCTION_GO);
-  const sql = postgres(databaseUrl, { max: 1, connect_timeout: 10, idle_timeout: 0, max_lifetime: null });
-  let lockBackendPid: number | null = null;
+  let receiptFd: number | null = args.receipt ? openSync(args.receipt, 'wx', 0o600) : null;
+  let receiptFinalized = false;
+  let operationStarted = false;
+  let operationReturned = false;
   try {
-    if (args.mode !== 'status' && args.mode !== 'dry-run') {
-      const lock = await sql.unsafe('SELECT pg_backend_pid()::int AS backend_pid, pg_try_advisory_lock($1) AS ok', [R1_ADVISORY_LOCK_KEY]) as AdvisoryLockRow[];
-      if (lock[0]?.ok !== true) throw new Error('Another Avers R1 migration runner holds the global lock');
-      lockBackendPid = Number(lock[0].backend_pid);
+    const sql = postgres(databaseUrl, { max: 1, connect_timeout: 10, idle_timeout: 0, max_lifetime: null });
+    let lockBackendPid: number | null = null;
+    try {
+      if (args.mode !== 'status' && args.mode !== 'dry-run') {
+        const lock = await sql.unsafe('SELECT pg_backend_pid()::int AS backend_pid, pg_try_advisory_lock($1) AS ok', [R1_ADVISORY_LOCK_KEY]) as AdvisoryLockRow[];
+        if (lock[0]?.ok !== true) throw new Error('Another Avers R1 migration runner holds the global lock');
+        lockBackendPid = Number(lock[0].backend_pid);
+      }
+      operationStarted = true;
+      const result = args.mode === 'status' || args.mode === 'dry-run'
+        ? { status: args.mode, ...(await readStatus(sql)), active_embed_jobs: await activeEmbedJobs(sql) }
+        : args.mode === 'prepare' ? await prepare(sql, args, lockBackendPid!)
+        : args.mode === 'cutover' ? await cutover(sql, args, lockBackendPid!)
+        : args.mode === 'disable-fence' ? await disableFence(sql, args, lockBackendPid!)
+        : await rollback(sql, args, lockBackendPid!);
+      operationReturned = true;
+      const output = `${JSON.stringify(result, null, 2)}\n`;
+      runR1ReceiptFinalizeHookForTests();
+      if (receiptFd !== null) {
+        ftruncateSync(receiptFd, 0);
+        writeSync(receiptFd, output, 0, 'utf8');
+        fsyncSync(receiptFd);
+        receiptFinalized = true;
+      }
+      process.stdout.write(output);
+    } finally {
+      resetGateway();
+      if (lockBackendPid !== null) {
+        await sql.unsafe('SELECT CASE WHEN pg_backend_pid()=$2 THEN pg_advisory_unlock($1) ELSE false END', [R1_ADVISORY_LOCK_KEY, lockBackendPid]).catch(() => {});
+      }
+      await sql.end({ timeout: 5 });
     }
-    const result = args.mode === 'status' || args.mode === 'dry-run'
-      ? { status: args.mode, ...(await readStatus(sql)), active_embed_jobs: await activeEmbedJobs(sql) }
-      : args.mode === 'prepare' ? await prepare(sql, args, lockBackendPid!)
-      : args.mode === 'cutover' ? await cutover(sql, args, lockBackendPid!)
-      : args.mode === 'disable-fence' ? await disableFence(sql, args, lockBackendPid!)
-      : await rollback(sql, args, lockBackendPid!);
-    const output = `${JSON.stringify(result, null, 2)}\n`;
-    if (args.receipt) writeFileSync(args.receipt, output, { encoding: 'utf8', mode: 0o600 });
-    process.stdout.write(output);
+  } catch (error) {
+    if (receiptFd !== null && !receiptFinalized) {
+      try {
+        const outcome = !operationStarted
+          ? 'operation_not_dispatched'
+          : operationReturned ? 'operation_completed' : 'operation_outcome_unknown';
+        const incomplete = `${JSON.stringify({
+          status: 'incomplete',
+          outcome,
+          mode: args.mode,
+          candidate_sha: args.expectedCandidateSha ?? null,
+          implementation_checksum: args.implementationChecksum ?? null,
+        }, null, 2)}\n`;
+        ftruncateSync(receiptFd, 0);
+        writeSync(receiptFd, incomplete, 0, 'utf8');
+        fsyncSync(receiptFd);
+        receiptFinalized = true;
+      } catch {
+        try { ftruncateSync(receiptFd, 0); fsyncSync(receiptFd); } catch { /* best-effort incomplete marker */ }
+      }
+    }
+    throw error;
   } finally {
-    resetGateway();
-    if (lockBackendPid !== null) {
-      await sql.unsafe('SELECT CASE WHEN pg_backend_pid()=$2 THEN pg_advisory_unlock($1) ELSE false END', [R1_ADVISORY_LOCK_KEY, lockBackendPid]).catch(() => {});
+    if (receiptFd !== null) {
+      closeSync(receiptFd);
+      receiptFd = null;
     }
-    await sql.end({ timeout: 5 });
   }
 }
 
