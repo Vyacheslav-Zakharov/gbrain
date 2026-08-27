@@ -43,6 +43,7 @@ import {
 
 interface ColumnRow { type: string }
 interface CountRow { total: number; populated: number }
+interface AdvisoryLockRow { backend_pid: number; ok: boolean }
 interface StateEnvelope {
   schema_version: 1;
   identity: R1MigrationIdentity;
@@ -66,6 +67,37 @@ async function getConfig(sql: Sql, key: string): Promise<string | null> {
 async function setConfig(sql: Sql, key: string, value: string): Promise<void> {
   await sql.unsafe('INSERT INTO config(key,value) VALUES ($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value', [key, value]);
 }
+
+async function assertR1LockBackend(sql: Sql, expectedBackendPid: number): Promise<void> {
+  const rows = await sql.unsafe(
+    `SELECT pg_backend_pid()::int AS backend_pid,
+            EXISTS (
+              SELECT 1 FROM pg_locks
+               WHERE pid=pg_backend_pid() AND locktype='advisory' AND granted
+                 AND classid::bigint=(($1::bigint >> 32) & 4294967295)
+                 AND objid::bigint=($1::bigint & 4294967295) AND objsubid=1
+            ) AS lock_held`,
+    [R1_ADVISORY_LOCK_KEY],
+  ) as Array<{ backend_pid: number; lock_held: boolean }>;
+  if (Number(rows[0]?.backend_pid) !== expectedBackendPid || rows[0]?.lock_held !== true) {
+    throw new Error('R1_ADVISORY_LOCK_LOST');
+  }
+}
+
+async function withR1MutationTransaction(
+  sql: Sql,
+  expectedBackendPid: number,
+  fn: (lockedSql: Sql) => Promise<void>,
+): Promise<void> {
+  await sql.begin(async (tx) => {
+    const lockedSql = tx as unknown as Sql;
+    // PID check and writes share one transaction/connection. A disconnect
+    // aborts the transaction instead of reconnecting past the session lock.
+    await assertR1LockBackend(lockedSql, expectedBackendPid);
+    await fn(lockedSql);
+  });
+}
+
 async function columnType(sql: Sql, table: string, column: string): Promise<string | null> {
   const rows = await sql.unsafe(
     `SELECT format_type(a.atttypid,a.atttypmod) AS type
@@ -281,7 +313,7 @@ async function probeTarget(): Promise<void> {
   }
 }
 
-async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, unknown>> {
+async function prepare(sql: Sql, args: R1MigrationArgs, lockBackendPid: number): Promise<Record<string, unknown>> {
   if (!args.yes) throw new Error('--prepare requires --yes');
   if (!args.expectedCandidateSha || !args.implementationChecksum) {
     throw new Error('--prepare requires --expected-candidate-sha and --implementation-checksum');
@@ -311,11 +343,7 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
   await validateR1CutoverRuntimePlanes(sql);
   await probeTarget();
 
-  await sql.unsafe(`ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS ${R1_SHADOW_COLUMN} vector(${R1_TARGET_DIMENSIONS})`);
-  await sql.unsafe(`ALTER TABLE facts ADD COLUMN IF NOT EXISTS ${R1_SHADOW_COLUMN} vector(${R1_TARGET_DIMENSIONS})`);
   const fenceTables = await existingFenceTables(sql);
-  await sql.unsafe(buildWriterFenceSql(fenceTables));
-  await setConfig(sql, R1_WRITER_FENCE_KEY, 'active');
   const startedAt = currentStateRaw ? (JSON.parse(currentStateRaw) as StateEnvelope).started_at : nowIso();
   const state: StateEnvelope = {
     schema_version: 1, identity, fingerprint, phase: 'preparing', started_at: startedAt, updated_at: nowIso(),
@@ -325,7 +353,13 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
     prior_reranker_enabled: (await getConfig(sql, 'search.reranker.enabled')) === 'true',
     writer_fence_tables: fenceTables,
   };
-  await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
+  await withR1MutationTransaction(sql, lockBackendPid, async (lockedSql) => {
+    await lockedSql.unsafe(`ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS ${R1_SHADOW_COLUMN} vector(${R1_TARGET_DIMENSIONS})`);
+    await lockedSql.unsafe(`ALTER TABLE facts ADD COLUMN IF NOT EXISTS ${R1_SHADOW_COLUMN} vector(${R1_TARGET_DIMENSIONS})`);
+    await lockedSql.unsafe(buildWriterFenceSql(fenceTables));
+    await setConfig(lockedSql, R1_WRITER_FENCE_KEY, 'active');
+    await setConfig(lockedSql, R1_STATE_KEY, JSON.stringify(state));
+  });
   if (args.noEmbed) return { status: 'prepared_no_embed', state, ...(await readStatus(sql)) };
 
   let chunksEmbedded = 0;
@@ -341,16 +375,16 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
       embeddingModel: R1_TARGET_MODEL, dimensions: R1_TARGET_DIMENSIONS, inputType: 'document', maxRetries: 2,
     });
     if (vectors.length !== rows.length) throw new Error('Chunk embedding count mismatch');
-    await sql.begin(async (tx) => {
-      await tx.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
+    state.updated_at = nowIso();
+    await withR1MutationTransaction(sql, lockBackendPid, async (lockedSql) => {
+      await lockedSql.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
       for (let i = 0; i < rows.length; i++) {
-        await tx.unsafe(`UPDATE content_chunks SET ${R1_SHADOW_COLUMN}=$1::vector WHERE id=$2 AND ${R1_SHADOW_COLUMN} IS NULL`, [vectorLiteral(vectors[i]), rows[i].id]);
+        await lockedSql.unsafe(`UPDATE content_chunks SET ${R1_SHADOW_COLUMN}=$1::vector WHERE id=$2 AND ${R1_SHADOW_COLUMN} IS NULL`, [vectorLiteral(vectors[i]), rows[i].id]);
       }
+      await setConfig(lockedSql, R1_STATE_KEY, JSON.stringify(state));
     });
     chunksEmbedded += rows.length;
     batches++;
-    state.updated_at = nowIso();
-    await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
     if (args.stopAfterBatches > 0 && batches >= args.stopAfterBatches) throw new Error(`R1_CONTROLLED_STOP_AFTER_BATCHES:${batches}`);
     if (args.paceMs > 0) await Bun.sleep(args.paceMs);
   }
@@ -364,27 +398,29 @@ async function prepare(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
       embeddingModel: R1_TARGET_MODEL, dimensions: R1_TARGET_DIMENSIONS, inputType: 'document', maxRetries: 2,
     });
     if (vectors.length !== rows.length) throw new Error('Fact embedding count mismatch');
-    await sql.begin(async (tx) => {
-      await tx.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
+    state.updated_at = nowIso();
+    await withR1MutationTransaction(sql, lockBackendPid, async (lockedSql) => {
+      await lockedSql.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
       for (let i = 0; i < rows.length; i++) {
-        await tx.unsafe(`UPDATE facts SET ${R1_SHADOW_COLUMN}=$1::vector WHERE id=$2 AND ${R1_SHADOW_COLUMN} IS NULL`, [vectorLiteral(vectors[i]), rows[i].id]);
+        await lockedSql.unsafe(`UPDATE facts SET ${R1_SHADOW_COLUMN}=$1::vector WHERE id=$2 AND ${R1_SHADOW_COLUMN} IS NULL`, [vectorLiteral(vectors[i]), rows[i].id]);
       }
+      await setConfig(lockedSql, R1_STATE_KEY, JSON.stringify(state));
     });
     factsEmbedded += rows.length;
     batches++;
-    state.updated_at = nowIso();
-    await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
     if (args.stopAfterBatches > 0 && batches >= args.stopAfterBatches) throw new Error(`R1_CONTROLLED_STOP_AFTER_BATCHES:${batches}`);
     if (args.paceMs > 0) await Bun.sleep(args.paceMs);
   }
-  await sql.unsafe(`CREATE INDEX IF NOT EXISTS idx_chunks_${R1_SHADOW_COLUMN} ON content_chunks USING hnsw (${R1_SHADOW_COLUMN} vector_cosine_ops) WHERE ${R1_SHADOW_COLUMN} IS NOT NULL`);
-  await sql.unsafe(`CREATE INDEX IF NOT EXISTS idx_facts_${R1_SHADOW_COLUMN}_hnsw ON facts USING hnsw (${R1_SHADOW_COLUMN} vector_cosine_ops) WHERE ${R1_SHADOW_COLUMN} IS NOT NULL AND expired_at IS NULL`);
   state.phase = 'prepared'; state.updated_at = nowIso();
-  await setConfig(sql, R1_STATE_KEY, JSON.stringify(state));
+  await withR1MutationTransaction(sql, lockBackendPid, async (lockedSql) => {
+    await lockedSql.unsafe(`CREATE INDEX IF NOT EXISTS idx_chunks_${R1_SHADOW_COLUMN} ON content_chunks USING hnsw (${R1_SHADOW_COLUMN} vector_cosine_ops) WHERE ${R1_SHADOW_COLUMN} IS NOT NULL`);
+    await lockedSql.unsafe(`CREATE INDEX IF NOT EXISTS idx_facts_${R1_SHADOW_COLUMN}_hnsw ON facts USING hnsw (${R1_SHADOW_COLUMN} vector_cosine_ops) WHERE ${R1_SHADOW_COLUMN} IS NOT NULL AND expired_at IS NULL`);
+    await setConfig(lockedSql, R1_STATE_KEY, JSON.stringify(state));
+  });
   return { status: 'prepared', chunks_embedded_this_run: chunksEmbedded, facts_embedded_this_run: factsEmbedded, batches, state, ...(await readStatus(sql)) };
 }
 
-async function cutover(sql: Sql, args: R1MigrationArgs): Promise<Record<string, unknown>> {
+async function cutover(sql: Sql, args: R1MigrationArgs, lockBackendPid: number): Promise<Record<string, unknown>> {
   if (!args.yes) throw new Error('--cutover requires --yes');
   assertR1EnvTarget(process.env, 'target');
   const fileSha256 = await validateR1CutoverRuntimePlanes(sql);
@@ -396,9 +432,8 @@ async function cutover(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
   const status = await readStatus(sql);
   const alreadyCutover = status.content_chunks.primary_type === 'vector(768)' && (status.content_chunks as any).backup_type === 'vector(1280)';
   if (!alreadyCutover) assertReadyForCutover(status);
-  await sql.begin(async (tx) => {
-    const lockedSql = tx as unknown as Sql;
-    await tx.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
+  await withR1MutationTransaction(sql, lockBackendPid, async (lockedSql) => {
+    await lockedSql.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
     await validateR1CutoverRuntimePlanes(lockedSql, fileSha256);
     if (!alreadyCutover) {
       const lockedStatus = await readStatus(lockedSql);
@@ -406,19 +441,18 @@ async function cutover(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
       await assertSourceDbIdentity(lockedSql, lockedStatus, state.from_model, state.from_dimensions);
       state.phase = 'cutover'; state.updated_at = nowIso();
       await setConfig(lockedSql, R1_STATE_KEY, JSON.stringify(state));
-      await tx.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
-      for (const statement of buildCutoverStatements()) await tx.unsafe(statement);
-      await tx.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.enabled','false') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
-      await tx.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.model','voyage:rerank-2.5') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
+      await lockedSql.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
+      for (const statement of buildCutoverStatements()) await lockedSql.unsafe(statement);
+      await lockedSql.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.enabled','false') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
+      await lockedSql.unsafe(`INSERT INTO config(key,value) VALUES ('search.reranker.model','voyage:rerank-2.5') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`);
     }
     await setConfig(lockedSql, 'embedding_columns', '{}');
     await setConfig(lockedSql, 'search_embedding_column', 'embedding');
     await validateR1CutoverRuntimePlanes(lockedSql, fileSha256, true);
   });
   let completion!: R1CompletionReality;
-  await sql.begin(async (tx) => {
-    const lockedSql = tx as unknown as Sql;
-    await tx.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
+  await withR1MutationTransaction(sql, lockBackendPid, async (lockedSql) => {
+    await lockedSql.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
     await validateR1CutoverRuntimePlanes(lockedSql, fileSha256, true);
     completion = await readCompletionReality(lockedSql);
     assertR1CompletionReality(completion);
@@ -430,11 +464,13 @@ async function cutover(sql: Sql, args: R1MigrationArgs): Promise<Record<string, 
   return { status: 'cutover_complete', state, completion, ...(await readStatus(sql)) };
 }
 
-async function disableFence(sql: Sql, args: R1MigrationArgs): Promise<Record<string, unknown>> {
+async function disableFence(sql: Sql, args: R1MigrationArgs, lockBackendPid: number): Promise<Record<string, unknown>> {
   if (!args.yes) throw new Error('--disable-fence requires --yes');
   const existing = await existingFenceTables(sql);
-  await sql.unsafe(buildWriterFenceDropSql(existing));
-  await setConfig(sql, R1_WRITER_FENCE_KEY, 'disabled');
+  await withR1MutationTransaction(sql, lockBackendPid, async (lockedSql) => {
+    await lockedSql.unsafe(buildWriterFenceDropSql(existing));
+    await setConfig(lockedSql, R1_WRITER_FENCE_KEY, 'disabled');
+  });
   return { status: 'writer_fence_disabled', ...(await readStatus(sql)) };
 }
 
@@ -450,7 +486,7 @@ async function assertRollbackReality(sql: Sql, state: StateEnvelope): Promise<vo
   if (await getConfig(sql, 'search.reranker.model') !== state.prior_reranker_model || await getConfig(sql, 'search.reranker.enabled') !== String(state.prior_reranker_enabled)) throw new Error('rollback reranker config mismatch');
 }
 
-async function rollback(sql: Sql, args: R1MigrationArgs): Promise<Record<string, unknown>> {
+async function rollback(sql: Sql, args: R1MigrationArgs, lockBackendPid: number): Promise<Record<string, unknown>> {
   if (!args.yes) throw new Error('--rollback requires --yes');
   const stateRaw = await getConfig(sql, R1_STATE_KEY);
   if (!stateRaw) throw new Error('No R1 migration marker available for rollback');
@@ -468,22 +504,21 @@ async function rollback(sql: Sql, args: R1MigrationArgs): Promise<Record<string,
   if (status.query_cache.primary_type !== 'vector(768)' || status.query_cache.backup_type !== `vector(${state.from_dimensions})`) {
     throw new Error('Query-cache vector planes are not in the expected post-cutover state');
   }
-  await sql.begin(async (tx) => {
-    const lockedSql = tx as unknown as Sql;
-    await tx.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
+  await withR1MutationTransaction(sql, lockBackendPid, async (lockedSql) => {
+    await lockedSql.unsafe('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
     validateR1RollbackRuntimePlanes(state, rollbackFileSha256);
-    await tx.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
+    await lockedSql.unsafe(`SET LOCAL avers.r1_migration_runner='on'`);
     for (const statement of buildRollbackStatements(
       state.from_model,
       state.from_dimensions,
       state.prior_reranker_model,
       state.prior_reranker_enabled,
-    )) await tx.unsafe(statement);
+    )) await lockedSql.unsafe(statement);
     await assertRollbackReality(lockedSql, state);
     validateR1RollbackRuntimePlanes(state, rollbackFileSha256);
     state.phase = 'rolled_back'; state.updated_at = nowIso();
     state.rollback_file_config_sha256 = rollbackFileSha256;
-    await tx.unsafe('DELETE FROM config WHERE key=$1', [R1_COMPLETED_KEY]);
+    await lockedSql.unsafe('DELETE FROM config WHERE key=$1', [R1_COMPLETED_KEY]);
     await setConfig(lockedSql, R1_STATE_KEY, JSON.stringify(state));
   });
   return { status: 'rollback_complete', state, ...(await readStatus(sql)) };
@@ -494,26 +529,28 @@ async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is required');
   assertR1DatabaseTarget(databaseUrl, args.target, process.env.R1_MIGRATION_CLONE_ACK, process.env.R1_MIGRATION_PRODUCTION_GO);
-  const sql = postgres(databaseUrl, { max: 1, connect_timeout: 10, idle_timeout: 30 });
-  let lockHeld = false;
+  const sql = postgres(databaseUrl, { max: 1, connect_timeout: 10, idle_timeout: 0, max_lifetime: null });
+  let lockBackendPid: number | null = null;
   try {
     if (args.mode !== 'status' && args.mode !== 'dry-run') {
-      const lock = await sql.unsafe('SELECT pg_try_advisory_lock($1) AS ok', [R1_ADVISORY_LOCK_KEY]) as Array<{ ok: boolean }>;
+      const lock = await sql.unsafe('SELECT pg_backend_pid()::int AS backend_pid, pg_try_advisory_lock($1) AS ok', [R1_ADVISORY_LOCK_KEY]) as AdvisoryLockRow[];
       if (lock[0]?.ok !== true) throw new Error('Another Avers R1 migration runner holds the global lock');
-      lockHeld = true;
+      lockBackendPid = Number(lock[0].backend_pid);
     }
     const result = args.mode === 'status' || args.mode === 'dry-run'
       ? { status: args.mode, ...(await readStatus(sql)), active_embed_jobs: await activeEmbedJobs(sql) }
-      : args.mode === 'prepare' ? await prepare(sql, args)
-      : args.mode === 'cutover' ? await cutover(sql, args)
-      : args.mode === 'disable-fence' ? await disableFence(sql, args)
-      : await rollback(sql, args);
+      : args.mode === 'prepare' ? await prepare(sql, args, lockBackendPid!)
+      : args.mode === 'cutover' ? await cutover(sql, args, lockBackendPid!)
+      : args.mode === 'disable-fence' ? await disableFence(sql, args, lockBackendPid!)
+      : await rollback(sql, args, lockBackendPid!);
     const output = `${JSON.stringify(result, null, 2)}\n`;
     if (args.receipt) writeFileSync(args.receipt, output, { encoding: 'utf8', mode: 0o600 });
     process.stdout.write(output);
   } finally {
     resetGateway();
-    if (lockHeld) await sql.unsafe('SELECT pg_advisory_unlock($1)', [R1_ADVISORY_LOCK_KEY]).catch(() => {});
+    if (lockBackendPid !== null) {
+      await sql.unsafe('SELECT CASE WHEN pg_backend_pid()=$2 THEN pg_advisory_unlock($1) ELSE false END', [R1_ADVISORY_LOCK_KEY, lockBackendPid]).catch(() => {});
+    }
     await sql.end({ timeout: 5 });
   }
 }

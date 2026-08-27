@@ -197,6 +197,30 @@ describe('R1 governed embedding migration contract', () => {
     }
   });
 
+  test('fixed runner pins advisory-lock ownership to every mutation transaction', () => {
+    const source = readFileSync(resolve(import.meta.dir, '../src/commands/r1-governed-migrate.ts'), 'utf8');
+    expect(source).toContain('idle_timeout: 0');
+    expect(source).toContain('max_lifetime: null');
+    expect(source).toContain('pg_backend_pid()::int AS backend_pid, pg_try_advisory_lock($1) AS ok');
+    expect(source).toContain("SELECT 1 FROM pg_locks");
+    expect(source).toContain("locktype='advisory' AND granted");
+    expect(source).toContain('classid::bigint=(($1::bigint >> 32) & 4294967295)');
+    expect(source).toContain('objid::bigint=($1::bigint & 4294967295) AND objsubid=1');
+    expect(source).toContain('rows[0]?.lock_held !== true');
+    expect(source).toContain('CASE WHEN pg_backend_pid()=$2 THEN pg_advisory_unlock($1) ELSE false END');
+    expect(source).toContain('async function withR1MutationTransaction(');
+    expect(source).toContain("throw new Error('R1_ADVISORY_LOCK_LOST')");
+    expect(source.match(/withR1MutationTransaction\(/g)?.length ?? 0).toBeGreaterThanOrEqual(9);
+    // Every data/schema/config mutation is routed through the one backend-PID checked seam.
+    expect(source.match(/await sql\.begin\(/g)).toHaveLength(1);
+    for (const signature of [
+      'async function prepare(sql: Sql, args: R1MigrationArgs, lockBackendPid: number)',
+      'async function cutover(sql: Sql, args: R1MigrationArgs, lockBackendPid: number)',
+      'async function disableFence(sql: Sql, args: R1MigrationArgs, lockBackendPid: number)',
+      'async function rollback(sql: Sql, args: R1MigrationArgs, lockBackendPid: number)',
+    ]) expect(source).toContain(signature);
+  });
+
   test('fixed runner checks file/env/base-url runtime planes before stamping completion', () => {
     const source = readFileSync(resolve(import.meta.dir, '../src/commands/r1-governed-migrate.ts'), 'utf8');
     const cutoverSource = source.slice(source.indexOf('async function cutover('), source.indexOf('async function disableFence('));
