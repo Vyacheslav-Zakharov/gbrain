@@ -879,9 +879,9 @@ CREATE POLICY "avers_rt_insert_timeline_entries" ON public."timeline_entries" AS
 RESET ROLE;
 -- Exact verification follows through the separately bound verifier inside this transaction.
 -- END G5-RUNTIME-ACL-RLS-COMMAND-FRAGMENT-NOEXEC.sql.txt
--- BEGIN G5-RUNTIME-ROUTINE-TYPE-ACL-FRAGMENT-NOEXEC.sql.txt sha256=e16c09f3418b7de6c0e3dc41f1e75b91e86d8fb21e0ec111ab9c1fd80d0cabe4
+-- BEGIN G5-RUNTIME-ROUTINE-TYPE-ACL-FRAGMENT-NOEXEC.sql.txt sha256=937f6b20ca44e6497f0ebc9c50c80c398728be940dc0b6a73a934786a2baf5d5
 -- Candidate SHA: 718c04a56dd997147b49a5c9c8161b9265a5ef71
--- Extension allowlist SHA-256: 0523e1e57e5ebd3d907cf3e043a54e82d631227e11714f361d5153d7840c5aab
+-- Extension allowlist SHA-256: ad1455afb5aae0fef305287df068b5c22bb888577712ec9aac3e67519b09851f
 -- Exact executor: session_user=current_user=postgres and postgres is superuser.
 -- Production authorization: NO-GO
 SET search_path TO pg_catalog, public;
@@ -1247,6 +1247,7 @@ GRANT EXECUTE ON FUNCTION public.similarity(text,text) TO gbrain_runtime;
 GRANT EXECUTE ON FUNCTION public.similarity_op(text,text) TO gbrain_runtime;
 GRANT EXECUTE ON FUNCTION public.gen_random_uuid() TO gbrain_runtime;
 GRANT EXECUTE ON FUNCTION public.cosine_distance(vector,vector) TO gbrain_runtime;
+GRANT EXECUTE ON FUNCTION public.vector(vector,integer,boolean) TO gbrain_runtime;
 REVOKE USAGE ON TYPE public.vector FROM PUBLIC;
 REVOKE USAGE ON TYPE public.vector FROM gbrain_runtime;
 GRANT USAGE ON TYPE public.vector TO gbrain_runtime;
@@ -1256,7 +1257,7 @@ GRANT USAGE ON TYPE public.gtrgm TO gbrain_runtime;
 
 -- Exact routine/type/catalog/default-ACL verification is delegated to the separately bound exact postcondition verifier.
 -- END G5-RUNTIME-ROUTINE-TYPE-ACL-FRAGMENT-NOEXEC.sql.txt
--- BEGIN G5-RUNTIME-ACL-EXACT-POSTCONDITIONS-NOEXEC.sql.txt sha256=582bb89d7966049dea5ba3ad66676c4a98cd8420779e00fca0bc38b049f9837d
+-- BEGIN G5-RUNTIME-ACL-EXACT-POSTCONDITIONS-NOEXEC.sql.txt sha256=aa684c516f9ca2027f1236e4100495c18e883f61003a764e5dd96baa041765f1
 -- Exact S2 forward postcondition verifier. Production authorization NO-GO.
 SET search_path TO pg_catalog, public;
 
@@ -3383,7 +3384,8 @@ BEGIN
       ('public.vector_sub(vector,vector)','postgres','postgres','EXECUTE',false),
       ('public.vector_to_float4(vector,integer,boolean)','postgres','postgres','EXECUTE',false),
       ('public.vector_typmod_in(cstring[])','postgres','postgres','EXECUTE',false),
-      ('public.vector(vector,integer,boolean)','postgres','postgres','EXECUTE',false)), expected_oids AS (SELECT to_regprocedure(signature) oid,grantor_name,grantee_name,privilege_type,is_grantable FROM expected), actual AS (SELECT p.oid,go.rolname,COALESCE(ge.rolname,'PUBLIC'),a.privilege_type,a.is_grantable FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a JOIN pg_roles go ON go.oid=a.grantor LEFT JOIN pg_roles ge ON ge.oid=a.grantee WHERE n.nspname='public') SELECT 1 FROM ((SELECT * FROM expected_oids EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected_oids)) d) THEN RAISE EXCEPTION 'routine ACL tuple mismatch'; END IF;
+      ('public.vector(vector,integer,boolean)','postgres','postgres','EXECUTE',false),
+      ('public.vector(vector,integer,boolean)','postgres','gbrain_runtime','EXECUTE',false)), expected_oids AS (SELECT to_regprocedure(signature) oid,grantor_name,grantee_name,privilege_type,is_grantable FROM expected), actual AS (SELECT p.oid,go.rolname,COALESCE(ge.rolname,'PUBLIC'),a.privilege_type,a.is_grantable FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a JOIN pg_roles go ON go.oid=a.grantor LEFT JOIN pg_roles ge ON ge.oid=a.grantee WHERE n.nspname='public') SELECT 1 FROM ((SELECT * FROM expected_oids EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected_oids)) d) THEN RAISE EXCEPTION 'routine ACL tuple mismatch'; END IF;
   IF EXISTS (WITH expected AS (SELECT * FROM (VALUES ('_access_tokens','gbrain_migration_owner','gbrain_migration_owner','USAGE',false),
       ('_access_tokens','gbrain_migration_owner','PUBLIC','USAGE',false),
       ('_ai_review_assignments','gbrain_migration_owner','gbrain_migration_owner','USAGE',false),

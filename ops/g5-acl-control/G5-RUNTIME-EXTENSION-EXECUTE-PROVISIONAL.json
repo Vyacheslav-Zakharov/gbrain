@@ -63,6 +63,14 @@
             "src/core/postgres-engine.ts:4600-4612",
             "src/core/search/query-cache.ts:157-169"
           ]
+        },
+        {
+          "signature": "vector(vector,integer,boolean)",
+          "reason": "typmod coercion for production text-form $n::vector assignment into vector(N) columns",
+          "citations": [
+            "src/core/postgres-engine.ts:2261-2274"
+          ],
+          "hosted_evidence": "run 33217900405 job 99005588441 denied this exact coercion after text-form vector input"
         }
       ],
       "type_usage_candidates": [

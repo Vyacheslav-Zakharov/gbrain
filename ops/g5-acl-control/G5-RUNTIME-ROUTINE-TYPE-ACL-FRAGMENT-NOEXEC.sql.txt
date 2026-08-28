@@ -3,7 +3,7 @@
 DO $g5_noexec$ BEGIN RAISE EXCEPTION 'NOEXEC DRAFT: strip only after new hash, exact review, hosted proof and ACL GO'; END $g5_noexec$;
 
 -- Candidate SHA: 718c04a56dd997147b49a5c9c8161b9265a5ef71
--- Extension allowlist SHA-256: 0523e1e57e5ebd3d907cf3e043a54e82d631227e11714f361d5153d7840c5aab
+-- Extension allowlist SHA-256: ad1455afb5aae0fef305287df068b5c22bb888577712ec9aac3e67519b09851f
 -- Exact executor: session_user=current_user=postgres and postgres is superuser.
 -- Production authorization: NO-GO
 SET search_path TO pg_catalog, public;
@@ -369,6 +369,7 @@ GRANT EXECUTE ON FUNCTION public.similarity(text,text) TO gbrain_runtime;
 GRANT EXECUTE ON FUNCTION public.similarity_op(text,text) TO gbrain_runtime;
 GRANT EXECUTE ON FUNCTION public.gen_random_uuid() TO gbrain_runtime;
 GRANT EXECUTE ON FUNCTION public.cosine_distance(vector,vector) TO gbrain_runtime;
+GRANT EXECUTE ON FUNCTION public.vector(vector,integer,boolean) TO gbrain_runtime;
 REVOKE USAGE ON TYPE public.vector FROM PUBLIC;
 REVOKE USAGE ON TYPE public.vector FROM gbrain_runtime;
 GRANT USAGE ON TYPE public.vector TO gbrain_runtime;
