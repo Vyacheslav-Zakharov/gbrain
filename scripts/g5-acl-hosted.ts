@@ -3,9 +3,6 @@ import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postgres from 'postgres';
-import * as db from '../src/core/db.ts';
-import { PostgresEngine } from '../src/core/postgres-engine.ts';
-import { runPageToAliasCore } from '../src/core/schema-pack/page-to-alias.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { buildZeroRowInsert, stripNoexecGuard, verifyControlManifest } from './g5-acl-hosted-lib.ts';
 
@@ -100,6 +97,8 @@ async function reconstructExtensionContainerOwners(sql: postgres.Sql): Promise<{
 }
 
 async function initBaseline(): Promise<void> {
+  const db = await import('../src/core/db.ts');
+  const { PostgresEngine } = await import('../src/core/postgres-engine.ts');
   const admin = connectSql(ADMIN_URL);
   try {
     await admin.unsafe("DROP DATABASE IF EXISTS gbrain WITH (FORCE)");
@@ -265,6 +264,8 @@ async function rolledBackStatement(sql: postgres.Sql, statement: string): Promis
 }
 
 async function runFunctionalProbes(runtime: postgres.Sql, migrator: postgres.Sql, sqlstates: Record<string, number>): Promise<{ positive: number; negative: number }> {
+  const { PostgresEngine } = await import('../src/core/postgres-engine.ts');
+  const { runPageToAliasCore } = await import('../src/core/schema-pack/page-to-alias.ts');
   let positive = 0, negative = 0;
   const runtimeUrl = gbrainUrl('gbrain_runtime', RUNTIME_PASSWORD);
   const engine = new PostgresEngine();
