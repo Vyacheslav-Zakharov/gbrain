@@ -70,6 +70,28 @@ async function setSyntheticPassword(sql: postgres.Sql, role: string, value: stri
   await sql.unsafe(`DO $g5_pw$ BEGIN EXECUTE format('ALTER ROLE ${sqlIdent(role)} PASSWORD %L', current_setting('g5.synthetic_password')); PERFORM set_config('g5.synthetic_password', '', false); END $g5_pw$;`);
 }
 
+async function reconstructExtensionContainerOwners(sql: postgres.Sql): Promise<{ containers: number; owner_dependencies: number; postgres_routines: number }> {
+  return sql.begin(async (tx) => {
+    await tx`UPDATE pg_extension SET extowner=(SELECT oid FROM pg_roles WHERE rolname='gbrain') WHERE extname IN ('pg_trgm','pgcrypto')`;
+    await tx`
+      WITH owner_role AS (SELECT oid FROM pg_authid WHERE rolname='gbrain'),
+           target_extensions AS (SELECT oid FROM pg_extension WHERE extname IN ('pg_trgm','pgcrypto'))
+      UPDATE pg_shdepend d SET refobjid=owner_role.oid
+      FROM owner_role,target_extensions e
+      WHERE d.dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
+        AND d.classid='pg_extension'::regclass AND d.objid=e.oid AND d.objsubid=0
+        AND d.refclassid='pg_authid'::regclass AND d.deptype='o'`;
+    const rows = await tx<{ containers: string; owner_dependencies: string; postgres_routines: string }[]>`
+      SELECT
+        (SELECT count(*)::text FROM pg_extension e JOIN pg_roles r ON r.oid=e.extowner WHERE e.extname IN ('pg_trgm','pgcrypto') AND r.rolname='gbrain') containers,
+        (SELECT count(*)::text FROM pg_extension e JOIN pg_shdepend d ON d.dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND d.classid='pg_extension'::regclass AND d.objid=e.oid AND d.objsubid=0 AND d.refclassid='pg_authid'::regclass AND d.deptype='o' JOIN pg_roles r ON r.oid=d.refobjid WHERE e.extname IN ('pg_trgm','pgcrypto') AND r.rolname='gbrain') owner_dependencies,
+        (SELECT count(*)::text FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e' JOIN pg_extension e ON e.oid=d.refobjid JOIN pg_roles r ON r.oid=p.proowner WHERE n.nspname='public' AND e.extname IN ('pg_trgm','pgcrypto','vector') AND r.rolname='postgres') postgres_routines`;
+    const topology = { containers: Number(rows[0]?.containers), owner_dependencies: Number(rows[0]?.owner_dependencies), postgres_routines: Number(rows[0]?.postgres_routines) };
+    if (topology.containers !== 2 || topology.owner_dependencies !== 2 || topology.postgres_routines !== 104) throw new Error(`synthetic extension owner topology mismatch: ${JSON.stringify(topology)}`);
+    return topology;
+  });
+}
+
 async function initBaseline(): Promise<void> {
   const admin = connectSql(ADMIN_URL);
   try {
@@ -90,10 +112,11 @@ async function initBaseline(): Promise<void> {
   const dbAdmin = connectSql(gbrainUrl('postgres', 'postgres'));
   try {
     await dbAdmin.unsafe('CREATE EXTENSION vector');
-    await dbAdmin.unsafe('SET ROLE gbrain');
     await dbAdmin.unsafe('CREATE EXTENSION pg_trgm');
     await dbAdmin.unsafe('CREATE EXTENSION pgcrypto');
-    await dbAdmin.unsafe('RESET ROLE');
+    // PostgreSQL 16 has no ALTER EXTENSION OWNER syntax. Reconstruct both the
+    // reviewed extowner and its shared owner dependency in this disposable fixture.
+    await reconstructExtensionContainerOwners(dbAdmin);
   } finally {
     await dbAdmin.end();
   }
@@ -207,6 +230,7 @@ async function proveTransactionalRollback(): Promise<void> {
   const admin = connectSql(gbrainUrl('postgres', 'postgres'));
   try {
     await expectSqlState(() => admin.unsafe(injected), 'P0001', 'forced S2 rollback');
+    await admin.unsafe('ROLLBACK');
     const roles = await admin<{ count: string }[]>`SELECT count(*)::text count FROM pg_roles WHERE rolname IN ('gbrain_runtime','gbrain_migrator','gbrain_migration_owner')`;
     if (roles[0]?.count !== '0') throw new Error('forced rollback left target roles');
   } finally { await admin.end(); }
@@ -432,6 +456,7 @@ async function writeReceipt(): Promise<void> {
   const forcedRollbackStage = readStage('forced-rollback');
   const applyStage = readStage('apply');
   const probeStage = readStage('probe');
+  const extensionRestoreStage = readStage('extension-restore');
   const restoreStage = readStage('restore');
   const baselineSchemaHash = readFileSync(resolve(RECEIPT_DIR, 'baseline-schema.sha256'), 'utf8').trim().split(/\s+/)[0];
   const restoredSchemaHash = readFileSync(resolve(RECEIPT_DIR, 'restored-schema.sha256'), 'utf8').trim().split(/\s+/)[0];
@@ -449,13 +474,15 @@ async function writeReceipt(): Promise<void> {
     server_version_num: census.server_version_num,
     positive_probe_count: probeCounts.positive,
     negative_probe_count: probeCounts.negative,
-    stage_hashes: { baseline: sha256Json(baselineStage), forced_rollback: sha256Json(forcedRollbackStage), apply: sha256Json(applyStage), probe: sha256Json(probeStage), restore: sha256Json(restoreStage) },
+    stage_hashes: { baseline: sha256Json(baselineStage), forced_rollback: sha256Json(forcedRollbackStage), apply: sha256Json(applyStage), probe: sha256Json(probeStage), extension_restore: sha256Json(extensionRestoreStage), restore: sha256Json(restoreStage) },
     baseline_schema_sha256: baselineSchemaHash,
     restored_schema_sha256: restoredSchemaHash,
     forward_verifier_sha256: createHash('sha256').update(readFileSync(resolve(CONTROL, 'G5-RUNTIME-ACL-EXACT-POSTCONDITIONS-NOEXEC.sql.txt'))).digest('hex'),
     inverse_verifier_sha256: createHash('sha256').update(readFileSync(resolve(CONTROL, 'G5-RUNTIME-ACL-EXACT-INVERSE-POSTCONDITIONS-NOEXEC.sql.txt'))).digest('hex'),
     application_candidate_tree_sha: 'b2b0eb03230ac447cf1b3d7cad8fa18468ae2e8d',
     full_restore_identity: true,
+    logical_dump_alone_full_restore_identity: false,
+    governed_extension_owner_reconstruction: true,
     postgres_image_digest: 'sha256:b740286128ce8e232fe0de3c8db2267d91aedc598dfbeaefb7ffb0b79ceef1b3',
     production_db_or_services_touched: false,
     complete: true,
@@ -479,10 +506,17 @@ else if (mode === 'set-recovery-credential') {
   await setSyntheticPassword(admin, 'gbrain', LEGACY_PASSWORD);
   await admin.end();
 } else if (mode === 'verify-restored') await verifyRestored();
+else if (mode === 'reconstruct-extension-owners') {
+  const admin = connectSql(gbrainUrl('postgres', 'postgres'));
+  try {
+    const topology = await reconstructExtensionContainerOwners(admin);
+    writeStage('extension-restore', { ...topology, logical_dump_alone_sufficient: false, complete: true });
+  } finally { await admin.end(); }
+}
 else if (mode === 'receipt') await writeReceipt();
 else if (mode === 'failure-receipt') {
   mkdirSync(RECEIPT_DIR, { recursive: true });
-  const stages = ['baseline', 'forced-rollback', 'apply', 'probe', 'restore'].filter((name) => existsSync(resolve(RECEIPT_DIR, `${name}.json`)));
+  const stages = ['baseline', 'forced-rollback', 'apply', 'probe', 'extension-restore', 'restore'].filter((name) => existsSync(resolve(RECEIPT_DIR, `${name}.json`)));
   writeFileSync(resolve(RECEIPT_DIR, 'receipt.json'), JSON.stringify({ complete: false, status: 'failed', stages, acl_binding_sha256: binding.bindingSha256, application_candidate_sha: APP_CANDIDATE_SHA, harness_sha: process.env.GITHUB_SHA ?? '[LOCAL-NO-RUN]', production_db_or_services_touched: false }, null, 2) + '\n');
 }
 else throw new Error(`unknown mode: ${mode}`);

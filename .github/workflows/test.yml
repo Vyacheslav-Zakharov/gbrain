@@ -260,11 +260,18 @@ jobs:
           sha256sum -c /tmp/gbrain.dump.sha256
           timeout 30s docker exec "$POSTGRES_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='gbrain' AND pid<>pg_backend_pid()"
           timeout 30s docker exec "$POSTGRES_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres -c "DROP DATABASE gbrain"
-          timeout 60s bun scripts/g5-acl-hosted.ts cleanup
+          TARGET_ROLE_COUNT=$(timeout 15s docker exec "$POSTGRES_CONTAINER" psql -X -At -U postgres -d postgres -c "SELECT count(*) FROM pg_roles WHERE rolname IN ('gbrain_runtime','gbrain_migrator','gbrain_migration_owner')")
+          if [ "$TARGET_ROLE_COUNT" = "3" ]; then
+            timeout 60s bun scripts/g5-acl-hosted.ts cleanup
+          elif [ "$TARGET_ROLE_COUNT" != "0" ]; then
+            echo "partial target-role residue: $TARGET_ROLE_COUNT" >&2
+            exit 1
+          fi
           timeout 30s docker cp /tmp/gbrain.dump "$POSTGRES_CONTAINER:/tmp/gbrain.dump"
           EXPECTED_DUMP_SHA=$(cut -d' ' -f1 /tmp/gbrain.dump.sha256)
           test "$(timeout 15s docker exec "$POSTGRES_CONTAINER" sha256sum /tmp/gbrain.dump | cut -d' ' -f1)" = "$EXPECTED_DUMP_SHA"
           timeout 180s docker exec "$POSTGRES_CONTAINER" pg_restore -U postgres -d postgres --exit-on-error /tmp/gbrain.dump
+          timeout 30s bun scripts/g5-acl-hosted.ts reconstruct-extension-owners
           timeout 30s bun scripts/g5-acl-hosted.ts set-recovery-credential
           timeout 120s bun scripts/g5-acl-hosted.ts verify-restored
           timeout 30s docker exec "$POSTGRES_CONTAINER" pg_dump -U postgres --schema-only --no-comments gbrain > /tmp/restored-schema.sql
