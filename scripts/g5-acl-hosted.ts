@@ -74,13 +74,17 @@ async function reconstructExtensionContainerOwners(sql: postgres.Sql): Promise<{
   return sql.begin(async (tx) => {
     await tx`UPDATE pg_extension SET extowner=(SELECT oid FROM pg_roles WHERE rolname='gbrain') WHERE extname IN ('pg_trgm','pgcrypto')`;
     await tx`
-      WITH owner_role AS (SELECT oid FROM pg_authid WHERE rolname='gbrain'),
-           target_extensions AS (SELECT oid FROM pg_extension WHERE extname IN ('pg_trgm','pgcrypto'))
-      UPDATE pg_shdepend d SET refobjid=owner_role.oid
-      FROM owner_role,target_extensions e
+      WITH target_extensions AS (SELECT oid FROM pg_extension WHERE extname IN ('pg_trgm','pgcrypto'))
+      DELETE FROM pg_shdepend d USING target_extensions e
       WHERE d.dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
         AND d.classid='pg_extension'::regclass AND d.objid=e.oid AND d.objsubid=0
         AND d.refclassid='pg_authid'::regclass AND d.deptype='o'`;
+    await tx`
+      INSERT INTO pg_shdepend (dbid,classid,objid,objsubid,refclassid,refobjid,deptype)
+      SELECT (SELECT oid FROM pg_database WHERE datname=current_database()),
+             'pg_extension'::regclass,e.oid,0,'pg_authid'::regclass,r.oid,'o'
+      FROM pg_extension e CROSS JOIN pg_authid r
+      WHERE e.extname IN ('pg_trgm','pgcrypto') AND r.rolname='gbrain'`;
     const rows = await tx<{ containers: string; owner_dependencies: string; postgres_routines: string }[]>`
       SELECT
         (SELECT count(*)::text FROM pg_extension e JOIN pg_roles r ON r.oid=e.extowner WHERE e.extname IN ('pg_trgm','pgcrypto') AND r.rolname='gbrain') containers,
