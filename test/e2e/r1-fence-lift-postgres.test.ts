@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import postgres, { type Sql } from 'postgres';
-import { assumeProductionMigrationOwner, validateHandoffNonceLedger } from '../../src/commands/r1-governed-migrate.ts';
+import { validateHandoffNonceLedger } from '../../src/commands/r1-governed-migrate.ts';
 import { LATEST_VERSION } from '../../src/core/migrate.ts';
 import {
   buildR1MigrationIdentity,
@@ -32,6 +32,7 @@ const tmp = mkdtempSync(join(tmpdir(), 'r1-fence-lift-'));
 const repo = resolve(import.meta.dir, '../..');
 const runner = resolve(repo, 'src/commands/r1-governed-migrate.ts');
 const cli = resolve(repo, 'src/cli.ts');
+const roleLoginProbe = resolve(repo, 'test/helpers/r1-role-login-probe.ts');
 const implementation = resolve(repo, 'src/core/r1-governed-migration.ts');
 const candidateSha = 'a'.repeat(40);
 const implementationSha = createHash('sha256').update(readFileSync(implementation)).digest('hex');
@@ -114,6 +115,17 @@ function runCliWithMigrationMode(mode: string): ReturnType<typeof spawnSync> {
     env: { ...process.env, DATABASE_URL, GBRAIN_HOME: brainHome, GBRAIN_MIGRATION_MODE: mode },
     encoding: 'utf8', timeout: 30_000, maxBuffer: 2 * 1024 * 1024,
   });
+}
+
+function runRoleLoginProbe(databaseUrl: string, mode: 'migrator' | 'runtime'): Record<string, unknown> {
+  const result = spawnSync(process.execPath, [roleLoginProbe], {
+    cwd: repo,
+    env: { ...process.env, R1_ROLE_DATABASE_URL: databaseUrl, R1_ROLE_PROBE_MODE: mode },
+    encoding: 'utf8', timeout: 15_000, killSignal: 'SIGKILL',
+  });
+  expect(result.error).toBeUndefined();
+  expect(result.status).toBe(0);
+  return JSON.parse(result.stdout.trim()) as Record<string, unknown>;
 }
 
 async function seedCompletedFence(): Promise<void> {
@@ -350,7 +362,7 @@ describe('R1 writer-fence lift on PostgreSQL', () => {
     const missingReceipt = join(tmp, 'cutover-missing-index.json');
     const missing = runRunner(DATABASE_URL, missingReceipt, '--cutover');
     expect(missing.status).not.toBe(0);
-    expect(String(missing.stderr)).toContain('index inventory is incomplete');
+    expect(String(missing.stderr)).toContain('Unexpected HNSW index catalog for embedding_r1_g768');
     expect((await sql.unsafe(`SELECT format_type(a.atttypid,a.atttypmod) AS type FROM pg_attribute a
       JOIN pg_class c ON c.oid=a.attrelid WHERE c.relname='content_chunks' AND a.attname='embedding'`) as Array<{ type: string }>)[0]?.type).toBe('vector(1280)');
 
@@ -420,8 +432,6 @@ describe('R1 writer-fence lift on PostgreSQL', () => {
     expect(existing).toEqual([]);
     const migratorPassword = randomBytes(32).toString('hex');
     const runtimePassword = randomBytes(32).toString('hex');
-    let migratorSql: Sql | null = null;
-    let runtimeSql: Sql | null = null;
     const createdRoles: string[] = [];
     try {
       await sql.unsafe('CREATE ROLE gbrain_migration_owner NOLOGIN NOINHERIT NOBYPASSRLS');
@@ -435,22 +445,18 @@ describe('R1 writer-fence lift on PostgreSQL', () => {
       const migratorUrl = new URL(DATABASE_URL);
       migratorUrl.username = 'gbrain_migrator';
       migratorUrl.password = migratorPassword;
-      migratorSql = postgres(migratorUrl.toString(), { max: 1 });
-      await assumeProductionMigrationOwner(migratorSql);
-      const migratorIdentity = await migratorSql.unsafe("SELECT session_user,current_user,current_setting('search_path') AS search_path") as Array<{ session_user: string; current_user: string; search_path: string }>;
-      expect(migratorIdentity[0]).toEqual({ session_user: 'gbrain_migrator', current_user: 'gbrain_migration_owner', search_path: 'pg_catalog, public' });
+      expect(runRoleLoginProbe(migratorUrl.toString(), 'migrator')).toEqual({
+        session_user: 'gbrain_migrator', current_user: 'gbrain_migration_owner', search_path: 'pg_catalog, public',
+      });
 
       const runtimeUrl = new URL(DATABASE_URL);
       runtimeUrl.username = 'gbrain_runtime';
       runtimeUrl.password = runtimePassword;
-      runtimeSql = postgres(runtimeUrl.toString(), { max: 1 });
-      const runtimeIdentity = await runtimeSql.unsafe('SELECT session_user,current_user') as Array<{ session_user: string; current_user: string }>;
-      expect(runtimeIdentity[0]).toEqual({ session_user: 'gbrain_runtime', current_user: 'gbrain_runtime' });
-      await expect(runtimeSql.unsafe('SET ROLE gbrain_migration_owner')).rejects.toThrow();
-      await expect(runtimeSql.unsafe('SET ROLE gbrain_migrator')).rejects.toThrow();
+      expect(runRoleLoginProbe(runtimeUrl.toString(), 'runtime')).toEqual({
+        session_user: 'gbrain_runtime', current_user: 'gbrain_runtime',
+        denied: ['gbrain_migration_owner', 'gbrain_migrator'],
+      });
     } finally {
-      const clients = [migratorSql, runtimeSql].filter((client): client is Sql => client !== null);
-      await Promise.all(clients.map((client) => client.end({ timeout: 1 })));
       for (const role of [...createdRoles].reverse()) await sql.unsafe(`DROP OWNED BY ${role}`);
       for (const role of [...createdRoles].reverse()) await sql.unsafe(`DROP ROLE ${role}`);
       const remaining = await sql.unsafe('SELECT rolname FROM pg_roles WHERE rolname=ANY($1::text[]) ORDER BY rolname', [roleNames]) as Array<{ rolname: string }>;
