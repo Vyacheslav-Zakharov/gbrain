@@ -18,7 +18,7 @@ Production execution: prohibited
 2. Create the eleven production catalog-only tables as explicit test fixtures with matching names and representative DML-safe columns; no production data.
 3. Assert exact baseline closure: 92 tables, 49 sequences, 113 public routines, 190 public types, zero policies/default ACLs/explicit relation/routine/type ACLs.
 4. Execute the bound `G5-ACL-S2-ASSEMBLED-NOEXEC.sql.txt` after the hosted harness validates hashes and removes only its deliberate guard. This must first transfer the event-trigger object to the exact `postgres` superuser (PostgreSQL forbids a non-superuser event-trigger owner), then exercise the real role creation, membership and `REASSIGN OWNED BY gbrain TO gbrain_migration_owner` path for the remaining objects—including the event-trigger function—not a fixture that directly creates the target end state.
-5. Verify extension owners/member owners, exact routine signature owners, database/schema ownership, explicit/default/column ACL tuples and application routine owners before and after ACL changes.
+5. Verify extension owners/member owners, exact routine signature owners, database/schema ownership, explicit/default/column ACL tuples and application routine owners before and after ACL changes. Default-ACL verification must include global rows (`defaclnamespace=0`) for both exact object-creator roles; schema-specific defaults are not accepted as a substitute for revoking hard-wired PUBLIC function/type defaults.
 
 ## Positive tests
 

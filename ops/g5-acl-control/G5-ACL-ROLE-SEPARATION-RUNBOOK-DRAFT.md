@@ -128,7 +128,7 @@ Package requirements:
 - exact bounded `ALTER ... OWNER` list for independently ownable objects plus topology-bounded `REASSIGN OWNED BY gbrain TO gbrain_migration_owner` where required to transfer PostgreSQL-16 extension ownership. Cluster-wide discovery must prove legacy `gbrain` owns no object in another database before S2. Discovery of any such object aborts this package pending a separately reviewed cross-database state machine; this single-database transaction may not attempt cross-database reassignment;
 - distinguish independent objects from dependent indexes/triggers;
 - revoke existing unwanted PUBLIC EXECUTE;
-- `ALTER DEFAULT PRIVILEGES FOR ROLE gbrain_migration_owner IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`;
+- globally revoke hard-wired PUBLIC function/type defaults for both exact object-creator roles (`gbrain_migration_owner`, `postgres`); PostgreSQL schema-specific defaults are additive and cannot subtract the global defaults;
 - exact runtime routine signatures only; generic EXECUTE ON ALL FUNCTIONS is prohibited;
 - exact schema USAGE, table DML, and sequence USAGE/SELECT/UPDATE only as behavior proves necessary;
 - omit runtime TRUNCATE, TRIGGER, REFERENCES, database/schema CREATE, grant options and all owner membership;
