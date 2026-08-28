@@ -373,7 +373,7 @@ describe('R1 writer-fence lift on PostgreSQL', () => {
     const wrongReceipt = join(tmp, 'cutover-wrong-index.json');
     const wrong = runRunner(DATABASE_URL, wrongReceipt, '--cutover');
     expect(wrong.status).not.toBe(0);
-    expect(String(wrong.stderr)).toContain('index definition mismatch');
+    expect(String(wrong.stderr)).toContain('Unexpected HNSW index catalog for embedding_r1_g768');
   }, 60_000);
 
   test('receipt collision and connection failure are classified before mutation', async () => {
@@ -485,7 +485,8 @@ describe('R1 writer-fence lift on PostgreSQL', () => {
 
       await sql.unsafe(`SET ROLE ${runtimeRole}`);
       await sql.unsafe(`SET avers.r1_migration_runner='on'`);
-      await sql.unsafe('SELECT pg_advisory_lock($1)', [R1_ADVISORY_LOCK_KEY]);
+      const lockAttempt = await sql.unsafe('SELECT pg_try_advisory_lock($1) AS ok', [R1_ADVISORY_LOCK_KEY]) as Array<{ ok: boolean }>;
+      expect(lockAttempt[0]?.ok).toBe(true);
       await expect(sql.unsafe(`INSERT INTO ${table}(id) VALUES (1)`)).rejects.toThrow('AVERS_R1_WRITER_FENCE_ACTIVE');
       await expect(sql.unsafe(`ALTER TABLE ${table} DISABLE TRIGGER avers_r1_writer_fence_${table}`)).rejects.toThrow();
       await expect(sql.unsafe(`DROP TRIGGER avers_r1_writer_fence_${table} ON ${table}`)).rejects.toThrow();
