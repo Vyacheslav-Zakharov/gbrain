@@ -128,6 +128,13 @@ function runRoleLoginProbe(databaseUrl: string, mode: 'migrator' | 'runtime'): R
   return JSON.parse(result.stdout.trim()) as Record<string, unknown>;
 }
 
+async function capturePostgresError(operation: Promise<unknown>): Promise<{ code?: string; message: string }> {
+  let caught: unknown;
+  try { await operation; } catch (error) { caught = error; }
+  if (!caught) throw new Error('Expected PostgreSQL operation to fail');
+  return { code: (caught as { code?: string }).code, message: String((caught as Error).message) };
+}
+
 async function seedCompletedFence(): Promise<void> {
   await cleanup();
   await sql.unsafe('CREATE TABLE pages(id bigint PRIMARY KEY, embedding_signature text)');
@@ -468,10 +475,13 @@ describe('R1 writer-fence lift on PostgreSQL', () => {
     const ownerRole = `g5_test_owner_${process.pid}`;
     const runtimeRole = `g5_test_runtime_${process.pid}`;
     const table = 'r1_fence_pages';
+    const createdRoles: string[] = [];
     await cleanup();
     try {
       await sql.unsafe(`CREATE ROLE ${ownerRole} NOLOGIN NOBYPASSRLS`);
+      createdRoles.push(ownerRole);
       await sql.unsafe(`CREATE ROLE ${runtimeRole} NOLOGIN NOBYPASSRLS`);
+      createdRoles.push(runtimeRole);
       await sql.unsafe(`GRANT USAGE, CREATE ON SCHEMA public TO ${ownerRole}`);
       await sql.unsafe(`GRANT USAGE ON SCHEMA public TO ${runtimeRole}`);
       await sql.unsafe(`SET ROLE ${ownerRole}`);
@@ -487,10 +497,16 @@ describe('R1 writer-fence lift on PostgreSQL', () => {
       await sql.unsafe(`SET avers.r1_migration_runner='on'`);
       const lockAttempt = await sql.unsafe('SELECT pg_try_advisory_lock($1) AS ok', [R1_ADVISORY_LOCK_KEY]) as Array<{ ok: boolean }>;
       expect(lockAttempt[0]?.ok).toBe(true);
-      await expect(sql.unsafe(`INSERT INTO ${table}(id) VALUES (1)`)).rejects.toThrow('AVERS_R1_WRITER_FENCE_ACTIVE');
-      await expect(sql.unsafe(`ALTER TABLE ${table} DISABLE TRIGGER avers_r1_writer_fence_${table}`)).rejects.toThrow();
-      await expect(sql.unsafe(`DROP TRIGGER avers_r1_writer_fence_${table} ON ${table}`)).rejects.toThrow();
-      await expect(sql.unsafe(`CREATE OR REPLACE FUNCTION avers_r1_writer_fence_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$`)).rejects.toThrow();
+      const fencedInsert = await capturePostgresError(sql.unsafe(`INSERT INTO ${table}(id) VALUES (1)`));
+      expect(fencedInsert).toMatchObject({ code: '55000' });
+      expect(fencedInsert.message).toBe('AVERS_R1_WRITER_FENCE_ACTIVE');
+      for (const operation of [
+        () => sql.unsafe(`ALTER TABLE ${table} DISABLE TRIGGER avers_r1_writer_fence_${table}`),
+        () => sql.unsafe(`DROP TRIGGER avers_r1_writer_fence_${table} ON ${table}`),
+        () => sql.unsafe(`CREATE OR REPLACE FUNCTION avers_r1_writer_fence_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$`),
+      ]) {
+        expect(await capturePostgresError(operation())).toMatchObject({ code: '42501' });
+      }
       await sql.unsafe('SELECT pg_advisory_unlock($1)', [R1_ADVISORY_LOCK_KEY]);
       await sql.unsafe('RESET ROLE');
 
@@ -500,14 +516,17 @@ describe('R1 writer-fence lift on PostgreSQL', () => {
       const rows = await sql.unsafe(`SELECT id FROM ${table}`) as Array<{ id: number }>;
       expect(rows.map((row) => Number(row.id))).toEqual([1]);
     } finally {
-      await sql.unsafe('RESET ROLE').catch(() => {});
-      await sql.unsafe('SELECT pg_advisory_unlock($1)', [R1_ADVISORY_LOCK_KEY]).catch(() => {});
-      await sql.unsafe(`DROP TABLE IF EXISTS ${table} CASCADE`).catch(() => {});
-      await sql.unsafe('DROP FUNCTION IF EXISTS avers_r1_writer_fence_guard() CASCADE').catch(() => {});
-      for (const role of [runtimeRole, ownerRole]) {
-        await sql.unsafe(`DROP OWNED BY ${role}`).catch(() => {});
-        await sql.unsafe(`DROP ROLE IF EXISTS ${role}`).catch(() => {});
-      }
+      await sql.unsafe('RESET ROLE');
+      await sql.unsafe('SELECT pg_advisory_unlock($1)', [R1_ADVISORY_LOCK_KEY]);
+      await sql.unsafe(`DROP TABLE IF EXISTS ${table} CASCADE`);
+      await sql.unsafe('DROP FUNCTION IF EXISTS avers_r1_writer_fence_guard() CASCADE');
+      for (const role of [...createdRoles].reverse()) await sql.unsafe(`DROP OWNED BY ${role}`);
+      for (const role of [...createdRoles].reverse()) await sql.unsafe(`DROP ROLE ${role}`);
+      const residue = await sql.unsafe(`SELECT
+        to_regclass('public.r1_fence_pages') IS NOT NULL AS has_table,
+        to_regprocedure('public.avers_r1_writer_fence_guard()') IS NOT NULL AS has_function,
+        EXISTS (SELECT 1 FROM pg_roles WHERE rolname=ANY($1::text[])) AS has_role`, [[ownerRole, runtimeRole]]) as Array<{ has_table: boolean; has_function: boolean; has_role: boolean }>;
+      expect(residue[0]).toEqual({ has_table: false, has_function: false, has_role: false });
     }
   });
 
