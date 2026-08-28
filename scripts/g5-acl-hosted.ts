@@ -280,8 +280,9 @@ async function runFunctionalProbes(runtime: postgres.Sql, migrator: postgres.Sql
     if (BigInt(afterClock[0]!.last_value) <= BigInt(beforeClock[0]!.last_value)) throw new Error('page generation clock trigger failed');
     positive += 3;
 
+    const embeddingLiteral = `[${new Array(768).fill('0').join(',')}]`;
     await engine.executeRaw(`INSERT INTO content_chunks (page_id,chunk_index,chunk_text,chunk_source,embedding)
-      VALUES ($1,0,'g5 hosted searchable chunk','compiled_truth',array_fill(0::real,ARRAY[768])::vector)`, [page[0]!.id]);
+      VALUES ($1,0,'g5 hosted searchable chunk','compiled_truth',$2::vector)`, [page[0]!.id, embeddingLiteral]);
     const chunk = await engine.executeRaw<{ ready: boolean }>("SELECT (search_vector IS NOT NULL) ready FROM content_chunks WHERE page_id=$1", [page[0]!.id]);
     if (!chunk[0]?.ready) throw new Error('chunk search-vector trigger failed');
     await engine.executeRaw("INSERT INTO minion_jobs (queue,name,data,status) VALUES ('default','g5-hosted','{}'::jsonb,'waiting')");
@@ -308,7 +309,7 @@ async function runFunctionalProbes(runtime: postgres.Sql, migrator: postgres.Sql
 
     await runtime.unsafe('SET enable_seqscan=off');
     const trigramPlan = await runtime.unsafe("EXPLAIN (FORMAT JSON) SELECT * FROM public.pages WHERE title % 'G5 Canonical'");
-    const vectorPlan = await runtime.unsafe("EXPLAIN (FORMAT JSON) SELECT * FROM public.content_chunks ORDER BY embedding <=> array_fill(0::real,ARRAY[768])::vector LIMIT 1");
+    const vectorPlan = await runtime.unsafe("EXPLAIN (FORMAT JSON) SELECT * FROM public.content_chunks ORDER BY embedding <=> $1::vector LIMIT 1", [embeddingLiteral]);
     await runtime.unsafe('RESET enable_seqscan');
     if (!JSON.stringify(trigramPlan).includes('idx_pages_trgm')) throw new Error('indexed trigram path not selected');
     if (!JSON.stringify(vectorPlan).includes('idx_chunks_embedding')) throw new Error('HNSW vector path not selected');
