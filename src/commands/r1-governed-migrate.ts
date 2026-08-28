@@ -93,7 +93,7 @@ function assertPreCutoverStateEnvelope(state: StateEnvelope, identity: R1Migrati
   if (state.schema_version !== 1 || identityFingerprint(state.identity) !== fingerprint || state.fingerprint !== fingerprint) throw new Error('Pre-cutover state identity is not canonical');
   if (state.phase !== 'preparing' && state.phase !== 'prepared') throw new Error(`Invalid pre-cutover phase ${state.phase}`);
   for (const timestamp of [state.started_at,state.updated_at]) if (!timestamp || !Number.isFinite(Date.parse(timestamp)) || new Date(timestamp).toISOString() !== timestamp) throw new Error('Pre-cutover state timestamp is invalid');
-  if (state.from_model !== 'zeroentropyai:zembed-1' || state.from_dimensions !== 1280) throw new Error('Pre-cutover source identity is invalid');
+  if (state.from_model !== R1_SOURCE_MODEL || state.from_dimensions !== 1280) throw new Error('Pre-cutover source identity is invalid');
   if (typeof state.prior_reranker_model !== 'string' || state.prior_reranker_model.length < 1 || typeof state.prior_reranker_enabled !== 'boolean') throw new Error('Pre-cutover reranker envelope is invalid');
   if (resolveR1WriterFenceTables(state).length === 0) throw new Error('Pre-cutover fence inventory is invalid');
 }
@@ -926,7 +926,7 @@ async function abortPrepareReality(
   if (archivedTables.length === 0) throw new Error('abort-prepare audit inventory is invalid');
   if (production && JSON.stringify(archivedTables) !== JSON.stringify(await existingFenceTables(sql,'production'))) throw new Error('abort-prepare audit inventory is not the complete production catalog');
   if (aborted.shadow_columns_removed !== true) throw new Error('abort-prepare cleanup flag is missing');
-  if (aborted.source_model !== 'zeroentropyai:zembed-1' || aborted.source_dimensions !== 1280) throw new Error('abort-prepare source identity marker is invalid');
+  if (aborted.source_model !== R1_SOURCE_MODEL || aborted.source_dimensions !== 1280) throw new Error('abort-prepare source identity marker is invalid');
   if (await getConfig(sql, 'embedding_model') !== aborted.source_model || Number(await getConfig(sql, 'embedding_dimensions')) !== aborted.source_dimensions) throw new Error('abort-prepare source config drifted');
   if (await getConfig(sql, 'search_embedding_column') !== 'embedding') throw new Error('abort-prepare selected embedding column drifted');
   if (expected && (aborted.previous_phase !== expected.previousPhase || JSON.stringify(archivedTables) !== JSON.stringify(expected.stampedTables))) throw new Error('abort-prepare audit marker differs from locked cleanup authority');

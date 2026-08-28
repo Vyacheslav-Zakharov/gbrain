@@ -104,7 +104,8 @@ describe('R1 zero hosted-ZE default egress contract', () => {
       'src/core/ai/recipes/zeroentropyai.ts:38759ad26db770408074acfd718c46efd8182b4a24e12ef6a50d9a5a1987a25b',
       'src/core/ai/recipes/zeroentropyai.ts:3fc51eae59d98fed5c8bb54f6213033ccc6dc1006b6ddd37f2ade8f5855671b5',
       'src/core/embedding-pricing.ts:3f5a1c09538e36bb9b5e83dba7b7ef3c7460b1033094824576c5ebd8b1c73d3f',
-      // Fail-closed detector literal, not a target.
+      // Governed source-model identity and fail-closed rollback detector literals; never targets.
+      'src/core/r1-governed-migration.ts:3f5a1c09538e36bb9b5e83dba7b7ef3c7460b1033094824576c5ebd8b1c73d3f',
       'src/core/r1-governed-migration.ts:8cb8ce10276d40c1f4228ff527ad9f26ac5ebd7a2ec656068b70f7a345c4e844',
       // Explicit operator-invoked legacy ze-switch path; never an automatic default.
       'src/core/retrieval-upgrade-planner.ts:3f5a1c09538e36bb9b5e83dba7b7ef3c7460b1033094824576c5ebd8b1c73d3f',
