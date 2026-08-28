@@ -11,7 +11,7 @@ BEGIN
   IF session_user<>'postgres' OR current_user<>'postgres' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='postgres' AND rolsuper) THEN RAISE EXCEPTION 'postgres superuser required'; END IF;
   IF current_database()<>'gbrain' OR current_setting('search_path')<>'pg_catalog, public' THEN RAISE EXCEPTION 'database/search_path mismatch'; END IF;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('gbrain_runtime','gbrain_migrator','gbrain_migration_owner')) THEN RAISE EXCEPTION 'target role residue'; END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='gbrain' AND rolcanlogin AND rolinherit AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication AND rolbypassrls AND rolconnlimit=-1 AND rolvaliduntil IS NULL AND rolpassword IS NOT NULL) THEN RAISE EXCEPTION 'legacy role baseline mismatch'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_authid WHERE rolname='gbrain' AND rolcanlogin AND rolinherit AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication AND rolbypassrls AND rolconnlimit=-1 AND rolvaliduntil IS NULL AND rolpassword IS NOT NULL) THEN RAISE EXCEPTION 'legacy role baseline mismatch'; END IF;
   IF EXISTS (SELECT 1 FROM pg_auth_members m JOIN pg_roles a ON a.oid=m.member JOIN pg_roles b ON b.oid=m.roleid WHERE a.rolname='gbrain' OR b.rolname='gbrain') THEN RAISE EXCEPTION 'legacy membership residue'; END IF;
   IF EXISTS (SELECT 1 FROM pg_db_role_setting s JOIN pg_roles r ON r.oid=s.setrole WHERE r.rolname='gbrain') THEN RAISE EXCEPTION 'legacy role setting residue'; END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_database d JOIN pg_roles o ON o.oid=d.datdba WHERE d.datname='gbrain' AND o.rolname='gbrain') THEN RAISE EXCEPTION 'database owner baseline mismatch'; END IF;
