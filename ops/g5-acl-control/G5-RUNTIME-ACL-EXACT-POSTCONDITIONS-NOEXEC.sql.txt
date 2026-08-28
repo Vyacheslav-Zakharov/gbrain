@@ -6,7 +6,6 @@ DO $g5_noexec$ BEGIN RAISE EXCEPTION 'NOEXEC verifier: strip only in bound hoste
 SET search_path TO pg_catalog, public;
 
 DO $g5_exact$
-DECLARE r record; actual boolean;
 BEGIN
   IF session_user<>'postgres' OR current_user<>'postgres' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='postgres' AND rolsuper) THEN RAISE EXCEPTION 'exact postgres superuser verifier required'; END IF;
   IF current_setting('search_path')<>'pg_catalog, public' THEN RAISE EXCEPTION 'search_path mismatch'; END IF;

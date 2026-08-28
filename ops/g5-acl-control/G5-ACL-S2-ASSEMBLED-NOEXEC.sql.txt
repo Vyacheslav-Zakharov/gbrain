@@ -1253,12 +1253,11 @@ GRANT USAGE ON TYPE public.gtrgm TO gbrain_runtime;
 
 -- Exact routine/type/catalog/default-ACL verification is delegated to the separately bound exact postcondition verifier.
 -- END G5-RUNTIME-ROUTINE-TYPE-ACL-FRAGMENT-NOEXEC.sql.txt
--- BEGIN G5-RUNTIME-ACL-EXACT-POSTCONDITIONS-NOEXEC.sql.txt sha256=0391fb3b9bac00ec185dfe9d47f7f881aaddce227155b5233c38f3a312ff0eeb
+-- BEGIN G5-RUNTIME-ACL-EXACT-POSTCONDITIONS-NOEXEC.sql.txt sha256=63da92b22d782dbf89ff3c77870fea0a1325c228736a7f20f4720f205a08f12a
 -- Exact S2 forward postcondition verifier. Production authorization NO-GO.
 SET search_path TO pg_catalog, public;
 
 DO $g5_exact$
-DECLARE r record; actual boolean;
 BEGIN
   IF session_user<>'postgres' OR current_user<>'postgres' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='postgres' AND rolsuper) THEN RAISE EXCEPTION 'exact postgres superuser verifier required'; END IF;
   IF current_setting('search_path')<>'pg_catalog, public' THEN RAISE EXCEPTION 'search_path mismatch'; END IF;
