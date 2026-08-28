@@ -280,7 +280,8 @@ async function runFunctionalProbes(runtime: postgres.Sql, migrator: postgres.Sql
     if (BigInt(afterClock[0]!.last_value) <= BigInt(beforeClock[0]!.last_value)) throw new Error('page generation clock trigger failed');
     positive += 3;
 
-    const embeddingLiteral = `[${new Array(768).fill('0').join(',')}]`;
+    // Exact candidate schema binds content_chunks.embedding to vector(1536).
+    const embeddingLiteral = `[${new Array(1536).fill('0').join(',')}]`;
     await engine.executeRaw(`INSERT INTO content_chunks (page_id,chunk_index,chunk_text,chunk_source,embedding)
       VALUES ($1,0,'g5 hosted searchable chunk','compiled_truth',$2::vector)`, [page[0]!.id, embeddingLiteral]);
     const chunk = await engine.executeRaw<{ ready: boolean }>("SELECT (search_vector IS NOT NULL) ready FROM content_chunks WHERE page_id=$1", [page[0]!.id]);
