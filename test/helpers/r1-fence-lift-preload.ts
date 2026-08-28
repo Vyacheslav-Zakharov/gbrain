@@ -1,6 +1,7 @@
 import { __setEmbedTransportForTests } from '../../src/core/ai/gateway.ts';
 import {
   __setR1FenceLiftAfterDropHookForTests,
+  __setR1AbortPrepareAfterCleanupHookForTests,
   __setR1ReceiptFinalizeHookForTests,
 } from '../../src/core/r1-governed-migration.ts';
 
@@ -12,6 +13,12 @@ __setEmbedTransportForTests(async ({ values }: { values: unknown[] }) => ({
 if (process.env.R1_TEST_FAIL_AFTER_FENCE_DROP === '1') {
   __setR1FenceLiftAfterDropHookForTests(() => {
     throw new Error('INJECTED_POST_DROP_FAILURE');
+  });
+}
+
+if (process.env.R1_TEST_FAIL_AFTER_ABORT_CLEANUP === '1') {
+  __setR1AbortPrepareAfterCleanupHookForTests(() => {
+    throw new Error('INJECTED_ABORT_CLEANUP_FAILURE');
   });
 }
 

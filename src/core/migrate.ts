@@ -6444,8 +6444,10 @@ async function runMigrationSQL(
 export async function hasPendingMigrations(engine: BrainEngine): Promise<boolean> {
   try {
     const currentStr = await engine.getConfig('version');
-    const current = parseInt(currentStr || '1', 10);
-    return current < LATEST_VERSION;
+    if (!currentStr || !/^(0|[1-9]\d*)$/.test(currentStr)) return true;
+    const current = Number(currentStr);
+    if (!Number.isSafeInteger(current)) return true;
+    return current !== LATEST_VERSION;
   } catch {
     return true;
   }
@@ -6490,11 +6492,22 @@ export type TryRunPendingMigrationsResult =
   | { status: 'ok'; attempts: number }
   | { status: 'not_needed' }
   | { status: 'fenced'; source: 'env' | 'file' }
+  | { status: 'runtime_blocked' }
   | { status: 'race_resolved'; attempts: number; pollIterations: number }
   | { status: 'persistent'; attempts: number; pollIterations: number; error: Error }
   | { status: 'error'; error: Error };
 
+export type MigrationStartupMode = 'automatic' | 'runtime';
+
+export function resolveMigrationStartupMode(env: Record<string, string | undefined> = process.env): MigrationStartupMode {
+  const raw = env.GBRAIN_MIGRATION_MODE;
+  if (raw === undefined || raw === '') return 'automatic';
+  if (raw === 'automatic' || raw === 'runtime') return raw;
+  throw new Error(`Invalid GBRAIN_MIGRATION_MODE=${JSON.stringify(raw)}; expected automatic or runtime`);
+}
+
 export interface TryRunPendingMigrationsOpts {
+  mode?: MigrationStartupMode;
   deadlineMs?: number;
   pollIntervalMs?: number;
   retryBackoffMs?: number;
@@ -6514,6 +6527,7 @@ export async function tryRunPendingMigrations(
 ): Promise<TryRunPendingMigrationsResult> {
   const fence = opts._hooks?.isMigrationFenced?.() ?? resolveMigrationFence();
   if (fence.active && fence.source) return { status: 'fenced', source: fence.source };
+  const mode = opts.mode ?? resolveMigrationStartupMode();
   const deadlineMs = opts.deadlineMs ?? 5000;
   const pollIntervalMs = opts.pollIntervalMs ?? 250;
   const retryBackoffMs = opts.retryBackoffMs ?? 250;
@@ -6524,6 +6538,9 @@ export async function tryRunPendingMigrations(
 
   // Quick early-exit: if no migrations are actually pending, skip entirely.
   if (!await hasPending()) return { status: 'not_needed' };
+  // Runtime mode is a read-only probe. It must never enter initSchema or any
+  // migration setup/repair path, even when the schema is stale.
+  if (mode === 'runtime') return { status: 'runtime_blocked' };
 
   let attempts = 0;
   let lastErr: Error | null = null;

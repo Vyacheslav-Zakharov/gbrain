@@ -18,6 +18,9 @@ import { describe, test, expect } from 'bun:test';
 import {
   tryRunPendingMigrations,
   isDeadlockError,
+  resolveMigrationStartupMode,
+  hasPendingMigrations,
+  LATEST_VERSION,
   type TryRunPendingMigrationsResult,
 } from '../src/core/migrate.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -59,6 +62,41 @@ describe('isDeadlockError', () => {
 });
 
 describe('tryRunPendingMigrations', () => {
+  test('schema watermark requires one canonical exact current integer', async () => {
+    const engine = (value: string | null) => ({ getConfig: async () => value }) as unknown as BrainEngine;
+    expect(await hasPendingMigrations(engine(String(LATEST_VERSION)))).toBe(false);
+    for (const value of [null, '', 'invalid', `${LATEST_VERSION}junk`, `0${LATEST_VERSION}`, String(LATEST_VERSION + 1), '9007199254740993']) {
+      expect(await hasPendingMigrations(engine(value))).toBe(true);
+    }
+  });
+
+  test('runtime mode performs only the pending probe and never initSchema', async () => {
+    let initCalls = 0;
+    const result = await tryRunPendingMigrations(fakeEngine, {
+      mode: 'runtime',
+      _hooks: { hasPending: async () => false, initSchema: async () => { initCalls++; } },
+    });
+    expect(result.status).toBe('not_needed');
+    expect(initCalls).toBe(0);
+  });
+
+  test('runtime mode fails closed on pending migration without initSchema', async () => {
+    let initCalls = 0;
+    const result = await tryRunPendingMigrations(fakeEngine, {
+      mode: 'runtime',
+      _hooks: { hasPending: async () => true, initSchema: async () => { initCalls++; } },
+    });
+    expect(result.status).toBe('runtime_blocked');
+    expect(initCalls).toBe(0);
+  });
+
+  test('migration startup mode is explicit and rejects malformed values', () => {
+    expect(resolveMigrationStartupMode({})).toBe('automatic');
+    expect(resolveMigrationStartupMode({ GBRAIN_MIGRATION_MODE: 'runtime' })).toBe('runtime');
+    expect(() => resolveMigrationStartupMode({ GBRAIN_MIGRATION_MODE: 'migrator' })).toThrow('GBRAIN_MIGRATION_MODE');
+    expect(() => resolveMigrationStartupMode({ GBRAIN_MIGRATION_MODE: 'yes' })).toThrow('GBRAIN_MIGRATION_MODE');
+  });
+
   test('returns not_needed when hasPending returns false up front', async () => {
     const result = await tryRunPendingMigrations(fakeEngine, {
       _hooks: {

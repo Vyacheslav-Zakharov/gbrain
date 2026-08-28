@@ -13,6 +13,9 @@ describe('R1 automatic migration fence', () => {
     expect(resolveMigrationFence({}, () => false)).toMatchObject({ active: false });
     expect(() => assertSchemaMutationAllowed({ GBRAIN_MIGRATION_FENCE: '1' }, () => false)).toThrow('MIGRATION_FENCE_ACTIVE');
     expect(() => assertSchemaMutationAllowed({ GBRAIN_MIGRATION_FENCE: '1', GBRAIN_MIGRATION_FENCE_BYPASS: 'avers-r1-approved-runner' }, () => false)).not.toThrow();
+    expect(() => assertSchemaMutationAllowed({ GBRAIN_MIGRATION_MODE: 'runtime' }, () => false)).toThrow('MIGRATION_RUNTIME_MODE_ACTIVE');
+    expect(() => assertSchemaMutationAllowed({ GBRAIN_MIGRATION_MODE: 'runtime', GBRAIN_MIGRATION_FENCE_BYPASS: 'avers-r1-approved-runner' }, () => false)).toThrow('MIGRATION_RUNTIME_MODE_ACTIVE');
+    expect(() => assertSchemaMutationAllowed({ GBRAIN_MIGRATION_MODE: 'migrator' }, () => false)).toThrow('Invalid GBRAIN_MIGRATION_MODE');
   });
 
   test('ordinary CLI migration helper returns fenced before probing or initSchema', async () => {
@@ -43,6 +46,10 @@ describe('R1 automatic migration fence', () => {
     expect(readFileSync(new URL('../src/core/migrate.ts', import.meta.url), 'utf8')).toContain('assertSchemaMutationAllowed');
     const cli = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
     expect(cli).toContain("throw new Error(`MIGRATION_FENCE_ACTIVE");
-    expect(cli).toContain("if (message.startsWith('MIGRATION_FENCE_ACTIVE')) throw err");
+    expect(cli).toContain("message.startsWith('MIGRATION_FENCE_ACTIVE') || message.startsWith('MIGRATION_RUNTIME_PENDING')");
+    const modeResolve = cli.indexOf('const migrationStartupMode = resolveMigrationStartupMode()');
+    const migrationCatch = cli.indexOf('  try {', modeResolve);
+    expect(modeResolve).toBeGreaterThan(0);
+    expect(modeResolve).toBeLessThan(migrationCatch);
   });
 });

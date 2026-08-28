@@ -6,8 +6,12 @@ export const R1_LINEAGE = 'avers-fork-0.42.53-r1';
 export const R1_OPERATION_ID = 'avers:r1:ze-exit:google-g768:v1';
 export const R1_TARGET_MODEL = 'google:gemini-embedding-001';
 export const R1_TARGET_DIMENSIONS = 768;
+export const R1_SOURCE_MODEL = 'zeroentropyai:zembed-1';
+export const R1_SOURCE_DIMENSIONS = 1280;
 export const R1_STATE_KEY = 'avers.r1.embedding_migration.state';
 export const R1_COMPLETED_KEY = 'avers.r1.embedding_migration.completed';
+export const R1_ABORTED_KEY = 'avers.r1.embedding_migration.aborted';
+export const R1_NONCE_LEDGER_KEY = 'avers.r1.embedding_migration.consumed_nonces';
 export const R1_WRITER_FENCE_KEY = 'avers.r1.writer_fence';
 export const R1_SHADOW_COLUMN = 'embedding_r1_g768';
 export const R1_BACKUP_COLUMN = 'embedding_ze_r0';
@@ -17,7 +21,9 @@ export const R1_WRITER_FENCE_TABLES = [
   'source_ingest_run_items', 'take_proposals', 'concept_proposals',
   'minion_jobs', 'mcp_request_log', 'ingest_log', 'eval_candidates',
 ] as const;
-export const R1_ADVISORY_LOCK_KEY = 7_671_003_001;
+export const R1_ADVISORY_LOCK_KEY = 7671003001;
+export const R1_MIGRATION_OWNER_ROLE = 'gbrain_migration_owner';
+export const R1_MIGRATOR_ROLE = 'gbrain_migrator';
 
 export type R1ByteWriter = (buffer: Uint8Array, offset: number, length: number, position: number) => number;
 export function writeR1BytesFully(bytes: Uint8Array, writer: R1ByteWriter): void {
@@ -33,6 +39,7 @@ export function writeR1BytesFully(bytes: Uint8Array, writer: R1ByteWriter): void
 
 let fenceLiftAfterDropHookForTests: (() => void) | null = null;
 let receiptFinalizeHookForTests: (() => void) | null = null;
+let abortPrepareAfterCleanupHookForTests: (() => void) | null = null;
 export function __setR1FenceLiftAfterDropHookForTests(hook: (() => void) | null): void {
   fenceLiftAfterDropHookForTests = hook;
 }
@@ -45,8 +52,14 @@ export function __setR1ReceiptFinalizeHookForTests(hook: (() => void) | null): v
 export function runR1ReceiptFinalizeHookForTests(): void {
   receiptFinalizeHookForTests?.();
 }
+export function __setR1AbortPrepareAfterCleanupHookForTests(hook: (() => void) | null): void {
+  abortPrepareAfterCleanupHookForTests = hook;
+}
+export function runR1AbortPrepareAfterCleanupHookForTests(): void {
+  abortPrepareAfterCleanupHookForTests?.();
+}
 
-export type R1MigrationMode = 'status' | 'dry-run' | 'prepare' | 'cutover' | 'rollback' | 'disable-fence';
+export type R1MigrationMode = 'status' | 'dry-run' | 'prepare' | 'abort-prepare' | 'cutover' | 'rollback' | 'disable-fence';
 export type R1Target = 'clone' | 'production';
 
 export interface R1MigrationArgs {
@@ -60,46 +73,94 @@ export interface R1MigrationArgs {
   receipt?: string;
   expectedCandidateSha?: string;
   implementationChecksum?: string;
+  handoff?: R1HandoffIdentity;
 }
 
-function argValue(argv: string[], name: string): string | undefined {
-  const i = argv.indexOf(name);
-  return i >= 0 ? argv[i + 1] : undefined;
+export interface R1HandoffIdentity {
+  g5a_run_id: string;
+  g5b_run_id: string;
+  backup_ready_sha256: string;
+  control_manifest_sha256: string;
+  topology_receipt_sha256: string;
+  endpoint_identity_sha256: string;
+  launcher_sha256: string;
+  compiled_runtime_sha256: string;
+  g5b1_go_sha256: string;
+  handoff_nonce: string;
 }
 
 export function parseR1MigrationArgs(argv: string[]): R1MigrationArgs {
-  const modeFlags: Array<[string, R1MigrationMode]> = [
-    ['--status', 'status'], ['--dry-run', 'dry-run'], ['--prepare', 'prepare'],
+  const modeByFlag = new Map<string, R1MigrationMode>([
+    ['--status', 'status'], ['--dry-run', 'dry-run'], ['--prepare', 'prepare'], ['--abort-prepare', 'abort-prepare'],
     ['--cutover', 'cutover'], ['--rollback', 'rollback'], ['--disable-fence', 'disable-fence'],
-  ];
-  const selected = modeFlags.filter(([flag]) => argv.includes(flag)).map(([, mode]) => mode);
-  if (selected.length !== 1) throw new Error('Pass exactly one mode: --status, --dry-run, --prepare, --cutover, --rollback, or --disable-fence');
-  const batchSize = Number(argValue(argv, '--batch-size') ?? '64');
-  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 256) {
-    throw new Error('--batch-size must be an integer in [1, 256]');
+  ]);
+  const booleanFlags = new Set(['--yes', '--no-embed']);
+  const valueFlags = new Set([
+    '--batch-size', '--pace-ms', '--target', '--stop-after-batches', '--receipt',
+    '--expected-candidate-sha', '--implementation-checksum',
+    '--g5a-run-id', '--g5b-run-id', '--backup-ready-sha256', '--control-manifest-sha256',
+    '--topology-receipt-sha256', '--endpoint-identity-sha256', '--launcher-sha256',
+    '--compiled-runtime-sha256', '--g5b1-go-sha256', '--handoff-nonce',
+  ]);
+  let mode: R1MigrationMode | undefined;
+  const booleans = new Set<string>();
+  const values = new Map<string, string>();
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+    const parsedMode = modeByFlag.get(token);
+    if (parsedMode) {
+      if (mode) throw new Error('Pass exactly one non-repeated migration mode');
+      mode = parsedMode;
+      continue;
+    }
+    if (booleanFlags.has(token)) {
+      if (booleans.has(token)) throw new Error(`Duplicate flag: ${token}`);
+      booleans.add(token);
+      continue;
+    }
+    if (!valueFlags.has(token)) throw new Error(`Unknown migration option: ${token}`);
+    if (values.has(token)) throw new Error(`Duplicate option: ${token}`);
+    const value = argv[++i];
+    if (!value || value.startsWith('--')) throw new Error(`${token} requires one value`);
+    values.set(token, value);
   }
-  const paceMs = Number(argValue(argv, '--pace-ms') ?? '0');
-  if (!Number.isInteger(paceMs) || paceMs < 0 || paceMs > 60_000) {
-    throw new Error('--pace-ms must be an integer in [0, 60000]');
-  }
-  const targetRaw = argValue(argv, '--target') ?? 'clone';
+  if (!mode) throw new Error('Pass exactly one migration mode');
+  const batchSize = Number(values.get('--batch-size') ?? '64');
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 256) throw new Error('--batch-size must be an integer in [1, 256]');
+  const paceMs = Number(values.get('--pace-ms') ?? '0');
+  if (!Number.isInteger(paceMs) || paceMs < 0 || paceMs > 60_000) throw new Error('--pace-ms must be an integer in [0, 60000]');
+  const targetRaw = values.get('--target') ?? 'clone';
   if (targetRaw !== 'clone' && targetRaw !== 'production') throw new Error('--target must be clone or production');
-  const stopAfterBatches = Number(argValue(argv, '--stop-after-batches') ?? '0');
+  const stopAfterBatches = Number(values.get('--stop-after-batches') ?? '0');
   if (!Number.isInteger(stopAfterBatches) || stopAfterBatches < 0 || stopAfterBatches > 10_000) throw new Error('--stop-after-batches must be in [0,10000]');
   if (targetRaw === 'production' && stopAfterBatches > 0) throw new Error('--stop-after-batches is clone-only');
-  const receipt = argValue(argv, '--receipt');
-  if (argv.includes('--receipt') && !receipt) throw new Error('--receipt requires a path');
+  const handoffFlags: Array<[string, keyof R1HandoffIdentity]> = [
+    ['--g5a-run-id', 'g5a_run_id'], ['--g5b-run-id', 'g5b_run_id'],
+    ['--backup-ready-sha256', 'backup_ready_sha256'], ['--control-manifest-sha256', 'control_manifest_sha256'],
+    ['--topology-receipt-sha256', 'topology_receipt_sha256'], ['--endpoint-identity-sha256', 'endpoint_identity_sha256'],
+    ['--launcher-sha256', 'launcher_sha256'], ['--compiled-runtime-sha256', 'compiled_runtime_sha256'],
+    ['--g5b1-go-sha256', 'g5b1_go_sha256'], ['--handoff-nonce', 'handoff_nonce'],
+  ];
+  const suppliedHandoffValues = handoffFlags.flatMap(([flag, key]) => values.has(flag) ? [[key, values.get(flag)!] as const] : []);
+  if (suppliedHandoffValues.length !== 0 && suppliedHandoffValues.length !== handoffFlags.length) throw new Error('handoff identity flags must be supplied as one complete set');
+  let handoff: R1HandoffIdentity | undefined;
+  if (suppliedHandoffValues.length === handoffFlags.length) {
+    handoff = Object.fromEntries(suppliedHandoffValues) as unknown as R1HandoffIdentity;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(handoff.g5a_run_id) || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(handoff.g5b_run_id)) throw new Error('handoff run IDs are invalid');
+    for (const [key, value] of Object.entries(handoff)) if ((key.endsWith('_sha256') || key === 'handoff_nonce') && !/^[0-9a-f]{64}$/.test(value)) throw new Error(`handoff ${key} must be a full SHA-256`);
+  }
   return {
-    mode: selected[0],
+    mode,
     target: targetRaw,
-    yes: argv.includes('--yes'),
-    noEmbed: argv.includes('--no-embed'),
+    yes: booleans.has('--yes'),
+    noEmbed: booleans.has('--no-embed'),
     batchSize,
     paceMs,
     stopAfterBatches,
-    ...(receipt ? { receipt } : {}),
-    ...(argValue(argv, '--expected-candidate-sha') ? { expectedCandidateSha: argValue(argv, '--expected-candidate-sha') } : {}),
-    ...(argValue(argv, '--implementation-checksum') ? { implementationChecksum: argValue(argv, '--implementation-checksum') } : {}),
+    ...(values.get('--receipt') ? { receipt: values.get('--receipt') } : {}),
+    ...(values.get('--expected-candidate-sha') ? { expectedCandidateSha: values.get('--expected-candidate-sha') } : {}),
+    ...(values.get('--implementation-checksum') ? { implementationChecksum: values.get('--implementation-checksum') } : {}),
+    ...(handoff ? { handoff } : {}),
   };
 }
 
@@ -144,9 +205,10 @@ export interface R1MigrationIdentity {
   target_dimensions: number;
   candidate_sha: string;
   implementation_checksum: string;
+  handoff?: R1HandoffIdentity;
 }
 
-export function buildR1MigrationIdentity(candidateSha: string, implementationChecksum: string): R1MigrationIdentity {
+export function buildR1MigrationIdentity(candidateSha: string, implementationChecksum: string, handoff?: R1HandoffIdentity): R1MigrationIdentity {
   if (!/^[0-9a-f]{40}$/.test(candidateSha)) throw new Error('A full 40-character candidate SHA is required');
   if (!/^[0-9a-f]{64}$/.test(implementationChecksum)) throw new Error('A full SHA-256 implementation checksum is required');
   return {
@@ -156,6 +218,7 @@ export function buildR1MigrationIdentity(candidateSha: string, implementationChe
     target_dimensions: R1_TARGET_DIMENSIONS,
     candidate_sha: candidateSha,
     implementation_checksum: implementationChecksum,
+    ...(handoff ? { handoff } : {}),
   };
 }
 
@@ -174,9 +237,9 @@ CREATE TRIGGER avers_r1_writer_fence_${table}
 BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON ${table}
 FOR EACH STATEMENT EXECUTE FUNCTION avers_r1_writer_fence_guard();`).join('\n');
   return `CREATE OR REPLACE FUNCTION avers_r1_writer_fence_guard() RETURNS trigger
-LANGUAGE plpgsql AS $fn$
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog AS $fn$
 BEGIN
-  IF current_setting('avers.r1_migration_runner', true) IS DISTINCT FROM 'on' THEN
+  IF current_user IS DISTINCT FROM pg_catalog.pg_get_userbyid((SELECT relowner FROM pg_catalog.pg_class WHERE oid=TG_RELID)) THEN
     RAISE EXCEPTION 'AVERS_R1_WRITER_FENCE_ACTIVE' USING ERRCODE = '55000';
   END IF;
   RETURN NULL;
@@ -191,6 +254,14 @@ export function buildWriterFenceDropSql(tables: string[]): string {
   return `${unique.map((table) => `DROP TRIGGER IF EXISTS avers_r1_writer_fence_${table} ON ${table};`).join('\n')}\nDROP FUNCTION IF EXISTS avers_r1_writer_fence_guard();`;
 }
 
+export function buildAbortPrepareStatements(tables: readonly string[]): string[] {
+  return [
+    buildWriterFenceDropSql([...tables]),
+    'ALTER TABLE content_chunks DROP COLUMN IF EXISTS embedding_r1_g768',
+    'ALTER TABLE facts DROP COLUMN IF EXISTS embedding_r1_g768',
+  ];
+}
+
 export interface R1WriterFenceRow {
   table: string;
   trigger: string;
@@ -198,8 +269,12 @@ export interface R1WriterFenceRow {
   function_schema: string;
   function_name: string;
   function_definition: string;
+  table_owner: string;
+  function_owner: string;
+  executor: string;
   function_volatility: string;
   function_security_definer: boolean;
+  function_config: string[] | null;
   enabled: string;
   definition: string;
 }
@@ -213,21 +288,26 @@ export function resolveR1WriterFenceTables(marker: unknown): string[] {
   return tables;
 }
 
-export function isExactR1WriterFence(expectedTables: string[], rows: R1WriterFenceRow[]): boolean {
-  const expected = [...new Set(expectedTables)].sort();
-  if (expected.length === 0 || expected.length !== expectedTables.length) return false;
-  if (rows.length !== expected.length) return false;
-  const canonicalFunction = `CREATE OR REPLACE FUNCTION PUBLIC.AVERS_R1_WRITER_FENCE_GUARD()
+export function expectedR1WriterFenceFunctionDefinition(): string {
+  return `CREATE OR REPLACE FUNCTION PUBLIC.AVERS_R1_WRITER_FENCE_GUARD()
 RETURNS TRIGGER
 LANGUAGE PLPGSQL
+SET SEARCH_PATH TO 'pg_catalog'
 AS $FUNCTION$
 BEGIN
-IF CURRENT_SETTING('AVERS.R1_MIGRATION_RUNNER', TRUE) IS DISTINCT FROM 'ON' THEN
+IF CURRENT_USER IS DISTINCT FROM PG_CATALOG.PG_GET_USERBYID((SELECT RELOWNER FROM PG_CATALOG.PG_CLASS WHERE OID=TG_RELID)) THEN
 RAISE EXCEPTION 'AVERS_R1_WRITER_FENCE_ACTIVE' USING ERRCODE = '55000';
 END IF;
 RETURN NULL;
 END;
 $FUNCTION$`;
+}
+
+export function isExactR1WriterFence(expectedTables: string[], rows: R1WriterFenceRow[]): boolean {
+  const expected = [...new Set(expectedTables)].sort();
+  if (expected.length === 0 || expected.length !== expectedTables.length) return false;
+  if (rows.length !== expected.length) return false;
+  const canonicalFunction = expectedR1WriterFenceFunctionDefinition();
   const normalize = (value: string): string => value.toUpperCase().replace(/\s+/g, ' ').trim().replace(/;$/, '');
   const canonicalFunctionDefinition = normalize(canonicalFunction);
   const byTable = new Map(rows.map((row) => [row.table, row]));
@@ -243,12 +323,75 @@ $FUNCTION$`;
       && row.trigger === `avers_r1_writer_fence_${table}`
       && row.function_schema === 'public'
       && row.function_name === 'avers_r1_writer_fence_guard'
+      && row.table_owner === row.executor
+      && row.function_owner === row.executor
+      && row.function_owner.length > 0
       && row.function_volatility === 'v'
       && row.function_security_definer === false
+      && JSON.stringify(row.function_config) === JSON.stringify(['search_path=pg_catalog'])
       && normalize(row.function_definition) === canonicalFunctionDefinition
       && row.enabled === 'O'
       && normalize(row.definition) === canonicalTriggerDefinition;
   });
+}
+
+export function assertR1AbortPrepareAuthority(
+  state: {
+    schema_version?: number;
+    identity?: R1MigrationIdentity;
+    fingerprint?: string;
+    phase?: string;
+    started_at?: string;
+    updated_at?: string;
+    from_model?: string;
+    from_dimensions?: number;
+    prior_reranker_model?: string;
+    prior_reranker_enabled?: boolean;
+    writer_fence_tables?: string[];
+  },
+  status: {
+    writer_fence_active: boolean;
+    content_chunks: { primary_type: string | null; shadow_type?: string | null; backup_type?: string | null };
+    facts: { primary_type: string | null; shadow_type?: string | null; backup_type?: string | null };
+    query_cache: { primary_type: string | null; backup_type?: string | null };
+  },
+  args: Pick<R1MigrationArgs, 'expectedCandidateSha' | 'implementationChecksum' | 'handoff'> & { target?: R1Target },
+): void {
+  if (!args.expectedCandidateSha || !args.implementationChecksum) {
+    throw new Error('abort-prepare requires candidate SHA and implementation checksum');
+  }
+  if (state.schema_version !== 1) throw new Error('abort-prepare requires state schema version 1');
+  for (const timestamp of [state.started_at,state.updated_at]) {
+    if (!timestamp || !Number.isFinite(Date.parse(timestamp)) || new Date(timestamp).toISOString() !== timestamp) throw new Error('abort-prepare state timestamp is invalid');
+  }
+  if (state.from_model !== R1_SOURCE_MODEL || state.from_dimensions !== R1_SOURCE_DIMENSIONS) throw new Error('abort-prepare source identity is invalid');
+  if (typeof state.prior_reranker_model !== 'string' || state.prior_reranker_model.length < 1 || typeof state.prior_reranker_enabled !== 'boolean') throw new Error('abort-prepare reranker envelope is invalid');
+  if (!state.identity || !state.fingerprint) throw new Error('abort-prepare requires exact migration identity');
+  if (state.identity.candidate_sha !== args.expectedCandidateSha) throw new Error('abort-prepare candidate SHA mismatch');
+  if (state.identity.implementation_checksum !== args.implementationChecksum) throw new Error('abort-prepare implementation checksum mismatch');
+  const canonical = buildR1MigrationIdentity(args.expectedCandidateSha, args.implementationChecksum, args.handoff);
+  const expectedFingerprint = identityFingerprint(canonical);
+  if (identityFingerprint(state.identity) !== expectedFingerprint || state.fingerprint !== expectedFingerprint) {
+    throw new Error('abort-prepare canonical migration identity mismatch');
+  }
+  if (state.phase !== 'preparing' && state.phase !== 'prepared') {
+    throw new Error(`abort-prepare requires pre-cutover preparing or prepared state, got ${state.phase ?? 'missing'}`);
+  }
+  const stamped = resolveR1WriterFenceTables(state);
+  if (stamped.length === 0) throw new Error('abort-prepare requires stamped writer-fence inventory');
+
+  if (!status.writer_fence_active) throw new Error('abort-prepare requires exact active writer fence');
+  if (status.content_chunks.primary_type !== 'vector(1280)'
+    || status.facts.primary_type !== 'vector(1280)'
+    || status.query_cache.primary_type !== 'vector(1280)') {
+    throw new Error('abort-prepare source primary planes have changed');
+  }
+  if (status.content_chunks.backup_type || status.facts.backup_type || status.query_cache.backup_type) {
+    throw new Error('abort-prepare refuses post-cutover backup planes');
+  }
+  if (status.content_chunks.shadow_type !== 'vector(768)' || status.facts.shadow_type !== 'vector(768)') {
+    throw new Error('abort-prepare shadow planes do not match prepared state');
+  }
 }
 
 export function vectorLiteral(vector: Float32Array): string {
@@ -268,8 +411,8 @@ export function resolveContentPlaneCounts(
 
 export interface R1CutoverStatus {
   writer_fence_active: boolean;
-  content_chunks: { total: number; shadow_populated: number; primary_type: string | null; shadow_type: string | null };
-  facts: { total_populated: number; shadow_populated: number; primary_type: string | null; shadow_type: string | null };
+  content_chunks: { total: number; shadow_populated: number; primary_type: string | null; shadow_type: string | null; backup_type?: string | null };
+  facts: { total_populated: number; shadow_populated: number; primary_type: string | null; shadow_type: string | null; backup_type?: string | null };
   query_cache: { primary_type: string | null; backup_type?: string | null; rows?: number };
   takes: { total_populated: number; primary_type: string | null };
 }
@@ -279,12 +422,15 @@ export interface R1CompletionReality {
   current_dimensions: number | null;
   reranker_model: string | null;
   content_primary_type: string | null;
+  content_backup_type: string | null;
   content_total: number;
   content_populated: number;
   facts_primary_type: string | null;
+  facts_backup_type: string | null;
   facts_expected: number;
   facts_populated: number;
   query_cache_type: string | null;
+  query_cache_backup_type: string | null;
   query_cache_rows: number;
   takes_populated: number;
   image_type: string | null;
@@ -295,6 +441,8 @@ export interface R1CompletionReality {
   custom_registry_columns: string[];
   scalar_watermark: number;
   vector_roundtrip_ok: boolean;
+  postcutover_indexes_exact: boolean;
+  rollback_indexes_exact: boolean;
 }
 
 export interface R1ZeroZeRuntimeConfig {
@@ -469,8 +617,11 @@ export function assertR1CompletionReality(r: R1CompletionReality): void {
   if (r.current_model !== R1_TARGET_MODEL || r.current_dimensions !== R1_TARGET_DIMENSIONS) throw new Error('completion config identity mismatch');
   if (r.reranker_model !== 'voyage:rerank-2.5') throw new Error('completion reranker identity mismatch');
   if (r.content_primary_type !== 'vector(768)' || r.content_populated !== r.content_total) throw new Error('completion content plane mismatch');
+  if (r.content_backup_type !== 'vector(1280)') throw new Error('completion content rollback plane mismatch');
   if (r.facts_primary_type !== 'vector(768)' || r.facts_populated !== r.facts_expected) throw new Error('completion facts plane mismatch');
+  if (r.facts_backup_type !== 'vector(1280)') throw new Error('completion facts rollback plane mismatch');
   if (r.query_cache_type !== 'vector(768)' || r.query_cache_rows !== 0) throw new Error('completion query cache mismatch');
+  if (r.query_cache_backup_type !== 'vector(1280)') throw new Error('completion query-cache rollback plane mismatch');
   if (r.takes_populated !== 0) throw new Error('completion takes disposition mismatch');
   if (r.image_type !== 'vector(1024)' || r.multimodal_type !== 'vector(1024)') throw new Error('completion image plane drift');
   if (r.false_target_signatures !== 0 || r.null_signatures_with_chunks !== 0) throw new Error('completion page signature mismatch');
@@ -478,6 +629,8 @@ export function assertR1CompletionReality(r: R1CompletionReality): void {
   if (r.custom_registry_columns.length !== 0) throw new Error(`completion embedding registry unresolved: ${r.custom_registry_columns.join(',')}`);
   if (r.scalar_watermark !== 140) throw new Error(`completion scalar watermark drifted to ${r.scalar_watermark}`);
   if (!r.vector_roundtrip_ok) throw new Error('completion vector roundtrip failed');
+  if (!r.postcutover_indexes_exact) throw new Error('completion post-cutover index catalog mismatch');
+  if (!r.rollback_indexes_exact) throw new Error('completion rollback index catalog mismatch');
 }
 
 interface R1FenceDisableMarker {
@@ -494,7 +647,7 @@ interface R1FenceDisableMarker {
 export function assertR1FenceDisableAuthority(
   state: R1FenceDisableMarker,
   completed: R1FenceDisableMarker,
-  args: Pick<R1MigrationArgs, 'expectedCandidateSha' | 'implementationChecksum'>,
+  args: Pick<R1MigrationArgs, 'expectedCandidateSha' | 'implementationChecksum' | 'handoff'>,
 ): void {
   if (!args.expectedCandidateSha || !args.implementationChecksum) {
     throw new Error('--disable-fence requires candidate SHA and implementation checksum');
@@ -502,7 +655,7 @@ export function assertR1FenceDisableAuthority(
   if (!state.identity || !completed.identity) throw new Error('writer-fence lift requires migration identity');
   if (state.identity.candidate_sha !== args.expectedCandidateSha) throw new Error('writer-fence lift candidate SHA mismatch');
   if (state.identity.implementation_checksum !== args.implementationChecksum) throw new Error('writer-fence lift implementation checksum mismatch');
-  const canonicalIdentity = buildR1MigrationIdentity(args.expectedCandidateSha, args.implementationChecksum);
+  const canonicalIdentity = buildR1MigrationIdentity(args.expectedCandidateSha, args.implementationChecksum, args.handoff);
   const expectedFingerprint = identityFingerprint(canonicalIdentity);
   if (identityFingerprint(state.identity) !== expectedFingerprint) throw new Error('writer-fence lift canonical migration identity mismatch');
   if (state.fingerprint !== expectedFingerprint) throw new Error('writer-fence lift state fingerprint mismatch');
@@ -550,21 +703,21 @@ export function assertReadyForCutover(status: R1CutoverStatus): void {
 export function buildCutoverStatements(): string[] {
   const signature = `${R1_TARGET_MODEL}:${R1_TARGET_DIMENSIONS}`;
   return [
-    `ALTER INDEX IF EXISTS idx_chunks_embedding RENAME TO idx_chunks_embedding_ze_r0`,
-    `ALTER INDEX IF EXISTS idx_chunks_embedding_null RENAME TO idx_chunks_embedding_null_ze_r0`,
-    `ALTER INDEX IF EXISTS content_chunks_stale_idx RENAME TO content_chunks_stale_idx_ze_r0`,
+    `ALTER INDEX idx_chunks_embedding RENAME TO idx_chunks_embedding_ze_r0`,
+    `ALTER INDEX idx_chunks_embedding_null RENAME TO idx_chunks_embedding_null_ze_r0`,
+    `ALTER INDEX content_chunks_stale_idx RENAME TO content_chunks_stale_idx_ze_r0`,
     `ALTER TABLE content_chunks RENAME COLUMN embedding TO ${R1_BACKUP_COLUMN}`,
     `ALTER TABLE content_chunks RENAME COLUMN ${R1_SHADOW_COLUMN} TO embedding`,
-    `ALTER INDEX IF EXISTS idx_chunks_${R1_SHADOW_COLUMN} RENAME TO idx_chunks_embedding`,
+    `ALTER INDEX idx_chunks_${R1_SHADOW_COLUMN} RENAME TO idx_chunks_embedding`,
     `CREATE INDEX idx_chunks_embedding_null ON content_chunks(page_id, chunk_index) WHERE embedding IS NULL`,
     `CREATE INDEX content_chunks_stale_idx ON content_chunks(page_id, chunk_index) WHERE embedding IS NULL`,
     `UPDATE content_chunks SET model='${R1_TARGET_MODEL}', embedded_at=now() WHERE embedding IS NOT NULL`,
-    `ALTER INDEX IF EXISTS idx_facts_embedding_hnsw RENAME TO idx_facts_embedding_hnsw_ze_r0`,
+    `ALTER INDEX idx_facts_embedding_hnsw RENAME TO idx_facts_embedding_hnsw_ze_r0`,
     `ALTER TABLE facts RENAME COLUMN embedding TO ${R1_BACKUP_COLUMN}`,
     `ALTER TABLE facts RENAME COLUMN ${R1_SHADOW_COLUMN} TO embedding`,
-    `ALTER INDEX IF EXISTS idx_facts_${R1_SHADOW_COLUMN}_hnsw RENAME TO idx_facts_embedding_hnsw`,
+    `ALTER INDEX idx_facts_${R1_SHADOW_COLUMN}_hnsw RENAME TO idx_facts_embedding_hnsw`,
     `UPDATE facts SET embedded_at=now() WHERE embedding IS NOT NULL`,
-    `ALTER INDEX IF EXISTS idx_query_cache_embedding_hnsw RENAME TO idx_query_cache_embedding_hnsw_ze_r0`,
+    `ALTER INDEX idx_query_cache_embedding_hnsw RENAME TO idx_query_cache_embedding_hnsw_ze_r0`,
     `ALTER TABLE query_cache RENAME COLUMN embedding TO ${R1_BACKUP_COLUMN}`,
     `ALTER TABLE query_cache ADD COLUMN embedding vector(${R1_TARGET_DIMENSIONS})`,
     `CREATE INDEX idx_query_cache_embedding_hnsw ON query_cache USING hnsw (embedding vector_cosine_ops) WHERE embedding IS NOT NULL`,
@@ -587,24 +740,24 @@ export function buildRollbackStatements(
   if (!/^[A-Za-z0-9._/:-]+$/.test(priorRerankerModel)) throw new Error('Unsafe rollback reranker model');
   const signature = `${fromModel}:${fromDimensions}`;
   return [
-    `ALTER INDEX IF EXISTS idx_chunks_embedding RENAME TO idx_chunks_embedding_g768_r1`,
-    `ALTER INDEX IF EXISTS idx_chunks_embedding_null RENAME TO idx_chunks_embedding_null_g768_r1`,
-    `ALTER INDEX IF EXISTS content_chunks_stale_idx RENAME TO content_chunks_stale_idx_g768_r1`,
+    `ALTER INDEX idx_chunks_embedding RENAME TO idx_chunks_embedding_g768_r1`,
+    `ALTER INDEX idx_chunks_embedding_null RENAME TO idx_chunks_embedding_null_g768_r1`,
+    `ALTER INDEX content_chunks_stale_idx RENAME TO content_chunks_stale_idx_g768_r1`,
     `ALTER TABLE content_chunks RENAME COLUMN embedding TO embedding_g768_r1`,
     `ALTER TABLE content_chunks RENAME COLUMN ${R1_BACKUP_COLUMN} TO embedding`,
-    `ALTER INDEX IF EXISTS idx_chunks_embedding_ze_r0 RENAME TO idx_chunks_embedding`,
-    `ALTER INDEX IF EXISTS idx_chunks_embedding_null_ze_r0 RENAME TO idx_chunks_embedding_null`,
-    `ALTER INDEX IF EXISTS content_chunks_stale_idx_ze_r0 RENAME TO content_chunks_stale_idx`,
+    `ALTER INDEX idx_chunks_embedding_ze_r0 RENAME TO idx_chunks_embedding`,
+    `ALTER INDEX idx_chunks_embedding_null_ze_r0 RENAME TO idx_chunks_embedding_null`,
+    `ALTER INDEX content_chunks_stale_idx_ze_r0 RENAME TO content_chunks_stale_idx`,
     `UPDATE content_chunks SET model='${fromModel}', embedded_at=now() WHERE embedding IS NOT NULL`,
-    `ALTER INDEX IF EXISTS idx_facts_embedding_hnsw RENAME TO idx_facts_embedding_hnsw_g768_r1`,
+    `ALTER INDEX idx_facts_embedding_hnsw RENAME TO idx_facts_embedding_hnsw_g768_r1`,
     `ALTER TABLE facts RENAME COLUMN embedding TO embedding_g768_r1`,
     `ALTER TABLE facts RENAME COLUMN ${R1_BACKUP_COLUMN} TO embedding`,
-    `ALTER INDEX IF EXISTS idx_facts_embedding_hnsw_ze_r0 RENAME TO idx_facts_embedding_hnsw`,
+    `ALTER INDEX idx_facts_embedding_hnsw_ze_r0 RENAME TO idx_facts_embedding_hnsw`,
     `UPDATE facts SET embedded_at=now() WHERE embedding IS NOT NULL`,
-    `ALTER INDEX IF EXISTS idx_query_cache_embedding_hnsw RENAME TO idx_query_cache_embedding_hnsw_g768_r1`,
+    `ALTER INDEX idx_query_cache_embedding_hnsw RENAME TO idx_query_cache_embedding_hnsw_g768_r1`,
     `ALTER TABLE query_cache RENAME COLUMN embedding TO embedding_g768_r1`,
     `ALTER TABLE query_cache RENAME COLUMN ${R1_BACKUP_COLUMN} TO embedding`,
-    `ALTER INDEX IF EXISTS idx_query_cache_embedding_hnsw_ze_r0 RENAME TO idx_query_cache_embedding_hnsw`,
+    `ALTER INDEX idx_query_cache_embedding_hnsw_ze_r0 RENAME TO idx_query_cache_embedding_hnsw`,
     `DELETE FROM query_cache`,
     `INSERT INTO config(key,value) VALUES ('embedding_model','${fromModel}') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`,
     `INSERT INTO config(key,value) VALUES ('embedding_dimensions','${fromDimensions}') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`,

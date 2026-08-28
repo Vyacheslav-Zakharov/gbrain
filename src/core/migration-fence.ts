@@ -24,6 +24,13 @@ export function assertSchemaMutationAllowed(
   env: NodeJS.ProcessEnv = process.env,
   fileExists: (path: string) => boolean = existsSync,
 ): void {
+  const startupMode = env.GBRAIN_MIGRATION_MODE;
+  if (startupMode === 'runtime') {
+    throw new Error('MIGRATION_RUNTIME_MODE_ACTIVE; schema mutation is disabled for this process');
+  }
+  if (startupMode !== undefined && startupMode !== '' && startupMode !== 'automatic') {
+    throw new Error(`Invalid GBRAIN_MIGRATION_MODE=${JSON.stringify(startupMode)} at schema mutation boundary`);
+  }
   const status = resolveMigrationFence(env, fileExists);
   if (!status.active) return;
   if (env.GBRAIN_MIGRATION_FENCE_BYPASS === MIGRATION_FENCE_BYPASS_TOKEN) return;

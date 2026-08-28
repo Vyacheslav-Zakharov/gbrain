@@ -2170,11 +2170,14 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
   // The retry+poll loop quiets the warning when the race resolves
   // itself (the common case); the revised wording fires only when
   // migrations are genuinely stuck.
+  const { tryRunPendingMigrations, resolveMigrationStartupMode } = await import('./core/migrate.ts');
+  const migrationStartupMode = resolveMigrationStartupMode();
   try {
-    const { tryRunPendingMigrations } = await import('./core/migrate.ts');
-    const result = await tryRunPendingMigrations(engine);
+    const result = await tryRunPendingMigrations(engine, { mode: migrationStartupMode });
     if (result.status === 'fenced') {
       throw new Error(`MIGRATION_FENCE_ACTIVE (${result.source}): refusing non-probe startup while automatic schema mutation is fenced.`);
+    } else if (result.status === 'runtime_blocked') {
+      throw new Error('MIGRATION_RUNTIME_PENDING: runtime mode is read-only and refuses startup while schema migrations are pending. Run the exact governed migrator first.');
     } else if (result.status === 'persistent') {
       console.warn(
         '  Schema migrations are pending. Another process attempted to apply them ' +
@@ -2194,7 +2197,7 @@ async function connectEngine(opts?: { probeOnly?: boolean }): Promise<BrainEngin
   } catch (err) {
     // The R1 deployment fence is fail-closed for every non-probe startup.
     const message = err instanceof Error ? err.message : String(err);
-    if (message.startsWith('MIGRATION_FENCE_ACTIVE')) throw err;
+    if (message.startsWith('MIGRATION_FENCE_ACTIVE') || message.startsWith('MIGRATION_RUNTIME_PENDING')) throw err;
     // Last-resort defense in case the helper itself throws unexpectedly.
     console.warn(`  Schema probe failed (unexpected): ${message}`);
     console.warn('  Re-run: `gbrain apply-migrations --yes`');

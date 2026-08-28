@@ -6,12 +6,14 @@ import { resolve } from 'node:path';
 import {
   R1_LINEAGE,
   R1_OPERATION_ID,
+  R1_ABORTED_KEY,
   R1_TARGET_DIMENSIONS,
   R1_TARGET_MODEL,
   assertR1DatabaseTarget,
   buildR1MigrationIdentity,
   buildCutoverStatements,
   buildRollbackStatements,
+  buildAbortPrepareStatements,
   buildWriterFenceSql,
   parseR1MigrationArgs,
   parseR1EmbeddingRegistry,
@@ -25,7 +27,9 @@ import {
   resolveR1WriterFenceTables,
   resolveContentPlaneCounts,
   assertR1FenceDisableAuthority,
+  assertR1AbortPrepareAuthority,
   identityFingerprint,
+  expectedR1WriterFenceFunctionDefinition,
   writeR1BytesFully,
 } from '../src/core/r1-governed-migration.ts';
 
@@ -35,10 +39,64 @@ describe('R1 governed embedding migration contract', () => {
     expect(parseR1MigrationArgs(['--prepare', '--yes', '--batch-size', '32', '--pace-ms', '25', '--stop-after-batches', '2'])).toMatchObject({
       mode: 'prepare', yes: true, batchSize: 32, paceMs: 25, stopAfterBatches: 2,
     });
-    expect(() => parseR1MigrationArgs(['--prepare', '--cutover'])).toThrow('exactly one mode');
+    expect(() => parseR1MigrationArgs(['--prepare', '--cutover'])).toThrow('non-repeated');
     expect(() => parseR1MigrationArgs(['--prepare', '--batch-size', '0'])).toThrow('--batch-size');
     expect(() => parseR1MigrationArgs(['--prepare', '--pace-ms', '-1'])).toThrow('--pace-ms');
     expect(() => parseR1MigrationArgs(['--prepare', '--target', 'production', '--stop-after-batches', '1'])).toThrow('clone-only');
+    expect(() => parseR1MigrationArgs(['--prepare', '--prepare'])).toThrow('non-repeated');
+    expect(() => parseR1MigrationArgs(['--prepare', '--yes', '--yes'])).toThrow('Duplicate flag');
+    expect(() => parseR1MigrationArgs(['--prepare', '--target', 'clone', '--target', 'production'])).toThrow('Duplicate option');
+    expect(() => parseR1MigrationArgs(['--prepare', '--unknown'])).toThrow('Unknown migration option');
+    expect(() => parseR1MigrationArgs(['--prepare', '--receipt', '--yes'])).toThrow('requires one value');
+    expect(parseR1MigrationArgs(['--abort-prepare', '--yes'])).toMatchObject({ mode: 'abort-prepare', yes: true });
+    expect(() => parseR1MigrationArgs(['--abort-prepare', '--rollback'])).toThrow('non-repeated');
+  });
+
+  test('abort-prepare is limited to exact pre-cutover identity and emits destructive shadow cleanup', () => {
+    const identity = buildR1MigrationIdentity('a'.repeat(40), 'b'.repeat(64));
+    const state = {
+      schema_version: 1,
+      identity,
+      fingerprint: identityFingerprint(identity),
+      phase: 'preparing',
+      started_at: '2026-08-28T00:00:00.000Z',
+      updated_at: '2026-08-28T00:01:00.000Z',
+      from_model: 'zeroentropyai:zembed-1',
+      from_dimensions: 1280,
+      prior_reranker_model: 'zeroentropyai:zerank-2',
+      prior_reranker_enabled: false,
+      writer_fence_tables: [...R1_WRITER_FENCE_TABLES],
+    };
+    const status = {
+      writer_fence_active: true,
+      content_chunks: { primary_type: 'vector(1280)', shadow_type: 'vector(768)', backup_type: null },
+      facts: { primary_type: 'vector(1280)', shadow_type: 'vector(768)', backup_type: null },
+      query_cache: { primary_type: 'vector(1280)', backup_type: null },
+    };
+    expect(() => assertR1AbortPrepareAuthority(state, status, {
+      expectedCandidateSha: identity.candidate_sha,
+      implementationChecksum: identity.implementation_checksum,
+    })).not.toThrow();
+    expect(() => assertR1AbortPrepareAuthority({ ...state, phase: 'prepared' }, status, {
+      expectedCandidateSha: identity.candidate_sha,
+      implementationChecksum: identity.implementation_checksum,
+    })).not.toThrow();
+    expect(() => assertR1AbortPrepareAuthority({ ...state, phase: 'cutover' }, status, {
+      expectedCandidateSha: identity.candidate_sha,
+      implementationChecksum: identity.implementation_checksum,
+    })).toThrow('pre-cutover');
+    expect(() => assertR1AbortPrepareAuthority(state, { ...status, writer_fence_active: false }, {
+      expectedCandidateSha: identity.candidate_sha,
+      implementationChecksum: identity.implementation_checksum,
+    })).toThrow('writer fence');
+    expect(() => assertR1AbortPrepareAuthority(state, status, {
+      expectedCandidateSha: 'c'.repeat(40), implementationChecksum: identity.implementation_checksum,
+    })).toThrow('candidate SHA');
+    const cleanup = buildAbortPrepareStatements(R1_WRITER_FENCE_TABLES).join('\n');
+    expect(cleanup).toContain('DROP TRIGGER IF EXISTS avers_r1_writer_fence_pages');
+    expect(cleanup).toContain('DROP FUNCTION IF EXISTS avers_r1_writer_fence_guard');
+    expect(cleanup).toContain('DROP COLUMN IF EXISTS embedding_r1_g768');
+    expect(R1_ABORTED_KEY).toBe('avers.r1.embedding_migration.aborted');
   });
 
   test('requires explicit clone identity or separately guarded production acknowledgement', () => {
@@ -48,7 +106,7 @@ describe('R1 governed embedding migration contract', () => {
     expect(() => assertR1DatabaseTarget('postgresql://u:p@db.internal:5432/gbrain', 'production', undefined, 'G5-EXPLICIT-GO')).not.toThrow();
   });
 
-  test('binds marker identity to lineage, operation, target, candidate, and implementation checksum', () => {
+  test('binds marker identity to lineage, operation, target, candidate, implementation, and handoff', () => {
     const identity = buildR1MigrationIdentity('a'.repeat(40), 'b'.repeat(64));
     expect(identity).toEqual({
       lineage: R1_LINEAGE,
@@ -59,11 +117,31 @@ describe('R1 governed embedding migration contract', () => {
       implementation_checksum: 'b'.repeat(64),
     });
     expect(() => buildR1MigrationIdentity('short', 'b'.repeat(64))).toThrow('candidate SHA');
+    const handoff = {
+      g5a_run_id: 'g5a-run', g5b_run_id: 'g5b-run',
+      backup_ready_sha256: '1'.repeat(64), control_manifest_sha256: '2'.repeat(64),
+      topology_receipt_sha256: '3'.repeat(64), endpoint_identity_sha256: '4'.repeat(64),
+      launcher_sha256: '5'.repeat(64), compiled_runtime_sha256: '6'.repeat(64),
+      g5b1_go_sha256: '7'.repeat(64), handoff_nonce: '8'.repeat(64),
+    };
+    expect(buildR1MigrationIdentity('a'.repeat(40), 'b'.repeat(64), handoff).handoff).toEqual(handoff);
+    const parsed = parseR1MigrationArgs([
+      '--prepare', '--g5a-run-id', 'g5a-run', '--g5b-run-id', 'g5b-run',
+      '--backup-ready-sha256', '1'.repeat(64), '--control-manifest-sha256', '2'.repeat(64),
+      '--topology-receipt-sha256', '3'.repeat(64), '--endpoint-identity-sha256', '4'.repeat(64),
+      '--launcher-sha256', '5'.repeat(64), '--compiled-runtime-sha256', '6'.repeat(64),
+      '--g5b1-go-sha256', '7'.repeat(64), '--handoff-nonce', '8'.repeat(64),
+    ]);
+    expect(parsed.handoff).toEqual(handoff);
+    expect(() => parseR1MigrationArgs(['--prepare', '--g5a-run-id', 'g5a-run'])).toThrow('complete set');
   });
 
-  test('writer fence is fail closed and only the migration session can bypass it', () => {
+  test('writer fence is SECURITY INVOKER and only exact table-owner current_user can bypass it', () => {
     const sql = buildWriterFenceSql(['pages', 'content_chunks', 'facts']);
-    expect(sql).toContain("current_setting('avers.r1_migration_runner', true)");
+    expect(sql).toContain('SECURITY INVOKER');
+    expect(sql).toContain('current_user IS DISTINCT FROM pg_catalog.pg_get_userbyid');
+    expect(sql).not.toContain("current_setting('avers.r1_migration_runner', true)");
+    expect(sql).not.toContain('pg_locks');
     expect(sql).toContain("RAISE EXCEPTION 'AVERS_R1_WRITER_FENCE_ACTIVE'");
     expect(sql).toContain('CREATE TRIGGER avers_r1_writer_fence_pages');
     expect(sql).toContain('CREATE TRIGGER avers_r1_writer_fence_content_chunks');
@@ -123,13 +201,13 @@ describe('R1 governed embedding migration contract', () => {
   test('completion is derived from database reality, signatures, registry, watermark, and smoke', () => {
     const good = {
       current_model: 'google:gemini-embedding-001', current_dimensions: 768, reranker_model: 'voyage:rerank-2.5',
-      content_primary_type: 'vector(768)', content_total: 4746, content_populated: 4746,
-      facts_primary_type: 'vector(768)', facts_expected: 68, facts_populated: 68,
-      query_cache_type: 'vector(768)', query_cache_rows: 0,
+      content_primary_type: 'vector(768)', content_backup_type: 'vector(1280)', content_total: 4746, content_populated: 4746,
+      facts_primary_type: 'vector(768)', facts_backup_type: 'vector(1280)', facts_expected: 68, facts_populated: 68,
+      query_cache_type: 'vector(768)', query_cache_backup_type: 'vector(1280)', query_cache_rows: 0,
       takes_populated: 0, image_type: 'vector(1024)', multimodal_type: 'vector(1024)',
       false_target_signatures: 0, null_signatures_with_chunks: 0,
       active_embed_jobs: 0, custom_registry_columns: [], scalar_watermark: 140,
-      vector_roundtrip_ok: true,
+      vector_roundtrip_ok: true, postcutover_indexes_exact: true, rollback_indexes_exact: true,
     };
     expect(() => assertR1CompletionReality(good)).not.toThrow();
     expect(() => assertR1CompletionReality({ ...good, null_signatures_with_chunks: 1 })).toThrow('signature');
@@ -143,12 +221,12 @@ describe('R1 governed embedding migration contract', () => {
     const fingerprint = identityFingerprint(identity);
     const completion = {
       current_model: R1_TARGET_MODEL, current_dimensions: R1_TARGET_DIMENSIONS, reranker_model: 'voyage:rerank-2.5',
-      content_primary_type: 'vector(768)', content_total: 10, content_populated: 10,
-      facts_primary_type: 'vector(768)', facts_expected: 3, facts_populated: 3,
-      query_cache_type: 'vector(768)', query_cache_rows: 0, takes_populated: 0,
+      content_primary_type: 'vector(768)', content_backup_type: 'vector(1280)', content_total: 10, content_populated: 10,
+      facts_primary_type: 'vector(768)', facts_backup_type: 'vector(1280)', facts_expected: 3, facts_populated: 3,
+      query_cache_type: 'vector(768)', query_cache_backup_type: 'vector(1280)', query_cache_rows: 0, takes_populated: 0,
       image_type: 'vector(1024)', multimodal_type: 'vector(1024)', false_target_signatures: 0,
       null_signatures_with_chunks: 0, active_embed_jobs: 0, custom_registry_columns: [], scalar_watermark: 140,
-      vector_roundtrip_ok: true,
+      vector_roundtrip_ok: true, postcutover_indexes_exact: true, rollback_indexes_exact: true,
     };
     const state = { identity, fingerprint, phase: 'completed', writer_fence_tables: [...R1_WRITER_FENCE_TABLES] };
     const completed = { ...state, completed_at: '2026-08-27T00:00:00.000Z', file_config_sha256: 'c'.repeat(64), completion };
@@ -246,6 +324,18 @@ describe('R1 governed embedding migration contract', () => {
 
   test('fixed runner pins advisory-lock ownership to every mutation transaction', () => {
     const source = readFileSync(resolve(import.meta.dir, '../src/commands/r1-governed-migrate.ts'), 'utf8');
+    expect(source).toContain("await sql.unsafe('SET ROLE gbrain_migration_owner')");
+    const setRolePos = source.indexOf("await sql.unsafe('SET ROLE gbrain_migration_owner')");
+    const setPathPos = source.indexOf("await sql.unsafe('SET search_path TO pg_catalog, public')");
+    const lockPos = source.indexOf('pg_try_advisory_lock($1) AS ok');
+    expect(setRolePos).toBeLessThan(setPathPos);
+    expect(setPathPos).toBeLessThan(lockPos);
+    expect(source).toContain("current_setting('search_path') AS search_path");
+    expect(source).toContain("if (args.target === 'production' && status.writer_fence_active)");
+    expect(source).toContain('await assertCompleteProductionFenceInventory(sql, state, args.target)');
+    expect(source).toContain("session_user !== R1_MIGRATOR_ROLE");
+    expect(source).toContain('JOIN pg_attribute a ON a.attrelid=d.refobjid AND a.attnum=d.refobjsubid');
+    expect(source).not.toContain("ILIKE ('%'||$2||'%')");
     expect(source).toContain('idle_timeout: 0');
     expect(source).toContain('max_lifetime: null');
     expect(source).toContain('pg_backend_pid()::int AS backend_pid, pg_try_advisory_lock($1) AS ok');
@@ -275,11 +365,11 @@ describe('R1 governed embedding migration contract', () => {
     const validation = cutoverSource.indexOf('validateR1CutoverRuntimePlanes(sql)');
     const transactionValidation = cutoverSource.indexOf('validateR1CutoverRuntimePlanes(lockedSql');
     const schemaCutover = cutoverSource.indexOf('buildCutoverStatements()');
-    const completedMarker = cutoverSource.indexOf("state.phase = 'completed'");
+    const completedMarker = cutoverSource.indexOf("lockedState.phase = 'completed'");
     expect(source).toContain('loadConfigFileSnapshotStrict()');
     expect(source).not.toContain('loadConfigFileOnly()');
     expect(source).toContain("setConfig(lockedSql, 'embedding_columns', '{}')");
-    expect(source.indexOf('validateR1CutoverRuntimePlanes(sql);')).toBeLessThan(source.indexOf('ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS'));
+    expect(source.indexOf('validateR1CutoverRuntimePlanes(sql);')).toBeLessThan(source.indexOf('ALTER TABLE content_chunks ADD COLUMN ${R1_SHADOW_COLUMN}'));
     expect(source).toContain('LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE');
     expect(cutoverSource.match(/LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE/g)).toHaveLength(2);
     expect(validation).toBeGreaterThan(0);
@@ -290,7 +380,7 @@ describe('R1 governed embedding migration contract', () => {
     expect(cutoverSource).toContain('file_config_sha256: fileSha256');
     expect(source).toContain("db_embedding_model: await getConfig(sql, 'embedding_model')");
     expect(source).toContain("db_reranker_model: await getConfig(sql, 'search.reranker.model')");
-    expect(source).toContain('await assertSourceDbIdentity(lockedSql, lockedStatus, state.from_model, state.from_dimensions)');
+    expect(source).toContain('await assertSourceDbIdentity(lockedSql, lockedStatus, lockedState.from_model, lockedState.from_dimensions)');
     expect(source).toContain("state.phase !== 'completed' && state.phase !== 'cutover'");
     expect(source).toContain('status.query_cache.primary_type');
     expect(source).toContain('await assertRollbackReality(lockedSql, state)');
@@ -324,11 +414,15 @@ describe('R1 governed embedding migration contract', () => {
   test('writer fence is active only when every expected trigger is present and hardened', () => {
     const row = (table: string) => ({
       table, trigger: `avers_r1_writer_fence_${table}`, schema: 'public', function_schema: 'public', function_name: 'avers_r1_writer_fence_guard', enabled: 'O',
+      table_owner: 'migration_owner', function_owner: 'migration_owner', executor: 'migration_owner',
       function_volatility: 'v', function_security_definer: false,
-      function_definition: `CREATE OR REPLACE FUNCTION public.avers_r1_writer_fence_guard() RETURNS trigger LANGUAGE plpgsql AS $function$ BEGIN IF current_setting('avers.r1_migration_runner', true) IS DISTINCT FROM 'on' THEN RAISE EXCEPTION 'AVERS_R1_WRITER_FENCE_ACTIVE' USING ERRCODE = '55000'; END IF; RETURN NULL; END; $function$`,
+      function_config: ['search_path=pg_catalog'],
+      function_definition: expectedR1WriterFenceFunctionDefinition(),
       definition: `CREATE TRIGGER avers_r1_writer_fence_${table} BEFORE INSERT OR DELETE OR UPDATE OR TRUNCATE ON public.${table} FOR EACH STATEMENT EXECUTE FUNCTION avers_r1_writer_fence_guard()`,
     });
     expect(isExactR1WriterFence(['pages', 'facts'], [row('pages'), row('facts')])).toBe(true);
+    expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), executor: 'gbrain_runtime' }])).toBe(false);
+    expect(isExactR1WriterFence(['pages'], [{ ...row('pages'), table_owner: 'other_owner' }])).toBe(false);
     expect(isExactR1WriterFence([], [])).toBe(false);
     expect(isExactR1WriterFence(['pages', 'pages'], [row('pages')])).toBe(false);
     expect(isExactR1WriterFence(['pages', 'facts'], [row('pages')])).toBe(false);
