@@ -77,7 +77,10 @@ async function initBaseline(): Promise<void> {
     for (const role of ['gbrain_runtime', 'gbrain_migrator', 'gbrain_migration_owner', 'gbrain']) {
       await admin.unsafe(`DROP ROLE IF EXISTS ${sqlIdent(role)}`);
     }
-    await admin.unsafe('CREATE ROLE gbrain LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS CONNECTION LIMIT -1 PASSWORD NULL');
+    // Production is already sealed NOSUPERUSER, but its historical event trigger can
+    // only be created by a superuser. Reproduce that catalog history in the disposable
+    // fixture, then seal the synthetic legacy role before census, backup or S2.
+    await admin.unsafe('CREATE ROLE gbrain LOGIN INHERIT SUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS CONNECTION LIMIT -1 PASSWORD NULL');
     await setSyntheticPassword(admin, 'gbrain', LEGACY_PASSWORD);
     await admin.unsafe('CREATE DATABASE gbrain OWNER gbrain');
   } finally {
@@ -104,6 +107,13 @@ async function initBaseline(): Promise<void> {
   await engine.initSchema();
   await engine.disconnect();
   await db.disconnect();
+
+  const sealAdmin = connectSql(gbrainUrl('postgres', 'postgres'));
+  try {
+    await sealAdmin.unsafe('ALTER ROLE gbrain NOSUPERUSER');
+    const sealed = await sealAdmin<{ sealed: boolean }[]>`SELECT NOT rolsuper AND rolcanlogin AND rolbypassrls sealed FROM pg_roles WHERE rolname='gbrain'`;
+    if (sealed[0]?.sealed !== true) throw new Error('synthetic legacy role seal failed');
+  } finally { await sealAdmin.end(); }
 
   const census = await baselineCensus();
   mkdirSync(RECEIPT_DIR, { recursive: true });
