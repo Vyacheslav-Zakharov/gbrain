@@ -14,10 +14,13 @@ const CONTROL = resolve(ROOT, 'ops/g5-acl-control');
 const RECEIPT_DIR = resolve(ROOT, 'g5-acl-hosted-receipt');
 const APP_CANDIDATE_SHA = '718c04a56dd997147b49a5c9c8161b9265a5ef71';
 const EXPECTED_BINDING = process.env.ACL_BINDING_SHA256;
-const ADMIN_URL = process.env.ADMIN_URL ?? (() => {
-  const url = new URL('postgresql://127.0.0.1:5432/postgres');
-  url.username = 'postgres';
-  url.password = ['post', 'gres'].join('');
+const ADMIN_URL = (() => {
+  const url = new URL(process.env.ADMIN_URL ?? 'postgresql://127.0.0.1:5432/postgres');
+  url.pathname = '/postgres';
+  if (!process.env.ADMIN_URL) {
+    url.username = 'postgres';
+    url.password = ['post', 'gres'].join('');
+  }
   return url.toString();
 })();
 const LEGACY_PASSWORD = 'g5-hosted-legacy-synthetic';
