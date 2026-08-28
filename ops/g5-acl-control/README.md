@@ -2,9 +2,9 @@
 
 This directory freezes the independently reviewed 44-entry Stage 2 ACL control package.
 
-- Control manifest SHA-256: `179ad2317535329880c434c3fd1bcf71792215f89e6a45dc6dfeb99c042338b8`
+- Control manifest SHA-256: `cd9d6ebe4599aa1a01346625224fb0d8de5102fc8df9beae3914417e6a1a4a75`
 - Application candidate: `718c04a56dd997147b49a5c9c8161b9265a5ef71`
-- Assembled guarded S2 SHA-256: `125eae2dfcb4f87c0da356425e2894361730dd3af51cc6c9dda283202bd051bb`
+- Assembled guarded S2 SHA-256: `a4b6d0ae0c99cf7c5d6437bcf3452e1146386cd46204170bbb958e582c5b7d19`
 - PostgreSQL service: GitHub-hosted disposable loopback container only, pinned `pgvector 0.6.0 / PostgreSQL 16` image digest.
 
 The blocking `g5-acl-hosted-postgres` job in `.github/workflows/test.yml`:
