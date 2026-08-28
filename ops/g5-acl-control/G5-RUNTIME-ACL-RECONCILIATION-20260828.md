@@ -144,9 +144,9 @@ Generated evidence artifacts:
 - `G5-RUNTIME-ACL-RLS-COMMAND-FRAGMENT-NOEXEC.sql.txt` — 82 exact table grants, 237 command policies, 46 sequence grant statements, explicit baseline revokes; SHA-256 `642c9c6f8d07a4f90924a247cbb14fe098f5c1b3f92c0d819138dab655a8767c`.
 - `G5-RUNTIME-ACL-RLS-COMMAND-INVERSE-NOEXEC.sql.txt` — diagnostic semantic inverse only, not authorized rollback; SHA-256 `c3c461bba0f4584840656d22ced47eaed895570a06482d576264440a6bee7b70`.
 - `G5-RUNTIME-ROUTINE-TYPE-ACL-FRAGMENT-NOEXEC.sql.txt` / inverse — exact `postgres` superuser forward; revoke PUBLIC EXECUTE on 113 routines, grant four provisional exact runtime signatures and two extension types, set function/type default ACLs for both object creators; diagnostic inverse only; SHA-256 `f7060054725bf7941a00e83eda0ccbefb0d7aaaa02691770ac4bc1491f7c1bca` / `cabf1da1ac5af4c2f97189507a3188fc455014b74e8b350dffe6716238f0d1d0`.
-- `G5-RUNTIME-ACL-EXACT-POSTCONDITIONS-NOEXEC.sql.txt` — exact catalog/owner/ACL/grantor/grantee/grant-option/default/column/policy/role/index/extension-member/full-trigger closure; SHA-256 `0ca933e390917290bf3cc8246716ab1a6214bbf04601d5c50b714055de4ac047`.
+- `G5-RUNTIME-ACL-EXACT-POSTCONDITIONS-NOEXEC.sql.txt` — exact catalog/owner/ACL/grantor/grantee/grant-option/default/column/policy/role/index/extension-member/full-trigger closure; SHA-256 `8ea7680fe092ffd015c2acc9267e4435b30d0592e7ab2d65ddafd989d3d8c923`.
 - `G5-RUNTIME-ACL-EXACT-INVERSE-POSTCONDITIONS-NOEXEC.sql.txt` — exact verifier after full database plus cluster-role/auth restoration with a new controlled recovery credential; SHA-256 `7cfa65a457afa7132eabc58832d9cdb4daee96c505ad75297bd13d7a5dc49e33`.
-- `G5-ACL-S2-ASSEMBLED-NOEXEC.sql.txt` — component-manifest-verified deterministic one-transaction assembly of the four forward fragments; SHA-256 `05a70a180760ea434caadc0a8777eb3781be5e590cfaa85d933e027f9b3cefe7`.
+- `G5-ACL-S2-ASSEMBLED-NOEXEC.sql.txt` — component-manifest-verified deterministic one-transaction assembly of the four forward fragments; SHA-256 `49964aaa2a87edf8bd478b4a1c116f53287c566dce28cf5b29c9724355d37679`.
 
 Every generated SQL evidence file begins with `\set ON_ERROR_STOP on` and a deliberate exception before candidate SQL, preventing false-success execution under `psql`. They may not be stripped of the guard without a new hash, review and authorization cycle.
 

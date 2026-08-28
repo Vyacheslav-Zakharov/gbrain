@@ -192,7 +192,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      ACL_BINDING_SHA256: 2f27d66f9b376ebaf76584524faa285f4e57381a5734f72bc6f3ddf63fe54e8f
+      ACL_BINDING_SHA256: 3514dc9fdc1fdfeb320289998b4ff7c3a020ba77c93e2de42da8974544004c20
     steps:
       - name: Initialize pre-checkout failure receipt
         run: |
