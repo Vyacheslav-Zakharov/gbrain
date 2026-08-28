@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -418,26 +418,43 @@ describe('R1 writer-fence lift on PostgreSQL', () => {
     const roleNames = ['gbrain_runtime', 'gbrain_migrator', 'gbrain_migration_owner'];
     const existing = await sql.unsafe('SELECT rolname FROM pg_roles WHERE rolname=ANY($1::text[]) ORDER BY rolname', [roleNames]) as Array<{ rolname: string }>;
     expect(existing).toEqual([]);
+    const migratorPassword = randomBytes(32).toString('hex');
+    const runtimePassword = randomBytes(32).toString('hex');
+    let migratorSql: Sql | null = null;
+    let runtimeSql: Sql | null = null;
+    const createdRoles: string[] = [];
     try {
       await sql.unsafe('CREATE ROLE gbrain_migration_owner NOLOGIN NOINHERIT NOBYPASSRLS');
-      await sql.unsafe('CREATE ROLE gbrain_migrator NOLOGIN NOINHERIT NOBYPASSRLS');
-      await sql.unsafe('CREATE ROLE gbrain_runtime NOLOGIN NOINHERIT NOBYPASSRLS');
+      createdRoles.push('gbrain_migration_owner');
+      await sql.unsafe(`CREATE ROLE gbrain_migrator LOGIN NOINHERIT NOBYPASSRLS PASSWORD '${migratorPassword}'`);
+      createdRoles.push('gbrain_migrator');
+      await sql.unsafe(`CREATE ROLE gbrain_runtime LOGIN NOINHERIT NOBYPASSRLS PASSWORD '${runtimePassword}'`);
+      createdRoles.push('gbrain_runtime');
       await sql.unsafe('GRANT gbrain_migration_owner TO gbrain_migrator WITH INHERIT FALSE, SET TRUE');
 
-      await sql.unsafe('SET SESSION AUTHORIZATION gbrain_migrator');
-      await assumeProductionMigrationOwner(sql);
-      const migratorIdentity = await sql.unsafe("SELECT session_user,current_user,current_setting('search_path') AS search_path") as Array<{ session_user: string; current_user: string; search_path: string }>;
+      const migratorUrl = new URL(DATABASE_URL);
+      migratorUrl.username = 'gbrain_migrator';
+      migratorUrl.password = migratorPassword;
+      migratorSql = postgres(migratorUrl.toString(), { max: 1 });
+      await assumeProductionMigrationOwner(migratorSql);
+      const migratorIdentity = await migratorSql.unsafe("SELECT session_user,current_user,current_setting('search_path') AS search_path") as Array<{ session_user: string; current_user: string; search_path: string }>;
       expect(migratorIdentity[0]).toEqual({ session_user: 'gbrain_migrator', current_user: 'gbrain_migration_owner', search_path: 'pg_catalog, public' });
-      await sql.unsafe('RESET SESSION AUTHORIZATION');
 
-      await sql.unsafe('SET SESSION AUTHORIZATION gbrain_runtime');
-      await expect(sql.unsafe('SET ROLE gbrain_migration_owner')).rejects.toThrow();
-      await expect(sql.unsafe('SET ROLE gbrain_migrator')).rejects.toThrow();
-      await sql.unsafe('RESET SESSION AUTHORIZATION');
+      const runtimeUrl = new URL(DATABASE_URL);
+      runtimeUrl.username = 'gbrain_runtime';
+      runtimeUrl.password = runtimePassword;
+      runtimeSql = postgres(runtimeUrl.toString(), { max: 1 });
+      const runtimeIdentity = await runtimeSql.unsafe('SELECT session_user,current_user') as Array<{ session_user: string; current_user: string }>;
+      expect(runtimeIdentity[0]).toEqual({ session_user: 'gbrain_runtime', current_user: 'gbrain_runtime' });
+      await expect(runtimeSql.unsafe('SET ROLE gbrain_migration_owner')).rejects.toThrow();
+      await expect(runtimeSql.unsafe('SET ROLE gbrain_migrator')).rejects.toThrow();
     } finally {
-      await sql.unsafe('RESET SESSION AUTHORIZATION').catch(() => {});
-      for (const role of roleNames) await sql.unsafe(`DROP OWNED BY ${role}`).catch(() => {});
-      for (const role of roleNames) await sql.unsafe(`DROP ROLE IF EXISTS ${role}`).catch(() => {});
+      const clients = [migratorSql, runtimeSql].filter((client): client is Sql => client !== null);
+      await Promise.all(clients.map((client) => client.end({ timeout: 1 })));
+      for (const role of [...createdRoles].reverse()) await sql.unsafe(`DROP OWNED BY ${role}`);
+      for (const role of [...createdRoles].reverse()) await sql.unsafe(`DROP ROLE ${role}`);
+      const remaining = await sql.unsafe('SELECT rolname FROM pg_roles WHERE rolname=ANY($1::text[]) ORDER BY rolname', [roleNames]) as Array<{ rolname: string }>;
+      expect(remaining).toEqual([]);
     }
   });
 
