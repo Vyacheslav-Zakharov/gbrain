@@ -115,6 +115,33 @@ async function initBaseline(): Promise<void> {
     if (sealed[0]?.sealed !== true) throw new Error('synthetic legacy role seal failed');
   } finally { await sealAdmin.end(); }
 
+  // These seven intake tables exist in the reviewed production catalog but are
+  // external to the frozen application candidate. Recreate only their bound
+  // object/index/sequence identities; no production data or service is used.
+  const externalFixture = connectSql(legacyUrl);
+  try {
+    await externalFixture.unsafe(`
+      CREATE TABLE intake_batches (id text PRIMARY KEY);
+      CREATE TABLE intake_events (id bigserial PRIMARY KEY);
+      CREATE TABLE intake_files (id text PRIMARY KEY);
+      CREATE TABLE intake_link_selections (
+        id text PRIMARY KEY, file_id text, link_type text, direction text,
+        target_source_id text, target_slug text,
+        UNIQUE (file_id, link_type, direction, target_source_id, target_slug)
+      );
+      CREATE TABLE intake_new_objects (
+        id text PRIMARY KEY, file_id text, source_id text, slug text,
+        UNIQUE (file_id, source_id, slug)
+      );
+      CREATE TABLE intake_object_link_selections (
+        id text PRIMARY KEY, object_id text, link_type text, direction text,
+        target_source_id text, target_slug text,
+        UNIQUE (object_id, link_type, direction, target_source_id, target_slug)
+      );
+      CREATE TABLE intake_review_items (id text PRIMARY KEY);
+    `);
+  } finally { await externalFixture.end(); }
+
   const census = await baselineCensus();
   mkdirSync(RECEIPT_DIR, { recursive: true });
   writeFileSync(resolve(RECEIPT_DIR, 'baseline-census.json'), JSON.stringify(census, null, 2) + '\n');
@@ -138,7 +165,7 @@ async function baselineCensus() {
     const expectedIndexes = new Set(rowsFromTsv('G5-INDEX-IDENTITIES-READONLY.tsv').map((row) => row.index_name));
     const actualTables = new Set((await admin<{ name: string }[]>`SELECT c.relname name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p')`).map((row) => row.name));
     const actualSequences = new Set((await admin<{ name: string }[]>`SELECT c.relname name FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='S'`).map((row) => row.name));
-    const actualRoutines = new Set((await admin<{ signature: string }[]>`SELECT 'public.'||p.oid::regprocedure::text signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'`).map((row) => row.signature));
+    const actualRoutines = new Set((await admin<{ signature: string }[]>`SELECT 'public.'||regexp_replace(p.oid::regprocedure::text,'^public\\.','') signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'`).map((row) => row.signature));
     const actualTypes = new Set((await admin<{ name: string }[]>`SELECT t.typname name FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public'`).map((row) => row.name));
     const actualIndexes = new Set((await admin<{ name: string }[]>`SELECT i.relname name FROM pg_class i JOIN pg_namespace n ON n.oid=i.relnamespace WHERE n.nspname='public' AND i.relkind IN ('i','I')`).map((row) => row.name));
     const diff = (expected: Set<string>, actual: Set<string>) => ({ missing: [...expected].filter((x) => !actual.has(x)).sort(), extra: [...actual].filter((x) => !expected.has(x)).sort() });
