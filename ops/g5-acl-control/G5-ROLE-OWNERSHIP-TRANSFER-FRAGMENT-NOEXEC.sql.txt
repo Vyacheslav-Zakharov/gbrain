@@ -187,6 +187,10 @@ CREATE ROLE gbrain_migrator LOGIN NOINHERIT NOBYPASSRLS PASSWORD NULL;
 CREATE ROLE gbrain_runtime LOGIN NOINHERIT NOBYPASSRLS PASSWORD NULL;
 GRANT gbrain_migration_owner TO gbrain_migrator WITH INHERIT FALSE, SET TRUE;
 
+-- PostgreSQL requires an event-trigger owner to remain a superuser. Keep the
+-- event-trigger object under the exact postgres administrator while its
+-- application function moves to the NOLOGIN migration owner below.
+ALTER EVENT TRIGGER auto_rls_on_create_table OWNER TO postgres;
 REASSIGN OWNED BY gbrain TO gbrain_migration_owner;
 ALTER ROLE gbrain NOLOGIN NOINHERIT NOBYPASSRLS PASSWORD NULL;
 

@@ -17,7 +17,7 @@ Production execution: prohibited
 1. Create baseline application schema from exact candidate source under the legacy owner.
 2. Create the eleven production catalog-only tables as explicit test fixtures with matching names and representative DML-safe columns; no production data.
 3. Assert exact baseline closure: 92 tables, 49 sequences, 113 public routines, 190 public types, zero policies/default ACLs/explicit relation/routine/type ACLs.
-4. Execute the bound `G5-ACL-S2-ASSEMBLED-NOEXEC.sql.txt` after the hosted harness validates hashes and removes only its deliberate guard. This must exercise the real role creation, membership and `REASSIGN OWNED BY gbrain TO gbrain_migration_owner` path—not a fixture that directly creates the target end state.
+4. Execute the bound `G5-ACL-S2-ASSEMBLED-NOEXEC.sql.txt` after the hosted harness validates hashes and removes only its deliberate guard. This must first transfer the event-trigger object to the exact `postgres` superuser (PostgreSQL forbids a non-superuser event-trigger owner), then exercise the real role creation, membership and `REASSIGN OWNED BY gbrain TO gbrain_migration_owner` path for the remaining objects—including the event-trigger function—not a fixture that directly creates the target end state.
 5. Verify extension owners/member owners, exact routine signature owners, database/schema ownership, explicit/default/column ACL tuples and application routine owners before and after ACL changes.
 
 ## Positive tests
@@ -48,7 +48,7 @@ Production execution: prohibited
 
 1. Before commit: forced failure rolls back role/ownership/ACL/default-ACL/policy changes exactly in the same transaction.
 2. Diagnostic SQL inverse may be exercised only as semantic evidence; it is not accepted as release rollback.
-3. Post-commit exact rollback: terminate sessions; drop the disposable `gbrain` database; run the bound hosted cleanup fragment from maintenance database `postgres` to drop target roles and recreate the legacy role with exact non-secret defaults; restore the full database; issue a fresh synthetic recovery credential; then run `G5-RUNTIME-ACL-EXACT-INVERSE-POSTCONDITIONS-NOEXEC.sql.txt` after removing its guard in the bound hosted harness.
+3. Post-commit exact rollback: terminate sessions; drop the disposable `gbrain` database; run the bound hosted cleanup fragment from maintenance database `postgres` to drop target roles and recreate the legacy role with exact non-secret defaults; temporarily elevate the synthetic legacy role only for logical restore because PostgreSQL requires the restored event-trigger owner to be a superuser; restore the full database; immediately seal the role `NOSUPERUSER`; reconstruct and attest extension-container owner dependencies not represented by logical dump; issue a fresh synthetic recovery credential; then run `G5-RUNTIME-ACL-EXACT-INVERSE-POSTCONDITIONS-NOEXEC.sql.txt` after removing its guard in the bound hosted harness.
 4. Compare restored database/schema/catalog/ACL/role/extension/trigger receipts byte-for-byte to baseline inventory. Production remains blocked on the protected real verifier/HBA/service-auth restoration mechanism described in `G5-ACL-CLUSTER-ROLE-AUTH-ROLLBACK-DRAFT.md`.
 
 ## Required receipt

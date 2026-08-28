@@ -140,13 +140,13 @@ Production ACL mutation: **NO-GO**.
 
 Generated evidence artifacts:
 
-- `G5-ROLE-OWNERSHIP-TRANSFER-FRAGMENT-NOEXEC.sql.txt` — exact role creation/membership, `REASSIGN OWNED`, legacy seal and DB/schema ACL transition; SHA-256 `e789029a0118a54d5d0bf8e581019739323e591f0b377c75f187e6f4d107293b`.
+- `G5-ROLE-OWNERSHIP-TRANSFER-FRAGMENT-NOEXEC.sql.txt` — exact role creation/membership, superuser-bound event-trigger object transfer, `REASSIGN OWNED`, legacy seal and DB/schema ACL transition; SHA-256 `30de2e1e3cbd4d08a464c5cca9adc4f84b300e186a19b8d283160275579e05fa`.
 - `G5-RUNTIME-ACL-RLS-COMMAND-FRAGMENT-NOEXEC.sql.txt` — 82 exact table grants, 237 command policies, 46 sequence grant statements, explicit baseline revokes; SHA-256 `642c9c6f8d07a4f90924a247cbb14fe098f5c1b3f92c0d819138dab655a8767c`.
 - `G5-RUNTIME-ACL-RLS-COMMAND-INVERSE-NOEXEC.sql.txt` — diagnostic semantic inverse only, not authorized rollback; SHA-256 `c3c461bba0f4584840656d22ced47eaed895570a06482d576264440a6bee7b70`.
 - `G5-RUNTIME-ROUTINE-TYPE-ACL-FRAGMENT-NOEXEC.sql.txt` / inverse — exact `postgres` superuser forward; revoke PUBLIC EXECUTE on 113 routines, grant four provisional exact runtime signatures and two extension types, set function/type default ACLs for both object creators; diagnostic inverse only; SHA-256 `f7060054725bf7941a00e83eda0ccbefb0d7aaaa02691770ac4bc1491f7c1bca` / `cabf1da1ac5af4c2f97189507a3188fc455014b74e8b350dffe6716238f0d1d0`.
-- `G5-RUNTIME-ACL-EXACT-POSTCONDITIONS-NOEXEC.sql.txt` — exact catalog/owner/ACL/grantor/grantee/grant-option/default/column/policy/role/index/extension-member/full-trigger closure; SHA-256 `b7430352337e454fd4f49b2a35f0f68fa31f2470101d1b23efdad7fbf2a2c057`.
-- `G5-RUNTIME-ACL-EXACT-INVERSE-POSTCONDITIONS-NOEXEC.sql.txt` — exact verifier after full database plus cluster-role/auth restoration with a new controlled recovery credential; SHA-256 `a27d4606f955d3a737cfe7d292a6dd6f945962a1da423d214a97f04a83773779`.
-- `G5-ACL-S2-ASSEMBLED-NOEXEC.sql.txt` — component-manifest-verified deterministic one-transaction assembly of the four forward fragments; SHA-256 `15a60a358a19c49c52285d3bc49af3d5e670c510b064e9c5de0b25d88c075f71`.
+- `G5-RUNTIME-ACL-EXACT-POSTCONDITIONS-NOEXEC.sql.txt` — exact catalog/owner/ACL/grantor/grantee/grant-option/default/column/policy/role/index/extension-member/full-trigger closure; SHA-256 `2db7b6b6a1a44ff8be7cae55692c4fa8802a02936792725d5ea6e972ca4db3bc`.
+- `G5-RUNTIME-ACL-EXACT-INVERSE-POSTCONDITIONS-NOEXEC.sql.txt` — exact verifier after full database plus cluster-role/auth restoration with a new controlled recovery credential; SHA-256 `b182845901971c493e7d316dd63e2c33184d85010d7314476cf36790ed81f190`.
+- `G5-ACL-S2-ASSEMBLED-NOEXEC.sql.txt` — component-manifest-verified deterministic one-transaction assembly of the four forward fragments; SHA-256 `810d6a85e48fc20d98c505f830c05f6c19fc3e61aa2651696ee6d4f031851cf0`.
 
 Every generated SQL evidence file begins with `\set ON_ERROR_STOP on` and a deliberate exception before candidate SQL, preventing false-success execution under `psql`. They may not be stripped of the guard without a new hash, review and authorization cycle.
 

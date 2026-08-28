@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postgres from 'postgres';
 import * as db from '../src/core/db.ts';
@@ -230,22 +230,23 @@ async function proveTransactionalRollback(): Promise<void> {
   const body = stripNoexecGuard(guarded);
   const marker = '\nCOMMIT;\n';
   if (body.lastIndexOf(marker) !== body.indexOf(marker)) throw new Error('assembled COMMIT cardinality mismatch');
-  const injected = body.replace(marker, "\nDO $g5_injected$ BEGIN RAISE EXCEPTION 'G5_HOSTED_FORCED_ROLLBACK'; END $g5_injected$;\nCOMMIT;\n");
+  const injected = body.replace(marker, "\nDO $g5_injected$ BEGIN RAISE EXCEPTION USING ERRCODE='Z5R01', MESSAGE='G5_HOSTED_FORCED_ROLLBACK_REACHED'; END $g5_injected$;\nCOMMIT;\n");
   const admin = connectSql(gbrainUrl('postgres', 'postgres'));
   try {
-    await expectSqlState(() => admin.unsafe(injected), 'P0001', 'forced S2 rollback');
+    await expectSqlState(() => admin.unsafe(injected), 'Z5R01', 'forced S2 rollback', undefined, 'G5_HOSTED_FORCED_ROLLBACK_REACHED');
     await admin.unsafe('ROLLBACK');
     const roles = await admin<{ count: string }[]>`SELECT count(*)::text count FROM pg_roles WHERE rolname IN ('gbrain_runtime','gbrain_migrator','gbrain_migration_owner')`;
     if (roles[0]?.count !== '0') throw new Error('forced rollback left target roles');
   } finally { await admin.end(); }
   const census = await baselineCensus();
   if (!census.complete) throw new Error('forced rollback changed baseline catalog');
-  writeStage('forced-rollback', { sqlstate: 'P0001', baseline_census_sha256: sha256Json(census), complete: true });
+  writeStage('forced-rollback', { sqlstate: 'Z5R01', marker: 'G5_HOSTED_FORCED_ROLLBACK_REACHED', baseline_census_sha256: sha256Json(census), complete: true });
 }
 
-async function expectSqlState(action: () => Promise<unknown>, expected: string, label: string, sqlstates?: Record<string, number>): Promise<void> {
+async function expectSqlState(action: () => Promise<unknown>, expected: string, label: string, sqlstates?: Record<string, number>, expectedMessage?: string): Promise<void> {
   try { await action(); } catch (error) {
     if ((error as { code?: string }).code === expected) {
+      if (expectedMessage && (error as { message?: string }).message !== expectedMessage) throw new Error(`${label}: expected exact marker message`);
       if (sqlstates) sqlstates[expected] = (sqlstates[expected] ?? 0) + 1;
       return;
     }
@@ -499,7 +500,9 @@ const mode = process.argv[2];
 if (mode === 'init') {
   mkdirSync(RECEIPT_DIR, { recursive: true });
   const state: RunState = { nonce: randomBytes(16).toString('hex'), binding_sha256: binding.bindingSha256, application_candidate_sha: APP_CANDIDATE_SHA };
-  writeFileSync(STATE_PATH, JSON.stringify(state, null, 2) + '\n');
+  const stateTemp = `${STATE_PATH}.tmp-${process.pid}`;
+  writeFileSync(stateTemp, JSON.stringify(state, null, 2) + '\n', { flag: 'wx' });
+  renameSync(stateTemp, STATE_PATH);
 } else if (mode === 'baseline') await initBaseline();
 else if (mode === 'forced-rollback') await proveTransactionalRollback();
 else if (mode === 'apply') await applyS2();
@@ -509,6 +512,30 @@ else if (mode === 'set-recovery-credential') {
   const admin = connectSql(ADMIN_URL);
   await setSyntheticPassword(admin, 'gbrain', LEGACY_PASSWORD);
   await admin.end();
+} else if (mode === 'elevate-legacy-for-restore') {
+  const admin = connectSql(ADMIN_URL);
+  try {
+    await admin.unsafe('ALTER ROLE gbrain SUPERUSER');
+    const rows = await admin<{ elevated: boolean }[]>`SELECT rolsuper AND rolcanlogin elevated FROM pg_roles WHERE rolname='gbrain'`;
+    if (rows[0]?.elevated !== true) throw new Error('legacy restore elevation failed');
+  } finally { await admin.end(); }
+} else if (mode === 'seal-legacy-after-restore') {
+  const admin = connectSql(ADMIN_URL);
+  try {
+    await admin.unsafe('ALTER ROLE gbrain NOSUPERUSER');
+    const rows = await admin<{ sealed: boolean }[]>`SELECT NOT rolsuper AND rolcanlogin AND rolbypassrls sealed FROM pg_roles WHERE rolname='gbrain'`;
+    if (rows[0]?.sealed !== true) throw new Error('legacy restore seal failed');
+  } finally { await admin.end(); }
+} else if (mode === 'ensure-legacy-sealed') {
+  const admin = connectSql(ADMIN_URL);
+  try {
+    const before = await admin<{ exists: boolean; superuser: boolean }[]>`SELECT true exists,rolsuper superuser FROM pg_roles WHERE rolname='gbrain'`;
+    if (before[0]?.superuser === true) await admin.unsafe('ALTER ROLE gbrain NOSUPERUSER');
+    const after = await admin<{ exists: boolean; superuser: boolean }[]>`SELECT true exists,rolsuper superuser FROM pg_roles WHERE rolname='gbrain'`;
+    const attestation = { role_exists: after[0]?.exists === true, superuser: after[0]?.superuser === true, safe: after[0]?.superuser !== true, complete: after[0]?.superuser !== true };
+    writeStage('seal-attestation', attestation);
+    if (!attestation.safe) throw new Error('legacy role remains superuser');
+  } finally { await admin.end(); }
 } else if (mode === 'verify-restored') await verifyRestored();
 else if (mode === 'reconstruct-extension-owners') {
   const admin = connectSql(gbrainUrl('postgres', 'postgres'));
@@ -520,7 +547,7 @@ else if (mode === 'reconstruct-extension-owners') {
 else if (mode === 'receipt') await writeReceipt();
 else if (mode === 'failure-receipt') {
   mkdirSync(RECEIPT_DIR, { recursive: true });
-  const stages = ['baseline', 'forced-rollback', 'apply', 'probe', 'extension-restore', 'restore'].filter((name) => existsSync(resolve(RECEIPT_DIR, `${name}.json`)));
+  const stages = ['baseline', 'forced-rollback', 'apply', 'probe', 'extension-restore', 'restore', 'seal-attestation'].filter((name) => existsSync(resolve(RECEIPT_DIR, `${name}.json`)));
   writeFileSync(resolve(RECEIPT_DIR, 'receipt.json'), JSON.stringify({ complete: false, status: 'failed', stages, acl_binding_sha256: binding.bindingSha256, application_candidate_sha: APP_CANDIDATE_SHA, harness_sha: process.env.GITHUB_SHA ?? '[LOCAL-NO-RUN]', production_db_or_services_touched: false }, null, 2) + '\n');
 }
 else throw new Error(`unknown mode: ${mode}`);

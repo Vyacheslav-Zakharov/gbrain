@@ -192,7 +192,7 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      ACL_BINDING_SHA256: c7814602e959baf2e8d5c9a05e6c18757f97431b9f9ee9ecacdf38de10581acd
+      ACL_BINDING_SHA256: f12ca73c263152ffbbc73e08bdfa887e5883888fa8311168251724520b8859cd
     steps:
       - name: Initialize pre-checkout failure receipt
         run: |
@@ -270,7 +270,12 @@ jobs:
           timeout 30s docker cp /tmp/gbrain.dump "$POSTGRES_CONTAINER:/tmp/gbrain.dump"
           EXPECTED_DUMP_SHA=$(cut -d' ' -f1 /tmp/gbrain.dump.sha256)
           test "$(timeout 15s docker exec "$POSTGRES_CONTAINER" sha256sum /tmp/gbrain.dump | cut -d' ' -f1)" = "$EXPECTED_DUMP_SHA"
-          timeout 180s docker exec "$POSTGRES_CONTAINER" pg_restore -U postgres -d postgres --exit-on-error /tmp/gbrain.dump
+          timeout 30s bun scripts/g5-acl-hosted.ts elevate-legacy-for-restore
+          if ! timeout 180s docker exec "$POSTGRES_CONTAINER" pg_restore -U postgres -d postgres --exit-on-error /tmp/gbrain.dump; then
+            timeout 30s bun scripts/g5-acl-hosted.ts seal-legacy-after-restore
+            exit 1
+          fi
+          timeout 30s bun scripts/g5-acl-hosted.ts seal-legacy-after-restore
           timeout 30s bun scripts/g5-acl-hosted.ts reconstruct-extension-owners
           timeout 30s bun scripts/g5-acl-hosted.ts set-recovery-credential
           timeout 120s bun scripts/g5-acl-hosted.ts verify-restored
@@ -282,6 +287,18 @@ jobs:
           test "$(timeout 15s docker exec "$POSTGRES_CONTAINER" psql -X -At -U postgres -d postgres -c "SELECT count(*) FROM pg_roles WHERE rolname IN ('gbrain_runtime','gbrain_migrator','gbrain_migration_owner')")" = "0"
           cp /tmp/gbrain.dump.sha256 g5-acl-hosted-receipt/backup-dump.sha256
           trap - EXIT
+      - name: Always seal and attest disposable legacy role
+        if: always()
+        run: |
+          if [ -f g5-acl-hosted-receipt/state.json ]; then
+            timeout 30s bun scripts/g5-acl-hosted.ts ensure-legacy-sealed
+            if [ -f g5-acl-hosted-receipt/receipt.json ] && ! jq -e '.complete == true' g5-acl-hosted-receipt/receipt.json >/dev/null; then
+              timeout 30s bun scripts/g5-acl-hosted.ts failure-receipt
+            fi
+          else
+            mkdir -p "$RUNNER_TEMP/g5-acl-hosted-bootstrap"
+            printf '%s\n' '{"complete":true,"phase":"pre-db-bootstrap","role_exists":false,"superuser":false,"safe":true}' > "$RUNNER_TEMP/g5-acl-hosted-bootstrap/seal-attestation.json"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         if: always()
         with:
