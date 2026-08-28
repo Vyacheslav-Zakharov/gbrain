@@ -271,7 +271,7 @@ jobs:
           EXPECTED_DUMP_SHA=$(cut -d' ' -f1 /tmp/gbrain.dump.sha256)
           test "$(timeout 15s docker exec "$POSTGRES_CONTAINER" sha256sum /tmp/gbrain.dump | cut -d' ' -f1)" = "$EXPECTED_DUMP_SHA"
           timeout 30s bun scripts/g5-acl-hosted.ts elevate-legacy-for-restore
-          if ! timeout 180s docker exec "$POSTGRES_CONTAINER" pg_restore -U postgres -d postgres --exit-on-error /tmp/gbrain.dump; then
+          if ! timeout 180s docker exec "$POSTGRES_CONTAINER" pg_restore -U postgres -d postgres --create --exit-on-error /tmp/gbrain.dump; then
             timeout 30s bun scripts/g5-acl-hosted.ts seal-legacy-after-restore
             exit 1
           fi
