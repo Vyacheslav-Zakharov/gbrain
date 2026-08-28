@@ -1,0 +1,38 @@
+\set ON_ERROR_STOP on
+\echo 'NOEXEC hosted role cleanup: deliberate exception follows'
+DO $g5_noexec$ BEGIN RAISE EXCEPTION 'NOEXEC hosted cleanup: strip only in bound disposable harness'; END $g5_noexec$;
+
+-- Hosted disposable PostgreSQL 16 only. Production use is prohibited.
+-- External harness prerequisite: terminate all gbrain/target-role sessions and DROP DATABASE gbrain.
+BEGIN;
+SET LOCAL lock_timeout='5s';
+SET LOCAL statement_timeout='60s';
+SET LOCAL search_path TO pg_catalog, public;
+DO $g5_cleanup_pre$
+BEGIN
+  IF session_user<>'postgres' OR current_user<>'postgres' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='postgres' AND rolsuper) THEN RAISE EXCEPTION 'postgres superuser required'; END IF;
+  IF current_database()<>'postgres' THEN RAISE EXCEPTION 'cleanup must run in postgres maintenance database'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_database WHERE datname='gbrain') THEN RAISE EXCEPTION 'gbrain database must be dropped before cluster-role cleanup'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename IN ('gbrain','gbrain_runtime','gbrain_migrator','gbrain_migration_owner') AND pid<>pg_backend_pid()) THEN RAISE EXCEPTION 'role session residue'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid=d.datdba WHERE r.rolname IN ('gbrain','gbrain_runtime','gbrain_migrator','gbrain_migration_owner')) THEN RAISE EXCEPTION 'database ownership residue'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_tablespace t JOIN pg_roles r ON r.oid=t.spcowner WHERE r.rolname IN ('gbrain','gbrain_runtime','gbrain_migrator','gbrain_migration_owner')) THEN RAISE EXCEPTION 'tablespace ownership residue'; END IF;
+END
+$g5_cleanup_pre$;
+
+REVOKE gbrain_migration_owner FROM gbrain_migrator;
+ALTER ROLE gbrain_runtime RESET ALL;
+ALTER ROLE gbrain_migrator RESET ALL;
+ALTER ROLE gbrain_migration_owner RESET ALL;
+DROP OWNED BY gbrain_runtime;
+DROP OWNED BY gbrain_migrator;
+DROP OWNED BY gbrain_migration_owner;
+DROP OWNED BY gbrain;
+DROP ROLE gbrain_runtime;
+DROP ROLE gbrain_migrator;
+DROP ROLE gbrain_migration_owner;
+DROP ROLE gbrain;
+CREATE ROLE gbrain LOGIN INHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS CONNECTION LIMIT -1 PASSWORD NULL;
+COMMIT;
+
+-- External hosted harness now restores the full database with owner gbrain, issues a fresh synthetic
+-- recovery credential without logging it, then runs the exact full-restore verifier from postgres.

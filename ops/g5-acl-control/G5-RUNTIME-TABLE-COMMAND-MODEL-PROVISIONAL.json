@@ -1,0 +1,2001 @@
+{
+  "schema_version": 4,
+  "date": "2026-08-28",
+  "candidate_sha": "718c04a56dd997147b49a5c9c8161b9265a5ef71",
+  "catalog_sha256": "7af70f0b3d3ad056572c5560d61678e73586d53ce90407df268d9716c5c1c867",
+  "target_role": "gbrain_runtime",
+  "target_role_shape": "single compatibility command union for deployed services plus read-only trusted CLI reporting; destructive admin commands require a governed admin path",
+  "entries": [
+    {
+      "table": "access_tokens",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/commands/auth.ts:89-172 creates, changes permissions on, lists, and revokes token rows.",
+        "src/commands/serve-http.ts:5047-5077 exposes admin list/create/revoke paths using direct SQL.",
+        "src/core/oauth-provider.ts:754-809 performs the OAuth-provider legacy fallback with SELECT and UPDATE.",
+        "src/core/oauth-provider.ts:761:rowScopes",
+        "src/core/oauth-provider.ts:780:verifyToken",
+        "src/core/sql-query.ts:102:access-token SQL helper",
+        "src/mcp/http-transport.ts:189-207 validates legacy bearer tokens with SELECT and asynchronously updates last_used_at.",
+        "src/mcp/http-transport.ts:195:validateToken"
+      ],
+      "notes": [
+        "Serve/MCP token authentication and last-used tracking.",
+        "The persistent HTTP runtime currently needs SELECT and UPDATE, while CLI/admin paths need INSERT and UPDATE. Exclude this table from broad direct ACL only after hardened token lookup/touch/create/revoke routines exist; otherwise both legacy HTTP authentication paths break."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "ai_review_assignments",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/ai-review-rounds.ts:1156:submitReviewVote",
+        "src/core/ai-review-rounds.ts:452:createReviewRound",
+        "src/core/ai-review-rounds.ts:574:loadAggregationInputs",
+        "src/core/ai-review-rounds.ts:951:loadAssignmentContext"
+      ],
+      "notes": [
+        "Optional AI-review runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "ai_review_events",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/ai-review-rounds.ts:1170:submitReviewVote",
+        "src/core/ai-review-rounds.ts:232:recordEvent",
+        "src/core/ai-review.ts:209:listTakeProposalEvents",
+        "src/core/concept-review.ts:63:getConceptProposalReview",
+        "src/core/cycle/propose-takes.ts:1057 review-event lookup",
+        "src/core/cycle/propose-takes.ts:1219 and 1250 review-event insertion"
+      ],
+      "notes": [
+        "Append/read audit events for AI-review operations.",
+        "Append/read review ledger."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "ai_review_revisions",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/ai-review.ts:203:listTakeProposalRevisions",
+        "src/core/concept-review.ts:187:acceptConceptProposal",
+        "src/core/concept-review.ts:62:getConceptProposalReview",
+        "src/core/concept-review.ts:96:createLlmConceptRevision",
+        "src/core/cycle/propose-takes.ts:1052 review revision lookup"
+      ],
+      "notes": [
+        "No write from the inspected worker phase.",
+        "Optional AI-review runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "ai_review_rounds",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/ai-review-rounds.ts:1392:listReviewRounds",
+        "src/core/ai-review-rounds.ts:439:createReviewRound",
+        "src/core/ai-review-rounds.ts:563:loadRound",
+        "src/core/ai-review-rounds.ts:617:finalizeRoundInternal"
+      ],
+      "notes": [
+        "Optional AI-review runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "ai_review_votes",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/ai-review-rounds.ts:1044:submitReviewVote",
+        "src/core/ai-review-rounds.ts:1141:submitReviewVote",
+        "src/core/ai-review-rounds.ts:1146:submitReviewVote",
+        "src/core/ai-review-rounds.ts:579:loadAggregationInputs"
+      ],
+      "notes": [
+        "Optional AI-review runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "budget_ledger",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/enrichment/budget.ts:108:reserveBudget",
+        "src/core/enrichment/budget.ts:147:reserveBudget",
+        "src/core/enrichment/budget.ts:208:commitReservation"
+      ],
+      "notes": [
+        "Enrichment budget accounting."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "budget_reservations",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/enrichment/budget.ts:141:reserveBudget",
+        "src/core/enrichment/budget.ts:193:commitReservation",
+        "src/core/enrichment/budget.ts:232:commitReservation",
+        "src/core/enrichment/budget.ts:312:cleanupExpired"
+      ],
+      "notes": [
+        "Enrichment budget reservations; no direct DELETE found."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "calibration_profiles",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/commands/calibration.ts:55 profile lookup",
+        "src/core/brainstorm/orchestrator.ts:341:loadCalibrationProfile",
+        "src/core/calibration/undo-wave.ts:164:undoWave",
+        "src/core/calibration/undo-wave.ts:170:undoWave",
+        "src/core/cycle/calibration-profile.ts:351 profile insertion",
+        "src/core/cycle/calibration-profile.ts:351:writeCalibrationProfile"
+      ],
+      "notes": [
+        "DELETE belongs to explicit undo-wave administration.",
+        "Optional calibration/cycle CLI runtime.",
+        "DELETE excluded from gbrain_runtime; destructive local CLI calibration --undo-wave requires a separately governed admin path."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "code_edges_chunk",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:5424 chunk-edge insertion",
+        "src/core/postgres-engine.ts:5424:addCodeEdgesBatch",
+        "src/core/postgres-engine.ts:5462 edge cleanup",
+        "src/core/postgres-engine.ts:5462:deleteCodeEdgesForChunks",
+        "src/core/postgres-engine.ts:5477-5550 code-edge reads",
+        "src/core/postgres-engine.ts:5477:getCodeCallees"
+      ],
+      "notes": [
+        "Conditional on code-indexing phases/handlers.",
+        "PostgresEngine code-graph operations."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "code_edges_symbol",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/chunkers/symbol-resolver.ts:174-255 symbol-edge resolution/update",
+        "src/core/chunkers/symbol-resolver.ts:247:resolveCodeEdgeSymbols",
+        "src/core/postgres-engine.ts:5444 symbol-edge insertion",
+        "src/core/postgres-engine.ts:5444:addCodeEdgesBatch",
+        "src/core/postgres-engine.ts:5463 symbol-edge cleanup",
+        "src/core/postgres-engine.ts:5463:deleteCodeEdgesForChunks",
+        "src/core/postgres-engine.ts:5483:getCodeCallees"
+      ],
+      "notes": [
+        "Conditional on code-indexing phases/handlers.",
+        "PostgresEngine and symbol-resolution code-graph operations."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "code_traversal_cache",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/code-intel/traversal-cache.ts:123:putTraversalCache",
+        "src/core/code-intel/traversal-cache.ts:168:invalidateTraversalCache",
+        "src/core/code-intel/traversal-cache.ts:176:invalidateTraversalCache",
+        "src/core/code-intel/traversal-cache.ts:90:getTraversalCache"
+      ],
+      "notes": [
+        "INSERT uses ON CONFLICT DO UPDATE, requiring UPDATE as well."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "concept_proposals",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/concept-review.ts:123:rejectConceptProposal",
+        "src/core/concept-review.ts:182:acceptConceptProposal",
+        "src/core/concept-review.ts:37:listConceptProposals",
+        "src/core/cycle/synthesize-concepts.ts:145-155 proposal provenance lookup",
+        "src/core/cycle/synthesize-concepts.ts:468-474 proposal insertion",
+        "src/core/cycle/synthesize-concepts.ts:469:synthesizeConcepts"
+      ],
+      "notes": [
+        "No routine UPDATE/DELETE found.",
+        "Optional concept-review/cycle runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "config",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/commands/autopilot-fanout.ts:96-547 reads scheduling, concurrency, cooldown, and last-run keys.",
+        "src/commands/jobs.ts:1586-1589 and 1628-1636 handler config reads",
+        "src/commands/jobs.ts:1588-1988 performs normal worker configuration reads and writes operational timestamps.",
+        "src/commands/jobs.ts:1753-1779 autopilot-global-maintenance last_global_at write",
+        "src/commands/serve-http.ts:559 reads persistent MCP publication configuration.",
+        "src/commands/sync.ts:469-3061 reads policy/cost keys and writes sync checkpoints.",
+        "src/core/last-retrieved.ts:142-157 search.track_retrieval read",
+        "src/core/minions/queue.ts:54-63 MinionQueue.ensureSchema via engine.getConfig",
+        "src/core/postgres-engine.ts:5161-5207 implements getConfig, setConfig via upsert, unsetConfig, and prefix listing with direct SQL.",
+        "src/core/postgres-engine.ts:5172:getConfig",
+        "src/core/postgres-engine.ts:5188:setConfig",
+        "src/core/postgres-engine.ts:5195:unsetConfig",
+        "src/core/postgres-engine.ts:5205:listConfig",
+        "src/core/source-ingest/executor.ts:74-78 source_ingest.live_connectors read",
+        "src/schema.sql:1938 enables RLS only when the schema installer is already running as a BYPASSRLS role."
+      ],
+      "notes": [
+        "Engine setConfig is implemented as upsert, requiring INSERT and UPDATE in addition to SELECT.",
+        "This is the only reviewed table where normal persistent/worker behavior broadly and repeatedly depends on the generic engine key/value API. A runtime role needs SELECT and, for worker/checkpoint paths, upsert/delete unless the API is replaced wholesale. Table-level ACL cannot distinguish harmless checkpoints from security-sensitive policy or credential-like keys such as zeroentropy_api_key; a future key-namespace policy or hardened config API is recommended.",
+        "setConfig uses INSERT ON CONFLICT DO UPDATE.",
+        "Security/policy/checkpoint key namespace is not separable by table ACL; temporary direct CRUD requires owner acceptance, expiry, and hardened key-scoped follow-up."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "content_chunks",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/commands/jobs.ts:1426-1455 embed handler",
+        "src/core/postgres-engine.ts:1753:searchKeyword",
+        "src/core/postgres-engine.ts:2240-2316 page chunk replacement/upsert",
+        "src/core/postgres-engine.ts:2240:putChunks",
+        "src/core/postgres-engine.ts:2315:putChunks",
+        "src/core/postgres-engine.ts:2439 embedding update",
+        "src/core/postgres-engine.ts:2439:clearChunkEmbeddings",
+        "src/core/source-ingest/executor.ts:983-991 importFromContent"
+      ],
+      "notes": [
+        "Core search, chunk replacement, embedding, and code-index runtime.",
+        "Even source-ingest defaults no_embed=true, content import can replace chunks; embedding UPDATE is conditional on no_embed=false or later embed jobs."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "context_volunteer_events",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/context/volunteer-events.ts:163-185 purgeStaleVolunteerEvents",
+        "src/core/context/volunteer-events.ts:175:purgeStaleVolunteerEvents",
+        "src/core/context/volunteer-events.ts:60-94 insertVolunteerEvents",
+        "src/core/context/volunteer-events.ts:89:insertVolunteerEvents",
+        "src/core/context/volunteer-events.ts:96-151 fire-and-forget sink registration",
+        "src/core/context/volunteer.ts:237:volunteerUsageStats"
+      ],
+      "notes": [
+        "Context-volunteering telemetry.",
+        "INSERT is the hot-path sink; DELETE is 90-day dream-cycle retention."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "conversation_parser_llm_cache",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/conversation-parser/llm-base.ts:240:readDbCache",
+        "src/core/conversation-parser/llm-base.ts:273:writeDbCache"
+      ],
+      "notes": [
+        "INSERT uses ON CONFLICT DO NOTHING; no UPDATE privilege found."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "dream_verdicts",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:3796:getDreamVerdict",
+        "src/core/postgres-engine.ts:3811:putDreamVerdict"
+      ],
+      "notes": [
+        "putDreamVerdict uses INSERT ON CONFLICT DO UPDATE."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "drift_decisions",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "eval_candidates",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/eval-capture.ts:157-190 captureEvalCandidate/doCaptureEvalCandidate",
+        "src/core/eval-capture.ts:193-230 eval-capture background drainer",
+        "src/core/postgres-engine.ts:5552-5572 logEvalCandidate",
+        "src/core/postgres-engine.ts:5555:logEvalCandidate",
+        "src/core/postgres-engine.ts:5582:listEvalCandidates",
+        "src/core/postgres-engine.ts:5599:deleteEvalCandidatesBefore"
+      ],
+      "notes": [
+        "Optional contributor/evaluation capture runtime.",
+        "SELECT/DELETE belong to eval export/prune commands, not the capture sink.",
+        "DELETE excluded from gbrain_runtime; destructive local CLI eval prune requires a separately governed admin path."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "eval_capture_failures",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/eval-capture.ts:177-189 failure classification/persistence",
+        "src/core/postgres-engine.ts:5604-5607 logEvalCaptureFailure",
+        "src/core/postgres-engine.ts:5606:logEvalCaptureFailure",
+        "src/core/postgres-engine.ts:5613:listEvalCaptureFailures"
+      ],
+      "notes": [
+        "Best-effort secondary sink.",
+        "Optional contributor/evaluation capture runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "eval_contradictions_cache",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:4483:getContradictionCache",
+        "src/core/postgres-engine.ts:4513:putContradictionCache",
+        "src/core/postgres-engine.ts:4533:sweepContradictionCache"
+      ],
+      "notes": [
+        "Cache upsert requires INSERT and UPDATE."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "eval_contradictions_runs",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/eval-contradictions/cost-prompt.ts:54:readLastPromptVersion",
+        "src/core/postgres-engine.ts:4402:writeContradictionsRun",
+        "src/core/postgres-engine.ts:4448:loadContradictionsTrend"
+      ],
+      "notes": [
+        "Optional contradictions-evaluation runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "eval_takes_quality_runs",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/takes-quality-eval/receipt-write.ts:29:writeReceiptToDb",
+        "src/core/takes-quality-eval/replay.ts:61:loadReceiptFromDb",
+        "src/core/takes-quality-eval/trend.ts:48:loadTrend"
+      ],
+      "notes": [
+        "Optional takes-quality evaluation CLI runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "extract_rollup_7d",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/commands/extract-explain.ts:149:runExtractExplain",
+        "src/commands/extract-status.ts:189:runExtractStatus",
+        "src/core/extract/rollup-writer.ts:84:upsertExtractRollup"
+      ],
+      "notes": [
+        "Upsert requires INSERT and UPDATE; extract status/explain reads it."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "facts",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/cycle/extract-facts.ts:120-122 legacy guard",
+        "src/core/cycle/phases/consolidate.ts:240-248 fact validity update",
+        "src/core/cycle/phases/consolidate.ts:66-75 fact selection",
+        "src/core/facts/backstop.ts:159-170 queued facts:absorb pipeline",
+        "src/core/facts/forget.ts:forgetFact",
+        "src/core/postgres-engine.ts:1278:migrateFactsToCanonical",
+        "src/core/postgres-engine.ts:3859:insertFact",
+        "src/core/postgres-engine.ts:3878-4065 fact insertion/reconciliation",
+        "src/core/postgres-engine.ts:3900:listFacts"
+      ],
+      "notes": [
+        "Core facts operations and extraction/cycle paths.",
+        "DELETE is used by explicit rebuild/reconciliation/forget paths; omit for a worker configuration that cannot claim those handlers."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "file_migration_ledger",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "files",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/attachments.ts:621:uploadAttachment",
+        "src/core/attachments.ts:683:uploadAttachment",
+        "src/core/attachments.ts:692:uploadAttachment",
+        "src/core/attachments.ts:723:listAttachments"
+      ],
+      "notes": [
+        "Attachment/file runtime; no normal direct DELETE was found."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "gbrain_cycle_locks",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/db-lock.ts:157-251 tryAcquireDbLock Postgres branch",
+        "src/core/db-lock.ts:209:acquireDbLock",
+        "src/core/db-lock.ts:231-249 DbLockHandle.refresh/release",
+        "src/core/db-lock.ts:237:refreshDbLock",
+        "src/core/db-lock.ts:430:listDbLocks",
+        "src/core/db-lock.ts:495:releaseDbLock",
+        "src/core/minions/supervisor.ts:543-559 supervisor singleton acquisition",
+        "src/core/minions/supervisor.ts:646-657 supervisor lock release",
+        "src/core/source-ingest/executor.ts:749-759 source-ingest refreshing lock"
+      ],
+      "notes": [
+        "Runtime coordination table, not migration-only.",
+        "TTL lock runtime for cycles and source-ingest execution."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "ingest_log",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/facts/absorb-log.ts:1-10 writeFactsAbsorbLog contract",
+        "src/core/facts/backstop.ts:162-170 queued facts absorb logging path",
+        "src/core/postgres-engine.ts:5046 logIngest INSERT",
+        "src/core/postgres-engine.ts:5046:logIngest",
+        "src/core/postgres-engine.ts:5055 ingest-log reads",
+        "src/core/postgres-engine.ts:5055:getIngestLog"
+      ],
+      "notes": [
+        "Core ingest telemetry.",
+        "The background facts sink requires INSERT; SELECT is needed by status/doctor readers."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "intake_batches",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "intake_events",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "intake_files",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "intake_link_selections",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "intake_new_objects",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "intake_object_link_selections",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "intake_review_items",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "links",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:2695-2740 link batch insertion",
+        "src/core/postgres-engine.ts:2695:addLink",
+        "src/core/postgres-engine.ts:2726:addLinksBatch",
+        "src/core/postgres-engine.ts:2760:removeLink",
+        "src/core/source-ingest/executor.ts:1031-1035 reconcileSourceGraphLinks",
+        "src/core/source-ingest/executor.ts:328-341 graph ownership query",
+        "src/core/source-ingest/executor.ts:393-423 source-ingest edge adoption/reconciliation",
+        "src/core/source-ingest/executor.ts:394:repairSourceIngestLinks",
+        "src/core/source-ingest/executor.ts:425 engine.addLinksBatch"
+      ],
+      "notes": [
+        "All four commands are exercised by deterministic source-ingest reconciliation.",
+        "Core graph and source-ingest graph ownership operations."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "mcp_request_log",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/commands/serve-http.ts:3823-3885 reads request counts and error summaries for the admin dashboard.",
+        "src/commands/serve-http.ts:3827:request-log endpoint",
+        "src/commands/serve-http.ts:5028-5034 reads filtered request-log pages and counts.",
+        "src/commands/serve-http.ts:5401-5408 MCP request logging call path",
+        "src/commands/serve-http.ts:5452-5460 error-path request logging",
+        "src/commands/serve-http.ts:679-702 inserts request-log rows for the normal persistent MCP path.",
+        "src/commands/serve-http.ts:683-704 persistRequestLog",
+        "src/commands/serve-http.ts:691:persistRequestLog",
+        "src/mcp/http-transport.ts:239-242 inserts best-effort request-log rows in the legacy HTTP transport.",
+        "src/mcp/http-transport.ts:240:logRequest"
+      ],
+      "notes": [
+        "Serve/MCP request logging and request-log reads.",
+        "The admin dashboard additionally needs SELECT, but serving and persisting requests only requires INSERT.",
+        "The request-serving role needs append capability and the admin dashboard needs bounded reads, but raw params/error data can be sensitive. Prefer an append-only logging routine plus a separately authorized redacted/bounded read routine rather than direct SELECT/INSERT on the table."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "mcp_spend_log",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/minions/budget-meter.ts:99:reserve",
+        "src/core/spend-log.ts:108:recordSpend",
+        "src/core/spend-log.ts:46:getTodaySpendCents"
+      ],
+      "notes": [
+        "Serve and minion spend accounting."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "mcp_spend_reservations",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/commands/serve-http.ts:478:queryAgentClientSpend",
+        "src/core/minions/budget-meter.ts:105:reserve",
+        "src/core/minions/budget-meter.ts:126:commitOrRelease",
+        "src/core/minions/budget-meter.ts:87:reserve"
+      ],
+      "notes": [
+        "Spend reservation lifecycle."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "migration_impact_log",
+      "commands": [
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "src/commands/onboard.ts:37-42,58-97",
+        "src/cli.ts:1931-1935"
+      ],
+      "notes": [
+        "Read-only trusted local onboard --history compatibility exception. Destructive/admin commands are not generally included in gbrain_runtime. INSERT helper is unwired and excluded."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "minion_attachments",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/minions/queue.ts:1372-1413 MinionQueue.addAttachment",
+        "src/core/minions/queue.ts:1393:addAttachment",
+        "src/core/minions/queue.ts:1416-1454 MinionQueue.listAttachments/getAttachment",
+        "src/core/minions/queue.ts:1420:listAttachments",
+        "src/core/minions/queue.ts:1435:getAttachment",
+        "src/core/minions/queue.ts:1456-1462 MinionQueue.deleteAttachment"
+      ],
+      "notes": [
+        "Minion attachment operations.",
+        "No direct UPDATE path found."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "minion_budget_log",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/commands/jobs-watch.ts:166:readSnapshot",
+        "src/core/minions/budget-tracker.ts:273:logBudgetEvent"
+      ],
+      "notes": [
+        "Append/read minion budget audit."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "minion_inbox",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/minions/queue.ts:1250-1287 MinionQueue.sendMessage/readInbox",
+        "src/core/minions/queue.ts:1332-1369 MinionQueue.readChildCompletions",
+        "src/core/minions/queue.ts:394-471 MinionQueue.cancelJob child_done insertion",
+        "src/core/minions/queue.ts:444:sendJobMessage",
+        "src/core/minions/queue.ts:692:claimInboxMessages",
+        "src/core/minions/queue.ts:765:ackInboxMessages",
+        "src/core/minions/queue.ts:807-899 MinionQueue.completeJob",
+        "src/core/minions/queue.ts:915-1032 MinionQueue.failJob"
+      ],
+      "notes": [
+        "Minion side-channel queue.",
+        "No direct runtime DELETE was found; rows may disappear through foreign-key cascade when minion_jobs rows are deleted."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "minion_jobs",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/minions/queue.ts:137:submit",
+        "src/core/minions/queue.ts:259:submit",
+        "src/core/minions/queue.ts:315:setWaitingChildren",
+        "src/core/minions/queue.ts:325-367 MinionQueue.getJob/getJobs",
+        "src/core/minions/queue.ts:370-501 MinionQueue.removeJob/cancelJob/retryJob/prune",
+        "src/core/minions/queue.ts:373:deleteJob",
+        "src/core/minions/queue.ts:605-633 MinionQueue.claim",
+        "src/core/minions/queue.ts:647-1210 timeout/completion/failure/stall/lock state machine",
+        "src/core/minions/queue.ts:77-323 MinionQueue.add",
+        "src/core/minions/worker.ts:294-319 MinionWorker stall and timeout sweeps",
+        "src/core/minions/worker.ts:504-568 MinionWorker poll/promote/claim loop"
+      ],
+      "notes": [
+        "Core durable queue table. DELETE is required by explicit jobs remove/prune and remove_on_complete/remove_on_fail cleanup, not merely migration tooling.",
+        "Primary minion queue/runtime table."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "minion_lease_pressure_log",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/commands/jobs.ts:623-644 jobs stats lease-pressure reporting",
+        "src/core/minions/lease-cap-controller.ts:155:sampleLeasePressure",
+        "src/core/minions/lease-pressure-audit.ts:112:readRecentLeasePressure",
+        "src/core/minions/lease-pressure-audit.ts:55-83 logLeasePressure",
+        "src/core/minions/lease-pressure-audit.ts:61:logLeasePressure",
+        "src/core/minions/lease-pressure-audit.ts:91-148 readRecentLeasePressure/countRecentLeasePressure",
+        "src/core/minions/worker.ts:1032-1076 MinionWorker lease-full bounce path"
+      ],
+      "notes": [
+        "Best-effort audit INSERT; SELECT is needed by jobs stats.",
+        "Best-effort lease-pressure telemetry."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "minion_self_fix_log",
+      "commands": [
+        "INSERT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/minions/self-fix.ts:257:logSelfFixEvent"
+      ],
+      "notes": [
+        "Best-effort append-only self-fix audit."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "oauth_clients",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/commands/auth.ts:312-320 directly deletes a client in the CLI revoke path.",
+        "src/commands/serve-http.ts:5134-5163 directly updates TTL, soft-deletes clients, and deletes associated token rows.",
+        "src/core/minions/budget-meter.ts:203 reads budget_usd_per_day for worker-side budget enforcement.",
+        "src/core/oauth-provider.ts:203:getClient",
+        "src/core/oauth-provider.ts:267-326 performs dynamic client registration with direct INSERT.",
+        "src/core/oauth-provider.ts:274:registerClient",
+        "src/core/oauth-provider.ts:287:updateClient",
+        "src/core/oauth-provider.ts:664-697 joins oauth_clients during access-token verification.",
+        "src/core/oauth-provider.ts:871-957 directly reads deleted state, TTL, and source grants during confidential-client and client-credentials flows.",
+        "src/core/oauth-provider.ts:client-revocation paths"
+      ],
+      "notes": [
+        "Normal persistent OAuth handling and worker budget enforcement currently require SELECT, and DCR/token administration currently requires mutations. This is credential, scope, source-grant, and budget authority; broad runtime table ACL should be replaced by narrowly scoped client lookup/register/update/revoke routines.",
+        "Serve OAuth client lifecycle.",
+        "DELETE is excluded from gbrain_runtime; destructive revoke-client belongs to a separately governed admin path."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "oauth_codes",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/core/oauth-provider.ts:485-495 inserts authorization-code hashes and bound PKCE/resource-owner grants.",
+        "src/core/oauth-provider.ts:486:createAuthorizationCode",
+        "src/core/oauth-provider.ts:512-519 selects the PKCE challenge with client and expiry predicates.",
+        "src/core/oauth-provider.ts:513:consumeAuthorizationCode",
+        "src/core/oauth-provider.ts:545-560 consumes a code atomically using DELETE ... RETURNING with client, redirect URI, and expiry binding.",
+        "src/core/oauth-provider.ts:547:consumeAuthorizationCode",
+        "src/core/oauth-provider.ts:973-975 deletes expired codes during the persistent server sweep."
+      ],
+      "notes": [
+        "Authorization-code lifecycle.",
+        "Normal OAuth authorization and exchange require these operations, but direct ACL is not recommended. A hardened routine must retain single-use consumption and all current client/redirect/expiry predicates."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "oauth_tokens",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/commands/serve-http.ts:5161-5163 deletes all tokens for a revoked client.",
+        "src/core/oauth-provider.ts:1097-1123 inserts access and refresh token hashes.",
+        "src/core/oauth-provider.ts:596-640 atomically consumes refresh tokens with DELETE ... RETURNING.",
+        "src/core/oauth-provider.ts:597:issueToken",
+        "src/core/oauth-provider.ts:664-752 verifies access tokens with a direct SELECT joined to oauth_clients.",
+        "src/core/oauth-provider.ts:670:verifyAccessToken",
+        "src/core/oauth-provider.ts:685:revokeToken",
+        "src/core/oauth-provider.ts:819-834 revokes only the caller client's token with direct DELETE.",
+        "src/core/oauth-provider.ts:964-976 sweeps expired access/refresh tokens with direct DELETE."
+      ],
+      "notes": [
+        "OAuth access/refresh-token lifecycle.",
+        "The persistent OAuth server genuinely exercises all listed commands today. The atomic DELETE ... RETURNING rotation/redeem semantics must be preserved in any SECURITY DEFINER replacement; granting direct table access broadly exposes bearer-token hashes and grant snapshots."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "op_checkpoint_paths",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/op-checkpoint.ts:135 checkpoint/path load",
+        "src/core/op-checkpoint.ts:135:loadOpCheckpoint",
+        "src/core/op-checkpoint.ts:21 checkpoint path insertion",
+        "src/core/op-checkpoint.ts:21:APPEND_PATHS_SQL",
+        "src/core/op-checkpoint.ts:277 checkpoint path cleanup",
+        "src/core/op-checkpoint.ts:277:clearOpCheckpoint"
+      ],
+      "notes": [
+        "Durable sync/operation checkpoint child rows.",
+        "No direct UPDATE path found."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "op_checkpoints",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/op-checkpoint.ts:135-196 checkpoint load/upsert",
+        "src/core/op-checkpoint.ts:138:loadOpCheckpoint",
+        "src/core/op-checkpoint.ts:17-21 schema/access primitives",
+        "src/core/op-checkpoint.ts:17:APPEND_PATHS_SQL",
+        "src/core/op-checkpoint.ts:196:recordCompleted",
+        "src/core/op-checkpoint.ts:277:clearOpCheckpoint",
+        "src/core/source-ingest/executor.ts:1058 appendCompleted",
+        "src/core/source-ingest/executor.ts:1080 clearOpCheckpoint",
+        "src/core/source-ingest/executor.ts:887-892 loadOpCheckpoint"
+      ],
+      "notes": [
+        "Checkpoint upserts require INSERT and UPDATE.",
+        "INSERT ON CONFLICT DO UPDATE requires UPDATE."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "page_aliases",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:5129:rewriteLinks",
+        "src/core/postgres-engine.ts:5152:setPageAliases",
+        "src/core/postgres-engine.ts:5155:setPageAliases"
+      ],
+      "notes": [
+        "Alias replacement uses DELETE followed by INSERT ON CONFLICT DO NOTHING."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "page_generation_clock",
+      "commands": [],
+      "disposition": "DENY_RUNTIME_NO_GRANT",
+      "source_classification": "EXACT_CANDIDATE_TRACE",
+      "evidence": [
+        "G5-RUNTIME-ACL-RECONCILIATION-20260828.md"
+      ],
+      "notes": [
+        "No steady-state runtime table caller; migration/catalog discovery does not justify data ACL."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "page_versions",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:4847 page-version insertion",
+        "src/core/postgres-engine.ts:4847:createVersion",
+        "src/core/postgres-engine.ts:4861:getVersions",
+        "src/core/postgres-engine.ts:4862-4905 version reads",
+        "src/core/postgres-engine.ts:4892:getVersion",
+        "src/core/source-ingest/executor.ts:947-948 prior version lookup"
+      ],
+      "notes": [
+        "No source-ingest runtime UPDATE or DELETE path found.",
+        "Page version history."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "pages",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/last-retrieved.ts:173-203 bumpLastRetrievedAt",
+        "src/core/postgres-engine.ts:1030:getPage",
+        "src/core/postgres-engine.ts:1097 page upsert implementation",
+        "src/core/postgres-engine.ts:1097:putPage",
+        "src/core/postgres-engine.ts:1125:deletePage",
+        "src/core/postgres-engine.ts:1182:softDeletePage",
+        "src/core/source-ingest/executor.ts:1063-1065 failed-create cleanup",
+        "src/core/source-ingest/executor.ts:234-240 and 844-851 source-ingest page joins",
+        "src/core/source-ingest/executor.ts:861-925 getPage/restorePage",
+        "src/core/source-ingest/executor.ts:983-999 importFromContent/write-through/getPage"
+      ],
+      "notes": [
+        "Core page relation. Writes also invoke search-vector and generation trigger routines; those routines do not add another table-command class for pages.",
+        "DELETE includes soft/hard page cleanup paths exposed by built-in worker handlers. A retrieval-only serve sink needs only UPDATE plus its configuration SELECT."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "portal_access_request_grants",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/core/portal-access-control.ts:358-369 reads requested and approved capabilities.",
+        "src/core/portal-access-control.ts:366:getRequest",
+        "src/core/portal-access-control.ts:442-447 inserts requested capability rows.",
+        "src/core/portal-access-control.ts:444:createRequest",
+        "src/core/portal-access-control.ts:493-538 validates the complete decision shape before updating approved_read and approved_write.",
+        "src/core/portal-access-control.ts:534:approveRequest",
+        "src/schema.sql:1829-1843 constrains write-implies-read and prevents approval beyond the requested capabilities."
+      ],
+      "notes": [
+        "Portal access-request workflow used by serve.",
+        "These rows are subordinate to the request state machine. Direct INSERT/UPDATE should be excluded once request-create and request-decide routines atomically manage both request tables."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "portal_access_requests",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/core/portal-access-control.ts:348-399 gets and lists access requests.",
+        "src/core/portal-access-control.ts:353:getRequest",
+        "src/core/portal-access-control.ts:393:listRequests",
+        "src/core/portal-access-control.ts:429-459 creates a pending request transactionally.",
+        "src/core/portal-access-control.ts:439:createRequest",
+        "src/core/portal-access-control.ts:480-574 locks a pending request, checks expectedVersion and decision shape, then updates decision metadata and version.",
+        "src/core/portal-access-control.ts:567:approveRequest",
+        "src/schema.sql:1815-1827 defines constrained request statuses and a positive version."
+      ],
+      "notes": [
+        "Portal access-request workflow used by serve.",
+        "Request creation and decision are state transitions, not generic table writes. Hardened routines should bind the authenticated actor internally and preserve status/version checks and audit insertion."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "portal_acl_audit",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/commands/serve-http.ts:1346-1355 reads the latest audit actor/time for admin correlation.",
+        "src/commands/serve-http.ts:1349:portal ACL audit endpoint",
+        "src/core/portal-access-control-migration.ts:374-411 appends import audit records during the dedicated migration path.",
+        "src/core/portal-access-control.ts:119-145 appends before/after audit state for every repository mutation.",
+        "src/core/portal-access-control.ts:135:appendAudit",
+        "src/schema.sql:1906-1915 installs portal_acl_audit_append_only() as a trigger guard rejecting UPDATE and DELETE."
+      ],
+      "notes": [
+        "Append-only audit; schema trigger rejects UPDATE/DELETE rather than requiring them.",
+        "Append-only enforcement does not prevent forged actor/action/state values from a caller with INSERT. Audit insertion should occur inside the same hardened routines that perform ACL transitions; ordinary runtime should receive only a bounded read-back surface if needed."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "portal_source_grants",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/core/portal-access-control.ts:160-169 reads exact per-user source grants.",
+        "src/core/portal-access-control.ts:166:getUser",
+        "src/core/portal-access-control.ts:244-247 creates the mandatory personal read/write grant.",
+        "src/core/portal-access-control.ts:245:provisionUser",
+        "src/core/portal-access-control.ts:314-334 replaces managed grants with DELETE plus INSERT ... ON CONFLICT DO UPDATE.",
+        "src/core/portal-access-control.ts:315:replaceGrants",
+        "src/core/portal-access-control.ts:321:replaceGrants",
+        "src/core/portal-access-control.ts:550-563 merges approved request grants with INSERT ... ON CONFLICT DO UPDATE.",
+        "src/schema.sql:1878-1904 installs portal_acl_guard_personal_grant() to protect the personal grant from deletion, reassignment, or downgrade."
+      ],
+      "notes": [
+        "Direct mutation is broader than the repository's managed-source, optimistic-version, personal-grant, and audit invariants. Runtime should read an ACL projection and invoke hardened grant-replacement/request-decision routines for mutation.",
+        "Serve authorization/provisioning relation. Writes invoke the personal-grant guard routine, which reads portal_users."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "portal_users",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/core/portal-access-control.ts:151-189 reads users and their ACL projections.",
+        "src/core/portal-access-control.ts:155:getUser",
+        "src/core/portal-access-control.ts:186:listUsers",
+        "src/core/portal-access-control.ts:202-258 provisions users or binds a previously-null Keycloak identity transactionally.",
+        "src/core/portal-access-control.ts:217:updateUser",
+        "src/core/portal-access-control.ts:241:provisionUser",
+        "src/core/portal-access-control.ts:286-345 locks users, advances versions, and appends audit during managed-grant replacement.",
+        "src/core/portal-access-control.ts:429-459 validates an active user before creating an access request.",
+        "src/core/portal-access-control.ts:541-563 locks and version-bumps a user during request approval.",
+        "src/schema.sql:1861-1876 installs portal_acl_guard_user_identity() to prevent rebinding non-null Keycloak identities and changing personal_source_id."
+      ],
+      "notes": [
+        "Portal login/provisioning relation. Identity-guard trigger also runs on writes.",
+        "The persistent Portal currently uses a centralized repository but still has direct SQL authority. Provisioning, one-time identity binding, login timestamp updates, and version advancement should become hardened transactional routines; generic direct UPDATE would exceed those needs."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "query_cache",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/search/hybrid.ts:1867-1876 cache safety/write decision",
+        "src/core/search/query-cache.ts:150-175 cache lookup",
+        "src/core/search/query-cache.ts:161:get",
+        "src/core/search/query-cache.ts:220-250 cache insertion",
+        "src/core/search/query-cache.ts:238:put",
+        "src/core/search/query-cache.ts:263-300 stale/prune deletion",
+        "src/core/search/query-cache.ts:273:clear",
+        "src/core/search/query-cache.ts:310-336 cache statistics/update",
+        "src/core/search/query-cache.ts:330:recordHit"
+      ],
+      "notes": [
+        "Registered background sink drains pending cache writes; normal search cache lifecycle uses all four commands.",
+        "Search cache runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "raw_data",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:3684:putRawData",
+        "src/core/postgres-engine.ts:3698:putRawData",
+        "src/core/postgres-engine.ts:3721:getRawData"
+      ],
+      "notes": [
+        "Raw-data writes use upsert and therefore require UPDATE."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "search_telemetry",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/search/telemetry.ts:199:flush",
+        "src/core/search/telemetry.ts:450:readSearchStats"
+      ],
+      "notes": [
+        "Telemetry flush uses INSERT ON CONFLICT DO UPDATE."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "slug_aliases",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:5092:rewriteLinks",
+        "src/core/search/hybrid.ts:579:applyAliasResolvedBoost"
+      ],
+      "notes": [
+        "Normal runtime only reads this relation; mutation is in schema-pack/onboarding maintenance paths and was excluded.",
+        "INSERT retained for active protected worker unify-types apply path; DELETE remains governed maintenance-only."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_article_views",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/source-ingest/catalog.ts:245:listSourceArticleViewsDependingOn",
+        "src/core/source-ingest/catalog.ts:428:upsertSourceArticleView",
+        "src/core/source-ingest/catalog.ts:475:deleteSourceArticleView",
+        "src/core/source-ingest/catalog.ts:621:freezeSourceArticleView"
+      ],
+      "notes": [
+        "Source-ingest MCP/serve catalog operations."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_base_views",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/source-ingest/catalog.ts:215:listSourceBaseViewsByConnector",
+        "src/core/source-ingest/catalog.ts:293:upsertSourceBaseView",
+        "src/core/source-ingest/catalog.ts:343:deleteSourceBaseView",
+        "src/core/source-ingest/catalog.ts:353:recordBaseViewDiscovery"
+      ],
+      "notes": [
+        "Source-ingest MCP/serve catalog operations."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_connector_configs",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/commands/serve-http.ts:3955-4591 uses these helpers throughout the authenticated Source Ingest admin workflow.",
+        "src/core/source-ingest/connector-config.ts:270-285 listSourceConnectorConfigs",
+        "src/core/source-ingest/connector-config.ts:273-286 directly lists non-secret connector/source-table configuration.",
+        "src/core/source-ingest/connector-config.ts:281:listSourceConnectorConfigs",
+        "src/core/source-ingest/connector-config.ts:314-355 performs INSERT ... ON CONFLICT DO UPDATE for routing, enablement, freshness policy, and config_json.",
+        "src/core/source-ingest/connector-config.ts:323:putSourceConnectorConfig",
+        "src/core/source-ingest/executor.ts:761-766 runSourceIngestExecutor saved connector configuration",
+        "src/schema.sql:857-876 defines target-source routing, enabled state, and config_json fields."
+      ],
+      "notes": [
+        "Configuration upsert requires UPDATE.",
+        "Worker reads persisted non-secret connector configuration.",
+        "Workers need SELECT for active connector execution, while mutations are admin configuration actions. Separate read projection from an authenticated upsert routine; do not give every worker generic UPDATE over target routing or enablement."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_connector_secret_audit",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/commands/serve-http.ts:4548-4553 exposes the bounded audit helper through an authenticated admin endpoint.",
+        "src/core/source-ingest/connector-config.ts:407-414 inserts a value-free rotate audit row containing only key names.",
+        "src/core/source-ingest/connector-config.ts:409:putSourceConnectorSecrets",
+        "src/core/source-ingest/connector-config.ts:427-434 inserts a value-free delete audit row.",
+        "src/core/source-ingest/connector-config.ts:429:deleteSourceConnectorSecrets",
+        "src/core/source-ingest/connector-config.ts:438-459 performs bounded audit reads.",
+        "src/core/source-ingest/connector-config.ts:453:listSourceConnectorSecretAudit"
+      ],
+      "notes": [
+        "Append/read secret metadata audit; values are not returned by the audit reader.",
+        "Audit insertion should be inseparable from secret rotation/deletion and should derive actor/action server-side. Admin reads can be exposed through a bounded routine; direct runtime INSERT would permit fabricated audit history."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_connector_secrets",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/commands/serve-http.ts:4111-4112 and 4591 retrieve secrets for authenticated admin connector workflows.",
+        "src/core/source-ingest/connector-config.ts:358-369 listSourceConnectorSecrets/getSourceConnectorSecretConfig",
+        "src/core/source-ingest/connector-config.ts:358-380 selects and application-decrypts secret_json.",
+        "src/core/source-ingest/connector-config.ts:365:listSourceConnectorSecrets",
+        "src/core/source-ingest/connector-config.ts:383-415 rotates secrets with INSERT ... ON CONFLICT DO UPDATE and records an audit row.",
+        "src/core/source-ingest/connector-config.ts:395:putSourceConnectorSecrets",
+        "src/core/source-ingest/connector-config.ts:418-435 reads keys, deletes the secret row, and records an audit row.",
+        "src/core/source-ingest/connector-config.ts:426:deleteSourceConnectorSecrets",
+        "src/core/source-ingest/executor.ts:763-766 runSourceIngestExecutor secret merge",
+        "src/core/source-ingest/executor.ts:764 and src/core/source-ingest/source-fetch.ts:44-73 retrieve secrets during worker/source-fetch execution."
+      ],
+      "notes": [
+        "Secret rotate/delete and secret-audit writes are admin-only and excluded from the worker allowlist.",
+        "Secret upsert requires UPDATE.",
+        "Workers genuinely need usable connector credentials, but not arbitrary table SELECT. Prefer a connector/object-bound SECURITY DEFINER retrieval routine with a tightly controlled return contract, plus separate rotate/delete routines that insert value-free audit rows atomically."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_connectors",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS_TEMPORARY_SENSITIVE",
+      "source_classification": "BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION",
+      "evidence": [
+        "src/core/source-ingest/catalog.ts:128 inserts or upserts connector catalog rows.",
+        "src/core/source-ingest/catalog.ts:128:upsertSourceConnectorView",
+        "src/core/source-ingest/catalog.ts:151 reads connector catalog rows.",
+        "src/core/source-ingest/catalog.ts:151:listSourceConnectorViews",
+        "src/core/source-ingest/catalog.ts:266 deletes connectors through the catalog workflow.",
+        "src/core/source-ingest/catalog.ts:266:deleteSourceConnectorView",
+        "src/core/source-ingest/catalog.ts:275 updates last connection-test status.",
+        "src/core/source-ingest/catalog.ts:275:recordSourceConnectorTest",
+        "src/schema.sql:903-916 defines connector kind, enablement, configuration hash, and test-status fields."
+      ],
+      "notes": [
+        "Normal execution may need a connector read projection and a narrow test-result update, but catalog creation/deletion and enablement are administrative. Broad worker table mutation is not recommended.",
+        "Source-ingest MCP/serve catalog operations."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_ingest_profile_versions",
+      "commands": [
+        "INSERT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/source-ingest/store.ts:73:putSourceIngestProfile"
+      ],
+      "notes": [
+        "Append-only profile-version write; no normal direct read/update/delete found."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_ingest_profiles",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/minions/handlers/source-ingest.ts:56-66 makeSourceIngestHandler",
+        "src/core/source-ingest/executor.ts:577-584 loadProfile",
+        "src/core/source-ingest/executor.ts:579:loadProfile",
+        "src/core/source-ingest/freshness.ts:64-82 list due profiles",
+        "src/core/source-ingest/store.ts:25:listSourceIngestProfiles",
+        "src/core/source-ingest/store.ts:38:putSourceIngestProfile",
+        "src/core/source-ingest/store.ts:42:putSourceIngestProfile"
+      ],
+      "notes": [
+        "Profile mutation is admin/catalog-only, not required by runSourceIngestExecutor.",
+        "Profile write is an upsert and requires UPDATE."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_ingest_run_items",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/commands/jobs.ts:1890-1895 purge handler",
+        "src/core/source-ingest/catalog.ts:656:listSourceArticleViewRuns",
+        "src/core/source-ingest/executor.ts:1048-1069 success/failure ledger writes",
+        "src/core/source-ingest/executor.ts:653-690 appendRunItem upsert",
+        "src/core/source-ingest/executor.ts:659:appendRunItem",
+        "src/core/source-ingest/ledger.ts:16:purgeStaleSourceIngestRunItems",
+        "src/core/source-ingest/ledger.ts:9-27 purgeStaleSourceIngestRunItems",
+        "src/core/source-ingest/revert.ts:78:loadRows"
+      ],
+      "notes": [
+        "The worker executor does not read this table during a normal run; SELECT is needed by report/revert/admin surfaces, not this runtime path.",
+        "appendRunItem is an upsert, hence UPDATE."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_sync_state",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/source-ingest/executor.ts:231-240 graph-target prefetch",
+        "src/core/source-ingest/executor.ts:236:preflightOwnership",
+        "src/core/source-ingest/executor.ts:603-648 writeSyncState upsert",
+        "src/core/source-ingest/executor.ts:605:writeSyncState",
+        "src/core/source-ingest/executor.ts:787-851 incremental and identity lookups",
+        "src/core/source-ingest/executor.ts:790:loadFailedRows",
+        "src/core/source-ingest/executor.ts:972-977 managed-state lookup",
+        "src/core/source-ingest/freshness.ts:64-82 freshness join",
+        "src/core/source-ingest/freshness.ts:81:listDueProfiles"
+      ],
+      "notes": [
+        "INSERT ... ON CONFLICT DO UPDATE requires both INSERT and UPDATE.",
+        "State write is an upsert and requires UPDATE."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "source_transform_views",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/source-ingest/catalog.ts:228:listSourceTransformViewsUsingBaseViews",
+        "src/core/source-ingest/catalog.ts:369:upsertSourceTransformView",
+        "src/core/source-ingest/catalog.ts:405:deleteSourceTransformView",
+        "src/core/source-ingest/catalog.ts:414:recordTransformPreview"
+      ],
+      "notes": [
+        "Source-ingest MCP/serve catalog operations."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "sources",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/commands/autopilot-fanout.ts:272-309 per-source fanout queries",
+        "src/commands/autopilot.ts:643-683 per-source freshness dispatch",
+        "src/commands/jobs.ts:1336-1348 sync handler source resolution",
+        "src/commands/jobs.ts:1648-1693 autopilot-cycle source/archive/local_path lookup",
+        "src/commands/sync.ts:981-1036 sync anchor/status updates",
+        "src/core/postgres-engine.ts:1375:listAllSources",
+        "src/core/postgres-engine.ts:1424:updateSourceConfig",
+        "src/core/source-ingest/executor-preflight.ts:37-47 resolveSourceIngestStorageMode",
+        "src/core/sources-ops.ts:410:addSource",
+        "src/core/sources-ops.ts:696:removeSource"
+      ],
+      "notes": [
+        "Core source registry and source lifecycle.",
+        "SELECT/UPDATE are normal worker/autopilot requirements. INSERT/DELETE are needed only for built-in handlers or operations that create/purge sources; omit them from a restricted worker role if those handlers are disabled."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "subagent_messages",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/minions/handlers/subagent.ts:1067 read persisted subagent messages",
+        "src/core/minions/handlers/subagent.ts:1067:loadPriorMessages",
+        "src/core/minions/handlers/subagent.ts:1108 persist subagent message",
+        "src/core/minions/handlers/subagent.ts:1108:persistMessage",
+        "src/core/minions/transcript.ts:55:loadTranscriptRows"
+      ],
+      "notes": [
+        "Conditional on subagent jobs.",
+        "Subagent transcript persistence."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "subagent_rate_leases",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/minions/handlers/subagent.ts:1046-1076 RateLeaseUnavailableError worker integration",
+        "src/core/minions/rate-leases.ts:116:renewLease",
+        "src/core/minions/rate-leases.ts:84-130 lease acquire/renew/release SQL",
+        "src/core/minions/rate-leases.ts:84:acquireLease",
+        "src/core/minions/rate-leases.ts:89:acquireLease",
+        "src/core/minions/rate-leases.ts:99:acquireLease"
+      ],
+      "notes": [
+        "Conditional on running the built-in subagent handler.",
+        "Subagent provider-rate concurrency leases."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "subagent_tool_executions",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/cycle/patterns.ts:237 pattern evidence lookup",
+        "src/core/cycle/synthesize.ts:1030 synthesis evidence lookup",
+        "src/core/minions/handlers/subagent.ts:1039-1174 tool-execution reads and writes",
+        "src/core/minions/handlers/subagent.ts:1039:loadPriorToolsV2",
+        "src/core/minions/handlers/subagent.ts:879-901 tool-execution reservation/status",
+        "src/core/minions/handlers/subagent.ts:879:persistToolExecution",
+        "src/core/minions/handlers/subagent.ts:893:completeToolExecution",
+        "src/core/minions/transcript.ts:62:loadTranscriptRows"
+      ],
+      "notes": [
+        "Conditional on protected subagent/synthesize/patterns/consolidate jobs.",
+        "Subagent tool-call persistence."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "synthesis_evidence",
+      "commands": [
+        "INSERT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:4831:addSynthesisEvidence"
+      ],
+      "notes": [
+        "Normal runtime appends synthesis provenance; no direct normal read/update/delete found."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "tags",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/postgres-engine.ts:1300:listPages",
+        "src/core/postgres-engine.ts:3554:addTag",
+        "src/core/postgres-engine.ts:3564:removeTag",
+        "src/core/postgres-engine.ts:3582:getTags"
+      ],
+      "notes": [
+        "Core tag operations."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "take_domain_assignments",
+      "commands": [
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/calibration/domain-aggregators.ts:118:aggregateScalarBrier",
+        "src/core/calibration/domain-aggregators.ts:161:aggregateWeightedBrier",
+        "src/core/calibration/domain-aggregators.ts:204:aggregateCountBased"
+      ],
+      "notes": [
+        "No normal INSERT/UPDATE/DELETE call site was found; population appears absent or outside the inspected runtime paths."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "take_grade_cache",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/calibration/undo-wave.ts:145:undoWave",
+        "src/core/cycle/grade-takes.ts:444 grade-cache lookup",
+        "src/core/cycle/grade-takes.ts:444:gradeTakes",
+        "src/core/cycle/grade-takes.ts:545 grade-cache insertion",
+        "src/core/cycle/grade-takes.ts:545:gradeTakes"
+      ],
+      "notes": [
+        "Optional cycle/calibration runtime.",
+        "UPDATE/DELETE occur in calibration undo/admin paths, not routine grading."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "take_nudge_log",
+      "commands": [
+        "DELETE",
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/calibration/nudge.ts:115:recordNudgeFire",
+        "src/core/calibration/nudge.ts:203:resetNudgeCooldown",
+        "src/core/calibration/nudge.ts:99:checkCooldown"
+      ],
+      "notes": [
+        "Calibration nudge cooldown/audit runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "take_proposal_scan_attempts",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/cycle/propose-takes.ts:1021 attempt lookup",
+        "src/core/cycle/propose-takes.ts:1021:runProposalScan",
+        "src/core/cycle/propose-takes.ts:955-960 stale-attempt snapshot",
+        "src/core/cycle/propose-takes.ts:955:runProposalScan",
+        "src/core/cycle/propose-takes.ts:997-1004 failed-attempt snapshot",
+        "src/core/cycle/propose-takes.ts:998:runProposalScan"
+      ],
+      "notes": [
+        "Append/read history table.",
+        "Optional propose-takes cycle runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "take_proposal_scans",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/cycle/propose-takes.ts:1007:runProposalScan",
+        "src/core/cycle/propose-takes.ts:1081-1132 scan completion/failure updates",
+        "src/core/cycle/propose-takes.ts:1081:runProposalScan",
+        "src/core/cycle/propose-takes.ts:944-968 stale scan handling",
+        "src/core/cycle/propose-takes.ts:946:runProposalScan",
+        "src/core/cycle/propose-takes.ts:980-1019 scan cache/upsert"
+      ],
+      "notes": [
+        "No routine DELETE found.",
+        "Optional propose-takes cycle runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "take_proposals",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/ai-review-rounds.ts:519:ensurePendingReviewRounds",
+        "src/core/ai-review.ts:155:loadProposal",
+        "src/core/ai-review.ts:394:claimProposal",
+        "src/core/cycle/propose-takes.ts:1050-1057 proposal/review lookup",
+        "src/core/cycle/propose-takes.ts:1193-1244 proposal write and review-state update",
+        "src/core/cycle/propose-takes.ts:1229:writeProposal"
+      ],
+      "notes": [
+        "No routine DELETE found.",
+        "Take proposal and review runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "takes",
+      "commands": [
+        "INSERT",
+        "SELECT",
+        "UPDATE"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/cycle/phases/consolidate.ts:134-205 take lookup/upsert flow",
+        "src/core/cycle/phases/consolidate.ts:184-186 take source update",
+        "src/core/cycle/synthesize-concepts.ts:270-279 active take selection",
+        "src/core/postgres-engine.ts:4266 addTakesBatch",
+        "src/core/postgres-engine.ts:4323:addTakesBatch",
+        "src/core/postgres-engine.ts:4363:listTakes",
+        "src/core/postgres-engine.ts:4667:writeTakeEmbeddings",
+        "src/core/postgres-engine.ts:4704:supersedeTake"
+      ],
+      "notes": [
+        "Core takes operations; DELETE is used by forget/prune paths.",
+        "DELETE is used by explicit rebuild/administrative extraction modes, but was not established as necessary for the routine autopilot cycle.",
+        "DELETE excluded from gbrain_runtime; extract takes --rebuild requires governed admin/migration authority."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "think_ab_results",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/calibration/think-ab.ts:117:buildAbReport",
+        "src/core/calibration/think-ab.ts:69:recordThinkAbResult"
+      ],
+      "notes": [
+        "Optional calibration A/B runtime."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    },
+    {
+      "table": "timeline_entries",
+      "commands": [
+        "INSERT",
+        "SELECT"
+      ],
+      "disposition": "ALLOW_RUNTIME_EXACT_COMMANDS",
+      "source_classification": "CANDIDATE_DIRECT_RUNTIME_ACL",
+      "evidence": [
+        "src/core/fts-language.ts:34:update_page_search_vector",
+        "src/core/postgres-engine.ts:3612-3650 timeline batch insertion",
+        "src/core/postgres-engine.ts:3612:addTimelineEntry",
+        "src/core/postgres-engine.ts:3633:addTimelineEntriesBatch",
+        "src/core/postgres-engine.ts:3665:getTimeline",
+        "src/core/source-ingest/executor.ts:1014-1021 buildSourceTimelineEntries",
+        "src/core/source-ingest/executor.ts:1036 engine.addTimelineEntriesBatch",
+        "src/core/timeline-dedup-repair.ts:96:repairTimelineDuplicates"
+      ],
+      "notes": [
+        "Other maintenance handlers can delete duplicate timeline rows; source-ingest itself requires SELECT/INSERT.",
+        "SELECT is also required by update_page_search_vector when page writes fire the trigger.",
+        "DELETE excluded from gbrain_runtime; migration timeline dedup repair requires governed admin/migration authority."
+      ],
+      "review_status": "PROVISIONAL_NO_GO"
+    }
+  ],
+  "rules": {
+    "ownership": false,
+    "database_create": false,
+    "schema_create": false,
+    "truncate": false,
+    "trigger": false,
+    "references": false,
+    "grant_option": false,
+    "ddl": false,
+    "destructive_admin_cli_in_runtime": false,
+    "rls": "role-scoped command compatibility policies; not row isolation"
+  },
+  "required_acceptance": "G5-RUNTIME-TEMPORARY-SENSITIVE-ACL-ACCEPTANCE-PACKAGE.md",
+  "authorization": "NO-GO",
+  "production_mutation": false
+}

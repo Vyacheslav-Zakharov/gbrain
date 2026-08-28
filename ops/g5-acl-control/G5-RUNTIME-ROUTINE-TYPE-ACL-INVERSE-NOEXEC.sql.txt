@@ -1,0 +1,261 @@
+\set ON_ERROR_STOP on
+\echo 'NOEXEC DRAFT: deliberate exception follows; evidence only'
+DO $g5_noexec$ BEGIN RAISE EXCEPTION 'NOEXEC DRAFT: strip only after new hash, exact review, hosted proof and ACL GO'; END $g5_noexec$;
+
+-- Candidate SHA: 718c04a56dd997147b49a5c9c8161b9265a5ef71
+-- Extension allowlist SHA-256: 0523e1e57e5ebd3d907cf3e043a54e82d631227e11714f361d5153d7840c5aab
+-- Exact executor: session_user=current_user=postgres and postgres is superuser.
+-- Production authorization: NO-GO
+SET search_path TO pg_catalog, public;
+DO $g5_inverse_pre$
+BEGIN
+  IF session_user <> 'postgres' OR current_user <> 'postgres' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='postgres' AND rolsuper) THEN RAISE EXCEPTION 'exact postgres superuser executor required'; END IF;
+  IF current_setting('search_path') <> 'pg_catalog, public' THEN RAISE EXCEPTION 'search_path mismatch'; END IF;
+  IF EXISTS (WITH expected(signature,owner_name) AS (VALUES
+      ('public.auto_enable_rls()','gbrain_migration_owner'),
+      ('public.bump_page_generation_clock_fn()','gbrain_migration_owner'),
+      ('public.bump_page_generation_fn()','gbrain_migration_owner'),
+      ('public.notify_minion_job_change()','gbrain_migration_owner'),
+      ('public.portal_acl_audit_append_only()','gbrain_migration_owner'),
+      ('public.portal_acl_guard_personal_grant()','gbrain_migration_owner'),
+      ('public.portal_acl_guard_user_identity()','gbrain_migration_owner'),
+      ('public.update_chunk_search_vector()','gbrain_migration_owner'),
+      ('public.update_page_search_vector()','gbrain_migration_owner'),
+      ('public.gin_extract_query_trgm(text,internal,smallint,internal,internal,internal,internal)','postgres'),
+      ('public.gin_extract_value_trgm(text,internal)','postgres'),
+      ('public.gin_trgm_consistent(internal,smallint,text,integer,internal,internal,internal,internal)','postgres'),
+      ('public.gin_trgm_triconsistent(internal,smallint,text,integer,internal,internal,internal)','postgres'),
+      ('public.gtrgm_compress(internal)','postgres'),
+      ('public.gtrgm_consistent(internal,text,smallint,oid,internal)','postgres'),
+      ('public.gtrgm_decompress(internal)','postgres'),
+      ('public.gtrgm_distance(internal,text,smallint,oid,internal)','postgres'),
+      ('public.gtrgm_in(cstring)','postgres'),
+      ('public.gtrgm_options(internal)','postgres'),
+      ('public.gtrgm_out(gtrgm)','postgres'),
+      ('public.gtrgm_penalty(internal,internal,internal)','postgres'),
+      ('public.gtrgm_picksplit(internal,internal)','postgres'),
+      ('public.gtrgm_same(gtrgm,gtrgm,internal)','postgres'),
+      ('public.gtrgm_union(internal,internal)','postgres'),
+      ('public.set_limit(real)','postgres'),
+      ('public.show_limit()','postgres'),
+      ('public.show_trgm(text)','postgres'),
+      ('public.similarity_dist(text,text)','postgres'),
+      ('public.similarity_op(text,text)','postgres'),
+      ('public.similarity(text,text)','postgres'),
+      ('public.strict_word_similarity_commutator_op(text,text)','postgres'),
+      ('public.strict_word_similarity_dist_commutator_op(text,text)','postgres'),
+      ('public.strict_word_similarity_dist_op(text,text)','postgres'),
+      ('public.strict_word_similarity_op(text,text)','postgres'),
+      ('public.strict_word_similarity(text,text)','postgres'),
+      ('public.word_similarity_commutator_op(text,text)','postgres'),
+      ('public.word_similarity_dist_commutator_op(text,text)','postgres'),
+      ('public.word_similarity_dist_op(text,text)','postgres'),
+      ('public.word_similarity_op(text,text)','postgres'),
+      ('public.word_similarity(text,text)','postgres'),
+      ('public.armor(bytea)','postgres'),
+      ('public.armor(bytea,text[],text[])','postgres'),
+      ('public.crypt(text,text)','postgres'),
+      ('public.dearmor(text)','postgres'),
+      ('public.decrypt(bytea,bytea,text)','postgres'),
+      ('public.decrypt_iv(bytea,bytea,bytea,text)','postgres'),
+      ('public.digest(bytea,text)','postgres'),
+      ('public.digest(text,text)','postgres'),
+      ('public.encrypt(bytea,bytea,text)','postgres'),
+      ('public.encrypt_iv(bytea,bytea,bytea,text)','postgres'),
+      ('public.gen_random_bytes(integer)','postgres'),
+      ('public.gen_salt(text)','postgres'),
+      ('public.gen_salt(text,integer)','postgres'),
+      ('public.hmac(bytea,bytea,text)','postgres'),
+      ('public.hmac(text,text,text)','postgres'),
+      ('public.pgp_armor_headers(text)','postgres'),
+      ('public.pgp_key_id(bytea)','postgres'),
+      ('public.pgp_pub_decrypt(bytea,bytea)','postgres'),
+      ('public.pgp_pub_decrypt_bytea(bytea,bytea)','postgres'),
+      ('public.pgp_pub_decrypt_bytea(bytea,bytea,text)','postgres'),
+      ('public.pgp_pub_decrypt_bytea(bytea,bytea,text,text)','postgres'),
+      ('public.pgp_pub_decrypt(bytea,bytea,text)','postgres'),
+      ('public.pgp_pub_decrypt(bytea,bytea,text,text)','postgres'),
+      ('public.pgp_pub_encrypt_bytea(bytea,bytea)','postgres'),
+      ('public.pgp_pub_encrypt_bytea(bytea,bytea,text)','postgres'),
+      ('public.pgp_pub_encrypt(text,bytea)','postgres'),
+      ('public.pgp_pub_encrypt(text,bytea,text)','postgres'),
+      ('public.pgp_sym_decrypt_bytea(bytea,text)','postgres'),
+      ('public.pgp_sym_decrypt_bytea(bytea,text,text)','postgres'),
+      ('public.pgp_sym_decrypt(bytea,text)','postgres'),
+      ('public.pgp_sym_decrypt(bytea,text,text)','postgres'),
+      ('public.pgp_sym_encrypt_bytea(bytea,text)','postgres'),
+      ('public.pgp_sym_encrypt_bytea(bytea,text,text)','postgres'),
+      ('public.pgp_sym_encrypt(text,text)','postgres'),
+      ('public.pgp_sym_encrypt(text,text,text)','postgres'),
+      ('public.gen_random_uuid()','postgres'),
+      ('public.array_to_vector(double precision[],integer,boolean)','postgres'),
+      ('public.array_to_vector(integer[],integer,boolean)','postgres'),
+      ('public.array_to_vector(numeric[],integer,boolean)','postgres'),
+      ('public.array_to_vector(real[],integer,boolean)','postgres'),
+      ('public.avg(vector)','postgres'),
+      ('public.cosine_distance(vector,vector)','postgres'),
+      ('public.hnswhandler(internal)','postgres'),
+      ('public.inner_product(vector,vector)','postgres'),
+      ('public.ivfflathandler(internal)','postgres'),
+      ('public.l1_distance(vector,vector)','postgres'),
+      ('public.l2_distance(vector,vector)','postgres'),
+      ('public.sum(vector)','postgres'),
+      ('public.vector_accum(double precision[],vector)','postgres'),
+      ('public.vector_add(vector,vector)','postgres'),
+      ('public.vector_avg(double precision[])','postgres'),
+      ('public.vector_cmp(vector,vector)','postgres'),
+      ('public.vector_combine(double precision[],double precision[])','postgres'),
+      ('public.vector_dims(vector)','postgres'),
+      ('public.vector_eq(vector,vector)','postgres'),
+      ('public.vector_ge(vector,vector)','postgres'),
+      ('public.vector_gt(vector,vector)','postgres'),
+      ('public.vector_in(cstring,oid,integer)','postgres'),
+      ('public.vector_l2_squared_distance(vector,vector)','postgres'),
+      ('public.vector_le(vector,vector)','postgres'),
+      ('public.vector_lt(vector,vector)','postgres'),
+      ('public.vector_mul(vector,vector)','postgres'),
+      ('public.vector_negative_inner_product(vector,vector)','postgres'),
+      ('public.vector_ne(vector,vector)','postgres'),
+      ('public.vector_norm(vector)','postgres'),
+      ('public.vector_out(vector)','postgres'),
+      ('public.vector_recv(internal,oid,integer)','postgres'),
+      ('public.vector_send(vector)','postgres'),
+      ('public.vector_spherical_distance(vector,vector)','postgres'),
+      ('public.vector_sub(vector,vector)','postgres'),
+      ('public.vector_to_float4(vector,integer,boolean)','postgres'),
+      ('public.vector_typmod_in(cstring[])','postgres'),
+      ('public.vector(vector,integer,boolean)','postgres')
+  ), expected_oids AS (SELECT to_regprocedure(signature) AS oid,owner_name FROM expected), actual AS (SELECT p.oid,r.rolname AS owner_name FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner WHERE n.nspname='public') SELECT 1 FROM expected_oids WHERE oid IS NULL UNION ALL SELECT 1 FROM ((SELECT * FROM expected_oids EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected_oids)) d) THEN RAISE EXCEPTION 'exact routine signature/owner mismatch'; END IF;
+END
+$g5_inverse_pre$;
+
+-- DIAGNOSTIC SEMANTIC INVERSE ONLY; NOT THE AUTHORIZED RELEASE ROLLBACK.
+-- Exact pre-commit rollback is transaction ROLLBACK. Exact post-commit rollback is the approved full database restore.
+
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT USAGE ON TYPES TO PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE gbrain_migration_owner IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
+ALTER DEFAULT PRIVILEGES FOR ROLE gbrain_migration_owner IN SCHEMA public GRANT USAGE ON TYPES TO PUBLIC;
+REVOKE USAGE ON TYPE public.gtrgm FROM gbrain_runtime;
+GRANT USAGE ON TYPE public.gtrgm TO PUBLIC;
+REVOKE USAGE ON TYPE public.vector FROM gbrain_runtime;
+GRANT USAGE ON TYPE public.vector TO PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.cosine_distance(vector,vector) FROM gbrain_runtime;
+REVOKE EXECUTE ON FUNCTION public.gen_random_uuid() FROM gbrain_runtime;
+REVOKE EXECUTE ON FUNCTION public.similarity_op(text,text) FROM gbrain_runtime;
+REVOKE EXECUTE ON FUNCTION public.similarity(text,text) FROM gbrain_runtime;
+GRANT EXECUTE ON FUNCTION public.vector(vector,integer,boolean) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_typmod_in(cstring[]) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_to_float4(vector,integer,boolean) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_sub(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_spherical_distance(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_send(vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_recv(internal,oid,integer) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_out(vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_norm(vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_ne(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_negative_inner_product(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_mul(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_lt(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_le(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_l2_squared_distance(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_in(cstring,oid,integer) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_gt(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_ge(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_eq(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_dims(vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_combine(double precision[],double precision[]) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_cmp(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_avg(double precision[]) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_add(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.vector_accum(double precision[],vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.sum(vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.l2_distance(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.l1_distance(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.ivfflathandler(internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.inner_product(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.hnswhandler(internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.cosine_distance(vector,vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.avg(vector) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.array_to_vector(real[],integer,boolean) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.array_to_vector(numeric[],integer,boolean) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.array_to_vector(integer[],integer,boolean) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.array_to_vector(double precision[],integer,boolean) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gen_random_uuid() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_sym_encrypt(text,text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_sym_encrypt(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_sym_encrypt_bytea(bytea,text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_sym_encrypt_bytea(bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_sym_decrypt(bytea,text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_sym_decrypt(bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_sym_decrypt_bytea(bytea,text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_sym_decrypt_bytea(bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_encrypt(text,bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_encrypt(text,bytea) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_encrypt_bytea(bytea,bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_encrypt_bytea(bytea,bytea) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_decrypt(bytea,bytea,text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_decrypt(bytea,bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_decrypt_bytea(bytea,bytea,text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_decrypt_bytea(bytea,bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_decrypt_bytea(bytea,bytea) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_pub_decrypt(bytea,bytea) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_key_id(bytea) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgp_armor_headers(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.hmac(text,text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.hmac(bytea,bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gen_salt(text,integer) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gen_salt(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gen_random_bytes(integer) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.encrypt_iv(bytea,bytea,bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.encrypt(bytea,bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.digest(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.digest(bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.decrypt_iv(bytea,bytea,bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.decrypt(bytea,bytea,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.dearmor(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.crypt(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.armor(bytea,text[],text[]) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.armor(bytea) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.word_similarity(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.word_similarity_op(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.word_similarity_dist_op(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.word_similarity_dist_commutator_op(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.word_similarity_commutator_op(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.strict_word_similarity(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.strict_word_similarity_op(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.strict_word_similarity_dist_op(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.strict_word_similarity_dist_commutator_op(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.strict_word_similarity_commutator_op(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.similarity(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.similarity_op(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.similarity_dist(text,text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.show_trgm(text) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.show_limit() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.set_limit(real) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_union(internal,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_same(gtrgm,gtrgm,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_picksplit(internal,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_penalty(internal,internal,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_out(gtrgm) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_options(internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_in(cstring) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_distance(internal,text,smallint,oid,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_decompress(internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_consistent(internal,text,smallint,oid,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gtrgm_compress(internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gin_trgm_triconsistent(internal,smallint,text,integer,internal,internal,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gin_trgm_consistent(internal,smallint,text,integer,internal,internal,internal,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gin_extract_value_trgm(text,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.gin_extract_query_trgm(text,internal,smallint,internal,internal,internal,internal) TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.update_page_search_vector() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.update_chunk_search_vector() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.portal_acl_guard_user_identity() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.portal_acl_guard_personal_grant() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.portal_acl_audit_append_only() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.notify_minion_job_change() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.bump_page_generation_fn() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.bump_page_generation_clock_fn() TO PUBLIC;
+GRANT EXECUTE ON FUNCTION public.auto_enable_rls() TO PUBLIC;
+
+-- This file restores effective PUBLIC behavior but may materialize explicit ACL arrays; it makes no exact-catalog rollback claim.

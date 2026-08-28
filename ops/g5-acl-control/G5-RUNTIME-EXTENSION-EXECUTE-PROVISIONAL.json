@@ -1,0 +1,120 @@
+{
+  "schema_version": 2,
+  "date": "2026-08-28",
+  "candidate_sha": "718c04a56dd997147b49a5c9c8161b9265a5ef71",
+  "production_mutation": false,
+  "target_role": "gbrain_runtime",
+  "extensions": {
+    "pg_trgm": {
+      "owner_live": "gbrain",
+      "target_owner_disposition": "gbrain_migration_owner per reviewed topology package",
+      "execute_candidates": [
+        {
+          "signature": "similarity(text,text)",
+          "reason": "direct fuzzy-resolution/search SQL",
+          "citations": [
+            "src/core/postgres-engine.ts:1630-1633",
+            "src/core/postgres-engine.ts:2983-2987",
+            "src/core/postgres-engine.ts:4575-4578",
+            "src/core/entities/resolve.ts:346-350"
+          ]
+        },
+        {
+          "signature": "similarity_op(text,text)",
+          "reason": "backing procedure for public text % text operator used by fuzzy search",
+          "operator": "%"
+        }
+      ],
+      "type_usage_candidates": [
+        "gtrgm"
+      ],
+      "unresolved": [
+        "whether GiST/GIN opclass support procedures require caller EXECUTE after PUBLIC revoke; must be proven on hosted PostgreSQL 16"
+      ]
+    },
+    "pgcrypto": {
+      "owner_live": "gbrain",
+      "target_owner_disposition": "gbrain_migration_owner per reviewed topology package",
+      "execute_candidates": [
+        {
+          "signature": "public.gen_random_uuid()",
+          "reason": "access_tokens.id database default is used by runtime INSERT that omits id",
+          "citations": [
+            "src/schema.sql:601-608",
+            "src/commands/auth.ts:87-93"
+          ]
+        }
+      ],
+      "explicit_denials": [
+        "no runtime EXECUTE on crypt/digest/hmac/encrypt/decrypt/PGP functions from current SQL evidence"
+      ]
+    },
+    "vector": {
+      "owner_live": "postgres",
+      "target_owner_disposition": "remain admin-owned unless separately approved",
+      "execute_candidates": [
+        {
+          "signature": "cosine_distance(vector,vector)",
+          "reason": "backing procedure for public vector <=> vector operator used throughout runtime search/query cache",
+          "operator": "<=>",
+          "citations": [
+            "src/core/postgres-engine.ts:2056-2075",
+            "src/core/postgres-engine.ts:4174-4177",
+            "src/core/postgres-engine.ts:4600-4612",
+            "src/core/search/query-cache.ts:157-169"
+          ]
+        }
+      ],
+      "type_usage_candidates": [
+        "vector"
+      ],
+      "unresolved": [
+        "whether HNSW access-method/opclass support procedures require caller EXECUTE after PUBLIC revoke; must be proven on hosted PostgreSQL 16",
+        "whether runtime paths use additional vector operators under configuration not reached by the exact source search"
+      ]
+    }
+  },
+  "rules": {
+    "generic_execute_all_functions": false,
+    "application_trigger_function_direct_execute": false,
+    "public_execute_revoke_requires_hosted_positive_and_negative_tests": true
+  },
+  "authorization": "NO-GO",
+  "executor": {
+    "session_user": "postgres",
+    "current_user": "postgres",
+    "superuser": true,
+    "reason": "vector and 104 extension-member routines are postgres-owned; routine/type ACL mutation requires authenticated admin authority"
+  },
+  "target_ownership": {
+    "application_routines": {
+      "owner": "gbrain_migration_owner",
+      "count": 9
+    },
+    "extension_member_routines": {
+      "owner": "postgres",
+      "count": 104
+    },
+    "extensions": {
+      "pg_trgm": "gbrain_migration_owner",
+      "pgcrypto": "gbrain_migration_owner",
+      "vector": "postgres"
+    }
+  },
+  "default_acl": {
+    "owners": [
+      "gbrain_migration_owner",
+      "postgres"
+    ],
+    "schema": "public",
+    "revoke_public": [
+      "EXECUTE ON FUNCTIONS",
+      "USAGE ON TYPES"
+    ]
+  },
+  "rollback": {
+    "pre_commit": "transaction rollback",
+    "post_commit": "approved full database restore only",
+    "sql_inverse": "diagnostic semantic rehearsal only"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "decision": "APPROVED",
+  "approved_at": "2026-08-28T23:19:32+05:00",
+  "owner": "Vyacheslav Zakharov",
+  "package": "G5-RUNTIME-TEMPORARY-SENSITIVE-ACL-ACCEPTANCE-PACKAGE.md",
+  "package_sha256": "c5a5fafc805e6d4f71fc9917f6ced61d2ce40ae93e441ee589d31dad4a7e942b",
+  "scope": {
+    "target_role": "gbrain_runtime NOBYPASSRLS",
+    "temporary_sensitive_tables": 15,
+    "role_shape": "single compatibility command union for deployed services plus read-only trusted CLI reporting",
+    "oauth_clients_delete_in_runtime": false,
+    "rls_row_isolation_claimed": false
+  },
+  "expiry": {
+    "rule": "earlier_of_cutover_plus_30_calendar_days_or_absolute_deadline",
+    "absolute_deadline": "2026-10-01T00:00:00+05:00",
+    "silent_extension_allowed": false,
+    "expiry_action": "production writers remain HOLD unless hardened replacement or separately approved disposition is proven"
+  },
+  "mandatory_follow_up": [
+    "key-scoped config interface",
+    "Portal authority routines",
+    "connector-secret routines and connector-specific execution identity",
+    "OAuth/token routines",
+    "service-role split assessment",
+    "hosted PostgreSQL positive/negative and rollback proof"
+  ],
+  "production_mutation_authorized": false,
+  "acl_cutover_authorized": false,
+  "separate_literal_artifact_bound_acl_go_required": true
+}

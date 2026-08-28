@@ -1,0 +1,100 @@
+{
+  "schema_version": 1,
+  "date": "2026-08-28",
+  "status": "read_only_deployment_evidence",
+  "production_mutation": false,
+  "system_scope_units": {
+    "gbrain-persistent.service": "inactive",
+    "gbrain-worker.service": "inactive",
+    "gbrain-ingest.service": "inactive"
+  },
+  "user_scope_units": {
+    "gbrain-persistent.service": {
+      "active": true,
+      "main_pid": 364332,
+      "exec_path": "/home/avers/.gbrain/start-gbrain-persistent.sh",
+      "allowlisted_modes": {
+        "GBRAIN_ADMIN_AUTH_MODE": "keycloak",
+        "GBRAIN_PORTAL_ACL_MODE": "db"
+      }
+    },
+    "gbrain-worker.service": {
+      "active": true,
+      "main_pid": 364335,
+      "exec_path": "/bin/bash",
+      "allowlisted_modes": {
+        "GBRAIN_PORTAL_ACL_MODE": "db"
+      }
+    },
+    "gbrain-ingest.service": {
+      "active": true,
+      "main_pid": 364337,
+      "exec_path": "/home/avers/services/gbrain-ingest/run.sh",
+      "allowlisted_modes": {}
+    }
+  },
+  "migration_mode_observation": "GBRAIN_MIGRATION_MODE absent from allowlisted process environments; Stage 1 commit is hosted-validated but not production-deployed",
+  "connector_catalog": {
+    "enabled_count": 3,
+    "connectors": [
+      {
+        "connector_id": "appsheet-avto",
+        "kind": "appsheet",
+        "enabled": true,
+        "last_test_ok": true
+      },
+      {
+        "connector_id": "appsheet-protokolist",
+        "kind": "appsheet",
+        "enabled": true,
+        "last_test_ok": true
+      },
+      {
+        "connector_id": "postgres-zp",
+        "kind": "postgres",
+        "enabled": true,
+        "last_test_ok": true,
+        "schema": "gbrain",
+        "allowed_objects": [
+          "companies",
+          "departments",
+          "positions",
+          "employees"
+        ]
+      }
+    ]
+  },
+  "database_role_census": {
+    "read_only_session": {
+      "session_user": "gbrain",
+      "current_user": "gbrain",
+      "database": "gbrain",
+      "default_transaction_read_only": true
+    },
+    "observed_application_sessions": [
+      {
+        "usename": "gbrain",
+        "application_name": "[empty]",
+        "client": "loopback",
+        "state": "idle",
+        "count": 1
+      },
+      {
+        "usename": "gbrain",
+        "application_name": "postgres.js",
+        "client": "loopback",
+        "state": "idle",
+        "count": 1
+      }
+    ],
+    "query_text_recorded": false,
+    "implication": "current deployed services share legacy principal gbrain; a single gbrain_runtime command union preserves this topology unless a separately reviewed service-role split is introduced"
+  },
+  "acl_implications": [
+    "Portal database authority is active; portal_* tables cannot be excluded as disabled",
+    "source connector catalog/config/secret paths are active; connector tables cannot be excluded as disabled",
+    "the enabled Postgres connector does not allowlist public intake_* objects; no connector SELECT exception exists for those seven tables",
+    "active user services currently remain on the legacy deployment and were not restarted or reconfigured"
+  ],
+  "secrets_recorded": false
+}

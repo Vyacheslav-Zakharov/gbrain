@@ -1,0 +1,209 @@
+\set ON_ERROR_STOP on
+\echo 'NOEXEC DRAFT: deliberate exception follows; evidence only'
+DO $g5_noexec$ BEGIN RAISE EXCEPTION 'NOEXEC ownership transfer: strip only after cross-database census, new hash, review, hosted proof and ACL GO'; END $g5_noexec$;
+
+-- Exact role/ownership/database/schema transition fragment.
+-- Candidate SHA: 718c04a56dd997147b49a5c9c8161b9265a5ef71
+-- Production authorization: NO-GO
+-- External prerequisite: authenticated admin census proves legacy gbrain owns no object in any other database/tablespace/shared scope except database gbrain.
+
+BEGIN;
+SET LOCAL lock_timeout='5s';
+SET LOCAL statement_timeout='60s';
+SELECT pg_advisory_xact_lock(7671003001);
+SET LOCAL search_path TO pg_catalog, public;
+DO $g5_owner_pre$
+BEGIN
+  IF session_user<>'postgres' OR current_user<>'postgres' OR NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='postgres' AND rolsuper) THEN RAISE EXCEPTION 'exact postgres superuser executor required'; END IF;
+  IF current_database()<>'gbrain' OR current_setting('search_path')<>'pg_catalog, public' THEN RAISE EXCEPTION 'database/search_path mismatch'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('gbrain_migration_owner','gbrain_migrator','gbrain_runtime')) THEN RAISE EXCEPTION 'target role collision'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='gbrain' AND rolcanlogin AND NOT rolsuper AND NOT rolcreaterole AND NOT rolcreatedb AND NOT rolreplication AND rolbypassrls AND rolinherit) THEN RAISE EXCEPTION 'legacy role baseline mismatch'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_database d JOIN pg_roles r ON r.oid=d.datdba WHERE d.datname='gbrain' AND r.rolname='gbrain') OR (SELECT count(*) FROM pg_database d JOIN pg_roles r ON r.oid=d.datdba WHERE r.rolname='gbrain')<>1 THEN RAISE EXCEPTION 'legacy database ownership scope mismatch'; END IF;
+  IF EXISTS (SELECT 1 FROM pg_tablespace t JOIN pg_roles r ON r.oid=t.spcowner WHERE r.rolname='gbrain') THEN RAISE EXCEPTION 'legacy tablespace ownership residue'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON r.oid=n.nspowner WHERE n.nspname='public' AND r.rolname='pg_database_owner') THEN RAISE EXCEPTION 'public schema owner baseline mismatch'; END IF;
+  IF EXISTS (WITH expected(name) AS (VALUES
+      ('access_tokens'),
+      ('ai_review_assignments'),
+      ('ai_review_events'),
+      ('ai_review_revisions'),
+      ('ai_review_rounds'),
+      ('ai_review_votes'),
+      ('budget_ledger'),
+      ('budget_reservations'),
+      ('calibration_profiles'),
+      ('code_edges_chunk'),
+      ('code_edges_symbol'),
+      ('code_traversal_cache'),
+      ('concept_proposals'),
+      ('config'),
+      ('content_chunks'),
+      ('context_volunteer_events'),
+      ('conversation_parser_llm_cache'),
+      ('dream_verdicts'),
+      ('drift_decisions'),
+      ('eval_candidates'),
+      ('eval_capture_failures'),
+      ('eval_contradictions_cache'),
+      ('eval_contradictions_runs'),
+      ('eval_takes_quality_runs'),
+      ('extract_rollup_7d'),
+      ('facts'),
+      ('file_migration_ledger'),
+      ('files'),
+      ('gbrain_cycle_locks'),
+      ('ingest_log'),
+      ('intake_batches'),
+      ('intake_events'),
+      ('intake_files'),
+      ('intake_link_selections'),
+      ('intake_new_objects'),
+      ('intake_object_link_selections'),
+      ('intake_review_items'),
+      ('links'),
+      ('mcp_request_log'),
+      ('mcp_spend_log'),
+      ('mcp_spend_reservations'),
+      ('migration_impact_log'),
+      ('minion_attachments'),
+      ('minion_budget_log'),
+      ('minion_inbox'),
+      ('minion_jobs'),
+      ('minion_lease_pressure_log'),
+      ('minion_self_fix_log'),
+      ('oauth_clients'),
+      ('oauth_codes'),
+      ('oauth_tokens'),
+      ('op_checkpoint_paths'),
+      ('op_checkpoints'),
+      ('page_aliases'),
+      ('page_generation_clock'),
+      ('page_versions'),
+      ('pages'),
+      ('portal_access_request_grants'),
+      ('portal_access_requests'),
+      ('portal_acl_audit'),
+      ('portal_source_grants'),
+      ('portal_users'),
+      ('query_cache'),
+      ('raw_data'),
+      ('search_telemetry'),
+      ('slug_aliases'),
+      ('source_article_views'),
+      ('source_base_views'),
+      ('source_connector_configs'),
+      ('source_connector_secret_audit'),
+      ('source_connector_secrets'),
+      ('source_connectors'),
+      ('source_ingest_profile_versions'),
+      ('source_ingest_profiles'),
+      ('source_ingest_run_items'),
+      ('source_sync_state'),
+      ('source_transform_views'),
+      ('sources'),
+      ('subagent_messages'),
+      ('subagent_rate_leases'),
+      ('subagent_tool_executions'),
+      ('synthesis_evidence'),
+      ('tags'),
+      ('take_domain_assignments'),
+      ('take_grade_cache'),
+      ('take_nudge_log'),
+      ('take_proposal_scan_attempts'),
+      ('take_proposal_scans'),
+      ('take_proposals'),
+      ('takes'),
+      ('think_ab_results'),
+      ('timeline_entries')
+  ), actual AS (SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname='public' AND c.relkind IN ('r','p') AND r.rolname='gbrain') SELECT 1 FROM ((SELECT * FROM expected EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)) d) THEN RAISE EXCEPTION 'legacy table owner set mismatch'; END IF;
+  IF EXISTS (WITH expected(name) AS (VALUES
+      ('ai_review_assignments_id_seq'),
+      ('ai_review_events_id_seq'),
+      ('ai_review_revisions_id_seq'),
+      ('ai_review_rounds_id_seq'),
+      ('ai_review_votes_id_seq'),
+      ('calibration_profiles_id_seq'),
+      ('code_edges_chunk_id_seq'),
+      ('code_edges_symbol_id_seq'),
+      ('code_traversal_cache_id_seq'),
+      ('concept_proposals_id_seq'),
+      ('content_chunks_id_seq'),
+      ('context_volunteer_events_id_seq'),
+      ('drift_decisions_id_seq'),
+      ('eval_candidates_id_seq'),
+      ('eval_capture_failures_id_seq'),
+      ('eval_takes_quality_runs_id_seq'),
+      ('facts_id_seq'),
+      ('files_id_seq'),
+      ('ingest_log_id_seq'),
+      ('intake_events_id_seq'),
+      ('links_id_seq'),
+      ('mcp_request_log_id_seq'),
+      ('mcp_spend_log_id_seq'),
+      ('migration_impact_log_id_seq'),
+      ('minion_attachments_id_seq'),
+      ('minion_budget_log_id_seq'),
+      ('minion_inbox_id_seq'),
+      ('minion_jobs_id_seq'),
+      ('minion_lease_pressure_log_id_seq'),
+      ('minion_self_fix_log_id_seq'),
+      ('page_aliases_id_seq'),
+      ('page_generation_clock_seq'),
+      ('page_versions_id_seq'),
+      ('pages_id_seq'),
+      ('portal_acl_audit_id_seq'),
+      ('raw_data_id_seq'),
+      ('slug_aliases_id_seq'),
+      ('source_connector_secret_audit_id_seq'),
+      ('subagent_messages_id_seq'),
+      ('subagent_rate_leases_id_seq'),
+      ('subagent_tool_executions_id_seq'),
+      ('tags_id_seq'),
+      ('take_nudge_log_id_seq'),
+      ('take_proposal_scan_attempts_id_seq'),
+      ('take_proposal_scans_id_seq'),
+      ('take_proposals_id_seq'),
+      ('takes_id_seq'),
+      ('think_ab_results_id_seq'),
+      ('timeline_entries_id_seq')
+  ), actual AS (SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname='public' AND c.relkind='S' AND r.rolname='gbrain') SELECT 1 FROM ((SELECT * FROM expected EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)) d) THEN RAISE EXCEPTION 'legacy sequence owner set mismatch'; END IF;
+  IF EXISTS (WITH expected(signature) AS (VALUES
+      ('public.auto_enable_rls()'),
+      ('public.bump_page_generation_clock_fn()'),
+      ('public.bump_page_generation_fn()'),
+      ('public.notify_minion_job_change()'),
+      ('public.portal_acl_audit_append_only()'),
+      ('public.portal_acl_guard_personal_grant()'),
+      ('public.portal_acl_guard_user_identity()'),
+      ('public.update_chunk_search_vector()'),
+      ('public.update_page_search_vector()')
+  ), expected_oids AS (SELECT to_regprocedure(signature) oid FROM expected), actual AS (SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner WHERE n.nspname='public' AND r.rolname='gbrain') SELECT 1 FROM ((SELECT oid FROM expected_oids EXCEPT SELECT oid FROM actual) UNION ALL (SELECT oid FROM actual EXCEPT SELECT oid FROM expected_oids)) d) THEN RAISE EXCEPTION 'legacy application routine owner set mismatch'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_extension e JOIN pg_roles r ON r.oid=e.extowner WHERE e.extname IN ('pg_trgm','pgcrypto') GROUP BY r.rolname HAVING r.rolname='gbrain' AND count(*)=2) OR NOT EXISTS (SELECT 1 FROM pg_extension e JOIN pg_roles r ON r.oid=e.extowner WHERE e.extname='vector' AND r.rolname='postgres') THEN RAISE EXCEPTION 'extension owner baseline mismatch'; END IF;
+  IF (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.deptype='e' JOIN pg_extension e ON e.oid=d.refobjid JOIN pg_roles r ON r.oid=p.proowner WHERE n.nspname='public' AND e.extname IN ('pg_trgm','pgcrypto','vector') AND r.rolname='postgres')<>104 THEN RAISE EXCEPTION 'extension member owner baseline mismatch'; END IF;
+END
+$g5_owner_pre$;
+
+CREATE ROLE gbrain_migration_owner NOLOGIN NOINHERIT NOBYPASSRLS;
+CREATE ROLE gbrain_migrator LOGIN NOINHERIT NOBYPASSRLS PASSWORD NULL;
+CREATE ROLE gbrain_runtime LOGIN NOINHERIT NOBYPASSRLS PASSWORD NULL;
+GRANT gbrain_migration_owner TO gbrain_migrator WITH INHERIT FALSE, SET TRUE;
+
+REASSIGN OWNED BY gbrain TO gbrain_migration_owner;
+ALTER ROLE gbrain NOLOGIN NOINHERIT NOBYPASSRLS PASSWORD NULL;
+
+SET ROLE gbrain_migration_owner;
+REVOKE ALL PRIVILEGES ON DATABASE gbrain FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON DATABASE gbrain FROM gbrain_migrator;
+REVOKE ALL PRIVILEGES ON DATABASE gbrain FROM gbrain_runtime;
+GRANT CONNECT ON DATABASE gbrain TO gbrain_migrator;
+GRANT CONNECT ON DATABASE gbrain TO gbrain_runtime;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM gbrain_migrator;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM gbrain_runtime;
+GRANT USAGE ON SCHEMA public TO gbrain_runtime;
+RESET ROLE;
+ALTER ROLE gbrain_runtime IN DATABASE gbrain SET search_path TO pg_catalog, public;
+ALTER ROLE gbrain_migrator IN DATABASE gbrain SET search_path TO pg_catalog, public;
+
+-- Include the bound table/sequence/RLS and routine/type fragments here inside this same transaction after their NOEXEC guards are removed by the hosted/release assembler.
+-- Execute the exact forward postcondition verifier in this transaction and again from a fresh administrator session after commit.
+COMMIT;

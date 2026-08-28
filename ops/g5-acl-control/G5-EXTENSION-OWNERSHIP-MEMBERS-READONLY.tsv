@@ -1,0 +1,5 @@
+extension	version	owner	schema	member_count
+pg_trgm	1.6	gbrain	public	46
+pgcrypto	1.3	gbrain	public	36
+plpgsql	1.0	postgres	pg_catalog	4
+vector	0.6.0	postgres	public	72

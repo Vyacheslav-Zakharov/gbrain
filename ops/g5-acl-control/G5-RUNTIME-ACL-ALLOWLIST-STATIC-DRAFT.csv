@@ -1,0 +1,82 @@
+﻿table,commands,classification,security_direct_access_recommended,surfaces,confidence
+access_tokens,"INSERT,SELECT,UPDATE",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql,high
+ai_review_assignments,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+ai_review_events,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,enabled autopilot proposal/review phase",high
+ai_review_revisions,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,enabled autopilot proposal/review phase",high
+ai_review_rounds,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+ai_review_votes,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+budget_ledger,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+budget_reservations,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+calibration_profiles,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,enabled autopilot calibration_profile phase",high
+code_edges_chunk,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,reindex/resolve_symbol_edges worker and enabled autopilot global maintenance","high,medium-high"
+code_edges_symbol,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,reindex/resolve_symbol_edges worker and enabled autopilot global maintenance","high,medium-high"
+code_traversal_cache,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+concept_proposals,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,enabled autopilot synthesize_concepts phase",high
+config,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,True,"direct_sql,worker handler configuration, autopilot state, source-ingest gates and background sinks",high
+content_chunks,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,sync/import/source-ingest and embed/embed-backfill/autopilot phases",high
+context_volunteer_events,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,serve/watch volunteer-events background sink and autopilot purge phase",high
+conversation_parser_llm_cache,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+dream_verdicts,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+eval_candidates,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,serve/CLI/subagent eval-capture background sink when capture is enabled",high
+eval_capture_failures,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,eval-capture background sink failure path",high
+eval_contradictions_cache,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+eval_contradictions_runs,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+eval_takes_quality_runs,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+extract_rollup_7d,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+facts,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,facts background sink, extract_facts/consolidate/autopilot and extraction handlers","high,medium-high"
+files,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+gbrain_cycle_locks,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,supervisor, sync/cycle/autopilot and source-ingest mutual exclusion",high
+ingest_log,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,facts background sink and ingest/import worker observability",high
+links,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,source-ingest graph projection and extract/autopilot graph phases",high
+mcp_request_log,"INSERT,SELECT",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,"direct_sql,serve-side request audit sink",high
+mcp_spend_log,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+mcp_spend_reservations,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+minion_attachments,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,jobs attachment API",high
+minion_budget_log,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+minion_inbox,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,minion parent/child coordination and job inbox",high
+minion_jobs,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,gbrain jobs work; jobs submit/get/list/remove/cancel/retry/prune; supervisor/autopilot queue dispatch; serve-side job enqueue",high
+minion_lease_pressure_log,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,worker lease-pressure audit and jobs stats",high
+minion_self_fix_log,INSERT,CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+oauth_clients,"DELETE,INSERT,SELECT,UPDATE",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql,high
+oauth_codes,"DELETE,INSERT,SELECT",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql,high
+oauth_tokens,"DELETE,INSERT,SELECT",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql,high
+op_checkpoint_paths,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,source-ingest and resumable worker operations",high
+op_checkpoints,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,source-ingest resumability and other long-running worker operations",high
+page_aliases,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+page_versions,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,source-ingest/import/write-through version history",high
+pages,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql_and_triggered_routines,source-ingest, sync/import/extract/autopilot handlers and last-retrieved background sink",high
+portal_access_request_grants,"INSERT,SELECT,UPDATE",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql,high
+portal_access_requests,"INSERT,SELECT,UPDATE",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql,high
+portal_acl_audit,"INSERT,SELECT",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql,high
+portal_source_grants,"DELETE,INSERT,SELECT,UPDATE",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql_and_triggered_routine,high
+portal_users,"INSERT,SELECT,UPDATE",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql_and_triggered_routine,high
+query_cache,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,serve/CLI/subagent search-cache background sink",high
+raw_data,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+search_telemetry,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+slug_aliases,SELECT,CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+source_article_views,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+source_base_views,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+source_connector_configs,"INSERT,SELECT,UPDATE",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,"direct_sql,source-ingest worker connector setup",high
+source_connector_secret_audit,"INSERT,SELECT",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql,high
+source_connector_secrets,"DELETE,INSERT,SELECT,UPDATE",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,"direct_sql,source-ingest worker live connector credentials",high
+source_connectors,"DELETE,INSERT,SELECT,UPDATE",BLOCKED_PENDING_HARDENED_ROUTINE_OR_PROVEN_EXCLUSION,False,direct_sql,high
+source_ingest_profile_versions,INSERT,CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+source_ingest_profiles,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,source-ingest worker and source-refresh scheduler",high
+source_ingest_run_items,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,source-ingest worker ledger and autopilot/purge retention",high
+source_sync_state,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,source-ingest execution and source-refresh due detection",high
+source_transform_views,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+sources,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,sync handler, enabled autopilot, source-ingest and destructive source purge","high,medium-high"
+subagent_messages,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,subagent minion handler",high
+subagent_rate_leases,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,subagent minion handler when enabled/claimed",high
+subagent_tool_executions,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,subagent handler and LLM-bearing autopilot phases",high
+synthesis_evidence,INSERT,CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+tags,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+take_domain_assignments,SELECT,CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+take_grade_cache,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,enabled autopilot grade_takes phase",high
+take_nudge_log,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+take_proposal_scan_attempts,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,enabled autopilot propose_takes phase",high
+take_proposal_scans,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,enabled autopilot propose_takes phase",high
+take_proposals,"INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,enabled autopilot propose_takes phase",high
+takes,"DELETE,INSERT,SELECT,UPDATE",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql,enabled autopilot extract/grade/consolidate/synthesize phases","high,medium-high"
+think_ab_results,"INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,direct_sql,high
+timeline_entries,"DELETE,INSERT,SELECT",CANDIDATE_DIRECT_RUNTIME_ACL,,"direct_sql_and_triggered_routine,source-ingest change intelligence and extract/autopilot timeline phases",high

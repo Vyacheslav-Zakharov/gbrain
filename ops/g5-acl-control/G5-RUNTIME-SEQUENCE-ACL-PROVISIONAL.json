@@ -1,0 +1,549 @@
+{
+  "schema_version": 2,
+  "date": "2026-08-28",
+  "candidate_sha": "718c04a56dd997147b49a5c9c8161b9265a5ef71",
+  "live_sequence_count": 49,
+  "production_mutation": false,
+  "rules": {
+    "serial_insert": "USAGE only; no UPDATE/setval",
+    "independent_clock": "USAGE for nextval and SELECT for last_value",
+    "ownership": "migration owner, never runtime"
+  },
+  "entries": [
+    {
+      "sequence": "ai_review_assignments_id_seq",
+      "table": "ai_review_assignments",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "ai_review_events_id_seq",
+      "table": "ai_review_events",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "ai_review_revisions_id_seq",
+      "table": "ai_review_revisions",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "ai_review_rounds_id_seq",
+      "table": "ai_review_rounds",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "ai_review_votes_id_seq",
+      "table": "ai_review_votes",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "calibration_profiles_id_seq",
+      "table": "calibration_profiles",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "code_edges_chunk_id_seq",
+      "table": "code_edges_chunk",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "code_edges_symbol_id_seq",
+      "table": "code_edges_symbol",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "code_traversal_cache_id_seq",
+      "table": "code_traversal_cache",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "concept_proposals_id_seq",
+      "table": "concept_proposals",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "content_chunks_id_seq",
+      "table": "content_chunks",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "context_volunteer_events_id_seq",
+      "table": "context_volunteer_events",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "drift_decisions_id_seq",
+      "table": "drift_decisions",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [],
+      "reason": "no candidate runtime INSERT at exact source draft",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "eval_candidates_id_seq",
+      "table": "eval_candidates",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "eval_capture_failures_id_seq",
+      "table": "eval_capture_failures",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "eval_takes_quality_runs_id_seq",
+      "table": "eval_takes_quality_runs",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "facts_id_seq",
+      "table": "facts",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "files_id_seq",
+      "table": "files",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "ingest_log_id_seq",
+      "table": "ingest_log",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "intake_events_id_seq",
+      "table": "intake_events",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [],
+      "reason": "no candidate runtime INSERT at exact source draft",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "links_id_seq",
+      "table": "links",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "mcp_request_log_id_seq",
+      "table": "mcp_request_log",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "mcp_spend_log_id_seq",
+      "table": "mcp_spend_log",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "migration_impact_log_id_seq",
+      "table": "migration_impact_log",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [],
+      "reason": "no candidate runtime INSERT at exact source draft",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "minion_attachments_id_seq",
+      "table": "minion_attachments",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "minion_budget_log_id_seq",
+      "table": "minion_budget_log",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "minion_inbox_id_seq",
+      "table": "minion_inbox",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "minion_jobs_id_seq",
+      "table": "minion_jobs",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "minion_lease_pressure_log_id_seq",
+      "table": "minion_lease_pressure_log",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "minion_self_fix_log_id_seq",
+      "table": "minion_self_fix_log",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "page_aliases_id_seq",
+      "table": "page_aliases",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "page_generation_clock_seq",
+      "table": null,
+      "column": null,
+      "dependency_type": null,
+      "runtime_privileges": [
+        "USAGE",
+        "SELECT"
+      ],
+      "reason": "page-write trigger nextval plus query-cache last_value read; confirmed by exact-candidate trace",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "page_versions_id_seq",
+      "table": "page_versions",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "pages_id_seq",
+      "table": "pages",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "portal_acl_audit_id_seq",
+      "table": "portal_acl_audit",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "raw_data_id_seq",
+      "table": "raw_data",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "slug_aliases_id_seq",
+      "table": "slug_aliases",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "active protected worker unify-types INSERT into slug_aliases",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "source_connector_secret_audit_id_seq",
+      "table": "source_connector_secret_audit",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "subagent_messages_id_seq",
+      "table": "subagent_messages",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "subagent_rate_leases_id_seq",
+      "table": "subagent_rate_leases",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "subagent_tool_executions_id_seq",
+      "table": "subagent_tool_executions",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "tags_id_seq",
+      "table": "tags",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "take_nudge_log_id_seq",
+      "table": "take_nudge_log",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "take_proposal_scan_attempts_id_seq",
+      "table": "take_proposal_scan_attempts",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "take_proposal_scans_id_seq",
+      "table": "take_proposal_scans",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "take_proposals_id_seq",
+      "table": "take_proposals",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "takes_id_seq",
+      "table": "takes",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "think_ab_results_id_seq",
+      "table": "think_ab_results",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    },
+    {
+      "sequence": "timeline_entries_id_seq",
+      "table": "timeline_entries",
+      "column": "id",
+      "dependency_type": "a",
+      "runtime_privileges": [
+        "USAGE"
+      ],
+      "reason": "table has candidate runtime INSERT",
+      "status": "PROVISIONAL"
+    }
+  ],
+  "authorization": "NO-GO"
+}

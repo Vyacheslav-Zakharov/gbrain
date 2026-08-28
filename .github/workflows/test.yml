@@ -76,7 +76,7 @@ jobs:
       - name: Cache status
         run: |
           if [ "${{ steps.lookup.outputs.cache-hit }}" = "true" ]; then
-            echo "✓ cache HIT for hash ${{ steps.compute.outputs.hash }} — test jobs will skip"
+            echo "✓ cache HIT for hash ${{ steps.compute.outputs.hash }} — cacheable jobs skip; exact-SHA G5 ACL still runs"
           else
             echo "✗ cache MISS for hash ${{ steps.compute.outputs.hash }} — full suite will run"
           fi
@@ -172,6 +172,118 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/gbrain_clone
           R1_FENCE_LIFT_TEST_ACK: "1"
         run: bun test test/e2e/r1-fence-lift-postgres.test.ts --timeout=60000
+
+  g5-acl-hosted-postgres:
+    needs: cache-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: pgvector/pgvector:0.6.0-pg16@sha256:b740286128ce8e232fe0de3c8db2267d91aedc598dfbeaefb7ffb0b79ceef1b3
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ACL_BINDING_SHA256: c7814602e959baf2e8d5c9a05e6c18757f97431b9f9ee9ecacdf38de10581acd
+    steps:
+      - name: Initialize pre-checkout failure receipt
+        run: |
+          mkdir -p "$RUNNER_TEMP/g5-acl-hosted-bootstrap"
+          printf '%s\n' '{"complete":false,"status":"pre-checkout","production_db_or_services_touched":false}' > "$RUNNER_TEMP/g5-acl-hosted-bootstrap/receipt.json"
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+      - name: Initialize workspace failure receipt
+        run: |
+          mkdir -p g5-acl-hosted-receipt
+          cp "$RUNNER_TEMP/g5-acl-hosted-bootstrap/receipt.json" g5-acl-hosted-receipt/receipt.json
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: 1.3.13
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
+        with:
+          path: ~/.bun/install/cache
+          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+      - run: bun install --frozen-lockfile
+      - name: Bind run nonce and control state
+        run: timeout 30s bun scripts/g5-acl-hosted.ts init
+      - name: Verify frozen application candidate and control package
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          git cat-file -e '718c04a56dd997147b49a5c9c8161b9265a5ef71^{commit}'
+          test "$(git rev-parse '718c04a56dd997147b49a5c9c8161b9265a5ef71^{commit}')" = "718c04a56dd997147b49a5c9c8161b9265a5ef71"
+          git diff --exit-code 718c04a56dd997147b49a5c9c8161b9265a5ef71 -- src package.json bun.lock
+          (cd ops/g5-acl-control && sha256sum -c G5-ACL-DRAFT-SHA256SUMS)
+          test "$(sha256sum ops/g5-acl-control/G5-ACL-DRAFT-SHA256SUMS | cut -d' ' -f1)" = "$ACL_BINDING_SHA256"
+          POSTGRES_IMAGE_ID=$(timeout 15s docker inspect --format='{{.Image}}' "$POSTGRES_CONTAINER")
+          timeout 15s docker image inspect --format='{{range .RepoDigests}}{{println .}}{{end}}' "$POSTGRES_IMAGE_ID" | grep -Fx 'pgvector/pgvector@sha256:b740286128ce8e232fe0de3c8db2267d91aedc598dfbeaefb7ffb0b79ceef1b3'
+      - name: Create exact baseline and validated full backup
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          timeout 180s bun scripts/g5-acl-hosted.ts baseline
+          timeout 120s docker exec "$POSTGRES_CONTAINER" pg_dump -U postgres --format=custom --create --file=/tmp/gbrain.dump gbrain
+          timeout 60s docker exec "$POSTGRES_CONTAINER" pg_restore --list /tmp/gbrain.dump >/tmp/gbrain-restore.list
+          test -s /tmp/gbrain-restore.list
+          timeout 30s docker exec "$POSTGRES_CONTAINER" pg_dump -U postgres --schema-only --no-comments gbrain > /tmp/baseline-schema.sql
+          sha256sum /tmp/baseline-schema.sql > g5-acl-hosted-receipt/baseline-schema.sha256
+          rm /tmp/baseline-schema.sql
+          timeout 30s docker cp "$POSTGRES_CONTAINER:/tmp/gbrain.dump" /tmp/gbrain.dump
+          sha256sum /tmp/gbrain.dump > /tmp/gbrain.dump.sha256
+      - name: Prove forced transactional rollback, apply exact S2, then run probes
+        run: |
+          timeout 180s bun scripts/g5-acl-hosted.ts forced-rollback
+          timeout 180s bun scripts/g5-acl-hosted.ts apply
+          timeout 300s bun scripts/g5-acl-hosted.ts probe
+      - name: Prove post-commit full restore and zero target-role residue
+        if: always()
+        env:
+          POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          on_exit() { rc=$?; if [ "$rc" -ne 0 ]; then timeout 30s bun scripts/g5-acl-hosted.ts failure-receipt || true; fi; exit "$rc"; }
+          trap on_exit EXIT
+          if [ ! -s /tmp/gbrain.dump ]; then
+            timeout 30s bun scripts/g5-acl-hosted.ts failure-receipt
+            trap - EXIT
+            exit 0
+          fi
+          sha256sum -c /tmp/gbrain.dump.sha256
+          timeout 30s docker exec "$POSTGRES_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='gbrain' AND pid<>pg_backend_pid()"
+          timeout 30s docker exec "$POSTGRES_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U postgres -d postgres -c "DROP DATABASE gbrain"
+          timeout 60s bun scripts/g5-acl-hosted.ts cleanup
+          timeout 30s docker cp /tmp/gbrain.dump "$POSTGRES_CONTAINER:/tmp/gbrain.dump"
+          EXPECTED_DUMP_SHA=$(cut -d' ' -f1 /tmp/gbrain.dump.sha256)
+          test "$(timeout 15s docker exec "$POSTGRES_CONTAINER" sha256sum /tmp/gbrain.dump | cut -d' ' -f1)" = "$EXPECTED_DUMP_SHA"
+          timeout 180s docker exec "$POSTGRES_CONTAINER" pg_restore -U postgres -d postgres --exit-on-error /tmp/gbrain.dump
+          timeout 30s bun scripts/g5-acl-hosted.ts set-recovery-credential
+          timeout 120s bun scripts/g5-acl-hosted.ts verify-restored
+          timeout 30s docker exec "$POSTGRES_CONTAINER" pg_dump -U postgres --schema-only --no-comments gbrain > /tmp/restored-schema.sql
+          sha256sum /tmp/restored-schema.sql > g5-acl-hosted-receipt/restored-schema.sha256
+          rm /tmp/restored-schema.sql
+          test "$(cut -d' ' -f1 g5-acl-hosted-receipt/baseline-schema.sha256)" = "$(cut -d' ' -f1 g5-acl-hosted-receipt/restored-schema.sha256)"
+          timeout 30s bun scripts/g5-acl-hosted.ts receipt
+          test "$(timeout 15s docker exec "$POSTGRES_CONTAINER" psql -X -At -U postgres -d postgres -c "SELECT count(*) FROM pg_roles WHERE rolname IN ('gbrain_runtime','gbrain_migrator','gbrain_migration_owner')")" = "0"
+          cp /tmp/gbrain.dump.sha256 g5-acl-hosted-receipt/backup-dump.sha256
+          trap - EXIT
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        if: always()
+        with:
+          name: g5-acl-hosted-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            g5-acl-hosted-receipt/
+            ${{ runner.temp }}/g5-acl-hosted-bootstrap/
+          retention-days: 30
+          if-no-files-found: error
 
   slow-eval-longmemeval:
     # Dedicated runner for the LongMemEval end-to-end test file. The file
@@ -272,7 +384,7 @@ jobs:
   # entry written when tests hadn't actually passed).
   # ──────────────────────────────────────────────────────────────────────
   cache-write:
-    needs: [cache-check, gitleaks, verify, serial-tests, r1-fence-lift-postgres, slow-eval-longmemeval, slow-entity-resolve-perf, test]
+    needs: [cache-check, gitleaks, verify, serial-tests, r1-fence-lift-postgres, g5-acl-hosted-postgres, slow-eval-longmemeval, slow-entity-resolve-perf, test]
     if: success() && needs.cache-check.outputs.hit != 'true' && inputs.force_full != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -290,13 +402,12 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────
   # test-status: the single user-visible "did CI pass?" check.
-  # Runs always (if: always()), succeeds when EITHER cache-check.hit==true
-  # OR all gated jobs (gitleaks, verify, serial-tests, R1 fence-lift DB,
-  # slow tests, matrix test) succeeded.
+  # Runs always (if: always()). A cache hit still requires the exact-SHA G5
+  # ACL hosted job; a cache miss requires every gated job.
   # Branch protection (when configured) gates on this single job name.
   # ──────────────────────────────────────────────────────────────────────
   test-status:
-    needs: [cache-check, gitleaks, verify, serial-tests, r1-fence-lift-postgres, slow-eval-longmemeval, slow-entity-resolve-perf, test]
+    needs: [cache-check, gitleaks, verify, serial-tests, r1-fence-lift-postgres, g5-acl-hosted-postgres, slow-eval-longmemeval, slow-entity-resolve-perf, test]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -309,21 +420,26 @@ jobs:
           VERIFY="${{ needs.verify.result }}"
           SERIAL="${{ needs.serial-tests.result }}"
           R1_FENCE="${{ needs.r1-fence-lift-postgres.result }}"
+          G5_ACL="${{ needs.g5-acl-hosted-postgres.result }}"
           SLOW_EVAL="${{ needs.slow-eval-longmemeval.result }}"
           SLOW_PERF="${{ needs.slow-entity-resolve-perf.result }}"
           TEST="${{ needs.test.result }}"
           echo "cache-check.result=$CACHE_CHECK  cache-check.hit=$HIT"
-          echo "gitleaks=$GITLEAKS  verify=$VERIFY  serial-tests=$SERIAL  r1-fence-lift-postgres=$R1_FENCE  slow-eval-longmemeval=$SLOW_EVAL  slow-entity-resolve-perf=$SLOW_PERF  test=$TEST"
+          echo "gitleaks=$GITLEAKS  verify=$VERIFY  serial-tests=$SERIAL  r1-fence-lift-postgres=$R1_FENCE  g5-acl-hosted-postgres=$G5_ACL  slow-eval-longmemeval=$SLOW_EVAL  slow-entity-resolve-perf=$SLOW_PERF  test=$TEST"
           if [ "$CACHE_CHECK" != "success" ]; then
             echo "✗ cache-check did not succeed (got $CACHE_CHECK) — CI fail"
             exit 1
           fi
           if [ "$HIT" = "true" ]; then
-            echo "✓ cache HIT for hash ${{ needs.cache-check.outputs.hash }} — CI green"
-            exit 0
+            if [ "$G5_ACL" = "success" ]; then
+              echo "✓ cache HIT plus exact-SHA G5 ACL hosted proof — CI green"
+              exit 0
+            fi
+            echo "✗ cache HIT cannot bypass G5 ACL hosted proof (got $G5_ACL)"
+            exit 1
           fi
           # Cache miss: every gated job must have succeeded.
-          for r in "$GITLEAKS" "$VERIFY" "$SERIAL" "$R1_FENCE" "$SLOW_EVAL" "$SLOW_PERF" "$TEST"; do
+          for r in "$GITLEAKS" "$VERIFY" "$SERIAL" "$R1_FENCE" "$G5_ACL" "$SLOW_EVAL" "$SLOW_PERF" "$TEST"; do
             if [ "$r" != "success" ]; then
               echo "✗ gated job did not succeed (got $r) — CI fail"
               exit 1

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "status": "stage1_hosted_validated_production_no_go",
+  "date": "2026-08-28",
+  "base_sha": "14592bab92a572292e93fe4bf6363ac2212751ba",
+  "candidate_sha": "718c04a56dd997147b49a5c9c8161b9265a5ef71",
+  "tree_sha": "b2b0eb03230ac447cf1b3d7cad8fa18468ae2e8d",
+  "branch": "ops/gbrain-r1-abort-prepare-20260828",
+  "remote": "Vyacheslav-Zakharov/gbrain",
+  "hosted": {
+    "workflow": "Test",
+    "run_id": 33190352938,
+    "run_attempt": 1,
+    "conclusion": "success",
+    "force_full": true,
+    "cache_hit": false,
+    "content_hash": "471f95f932b3c999",
+    "jobs_total": 20,
+    "jobs_success": 19,
+    "jobs_skipped_expected": ["cache-write"],
+    "r1_fence_lift_postgres": "success",
+    "exact_sha_receipt": {
+      "candidate_sha": "718c04a56dd997147b49a5c9c8161b9265a5ef71",
+      "checked_out_sha": "718c04a56dd997147b49a5c9c8161b9265a5ef71",
+      "complete": true,
+      "gate_result": "success",
+      "sha256": "8dbb75a67ef576024797a97f11957bd05005f42511bad2975847fe5ac732022f"
+    }
+  },
+  "verified_contracts": [
+    "runtime mode never performs automatic DDL and fails closed on pending or untrusted schema watermark",
+    "schema watermark is a canonical safe decimal exactly equal to LATEST_VERSION",
+    "governed runner authenticates as gbrain_migrator and SET ROLE gbrain_migration_owner",
+    "governed runner pins and reads back search_path before privileged work",
+    "gbrain_runtime cannot SET ROLE migrator or owner",
+    "writer fence is SECURITY INVOKER and owner-identity-bound",
+    "runtime cannot bypass writer fence with GUC or advisory lock",
+    "production status and dry-run require complete fence inventory",
+    "abort evidence includes canonical pre_abort_state",
+    "production handoff nonce ledger cannot be silently reinitialized after prior abort"
+  ],
+  "local_bounded_verification": {
+    "typecheck": "pass",
+    "targeted_units": "pass",
+    "runner_compile": "pass",
+    "offline_coordinator_regressions": "pass",
+    "local_postgresql_e2e": "not_run_by_policy"
+  },
+  "production_mutation": false,
+  "production_authorization": "NO-GO",
+  "remaining_external_gates": [
+    "admin-only production topology and exact ordered HBA/ident evidence",
+    "exact runtime table/sequence/routine ACL allowlist",
+    "command-specific RLS compatibility and inverse packages",
+    "root-owned peer-authenticated migrator launcher package",
+    "runtime credential delivery and service switch package",
+    "backup and rollback recovery proof",
+    "independent exact-package reviews",
+    "separate literal artifact-bound ACL GO"
+  ]
+}

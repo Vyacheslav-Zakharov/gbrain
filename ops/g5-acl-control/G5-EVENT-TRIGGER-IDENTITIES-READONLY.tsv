@@ -1,0 +1,2 @@
+event_trigger	event	enabled	owner	function_signature	tags
+auto_rls_on_create_table	ddl_command_end	O	gbrain	auto_enable_rls()	CREATE TABLE,CREATE TABLE AS,SELECT INTO
