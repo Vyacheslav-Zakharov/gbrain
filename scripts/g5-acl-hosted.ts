@@ -199,7 +199,7 @@ async function initBaseline(): Promise<void> {
         [sequenceNames],
       );
       const pre = before[0];
-      if (pre?.total !== '49' || pre.target !== '49' || pre.wrong_owner !== '0' || pre.acl_tuples !== '49' || pre.invalid_acl_tuples !== '0' || pre.acl_dependencies !== '0') throw new Error('sequence ACL fixture pre-state mismatch');
+      if (pre?.total !== '49' || pre.target !== '49' || pre.wrong_owner !== '0' || pre.acl_tuples !== '49' || pre.invalid_acl_tuples !== '0' || pre.acl_dependencies !== '0') throw new Error(`sequence ACL fixture pre-state mismatch: ${JSON.stringify(pre ?? {})}`);
       const updated = await tx.unsafe<{ relname: string }[]>(
         `UPDATE pg_class c SET relacl=NULL FROM pg_namespace n
          WHERE n.oid=c.relnamespace AND n.nspname='public' AND c.relkind='S'
