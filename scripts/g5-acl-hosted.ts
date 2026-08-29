@@ -119,46 +119,6 @@ async function assertBaselineSequenceAcls(sql: postgres.Sql): Promise<number> {
   return 49;
 }
 
-async function reconstructRestoredSequenceAcls(sql: postgres.Sql): Promise<number> {
-  const frozen = rowsFromTsv('G5-RUNTIME-SEQUENCES-CATALOG-READONLY.tsv');
-  const names = frozen.map((row) => row.sequence_name);
-  if (frozen.length !== 49 || new Set(names).size !== 49 || frozen.some((row) => row.sequence_schema !== 'public' || row.owner !== 'gbrain' || row.acl !== '[NULL]')) throw new Error('frozen sequence ACL reconstruction mismatch');
-  return sql.begin(async (tx) => {
-    const before = await tx.unsafe<{ total: string; target: string; wrong_owner: string; acl_tuples: string; invalid_acl_tuples: string; acl_dependencies: string }[]>(`
-      WITH target AS (
-        SELECT c.oid,c.relowner,c.relacl FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind='S' AND c.relname=ANY($1::text[])
-      )
-      SELECT
-        (SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='S') total,
-        (SELECT count(*)::text FROM target) target,
-        (SELECT count(*)::text FROM target t JOIN pg_roles r ON r.oid=t.relowner WHERE r.rolname<>'gbrain') wrong_owner,
-        (SELECT count(a.privilege_type)::text FROM target t LEFT JOIN LATERAL aclexplode(t.relacl) a ON true) acl_tuples,
-        (SELECT count(*)::text FROM target t LEFT JOIN LATERAL aclexplode(t.relacl) a ON true
-         WHERE a.grantor IS DISTINCT FROM t.relowner OR a.grantee IS DISTINCT FROM t.relowner
-            OR a.privilege_type IS DISTINCT FROM 'USAGE' OR a.is_grantable IS DISTINCT FROM false) invalid_acl_tuples,
-        (SELECT count(*)::text FROM pg_shdepend d JOIN target t ON d.classid='pg_class'::regclass AND d.objid=t.oid AND d.objsubid=0
-         WHERE d.dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND d.deptype='a') acl_dependencies`,
-      [names],
-    );
-    const pre = before[0];
-    if (pre?.total !== '49' || pre.target !== '49' || pre.wrong_owner !== '0' || pre.acl_tuples !== '49' || pre.invalid_acl_tuples !== '0' || pre.acl_dependencies !== '0') throw new Error(`restored sequence ACL pre-state mismatch: ${JSON.stringify(pre ?? {})}`);
-    const updated = await tx.unsafe<{ relname: string }[]>(
-      `UPDATE pg_class c SET relacl=NULL FROM pg_namespace n
-       WHERE n.oid=c.relnamespace AND n.nspname='public' AND c.relkind='S'
-         AND c.relname=ANY($1::text[]) RETURNING c.relname`,
-      [names],
-    );
-    const after = await tx<{ total: string; non_null: string; dependencies: string }[]>`
-      SELECT
-        (SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='S') total,
-        (SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='S' AND c.relacl IS NOT NULL) non_null,
-        (SELECT count(*)::text FROM pg_shdepend d JOIN pg_class c ON d.classid='pg_class'::regclass AND d.objid=c.oid AND d.objsubid=0 JOIN pg_namespace n ON n.oid=c.relnamespace WHERE d.dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND d.deptype='a' AND n.nspname='public' AND c.relkind='S') dependencies`;
-    if (updated.length !== 49 || after[0]?.total !== '49' || after[0]?.non_null !== '0' || after[0]?.dependencies !== '0') throw new Error('restored sequence ACL reconstruction mismatch');
-    return updated.length;
-  });
-}
-
 async function initBaseline(): Promise<void> {
   const db = await import('../src/core/db.ts');
   const { PostgresEngine } = await import('../src/core/postgres-engine.ts');
@@ -519,11 +479,15 @@ async function probeRuntime(): Promise<void> {
 }
 
 async function verifyRestored(): Promise<void> {
+  const restoredAclAdmin = connectSql(gbrainUrl('postgres', 'postgres'));
+  let sequenceAclNullCount: number;
+  try { sequenceAclNullCount = await assertBaselineSequenceAcls(restoredAclAdmin); }
+  finally { await restoredAclAdmin.end(); }
   await executeGuarded('G5-RUNTIME-ACL-EXACT-INVERSE-POSTCONDITIONS-NOEXEC.sql.txt');
   const restored = await baselineCensus();
   const baselineCensusValue = JSON.parse(readFileSync(resolve(RECEIPT_DIR, 'baseline-census.json'), 'utf8'));
   if (!restored.complete || sha256Json(restored) !== sha256Json(baselineCensusValue)) throw new Error('restored census differs from baseline');
-  writeStage('restore', { census_sha256: sha256Json(restored), inverse_verifier: true, complete: true });
+  writeStage('restore', { census_sha256: sha256Json(restored), sequence_acl_null_count: sequenceAclNullCount, inverse_verifier: true, complete: true });
 }
 
 async function writeReceipt(): Promise<void> {
@@ -616,8 +580,7 @@ else if (mode === 'reconstruct-extension-owners') {
   const admin = connectSql(gbrainUrl('postgres', 'postgres'));
   try {
     const topology = await reconstructExtensionContainerOwners(admin);
-    const sequenceAclNullCount = await reconstructRestoredSequenceAcls(admin);
-    writeStage('extension-restore', { ...topology, sequence_acl_null_count: sequenceAclNullCount, logical_dump_alone_sufficient: false, complete: true });
+    writeStage('extension-restore', { ...topology, logical_dump_alone_sufficient: false, complete: true });
   } finally { await admin.end(); }
 }
 else if (mode === 'receipt') await writeReceipt();
