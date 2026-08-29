@@ -169,13 +169,57 @@ async function initBaseline(): Promise<void> {
       );
       CREATE TABLE intake_review_items (id text PRIMARY KEY);
     `);
+
   } finally { await externalFixture.end(); }
+
+  const frozenSequences = rowsFromTsv('G5-RUNTIME-SEQUENCES-CATALOG-READONLY.tsv');
+  const sequenceNames = frozenSequences.map((row) => row.sequence_name);
+  if (frozenSequences.length !== 49 || new Set(sequenceNames).size !== 49 || frozenSequences.some((row) => row.sequence_schema !== 'public' || row.owner !== 'gbrain' || row.acl !== '[NULL]')) throw new Error('frozen sequence ACL fixture mismatch');
+  const fixtureAdmin = connectSql(gbrainUrl('postgres', 'postgres'));
+  let normalizedSequenceAcls = 0;
+  try {
+    normalizedSequenceAcls = await fixtureAdmin.begin(async (tx) => {
+      // Disposable fixture only: application bootstrap leaves explicit owner-USAGE
+      // ACLs, while all 49 reviewed production sequences have relacl=NULL.
+      const before = await tx.unsafe<{ total: string; target: string; wrong_owner: string; acl_tuples: string; invalid_acl_tuples: string; acl_dependencies: string }[]>(`
+        WITH target AS (
+          SELECT c.oid,c.relowner,c.relacl FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname='public' AND c.relkind='S' AND c.relname=ANY($1::text[])
+        )
+        SELECT
+          (SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind='S') total,
+          (SELECT count(*)::text FROM target) target,
+          (SELECT count(*)::text FROM target t JOIN pg_roles r ON r.oid=t.relowner WHERE r.rolname<>'gbrain') wrong_owner,
+          (SELECT count(a.privilege_type)::text FROM target t LEFT JOIN LATERAL aclexplode(t.relacl) a ON true) acl_tuples,
+          (SELECT count(*)::text FROM target t LEFT JOIN LATERAL aclexplode(t.relacl) a ON true
+           WHERE a.grantor IS DISTINCT FROM t.relowner OR a.grantee IS DISTINCT FROM t.relowner
+              OR a.privilege_type IS DISTINCT FROM 'USAGE' OR a.is_grantable IS DISTINCT FROM false) invalid_acl_tuples,
+          (SELECT count(*)::text FROM pg_shdepend d JOIN target t ON d.classid='pg_class'::regclass AND d.objid=t.oid AND d.objsubid=0
+           WHERE d.dbid=(SELECT oid FROM pg_database WHERE datname=current_database()) AND d.deptype='a') acl_dependencies`,
+        [sequenceNames],
+      );
+      const pre = before[0];
+      if (pre?.total !== '49' || pre.target !== '49' || pre.wrong_owner !== '0' || pre.acl_tuples !== '49' || pre.invalid_acl_tuples !== '0' || pre.acl_dependencies !== '0') throw new Error('sequence ACL fixture pre-state mismatch');
+      const updated = await tx.unsafe<{ relname: string }[]>(
+        `UPDATE pg_class c SET relacl=NULL FROM pg_namespace n
+         WHERE n.oid=c.relnamespace AND n.nspname='public' AND c.relkind='S'
+           AND c.relname=ANY($1::text[]) RETURNING c.relname`,
+        [sequenceNames],
+      );
+      const state = await tx<{ total: string; non_null: string }[]>`
+        SELECT count(*)::text total,count(*) FILTER (WHERE c.relacl IS NOT NULL)::text non_null
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind='S'`;
+      if (updated.length !== 49 || state[0]?.total !== '49' || state[0]?.non_null !== '0') throw new Error('sequence ACL fixture normalization mismatch');
+      return updated.length;
+    });
+  } finally { await fixtureAdmin.end(); }
 
   const census = await baselineCensus();
   mkdirSync(RECEIPT_DIR, { recursive: true });
   writeFileSync(resolve(RECEIPT_DIR, 'baseline-census.json'), JSON.stringify(census, null, 2) + '\n');
   if (!census.complete) throw new Error(`baseline catalog mismatch: ${JSON.stringify(census.mismatches)}`);
-  writeStage('baseline', { census_sha256: sha256Json(census), complete: true });
+  writeStage('baseline', { census_sha256: sha256Json(census), sequence_acl_null_count: normalizedSequenceAcls, complete: true });
 }
 
 function rowsFromTsv(name: string): Array<Record<string, string>> {
