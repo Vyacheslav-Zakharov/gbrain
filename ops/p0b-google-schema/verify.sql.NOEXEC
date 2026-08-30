@@ -1,0 +1,31 @@
+-- NOEXEC / UNFINALIZED_NOEXEC: this verifier deliberately has no success receipt.
+-- A future separately reviewed finalizer must derive exact ACL and RLS policy
+-- catalog digests in SQL; caller-supplied receipt values are not authority.
+SELECT set_config('lock_timeout', '5s', true);
+SELECT set_config('statement_timeout', '60s', true);
+SELECT set_config('idle_in_transaction_session_timeout', '60s', true);
+SELECT pg_advisory_xact_lock(578411056621836801::bigint);
+
+DO $p0b_verify$
+BEGIN
+  IF current_setting('server_version_num')::integer < 160000
+     OR current_setting('server_version_num')::integer >= 170000 THEN
+    RAISE EXCEPTION 'P0B_POSTGRES_MAJOR_16_REQUIRED';
+  END IF;
+  IF current_user <> current_setting('gbrain.p0b.expected_owner_role')
+     OR session_user <> current_setting('gbrain.p0b.expected_migrator_role')
+     OR current_role <> current_setting('gbrain.p0b.expected_owner_role')
+     OR NOT pg_has_role(
+       current_setting('gbrain.p0b.expected_migrator_role'),
+       current_setting('gbrain.p0b.expected_owner_role'), 'MEMBER'
+     ) THEN RAISE EXCEPTION 'P0B_EXACT_ROLE_AUTHORITY_REQUIRED'; END IF;
+
+  -- P0B_POLICY_CATALOG_DIGEST_REQUIRED: exact policy table/name/command/roles,
+  -- USING, WITH CHECK, table/schema ACL, owner and default-privilege effects must
+  -- be canonicalized from pg_policy/pg_class/pg_namespace/ACL catalogs here.
+  -- This template intentionally cannot ratify a caller-provided digest.
+  RAISE EXCEPTION 'P0B_ACL_RLS_VERIFIER_NOT_FINALIZED';
+END
+$p0b_verify$;
+
+-- Intentionally no success SELECT. This lineage cannot emit a verification receipt.

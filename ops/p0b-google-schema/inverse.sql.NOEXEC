@@ -1,0 +1,312 @@
+-- NOEXEC: separate destructive action, transaction owned by transactionRaw.
+SELECT set_config('lock_timeout', '5s', true);
+SELECT set_config('statement_timeout', '60s', true);
+SELECT set_config('idle_in_transaction_session_timeout', '60s', true);
+SELECT pg_advisory_xact_lock(578411056621836801::bigint);
+
+DO $p0b$
+DECLARE
+  unexpected_indexes integer;
+BEGIN
+  IF current_setting('server_version_num')::integer < 160000
+     OR current_setting('server_version_num')::integer >= 170000 THEN
+    RAISE EXCEPTION 'P0B_POSTGRES_MAJOR_16_REQUIRED';
+  END IF;
+  IF current_user <> current_setting('gbrain.p0b.expected_owner_role')
+     OR session_user <> current_setting('gbrain.p0b.expected_migrator_role')
+     OR current_role <> current_setting('gbrain.p0b.expected_owner_role')
+     OR NOT pg_has_role(
+       current_setting('gbrain.p0b.expected_migrator_role'),
+       current_setting('gbrain.p0b.expected_owner_role'), 'MEMBER'
+     ) THEN RAISE EXCEPTION 'P0B_EXACT_ROLE_AUTHORITY_REQUIRED'; END IF;
+
+  IF to_regclass('public.p0b_google_bridge_state') IS NULL
+     OR to_regclass('public.p0b_google_reconciler_checkpoint') IS NULL
+     OR to_regclass('public.p0b_google_control_nonce_ledger') IS NULL
+     OR to_regclass('public.p0b_google_embedding_provenance') IS NULL
+     OR to_regclass('public.p0b_google_acl_rls_receipt') IS NULL
+     OR to_regclass('public.idx_content_chunks_p0b_g768_keyset') IS NULL
+     OR NOT EXISTS (
+       SELECT 1 FROM pg_attribute
+       WHERE attrelid = 'public.content_chunks'::regclass
+         AND attname = 'embedding_g768' AND NOT attisdropped
+     ) THEN RAISE EXCEPTION 'P0B_INVERSE_SCHEMA_ABSENT_OR_INVALID'; END IF;
+
+  IF (SELECT count(*) FROM public.p0b_google_bridge_state) <> 1
+     OR NOT EXISTS (
+       SELECT 1 FROM public.p0b_google_bridge_state
+       WHERE singleton_key = 'google-g768'
+         AND schema_identity = 'gbrain:p0b:google-g768-control-postgres:v1'
+         AND state_json = current_setting('gbrain.p0b.initial_state_json')::jsonb
+         AND state_fingerprint = current_setting('gbrain.p0b.initial_state_fingerprint')
+         AND state_json->>'state' = 'DRAFT'
+         AND state_json->>'state' NOT IN ('ACTIVE', 'COMPENSATING')
+     ) THEN RAISE EXCEPTION 'P0B_INVERSE_LIFECYCLE_ADVANCED_OR_INVALID'; END IF;
+
+  IF (SELECT count(*) FROM public.p0b_google_reconciler_checkpoint) <> 1
+     OR NOT EXISTS (
+       SELECT 1 FROM public.p0b_google_reconciler_checkpoint
+       WHERE singleton_key = 'google-g768'
+         AND schema_identity = 'gbrain:p0b:google-g768-reconciler-postgres:v1'
+         AND revision = current_setting('gbrain.p0b.initial_checkpoint_revision')
+         AND pass = 1
+         AND cursor_chunk_index IS NULL
+         AND cursor_chunk_id IS NULL
+         AND fence_epoch = current_setting('gbrain.p0b.initial_fence_epoch')::bigint
+         AND fence_token = current_setting('gbrain.p0b.initial_fence_token')
+         AND lease_id = 'inactive'
+         AND lease_nonce = 'inactive'
+         AND lease_expires_at = '-infinity'::timestamptz
+         AND NOT (lease_expires_at > clock_timestamp())
+     ) THEN RAISE EXCEPTION 'P0B_INVERSE_CHECKPOINT_FENCE_CURSOR_PASS_REVISION_ADVANCED'; END IF;
+
+  IF EXISTS (SELECT 1 FROM public.content_chunks WHERE embedding_g768 IS NOT NULL)
+     OR EXISTS (SELECT 1 FROM public.p0b_google_embedding_provenance)
+     OR EXISTS (SELECT 1 FROM public.p0b_google_control_nonce_ledger) THEN
+    RAISE EXCEPTION 'P0B_PRESERVATION_PLAN_NOT_IMPLEMENTED';
+  END IF;
+
+  IF (SELECT count(*) FROM public.p0b_google_acl_rls_receipt) <> 1
+     OR NOT EXISTS (
+       SELECT 1 FROM public.p0b_google_acl_rls_receipt
+       WHERE singleton_key = 'google-g768'
+         AND acl_status = 'PENDING_RATIFICATION'
+         AND rls_status = 'PENDING_RATIFICATION'
+         AND role_policy_sha256 IS NULL AND rls_policy_sha256 IS NULL
+     )
+     OR EXISTS (
+       SELECT 1 FROM pg_policies
+       WHERE schemaname = 'public'
+         AND tablename IN (
+           'p0b_google_bridge_state', 'p0b_google_reconciler_checkpoint',
+           'p0b_google_control_nonce_ledger', 'p0b_google_embedding_provenance',
+           'p0b_google_acl_rls_receipt'
+         )
+     ) THEN RAISE EXCEPTION 'P0B_INVERSE_ACL_RLS_ADVANCED'; END IF;
+
+  SELECT count(*) INTO unexpected_indexes
+  FROM pg_index i
+  JOIN pg_class idx ON idx.oid = i.indexrelid
+  WHERE i.indrelid = 'public.content_chunks'::regclass
+    AND pg_get_indexdef(i.indexrelid) LIKE '%embedding_g768%';
+  IF unexpected_indexes <> 0 OR EXISTS (
+    SELECT 1 FROM pg_index i
+    JOIN pg_class idx ON idx.oid = i.indexrelid
+    WHERE i.indrelid = 'public.content_chunks'::regclass
+      AND (NOT i.indisvalid OR NOT i.indisready)
+      AND pg_get_indexdef(i.indexrelid) LIKE '%embedding_g768%'
+  ) THEN RAISE EXCEPTION 'P0B_INVERSE_VECTOR_INDEX_PRESENT_INVALID_OR_BUILDING'; END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM (VALUES
+      ('p0b_google_bridge_state'), ('p0b_google_reconciler_checkpoint'),
+      ('p0b_google_control_nonce_ledger'), ('p0b_google_embedding_provenance'),
+      ('p0b_google_acl_rls_receipt'), ('idx_content_chunks_p0b_g768_keyset')
+    ) AS names(relname)
+    JOIN pg_class c ON c.oid = to_regclass('public.' || names.relname)
+    JOIN pg_roles r ON r.oid = c.relowner
+    WHERE r.rolname <> current_setting('gbrain.p0b.expected_owner_role')
+  ) THEN RAISE EXCEPTION 'P0B_INVERSE_OWNERSHIP_MISMATCH'; END IF;
+END
+$p0b$;
+
+-- Duplicated intentionally: inverse must attest exact core shape before any drop.
+-- P0B_EXACT_CORE_ATTESTATION: columns, constraints, ownership, ACL, triggers, RLS, index.
+DO $p0b_core$
+BEGIN
+  IF EXISTS (
+    WITH expected_columns(relname, attnum, attname, type_name, not_null) AS (VALUES
+      ('p0b_google_bridge_state',1,'singleton_key','text',true),
+      ('p0b_google_bridge_state',2,'schema_identity','text',true),
+      ('p0b_google_bridge_state',3,'state_json','jsonb',true),
+      ('p0b_google_bridge_state',4,'state_fingerprint','text',true),
+      ('p0b_google_reconciler_checkpoint',1,'singleton_key','text',true),
+      ('p0b_google_reconciler_checkpoint',2,'schema_identity','text',true),
+      ('p0b_google_reconciler_checkpoint',3,'revision','text',true),
+      ('p0b_google_reconciler_checkpoint',4,'pass','integer',true),
+      ('p0b_google_reconciler_checkpoint',5,'cursor_chunk_index','integer',false),
+      ('p0b_google_reconciler_checkpoint',6,'cursor_chunk_id','text',false),
+      ('p0b_google_reconciler_checkpoint',7,'fence_epoch','bigint',true),
+      ('p0b_google_reconciler_checkpoint',8,'fence_token','text',true),
+      ('p0b_google_reconciler_checkpoint',9,'lease_id','text',true),
+      ('p0b_google_reconciler_checkpoint',10,'lease_nonce','text',true),
+      ('p0b_google_reconciler_checkpoint',11,'lease_expires_at','timestamp with time zone',true),
+      ('p0b_google_control_nonce_ledger',1,'singleton_key','text',true),
+      ('p0b_google_control_nonce_ledger',2,'nonce','text',true),
+      ('p0b_google_control_nonce_ledger',3,'action','text',true),
+      ('p0b_google_control_nonce_ledger',4,'state_fingerprint','text',true),
+      ('p0b_google_control_nonce_ledger',5,'checkpoint_revision','text',true),
+      ('p0b_google_control_nonce_ledger',6,'issued_at','timestamp with time zone',true),
+      ('p0b_google_embedding_provenance',1,'chunk_id','integer',true),
+      ('p0b_google_embedding_provenance',2,'embedding_model','text',true),
+      ('p0b_google_embedding_provenance',3,'embedding_dimensions','integer',true),
+      ('p0b_google_embedding_provenance',4,'source_hash','text',true),
+      ('p0b_google_acl_rls_receipt',1,'singleton_key','text',true),
+      ('p0b_google_acl_rls_receipt',2,'schema_identity','text',true),
+      ('p0b_google_acl_rls_receipt',3,'acl_status','text',true),
+      ('p0b_google_acl_rls_receipt',4,'rls_status','text',true),
+      ('p0b_google_acl_rls_receipt',5,'role_policy_sha256','text',false),
+      ('p0b_google_acl_rls_receipt',6,'rls_policy_sha256','text',false)
+    ), actual_columns AS (
+      SELECT c.relname::text, a.attnum::integer, a.attname::text,
+             format_type(a.atttypid,a.atttypmod), a.attnotnull
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      JOIN pg_attribute a ON a.attrelid=c.oid
+      WHERE n.nspname='public' AND c.relname IN (
+        'p0b_google_bridge_state','p0b_google_reconciler_checkpoint',
+        'p0b_google_control_nonce_ledger','p0b_google_embedding_provenance',
+        'p0b_google_acl_rls_receipt') AND a.attnum>0 AND NOT a.attisdropped
+    )
+    (SELECT * FROM expected_columns EXCEPT SELECT * FROM actual_columns)
+    UNION ALL
+    (SELECT * FROM actual_columns EXCEPT SELECT * FROM expected_columns)
+  ) OR EXISTS (
+    SELECT 1 FROM pg_attribute a
+    WHERE a.attrelid IN (
+      'public.p0b_google_bridge_state'::regclass,
+      'public.p0b_google_reconciler_checkpoint'::regclass,
+      'public.p0b_google_control_nonce_ledger'::regclass,
+      'public.p0b_google_embedding_provenance'::regclass,
+      'public.p0b_google_acl_rls_receipt'::regclass)
+      AND a.attnum>0 AND NOT a.attisdropped AND a.atthasdef
+  ) THEN RAISE EXCEPTION 'P0B_EXACT_CORE_ATTESTATION_COLUMNS'; END IF;
+
+  IF EXISTS (
+    WITH expected_constraints(relname, conname, contype) AS (VALUES
+      ('p0b_google_bridge_state','p0b_google_bridge_state_pkey','p'),
+      ('p0b_google_bridge_state','p0b_google_bridge_state_singleton_ck','c'),
+      ('p0b_google_bridge_state','p0b_google_bridge_state_identity_ck','c'),
+      ('p0b_google_bridge_state','p0b_google_bridge_state_fingerprint_ck','c'),
+      ('p0b_google_bridge_state','p0b_google_bridge_state_json_ck','c'),
+      ('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_pkey','p'),
+      ('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_state_fk','f'),
+      ('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_identity_ck','c'),
+      ('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_revision_ck','c'),
+      ('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_pass_ck','c'),
+      ('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_cursor_ck','c'),
+      ('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_fence_ck','c'),
+      ('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_lease_ck','c'),
+      ('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_pkey','p'),
+      ('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_state_fk','f'),
+      ('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_action_ck','c'),
+      ('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_nonce_ck','c'),
+      ('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_state_fp_ck','c'),
+      ('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_revision_ck','c'),
+      ('p0b_google_embedding_provenance','p0b_google_embedding_provenance_pkey','p'),
+      ('p0b_google_embedding_provenance','p0b_google_embedding_provenance_chunk_fk','f'),
+      ('p0b_google_embedding_provenance','p0b_google_embedding_provenance_model_ck','c'),
+      ('p0b_google_embedding_provenance','p0b_google_embedding_provenance_dims_ck','c'),
+      ('p0b_google_embedding_provenance','p0b_google_embedding_provenance_hash_ck','c'),
+      ('p0b_google_acl_rls_receipt','p0b_google_acl_rls_receipt_pkey','p'),
+      ('p0b_google_acl_rls_receipt','p0b_google_acl_rls_receipt_state_fk','f'),
+      ('p0b_google_acl_rls_receipt','p0b_google_acl_rls_receipt_identity_ck','c'),
+      ('p0b_google_acl_rls_receipt','p0b_google_acl_rls_receipt_status_ck','c')
+    ), actual_constraints AS (
+      SELECT cl.relname::text, co.conname::text, co.contype::text
+      FROM pg_constraint co JOIN pg_class cl ON cl.oid=co.conrelid
+      JOIN pg_namespace n ON n.oid=cl.relnamespace
+      WHERE n.nspname='public' AND cl.relname IN (
+        'p0b_google_bridge_state','p0b_google_reconciler_checkpoint',
+        'p0b_google_control_nonce_ledger','p0b_google_embedding_provenance',
+        'p0b_google_acl_rls_receipt')
+    )
+    (SELECT * FROM expected_constraints EXCEPT SELECT * FROM actual_constraints)
+    UNION ALL
+    (SELECT * FROM actual_constraints EXCEPT SELECT * FROM expected_constraints)
+  ) THEN RAISE EXCEPTION 'P0B_EXACT_CORE_ATTESTATION_CONSTRAINT_SET'; END IF;
+
+  -- Exact definitions are pinned after search_path is attested by the runner.
+  IF EXISTS (
+    WITH expected_constraint_definitions(conname, definition) AS (VALUES
+      ('p0b_google_bridge_state_pkey','PRIMARY KEY (singleton_key)'),
+      ('p0b_google_bridge_state_singleton_ck','CHECK (singleton_key = ''google-g768''::text)'),
+      ('p0b_google_bridge_state_identity_ck','CHECK (schema_identity = ''gbrain:p0b:google-g768-control-postgres:v1''::text)'),
+      ('p0b_google_bridge_state_fingerprint_ck','CHECK (state_fingerprint ~ ''^[a-f0-9]{64}$''::text)'),
+      ('p0b_google_bridge_state_json_ck','CHECK (jsonb_typeof(state_json) = ''object''::text AND state_json ?& ARRAY[''schema_version''::text, ''state''::text, ''previous_search_column''::text, ''consumed_nonces''::text, ''rollback_target''::text, ''fingerprint''::text] AND (state_json - ARRAY[''schema_version''::text, ''state''::text, ''previous_search_column''::text, ''consumed_nonces''::text, ''rollback_target''::text, ''fingerprint''::text]) = ''{}''::jsonb AND state_json ->> ''schema_version''::text = ''1''::text AND (state_json ->> ''state''::text) = ANY (ARRAY[''DRAFT''::text, ''PREPARING''::text, ''RECONCILING''::text, ''PREPARED''::text, ''ACTIVE''::text, ''COMPENSATING''::text, ''ROLLED_BACK''::text, ''ABORTED''::text, ''BLOCKED''::text]) AND jsonb_typeof(state_json -> ''consumed_nonces''::text) = ''array''::text AND state_json ->> ''fingerprint''::text = state_fingerprint)'),
+      ('p0b_google_reconciler_checkpoint_pkey','PRIMARY KEY (singleton_key)'),
+      ('p0b_google_reconciler_checkpoint_state_fk','FOREIGN KEY (singleton_key) REFERENCES p0b_google_bridge_state(singleton_key)'),
+      ('p0b_google_reconciler_checkpoint_identity_ck','CHECK (schema_identity = ''gbrain:p0b:google-g768-reconciler-postgres:v1''::text)'),
+      ('p0b_google_reconciler_checkpoint_revision_ck','CHECK (revision ~ ''^[a-f0-9]{64}$''::text)'),
+      ('p0b_google_reconciler_checkpoint_pass_ck','CHECK (pass > 0)'),
+      ('p0b_google_reconciler_checkpoint_cursor_ck','CHECK ((cursor_chunk_index IS NULL) = (cursor_chunk_id IS NULL))'),
+      ('p0b_google_reconciler_checkpoint_fence_ck','CHECK (fence_epoch >= 0 AND fence_token = (''fence-''::text || lpad(fence_epoch::text, 20, ''0''::text)))'),
+      ('p0b_google_reconciler_checkpoint_lease_ck','CHECK (lease_id = ''inactive''::text AND lease_nonce = ''inactive''::text AND lease_expires_at = ''-infinity''::timestamp with time zone OR lease_id <> ''inactive''::text AND lease_nonce <> ''inactive''::text AND lease_expires_at <> ''-infinity''::timestamp with time zone)'),
+      ('p0b_google_control_nonce_ledger_pkey','PRIMARY KEY (singleton_key, nonce)'),
+      ('p0b_google_control_nonce_ledger_state_fk','FOREIGN KEY (singleton_key) REFERENCES p0b_google_bridge_state(singleton_key)'),
+      ('p0b_google_control_nonce_ledger_action_ck','CHECK (action = ''ISSUE_LEASE''::text)'),
+      ('p0b_google_control_nonce_ledger_nonce_ck','CHECK (octet_length(nonce) >= 32 AND octet_length(nonce) <= 128 AND nonce ~ ''^[A-Za-z0-9][A-Za-z0-9._:-]{31,127}$''::text)'),
+      ('p0b_google_control_nonce_ledger_state_fp_ck','CHECK (state_fingerprint ~ ''^[a-f0-9]{64}$''::text)'),
+      ('p0b_google_control_nonce_ledger_revision_ck','CHECK (checkpoint_revision ~ ''^[a-f0-9]{64}$''::text)'),
+      ('p0b_google_embedding_provenance_pkey','PRIMARY KEY (chunk_id, embedding_model, embedding_dimensions)'),
+      ('p0b_google_embedding_provenance_chunk_fk','FOREIGN KEY (chunk_id) REFERENCES content_chunks(id) ON DELETE CASCADE'),
+      ('p0b_google_embedding_provenance_model_ck','CHECK (embedding_model = ''google:gemini-embedding-001''::text)'),
+      ('p0b_google_embedding_provenance_dims_ck','CHECK (embedding_dimensions = 768)'),
+      ('p0b_google_embedding_provenance_hash_ck','CHECK (source_hash ~ ''^[a-f0-9]{64}$''::text)'),
+      ('p0b_google_acl_rls_receipt_pkey','PRIMARY KEY (singleton_key)'),
+      ('p0b_google_acl_rls_receipt_state_fk','FOREIGN KEY (singleton_key) REFERENCES p0b_google_bridge_state(singleton_key)'),
+      ('p0b_google_acl_rls_receipt_identity_ck','CHECK (schema_identity = ''gbrain:p0b:google-g768-acl-rls-receipt:v1''::text)'),
+      ('p0b_google_acl_rls_receipt_status_ck','CHECK (acl_status = ''PENDING_RATIFICATION''::text AND rls_status = ''PENDING_RATIFICATION''::text AND role_policy_sha256 IS NULL AND rls_policy_sha256 IS NULL)')
+    ), actual_constraint_definitions AS (
+      SELECT co.conname::text, pg_get_constraintdef(co.oid,true)
+      FROM pg_constraint co
+      WHERE co.conrelid IN (
+        'public.p0b_google_bridge_state'::regclass,
+        'public.p0b_google_reconciler_checkpoint'::regclass,
+        'public.p0b_google_control_nonce_ledger'::regclass,
+        'public.p0b_google_embedding_provenance'::regclass,
+        'public.p0b_google_acl_rls_receipt'::regclass)
+    )
+    (SELECT * FROM expected_constraint_definitions EXCEPT SELECT * FROM actual_constraint_definitions)
+    UNION ALL
+    (SELECT * FROM actual_constraint_definitions EXCEPT SELECT * FROM expected_constraint_definitions)
+  ) THEN RAISE EXCEPTION 'P0B_EXACT_CORE_ATTESTATION_CONSTRAINT_DEFINITIONS'; END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' AND c.relname IN (
+      'p0b_google_bridge_state','p0b_google_reconciler_checkpoint',
+      'p0b_google_control_nonce_ledger','p0b_google_embedding_provenance',
+      'p0b_google_acl_rls_receipt')
+      AND (c.relkind<>'r' OR c.relowner<>(current_setting('gbrain.p0b.expected_owner_role')::regrole)::oid
+        OR c.relrowsecurity OR c.relforcerowsecurity
+        OR (c.relacl IS NOT NULL AND EXISTS (
+          SELECT 1 FROM aclexplode(c.relacl) acl WHERE acl.grantee<>c.relowner)))
+  ) OR EXISTS (
+    SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename IN (
+      'p0b_google_bridge_state','p0b_google_reconciler_checkpoint',
+      'p0b_google_control_nonce_ledger','p0b_google_embedding_provenance',
+      'p0b_google_acl_rls_receipt')
+  ) THEN RAISE EXCEPTION 'P0B_EXACT_CORE_ATTESTATION_OWNER_ACL_RLS'; END IF;
+
+  IF EXISTS (
+    SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid
+    WHERE c.oid IN (
+      'public.p0b_google_bridge_state'::regclass,
+      'public.p0b_google_reconciler_checkpoint'::regclass,
+      'public.p0b_google_control_nonce_ledger'::regclass,
+      'public.p0b_google_embedding_provenance'::regclass,
+      'public.p0b_google_acl_rls_receipt'::regclass)
+      AND (NOT t.tgisinternal OR t.tgconstraint=0)
+  ) THEN RAISE EXCEPTION 'P0B_EXACT_CORE_ATTESTATION_TRIGGERS'; END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid
+    WHERE idx.oid='public.idx_content_chunks_p0b_g768_keyset'::regclass
+      AND i.indrelid='public.content_chunks'::regclass AND i.indisvalid AND i.indisready
+      AND NOT i.indisunique AND i.indpred IS NULL
+      AND idx.relowner=(current_setting('gbrain.p0b.expected_owner_role')::regrole)::oid
+      AND pg_get_indexdef(i.indexrelid)=
+        'CREATE INDEX idx_content_chunks_p0b_g768_keyset ON public.content_chunks USING btree (chunk_index, ((id)::text) COLLATE "C")'
+  ) THEN RAISE EXCEPTION 'P0B_EXACT_CORE_ATTESTATION_INDEX'; END IF;
+END
+$p0b_core$;
+
+
+DROP INDEX public.idx_content_chunks_p0b_g768_keyset;
+DROP TABLE public.p0b_google_acl_rls_receipt;
+DROP TABLE public.p0b_google_embedding_provenance;
+DROP TABLE public.p0b_google_control_nonce_ledger;
+DROP TABLE public.p0b_google_reconciler_checkpoint;
+DROP TABLE public.p0b_google_bridge_state;
+ALTER TABLE public.content_chunks DROP COLUMN embedding_g768;
