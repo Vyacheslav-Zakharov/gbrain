@@ -946,27 +946,68 @@ export class PostgresEngine implements BrainEngine {
   async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
     const pool = this.sql;
     const reserved = await pool.reserve();
+    let releaseReserved = true;
+    let transactionActive = false;
     try {
+      const execute = async <R>(
+        handle: Pick<typeof reserved, 'unsafe'>,
+        query: string,
+        params?: unknown[],
+        opts?: { signal?: AbortSignal },
+      ): Promise<R[]> => {
+        // ReservedConnection.executeRaw doesn't wire AbortSignal today.
+        // Keep the existing signature while callers rely on transaction-local
+        // statement_timeout for bounded adapter work.
+        void opts;
+        const rows = params === undefined
+          ? await handle.unsafe(query)
+          : await handle.unsafe(query, params as Parameters<typeof reserved.unsafe>[1]);
+        return rows as unknown as R[];
+      };
       const conn: ReservedConnection = {
         async executeRaw<R = Record<string, unknown>>(
           query: string,
           params?: unknown[],
           opts?: { signal?: AbortSignal },
         ): Promise<R[]> {
-          // ReservedConnection.executeRaw doesn't wire AbortSignal today
-          // (the only use site is migrations + cycle-lock writes that don't
-          // want cancellation). Signature matches the interface so callers
-          // that pass opts don't typecheck-break; opts.signal is ignored.
-          void opts;
-          const rows = params === undefined
-            ? await reserved.unsafe(query)
-            : await reserved.unsafe(query, params as Parameters<typeof reserved.unsafe>[1]);
-          return rows as unknown as R[];
+          return execute<R>(reserved, query, params, opts);
+        },
+        async transactionRaw<R>(work: (tx: ReservedConnection) => Promise<R>): Promise<R> {
+          if (transactionActive) throw new Error('Nested or concurrent transactionRaw is not supported');
+          transactionActive = true;
+          try {
+            await execute(reserved, 'BEGIN');
+          const tx: ReservedConnection = {
+            executeRaw<Q = Record<string, unknown>>(query: string, params?: unknown[], opts?: { signal?: AbortSignal }) {
+              return execute<Q>(reserved, query, params, opts);
+            },
+            async transactionRaw(): Promise<never> {
+              throw new Error('Nested or concurrent transactionRaw is not supported');
+            },
+          };
+          try {
+            const result = await work(tx);
+            await execute(reserved, 'COMMIT');
+            return result;
+          } catch (error) {
+            try {
+              await execute(reserved, 'ROLLBACK');
+            } catch {
+              // postgres.js 3.4.x reserved handles cannot destroy one client.
+              // Never return a backend with uncertain transaction state.
+              releaseReserved = false;
+              throw new Error('Reserved transaction rollback failed');
+            }
+            throw error;
+          }
+          } finally {
+            transactionActive = false;
+          }
         },
       };
       return await fn(conn);
     } finally {
-      reserved.release();
+      if (releaseReserved) reserved.release();
     }
   }
 

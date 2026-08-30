@@ -229,6 +229,12 @@ export interface ReservedConnection {
     params?: unknown[],
     opts?: { signal?: AbortSignal },
   ): Promise<T[]>;
+  /**
+   * Run work in a transaction pinned to this reserved connection. The
+   * callback receives another exact ReservedConnection whose executeRaw calls
+   * are bound to the transaction. Nested transactionRaw calls fail closed.
+   */
+  transactionRaw<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T>;
 }
 
 /**

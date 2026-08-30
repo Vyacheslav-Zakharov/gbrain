@@ -960,10 +960,31 @@ export class PGLiteEngine implements BrainEngine {
     // PGLite has no connection pool. The single backing connection is
     // always effectively reserved — pass it through.
     const db = this.db;
+    let transactionActive = false;
     const conn: ReservedConnection = {
       async executeRaw<R = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<R[]> {
         const { rows } = await db.query(sql, params);
         return rows as R[];
+      },
+      async transactionRaw<R>(work: (tx: ReservedConnection) => Promise<R>): Promise<R> {
+        if (transactionActive) throw new Error('Nested or concurrent transactionRaw is not supported');
+        transactionActive = true;
+        try {
+          return await db.transaction(async txDb => {
+          const tx: ReservedConnection = {
+            async executeRaw<Q = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<Q[]> {
+              const { rows } = await txDb.query(sql, params);
+              return rows as Q[];
+            },
+            async transactionRaw(): Promise<never> {
+              throw new Error('Nested or concurrent transactionRaw is not supported');
+            },
+          };
+          return work(tx);
+          });
+        } finally {
+          transactionActive = false;
+        }
       },
     };
     return fn(conn);
