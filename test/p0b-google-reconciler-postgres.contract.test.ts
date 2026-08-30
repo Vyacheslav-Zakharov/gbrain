@@ -10,6 +10,7 @@ import {
 const NOW = 1_800_000_000_000;
 const REVISION = 'a'.repeat(64);
 const NEXT_REVISION = 'c'.repeat(64);
+const LIFECYCLE_FINGERPRINT = 'e'.repeat(64);
 const checkpoint = { schema_version: 1 as const, pass: 1, cursor: null, revision: REVISION };
 const authority = { lease_id: 'lease-12345678', fence_token: 'fence-12345678' };
 const vector = (width = 768, value = 0.25) => Array.from({ length: width }, () => value);
@@ -56,6 +57,8 @@ function reservedSession(handler: Handler) {
 
 function checkpointRow(overrides: Record<string, unknown> = {}) {
   return {
+    lifecycle_state: 'RECONCILING',
+    lifecycle_fingerprint: LIFECYCLE_FINGERPRINT,
     revision: REVISION,
     pass: 1,
     cursor_chunk_index: null,
@@ -109,6 +112,8 @@ function successfulSql(call: Call): unknown[] {
   if (text.includes("set_config('lock_timeout'")) return [{ lock_timeout: params?.[0] }];
   if (text.includes('SELECT schema_identity')) return [{ schema_identity: P0B_GOOGLE_RECONCILER_POSTGRES_CONTRACT.schema_identity }];
   if (text.includes('lease_expires_at_epoch_ms_text') && !text.includes('FOR UPDATE')) return [{
+    lifecycle_state: 'RECONCILING',
+    lifecycle_fingerprint: LIFECYCLE_FINGERPRINT,
     pass: 1,
     cursor_chunk_index: null,
     cursor_chunk_id: null,
@@ -152,6 +157,7 @@ describe('P0-B PostgreSQL adapter transaction contract', () => {
       coordination: 'PERSISTED_LEASE_FENCE_AND_CHECKPOINT_CAS',
       checkpoint_singleton_key: 'google-g768',
       checkpoint_table: 'p0b_google_reconciler_checkpoint',
+      lifecycle_table: 'p0b_google_bridge_state',
       provenance_table: 'p0b_google_embedding_provenance',
       migration_required: true,
       migration_execution: 'FORBIDDEN_IN_ADAPTER',
@@ -170,6 +176,8 @@ describe('P0-B PostgreSQL adapter transaction contract', () => {
     const mock = reservedSession(call => {
       if (call.text.includes('FROM content_chunks')) return candidateReads++ === 0 ? [candidateRow()] : [];
       if (call.text.includes('lease_expires_at_epoch_ms_text') && !call.text.includes('FOR UPDATE')) return [{
+        lifecycle_state: 'RECONCILING',
+        lifecycle_fingerprint: LIFECYCLE_FINGERPRINT,
         pass: state.pass,
         cursor_chunk_index: state.cursor_chunk_index,
         cursor_chunk_id: state.cursor_chunk_id,
@@ -215,11 +223,13 @@ describe('P0-B PostgreSQL adapter transaction contract', () => {
       'control.lease_id = $11',
       'control.fence_token = $12',
       'control.lease_expires_at > clock_timestamp()',
+      "lifecycle.state_json->>'state' = 'RECONCILING'",
     ]) expect(mock.calls[firstRead].text).toContain(predicate);
     expect(mock.calls[firstRead].params).toEqual([
       null, null, 10, 'google:gemini-embedding-001', 768,
       'google-g768', 'gbrain:p0b:google-g768-reconciler-postgres:v1',
       1, null, null, authority.lease_id, authority.fence_token,
+      'gbrain:p0b:google-g768-control-postgres:v1',
     ]);
     expect(mock.calls[firstRead - 2].params).toEqual(['30000ms']);
     expect(mock.calls[firstRead - 1].params).toEqual(['5000ms']);
@@ -259,6 +269,8 @@ describe('P0-B PostgreSQL adapter transaction contract', () => {
   test('read rejects stale lease/fence before exposing chunk text to provider work', async () => {
     const mock = reservedSession(call => {
       if (call.text.includes('lease_expires_at_epoch_ms_text') && !call.text.includes('FOR UPDATE')) return [{
+        lifecycle_state: 'RECONCILING',
+        lifecycle_fingerprint: LIFECYCLE_FINGERPRINT,
         pass: 1,
         cursor_chunk_index: null,
         cursor_chunk_id: null,
@@ -305,6 +317,7 @@ describe('P0-B PostgreSQL adapter transaction contract', () => {
     const lock = mock.calls.find(call => call.text.includes('FOR UPDATE'))!;
     expect(lock.text).toContain('clock_timestamp()');
     expect(lock.text).toContain('lease_expires_at_epoch_ms_text');
+    expect(lock.text).toContain('FOR UPDATE OF lifecycle, control');
     const vectorWrite = mock.calls.find(call => call.text.includes('UPDATE content_chunks'))!;
     expect(vectorWrite.text).toContain('p.deleted_at IS NULL');
     expect(vectorWrite.text).toContain('RETURNING cc.id::text AS chunk_id');
@@ -315,6 +328,8 @@ describe('P0-B PostgreSQL adapter transaction contract', () => {
     expect(provenance.text).toContain('RETURNING');
     const checkpointWrite = mock.calls.find(call => call.text.includes('UPDATE p0b_google_reconciler_checkpoint'))!;
     expect(checkpointWrite.text).toContain('lease_expires_at > clock_timestamp()');
+    expect(checkpointWrite.text).toContain("lifecycle.state_json->>'state' = 'RECONCILING'");
+    expect(checkpointWrite.text).toContain('lifecycle.state_fingerprint = $13');
     expect(checkpointWrite.text).toContain('RETURNING revision');
     const dbNowIndex = mock.calls.findIndex(call => call.text.includes('clock_timestamp()') && !call.text.includes('FOR UPDATE'));
     expect(dbNowIndex).toBeGreaterThan(mock.calls.indexOf(provenance));

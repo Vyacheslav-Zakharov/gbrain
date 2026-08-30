@@ -13,6 +13,7 @@ export const P0B_GOOGLE_RECONCILER_POSTGRES_CONTRACT = Object.freeze({
   coordination: 'PERSISTED_LEASE_FENCE_AND_CHECKPOINT_CAS',
   checkpoint_singleton_key: 'google-g768',
   checkpoint_table: 'p0b_google_reconciler_checkpoint',
+  lifecycle_table: 'p0b_google_bridge_state',
   provenance_table: 'p0b_google_embedding_provenance',
   migration_required: true,
   migration_execution: 'FORBIDDEN_IN_ADAPTER',
@@ -152,6 +153,10 @@ JOIN p0b_google_reconciler_checkpoint AS control
  AND control.lease_id = $11
  AND control.fence_token = $12
  AND control.lease_expires_at > clock_timestamp()
+JOIN p0b_google_bridge_state AS lifecycle
+  ON lifecycle.singleton_key = control.singleton_key
+ AND lifecycle.schema_identity = $13
+ AND lifecycle.state_json->>'state' = 'RECONCILING'
 LEFT JOIN p0b_google_embedding_provenance AS provenance
   ON provenance.chunk_id = cc.id
  AND provenance.embedding_model = $4
@@ -167,32 +172,43 @@ LIMIT $3
 
 const LOCK_CHECKPOINT_SQL = `
 SELECT
-  revision,
-  pass,
-  cursor_chunk_index,
-  cursor_chunk_id,
-  lease_id,
-  fence_token,
-  floor(EXTRACT(EPOCH FROM lease_expires_at) * 1000)::bigint::text AS lease_expires_at_epoch_ms_text,
+  lifecycle.state_json->>'state' AS lifecycle_state,
+  lifecycle.state_fingerprint AS lifecycle_fingerprint,
+  control.revision,
+  control.pass,
+  control.cursor_chunk_index,
+  control.cursor_chunk_id,
+  control.lease_id,
+  control.fence_token,
+  floor(EXTRACT(EPOCH FROM control.lease_expires_at) * 1000)::bigint::text AS lease_expires_at_epoch_ms_text,
   floor(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint::text AS db_now_epoch_ms_text
-FROM p0b_google_reconciler_checkpoint
-WHERE singleton_key = $1
-  AND schema_identity = $2
-FOR UPDATE
+FROM p0b_google_bridge_state AS lifecycle
+JOIN p0b_google_reconciler_checkpoint AS control
+  ON control.singleton_key = lifecycle.singleton_key
+ AND control.schema_identity = $2
+WHERE lifecycle.singleton_key = $1
+  AND lifecycle.schema_identity = $3
+FOR UPDATE OF lifecycle, control
 `.trim();
 
 const READ_AUTHORITY_SQL = `
 SELECT
-  pass,
+  lifecycle.state_json->>'state' AS lifecycle_state,
+  lifecycle.state_fingerprint AS lifecycle_fingerprint,
+  control.pass,
   cursor_chunk_index,
   cursor_chunk_id,
   lease_id,
   fence_token,
   floor(EXTRACT(EPOCH FROM lease_expires_at) * 1000)::bigint::text AS lease_expires_at_epoch_ms_text,
   floor(EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint::text AS db_now_epoch_ms_text
-FROM p0b_google_reconciler_checkpoint
-WHERE singleton_key = $1
-  AND schema_identity = $2
+FROM p0b_google_bridge_state AS lifecycle
+JOIN p0b_google_reconciler_checkpoint AS control
+  ON control.singleton_key = lifecycle.singleton_key
+ AND control.schema_identity = $2
+WHERE lifecycle.singleton_key = $1
+  AND lifecycle.schema_identity = $3
+  AND lifecycle.state_json->>'state' = 'RECONCILING'
 `.trim();
 
 const DATABASE_NOW_SQL = `
@@ -247,6 +263,13 @@ WHERE singleton_key = $5
   AND lease_id = $11
   AND fence_token = $12
   AND lease_expires_at > clock_timestamp()
+  AND EXISTS (
+    SELECT 1 FROM p0b_google_bridge_state AS lifecycle
+    WHERE lifecycle.singleton_key = $5
+      AND lifecycle.schema_identity = $14
+      AND lifecycle.state_json->>'state' = 'RECONCILING'
+      AND lifecycle.state_fingerprint = $13
+  )
 RETURNING revision
 `.trim();
 
@@ -268,6 +291,7 @@ const EXPECTED_ROW_KEYS = [
 ] as const;
 const DIGEST_RE = /^[a-f0-9]{64}$/;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,255}$/;
+const LIFECYCLE_SCHEMA_IDENTITY = 'gbrain:p0b:google-g768-control-postgres:v1';
 
 function dataRecord(value: unknown): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -276,9 +300,11 @@ function dataRecord(value: unknown): Record<string, unknown> {
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) throw new Error('row prototype is not plain');
   const row = value as Record<string, unknown>;
-  for (const key of Object.keys(row)) {
+  const ownKeys = Reflect.ownKeys(row);
+  if (ownKeys.some(key => typeof key !== 'string')) throw new Error('row contains symbol');
+  for (const key of ownKeys as string[]) {
     const descriptor = Object.getOwnPropertyDescriptor(row, key);
-    if (descriptor === undefined || !('value' in descriptor)) throw new Error('row contains accessor');
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) throw new Error('row contains non-data property');
   }
   return row;
 }
@@ -295,11 +321,12 @@ function exactDataRecord(value: unknown, keys: readonly string[]): Record<string
 
 function denseDataArray(value: unknown): unknown[] {
   if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) throw new Error('array shape mismatch');
-  const keys = Object.keys(value);
-  if (keys.length !== value.length || keys.some((key, index) => key !== String(index))) throw new Error('sparse array');
-  for (const key of keys) {
+  const keys = Reflect.ownKeys(value);
+  const expected = [...Array.from({ length: value.length }, (_, index) => String(index)), 'length'];
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) throw new Error('sparse array');
+  for (const key of expected.slice(0, -1)) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined || !('value' in descriptor)) throw new Error('array contains accessor');
+    if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) throw new Error('array contains accessor');
   }
   return value;
 }
@@ -389,6 +416,10 @@ function checkpointConflict(
 }
 
 function assertReadAuthority(row: Record<string, unknown>, request: ReadRequest): void {
+  if (row.lifecycle_state !== 'RECONCILING') throw new Error('lifecycle phase invalid');
+  if (typeof row.lifecycle_fingerprint !== 'string' || !DIGEST_RE.test(row.lifecycle_fingerprint)) {
+    throw new Error('lifecycle fingerprint invalid');
+  }
   const databaseNow = canonicalSafeIntegerText(row.db_now_epoch_ms_text);
   const leaseExpiry = canonicalSafeIntegerText(row.lease_expires_at_epoch_ms_text);
   const expectedCursor = request.after;
@@ -553,8 +584,9 @@ export function createP0BGoogleReconcilerPostgresPorts(
             await executeBounded(tx, clock, request.deadline_epoch_ms, READ_AUTHORITY_SQL, [
               P0B_GOOGLE_RECONCILER_POSTGRES_CONTRACT.checkpoint_singleton_key,
               P0B_GOOGLE_RECONCILER_POSTGRES_CONTRACT.schema_identity,
+              LIFECYCLE_SCHEMA_IDENTITY,
             ]),
-            ['pass', 'cursor_chunk_index', 'cursor_chunk_id', 'lease_id', 'fence_token',
+            ['lifecycle_state', 'lifecycle_fingerprint', 'pass', 'cursor_chunk_index', 'cursor_chunk_id', 'lease_id', 'fence_token',
               'lease_expires_at_epoch_ms_text', 'db_now_epoch_ms_text'],
           );
           assertReadAuthority(authorityRow, request);
@@ -571,6 +603,7 @@ export function createP0BGoogleReconcilerPostgresPorts(
             request.after?.chunk_id ?? null,
             request.authority.lease_id,
             request.authority.fence_token,
+            LIFECYCLE_SCHEMA_IDENTITY,
           ]);
           return Object.freeze({
             schema_version: 1,
@@ -593,12 +626,20 @@ export function createP0BGoogleReconcilerPostgresPorts(
           const lockedRows = await executeBounded(tx, clock, request.deadline_epoch_ms, LOCK_CHECKPOINT_SQL, [
             P0B_GOOGLE_RECONCILER_POSTGRES_CONTRACT.checkpoint_singleton_key,
             P0B_GOOGLE_RECONCILER_POSTGRES_CONTRACT.schema_identity,
+            LIFECYCLE_SCHEMA_IDENTITY,
           ]);
           if (lockedRows.length === 0) throw new TransactionConflict('CHECKPOINT_CAS', request.expected_checkpoint);
           const locked = exactOne(lockedRows, [
-            'revision', 'pass', 'cursor_chunk_index', 'cursor_chunk_id', 'lease_id', 'fence_token',
+            'lifecycle_state', 'lifecycle_fingerprint', 'revision', 'pass', 'cursor_chunk_index', 'cursor_chunk_id', 'lease_id', 'fence_token',
             'lease_expires_at_epoch_ms_text', 'db_now_epoch_ms_text',
           ]);
+          if (locked.lifecycle_state !== 'RECONCILING') {
+            throw new TransactionConflict('CHECKPOINT_CAS', request.expected_checkpoint);
+          }
+          const lifecycleFingerprint = typeof locked.lifecycle_fingerprint === 'string'
+            ? locked.lifecycle_fingerprint
+            : '';
+          if (!DIGEST_RE.test(lifecycleFingerprint)) throw new Error('lifecycle fingerprint invalid');
           const databaseNow = canonicalSafeIntegerText(locked.db_now_epoch_ms_text);
           const leaseExpiry = canonicalSafeIntegerText(locked.lease_expires_at_epoch_ms_text);
           if (databaseNow >= request.deadline_epoch_ms) throw new Error('database deadline expired');
@@ -654,6 +695,7 @@ export function createP0BGoogleReconcilerPostgresPorts(
             P0B_GOOGLE_RECONCILER_POSTGRES_CONTRACT.schema_identity,
             expected.revision, expected.pass, expected.cursor?.chunk_index ?? null, expected.cursor?.chunk_id ?? null,
             request.authority.lease_id, request.authority.fence_token,
+            lifecycleFingerprint, LIFECYCLE_SCHEMA_IDENTITY,
           ]);
           if (checkpointRows.length === 0) throw new TransactionConflict('CHECKPOINT_CAS', request.expected_checkpoint);
           const checkpointRow = exactOne(checkpointRows, ['revision']);
