@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "artifact_kind": "P0B_GOOGLE_SCHEMA_EXPECTED_CATALOG_UNVERIFIED_TRANSCRIPTION_INERT",
+  "execution_state": "INERT_JSON_NOEXEC",
+  "referenced_source_path": "ops/p0b-google-schema/forward.sql.NOEXEC",
+  "definition_basis": "UNVERIFIED_TRANSCRIPTION of whitespace-normalized clauses from the referenced NOEXEC path; the referenced source bytes are not part of this package and this artifact makes no source-canonical provenance claim.",
+  "catalog_equivalence": "UNPROVEN_WITHOUT_POSTGRESQL_16",
+  "blocker": "The transcription and PostgreSQL 16 catalog renderings are unverified. This inert JSON is neither a source-canonical artifact nor a pg_catalog receipt.",
+  "constraints": [
+    {"table":"public.p0b_google_bridge_state","name":"p0b_google_bridge_state_pkey","type":"PRIMARY KEY","definition":"PRIMARY KEY (singleton_key)"},
+    {"table":"public.p0b_google_bridge_state","name":"p0b_google_bridge_state_singleton_ck","type":"CHECK","definition":"CHECK (singleton_key = 'google-g768')"},
+    {"table":"public.p0b_google_bridge_state","name":"p0b_google_bridge_state_identity_ck","type":"CHECK","definition":"CHECK (schema_identity = 'gbrain:p0b:google-g768-control-postgres:v1')"},
+    {"table":"public.p0b_google_bridge_state","name":"p0b_google_bridge_state_fingerprint_ck","type":"CHECK","definition":"CHECK (state_fingerprint ~ '^[a-f0-9]{64}$')"},
+    {"table":"public.p0b_google_bridge_state","name":"p0b_google_bridge_state_json_ck","type":"CHECK","definition":"CHECK (state_json = current_setting('gbrain.p0b.initial_state_json')::jsonb AND jsonb_typeof(state_json) = 'object' AND state_json ->> 'fingerprint' = state_fingerprint)"},
+
+    {"table":"public.p0b_google_reconciler_checkpoint","name":"p0b_google_reconciler_checkpoint_pkey","type":"PRIMARY KEY","definition":"PRIMARY KEY (singleton_key)"},
+    {"table":"public.p0b_google_reconciler_checkpoint","name":"p0b_google_reconciler_checkpoint_state_fk","type":"FOREIGN KEY","definition":"FOREIGN KEY (singleton_key) REFERENCES public.p0b_google_bridge_state(singleton_key)"},
+    {"table":"public.p0b_google_reconciler_checkpoint","name":"p0b_google_reconciler_checkpoint_identity_ck","type":"CHECK","definition":"CHECK (schema_identity = 'gbrain:p0b:google-g768-reconciler-postgres:v1')"},
+    {"table":"public.p0b_google_reconciler_checkpoint","name":"p0b_google_reconciler_checkpoint_revision_ck","type":"CHECK","definition":"CHECK (revision ~ '^[a-f0-9]{64}$')"},
+    {"table":"public.p0b_google_reconciler_checkpoint","name":"p0b_google_reconciler_checkpoint_pass_ck","type":"CHECK","definition":"CHECK (pass > 0)"},
+    {"table":"public.p0b_google_reconciler_checkpoint","name":"p0b_google_reconciler_checkpoint_cursor_ck","type":"CHECK","definition":"CHECK ((cursor_chunk_index IS NULL) = (cursor_chunk_id IS NULL))"},
+    {"table":"public.p0b_google_reconciler_checkpoint","name":"p0b_google_reconciler_checkpoint_fence_ck","type":"CHECK","definition":"CHECK (fence_epoch >= 0 AND fence_token = 'fence-' || lpad(fence_epoch::text, 20, '0'))"},
+    {"table":"public.p0b_google_reconciler_checkpoint","name":"p0b_google_reconciler_checkpoint_lease_ck","type":"CHECK","definition":"CHECK ((lease_id = 'inactive' AND lease_nonce = 'inactive' AND lease_expires_at = '-infinity'::timestamptz) OR (lease_id <> 'inactive' AND lease_nonce <> 'inactive' AND lease_expires_at <> '-infinity'::timestamptz))"},
+
+    {"table":"public.p0b_google_control_nonce_ledger","name":"p0b_google_control_nonce_ledger_pkey","type":"PRIMARY KEY","definition":"PRIMARY KEY (singleton_key, nonce)"},
+    {"table":"public.p0b_google_control_nonce_ledger","name":"p0b_google_control_nonce_ledger_state_fk","type":"FOREIGN KEY","definition":"FOREIGN KEY (singleton_key) REFERENCES public.p0b_google_bridge_state(singleton_key)"},
+    {"table":"public.p0b_google_control_nonce_ledger","name":"p0b_google_control_nonce_ledger_action_ck","type":"CHECK","definition":"CHECK (action = 'ISSUE_LEASE')"},
+    {"table":"public.p0b_google_control_nonce_ledger","name":"p0b_google_control_nonce_ledger_nonce_ck","type":"CHECK","definition":"CHECK (octet_length(nonce) BETWEEN 32 AND 128 AND nonce ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{31,127}$')"},
+    {"table":"public.p0b_google_control_nonce_ledger","name":"p0b_google_control_nonce_ledger_state_fp_ck","type":"CHECK","definition":"CHECK (state_fingerprint ~ '^[a-f0-9]{64}$')"},
+    {"table":"public.p0b_google_control_nonce_ledger","name":"p0b_google_control_nonce_ledger_revision_ck","type":"CHECK","definition":"CHECK (checkpoint_revision ~ '^[a-f0-9]{64}$')"},
+
+    {"table":"public.p0b_google_embedding_provenance","name":"p0b_google_embedding_provenance_pkey","type":"PRIMARY KEY","definition":"PRIMARY KEY (chunk_id, embedding_model, embedding_dimensions)"},
+    {"table":"public.p0b_google_embedding_provenance","name":"p0b_google_embedding_provenance_chunk_fk","type":"FOREIGN KEY","definition":"FOREIGN KEY (chunk_id) REFERENCES public.content_chunks(id) ON DELETE CASCADE"},
+    {"table":"public.p0b_google_embedding_provenance","name":"p0b_google_embedding_provenance_model_ck","type":"CHECK","definition":"CHECK (embedding_model = 'google:gemini-embedding-001')"},
+    {"table":"public.p0b_google_embedding_provenance","name":"p0b_google_embedding_provenance_dims_ck","type":"CHECK","definition":"CHECK (embedding_dimensions = 768)"},
+    {"table":"public.p0b_google_embedding_provenance","name":"p0b_google_embedding_provenance_hash_ck","type":"CHECK","definition":"CHECK (source_hash ~ '^[a-f0-9]{64}$')"},
+
+    {"table":"public.p0b_google_acl_rls_receipt","name":"p0b_google_acl_rls_receipt_pkey","type":"PRIMARY KEY","definition":"PRIMARY KEY (singleton_key)"},
+    {"table":"public.p0b_google_acl_rls_receipt","name":"p0b_google_acl_rls_receipt_state_fk","type":"FOREIGN KEY","definition":"FOREIGN KEY (singleton_key) REFERENCES public.p0b_google_bridge_state(singleton_key)"},
+    {"table":"public.p0b_google_acl_rls_receipt","name":"p0b_google_acl_rls_receipt_identity_ck","type":"CHECK","definition":"CHECK (schema_identity = 'gbrain:p0b:google-g768-acl-rls-receipt:v1')"},
+    {"table":"public.p0b_google_acl_rls_receipt","name":"p0b_google_acl_rls_receipt_digest_ck","type":"CHECK","definition":"CHECK (topology_receipt_sha256 ~ '^[a-f0-9]{64}$' AND baseline_relation_identity_sha256 ~ '^[a-f0-9]{64}$' AND role_policy_sha256 ~ '^[a-f0-9]{64}$' AND rls_policy_sha256 ~ '^[a-f0-9]{64}$')"}
+  ],
+  "indexes": [
+    {"table":"public.p0b_google_bridge_state","name":"p0b_google_bridge_state_pkey","unique":true,"primary":true,"definition":"CREATE UNIQUE INDEX p0b_google_bridge_state_pkey ON public.p0b_google_bridge_state USING btree (singleton_key)"},
+    {"table":"public.p0b_google_reconciler_checkpoint","name":"p0b_google_reconciler_checkpoint_pkey","unique":true,"primary":true,"definition":"CREATE UNIQUE INDEX p0b_google_reconciler_checkpoint_pkey ON public.p0b_google_reconciler_checkpoint USING btree (singleton_key)"},
+    {"table":"public.p0b_google_control_nonce_ledger","name":"p0b_google_control_nonce_ledger_pkey","unique":true,"primary":true,"definition":"CREATE UNIQUE INDEX p0b_google_control_nonce_ledger_pkey ON public.p0b_google_control_nonce_ledger USING btree (singleton_key, nonce)"},
+    {"table":"public.p0b_google_embedding_provenance","name":"p0b_google_embedding_provenance_pkey","unique":true,"primary":true,"definition":"CREATE UNIQUE INDEX p0b_google_embedding_provenance_pkey ON public.p0b_google_embedding_provenance USING btree (chunk_id, embedding_model, embedding_dimensions)"},
+    {"table":"public.p0b_google_acl_rls_receipt","name":"p0b_google_acl_rls_receipt_pkey","unique":true,"primary":true,"definition":"CREATE UNIQUE INDEX p0b_google_acl_rls_receipt_pkey ON public.p0b_google_acl_rls_receipt USING btree (singleton_key)"}
+  ]
+}

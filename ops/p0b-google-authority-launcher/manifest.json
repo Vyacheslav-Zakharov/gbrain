@@ -1,0 +1,69 @@
+{
+  "artifact_kind": "P0B_DURABLE_AUTHORITY_LAUNCHER_OFFLINE_SUCCESSOR",
+  "base_commit_sha": "4530b60747c6bf6a5acf3dc65ffcd6357917da8e",
+  "blockers": [
+    "openat2 trusted-parent acquisition with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS, mount, and magic-link restrictions is not implemented",
+    "signature verifier is an injected seam, not an installed trust root",
+    "package verifier is an injected seam, not launch-time immutable deployment authority",
+    "catalog definitions are an unverified transcription, not PostgreSQL 16 catalog proof",
+    "literal artifact-bound owner GO absent"
+  ],
+  "execution_state": "OFFLINE_BUILTIN_INERT_ONLY_NOEXEC",
+  "package_root_sha256": "74a3b558fbabe49559374a6024639b1cd24eb886360448302be7bc537c3a0b9e",
+  "production_mutation_authorized": false,
+  "schema_version": 1,
+  "signed_descriptor_definition": "SHA-256 of P0B_PACKAGE_DESCRIPTOR_V1 newline followed by canonical compact JSON in source canonicalizer field order",
+  "signed_descriptor_sha256": "7097c7e81849572ca17877808c2bc13318b78e9734d8ea24011bb6649a06c273",
+  "signed_descriptor": {
+    "schema_version": 1,
+    "artifact_kind": "P0B_DURABLE_AUTHORITY_LAUNCHER_OFFLINE_SUCCESSOR",
+    "base_commit_sha": "4530b60747c6bf6a5acf3dc65ffcd6357917da8e",
+    "execution_state": "OFFLINE_BUILTIN_INERT_ONLY_NOEXEC",
+    "production_mutation_authorized": false,
+    "package_root_definition": "SHA-256 of UTF-8 records logical_name NUL path NUL lowercase_raw_sha256 NUL decimal_byte_count LF sorted by logical_name; signed descriptor and manifest excluded",
+    "artifacts": [
+      {
+        "logical_name": "EXPECTED_CATALOG_TRANSCRIPTION",
+        "path": "ops/p0b-google-authority-launcher/expected-catalog-definitions.inert.json",
+        "sha256": "3de8aefa49772ae163f81dce56f1417ab26a6fefffc21d2e41b7258181b917a2",
+        "bytes": 7805
+      },
+      {
+        "logical_name": "SOURCE",
+        "path": "src/core/p0b-authority-launcher.ts",
+        "sha256": "985e8c4cbd2671c6567fec2435fd41e1bee3516823a2bbe53d974a147dc04cc7",
+        "bytes": 25526
+      },
+      {
+        "logical_name": "TEST",
+        "path": "test/p0b-authority-launcher.test.ts",
+        "sha256": "031ed0718af18d2487353fef4649eadecd63d5d5c6cc2eaa5e5f9a5b320b9a9c",
+        "bytes": 13330
+      }
+    ],
+    "security_properties": [
+      "direct effective uid and gid enforcement",
+      "closed built-in inert child",
+      "authorization time revalidated after asynchronous verifiers",
+      "opened authority directory dev and ino bound to initial lstat",
+      "exclusive durable claim before receipt reservation",
+      "exclusive durable INCOMPLETE receipt reservation before inert child finalization",
+      "terminal receipt finalized through retained descriptor with file and directory fsync",
+      "strict authorization mode exactly 0400 or 0600",
+      "stable boundary error codes with primary failure preserved during cleanup",
+      "canonical signed descriptor binds security metadata and provenance"
+    ],
+    "blockers": [
+      "openat2 trusted-parent acquisition with RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS, mount, and magic-link restrictions is not implemented",
+      "signature verifier is an injected seam, not an installed trust root",
+      "package verifier is an injected seam, not launch-time immutable deployment authority",
+      "catalog definitions are an unverified transcription, not PostgreSQL 16 catalog proof",
+      "literal artifact-bound owner GO absent"
+    ],
+    "provenance": {
+      "catalog_artifact_path": "ops/p0b-google-authority-launcher/expected-catalog-definitions.inert.json",
+      "basis": "UNVERIFIED_TRANSCRIPTION",
+      "referenced_source_path": "ops/p0b-google-schema/forward.sql.NOEXEC"
+    }
+  }
+}
