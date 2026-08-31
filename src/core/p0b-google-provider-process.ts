@@ -1,134 +1,92 @@
 import type { P0BGoogleCredentialFd } from './p0b-google-credential.ts';
-import { P0B_GOOGLE_RUNTIME_EXECUTION_STATE } from './p0b-google-credential.ts';
+import {
+  P0B_GOOGLE_RUNTIME_EXECUTION_STATE,
+  withP0BGoogleCredentialSecret,
+} from './p0b-google-credential.ts';
+import {
+  createP0BGoogleUnixClient,
+  createPinnedGoogleHttpsAdapter,
+  denyByDefaultPeerCredentialAdapter,
+  P0B_GOOGLE_DIMENSIONS,
+  P0B_GOOGLE_MODEL,
+  P0B_GOOGLE_SOCKET_PATH,
+  startP0BGoogleProviderServer,
+  type P0BGoogleLinuxPeerCredentialAdapter,
+  type P0BGooglePeerPolicy,
+} from './p0b-google-provider-protocol.ts';
 
 export const P0B_GOOGLE_PROVIDER_PROCESS_CONTRACT = Object.freeze({
-  schema_version: 1,
+  schema_version: 2,
   executable: '/usr/lib/gbrain/p0b-google-provider',
-  protocol: 'STDIO_FRAMED_V1',
+  protocol: 'AF_UNIX_LENGTH_PREFIXED_JSON_V1',
+  socket_path: P0B_GOOGLE_SOCKET_PATH,
   action: 'GOOGLE_EMBED_FIXED',
-  model: 'google:gemini-embedding-001',
-  dimensions: 768,
-  credential_fd: 3,
+  model: P0B_GOOGLE_MODEL,
+  dimensions: P0B_GOOGLE_DIMENSIONS,
   shared_gateway: 'FORBIDDEN',
   environment_credentials: 'FORBIDDEN',
+  peer_credentials: 'LINUX_SO_PEERCRED_REQUIRED_DENY_BY_DEFAULT',
 } as const);
 
 interface ProviderRequest {
   readonly schema_version: 1;
-  readonly model: 'google:gemini-embedding-001';
-  readonly dimensions: 768;
+  readonly model: typeof P0B_GOOGLE_MODEL;
+  readonly dimensions: typeof P0B_GOOGLE_DIMENSIONS;
   readonly inputs: readonly string[];
   readonly deadline_epoch_ms: number;
 }
 
-interface ProviderChild {
-  readonly request: (frame: unknown) => Promise<unknown>;
-  readonly terminate: () => Promise<void>;
-}
-
-interface ProviderLauncher {
-  readonly launch: (request: unknown) => Promise<ProviderChild>;
-}
-
-function plain(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    && Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function exact(value: unknown, keys: readonly string[]): Record<string, unknown> {
-  if (!plain(value)) throw new Error('P0B_PROVIDER_PROTOCOL');
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-    throw new Error('P0B_PROVIDER_PROTOCOL');
-  }
-  return value;
-}
-
-function dense(value: unknown): unknown[] {
-  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
-    throw new Error('P0B_PROVIDER_PROTOCOL');
-  }
-  const keys = Object.keys(value);
-  if (keys.length !== value.length || keys.some((key, index) => key !== String(index))) {
-    throw new Error('P0B_PROVIDER_PROTOCOL');
-  }
-  return value;
-}
-
-function parseRequest(value: unknown): ProviderRequest {
-  const request = exact(value, ['schema_version', 'model', 'dimensions', 'inputs', 'deadline_epoch_ms']);
-  const inputs = dense(request.inputs);
-  if (request.schema_version !== 1
-    || request.model !== P0B_GOOGLE_PROVIDER_PROCESS_CONTRACT.model
-    || request.dimensions !== P0B_GOOGLE_PROVIDER_PROCESS_CONTRACT.dimensions
-    || !Number.isSafeInteger(request.deadline_epoch_ms) || (request.deadline_epoch_ms as number) <= 0
-    || inputs.length === 0 || inputs.some(input => typeof input !== 'string')) {
-    throw new Error('P0B_PROVIDER_PROTOCOL');
-  }
-  return Object.freeze({ ...request, inputs: Object.freeze([...inputs]) }) as unknown as ProviderRequest;
-}
-
-function parseResponse(value: unknown, requestId: string, count: number): { schema_version: 1; vectors: number[][] } {
-  const response = exact(value, ['schema_version', 'request_id', 'vectors']);
-  const rawVectors = dense(response.vectors);
-  if (response.schema_version !== 1 || response.request_id !== requestId || rawVectors.length !== count) {
-    throw new Error('P0B_PROVIDER_PROTOCOL');
-  }
-  const vectors = rawVectors.map(rawVector => {
-    const vector = dense(rawVector);
-    if (vector.length !== P0B_GOOGLE_PROVIDER_PROCESS_CONTRACT.dimensions
-      || vector.some(component => typeof component !== 'number' || !Number.isFinite(component))) {
-      throw new Error('P0B_PROVIDER_PROTOCOL');
-    }
-    return Object.freeze(vector.map(component => Object.is(component, -0) ? 0 : component)) as number[];
-  });
-  return Object.freeze({ schema_version: 1, vectors: Object.freeze(vectors) }) as { schema_version: 1; vectors: number[][] };
-}
-
-export function createP0BGoogleProviderProcess(launcher: ProviderLauncher) {
-  let sequence = 0;
+/**
+ * Real successor client. It uses bounded byte framing over AF_UNIX and a random
+ * 256-bit nonce. It is intentionally not wired into the fenced runner yet.
+ */
+export function createP0BGoogleProviderSocketProcess(options: { readonly socket_path?: string } = {}) {
+  const client = createP0BGoogleUnixClient(options);
   return Object.freeze({
-    embedWithCredential: async (credential: P0BGoogleCredentialFd, value: unknown) => {
-      if (P0B_GOOGLE_RUNTIME_EXECUTION_STATE === 'UNFINALIZED_NOEXEC') {
-        throw new Error('P0B_GOOGLE_RUNTIME_UNFINALIZED_NOEXEC');
-      }
-      const request = parseRequest(value);
-      sequence += 1;
-      if (!Number.isSafeInteger(sequence) || sequence > 99_999_999) throw new Error('P0B_PROVIDER_PROTOCOL');
-      const requestId = `request-${String(sequence).padStart(8, '0')}`;
-      let child: ProviderChild | undefined;
-      try {
-        child = await launcher.launch(Object.freeze({
-          executable: P0B_GOOGLE_PROVIDER_PROCESS_CONTRACT.executable,
-          argv: Object.freeze([P0B_GOOGLE_PROVIDER_PROCESS_CONTRACT.executable, '--stdio-framed-v1']),
-          env: Object.freeze({}),
-          credential_fd: P0B_GOOGLE_PROVIDER_PROCESS_CONTRACT.credential_fd,
-          credential: credential.fd,
-          stdin: 'PIPE',
-          stdout: 'PIPE',
-          stderr: 'VALUE_FREE',
-          shared_gateway: 'FORBIDDEN',
-          network: 'GOOGLE_GENERATIVE_LANGUAGE_ONLY',
-        }));
-        const response = await child.request(Object.freeze({
-          schema_version: 1,
-          action: P0B_GOOGLE_PROVIDER_PROCESS_CONTRACT.action,
-          request_id: requestId,
-          model: request.model,
-          dimensions: request.dimensions,
-          inputs: request.inputs,
-          deadline_epoch_ms: request.deadline_epoch_ms,
-        }));
-        return parseResponse(response, requestId, request.inputs.length);
-      } catch (error) {
-        if (error instanceof Error && error.message === 'P0B_PROVIDER_PROTOCOL') throw error;
-        throw new Error('P0B_PROVIDER_PROTOCOL');
-      } finally {
-        if (child !== undefined) {
-          try { await child.terminate(); } catch { /* child is already unusable */ }
-        }
-      }
+    async embed(request: ProviderRequest) {
+      if (request.schema_version !== 1 || request.model !== P0B_GOOGLE_MODEL
+        || request.dimensions !== P0B_GOOGLE_DIMENSIONS) throw new Error('P0B_PROVIDER_PROTOCOL');
+      return await client.embed(request.inputs, request.deadline_epoch_ms);
+    },
+  });
+}
+
+/**
+ * Production entrypoint. Deployment remains blocked at the first instruction.
+ * The peer adapter argument exists because Node/Bun does not expose SO_PEERCRED;
+ * an independently reviewed native adapter and stable UID/group policy are required.
+ */
+export async function runP0BGoogleProviderExecutable(options: {
+  readonly peer_credentials?: P0BGoogleLinuxPeerCredentialAdapter;
+  readonly peer_policy?: P0BGooglePeerPolicy;
+} = {}): Promise<never> {
+  if (P0B_GOOGLE_RUNTIME_EXECUTION_STATE === 'UNFINALIZED_NOEXEC') {
+    throw new Error('P0B_GOOGLE_RUNTIME_UNFINALIZED_NOEXEC');
+  }
+  const peerPolicy = options.peer_policy;
+  if (peerPolicy === undefined) throw new Error('P0B_PEER_POLICY_UNFINALIZED_NOEXEC');
+  const server = await startP0BGoogleProviderServer({
+    socket_path: P0B_GOOGLE_SOCKET_PATH,
+    peer_credentials: options.peer_credentials ?? denyByDefaultPeerCredentialAdapter,
+    peer_policy: peerPolicy,
+    https: createPinnedGoogleHttpsAdapter(),
+    with_api_key: use => withP0BGoogleCredentialSecret(use),
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('close', resolve);
+    server.once('error', reject);
+  });
+  throw new Error('P0B_PROVIDER_STOPPED');
+}
+
+/**
+ * Compatibility surface for the original mock launcher contract. It remains
+ * hard-fenced and never reads any caller-controlled value.
+ */
+export function createP0BGoogleProviderProcess(_launcher: unknown) {
+  return Object.freeze({
+    embedWithCredential: async (_credential: P0BGoogleCredentialFd, _value: unknown) => {
+      throw new Error('P0B_GOOGLE_RUNTIME_UNFINALIZED_NOEXEC');
     },
   });
 }

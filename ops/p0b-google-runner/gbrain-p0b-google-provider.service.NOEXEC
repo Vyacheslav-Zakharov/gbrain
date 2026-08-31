@@ -1,0 +1,36 @@
+# UNFINALIZED NOEXEC TEMPLATE — DO NOT INSTALL OR ENABLE.
+[Unit]
+Description=GBrain P0-B fixed Google provider (NOEXEC template)
+Requires=gbrain-p0b-google-provider.socket
+After=gbrain-p0b-google-provider.socket
+
+[Service]
+Type=simple
+ExecCondition=/usr/bin/false
+DynamicUser=yes
+User=
+Group=
+UMask=0077
+LoadCredential=google-generative-ai-api-key
+ExecStart=/usr/lib/gbrain/p0b-google-provider
+Environment=
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateUsers=yes
+ProtectSystem=strict
+ProtectHome=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RuntimeMaxSec=300
+TimeoutStopSec=15
+KillMode=control-group
+SendSIGKILL=yes
+MemoryHigh=256M
+MemoryMax=384M
+
+# No [Install]. AF_INET/AF_INET6 remain absent until an approved egress mechanism exists.
+# DynamicUser identity cannot satisfy the peer UID contract and is intentionally unresolved.

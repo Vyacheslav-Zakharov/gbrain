@@ -1,0 +1,27 @@
+-- INERT REVIEW PAYLOAD: NO STATEMENT IN THIS FILE IS EXECUTABLE.
+-- -- NOEXEC: root-owned launcher only; connect locally as PostgreSQL session_user postgres.
+-- -- Authorization nonce MUST already be claimed by a separately committed root authority action.
+-- \set ON_ERROR_STOP on
+-- BEGIN;
+-- SET LOCAL lock_timeout = '5s';
+-- SET LOCAL statement_timeout = '60s';
+-- SELECT pg_advisory_xact_lock(578411056621836800::bigint);
+-- DO $bootstrap$
+-- BEGIN
+--   IF current_setting('server_version_num')::integer NOT BETWEEN 160000 AND 169999
+--      OR session_user <> 'postgres' OR current_user <> 'postgres'
+--      OR NOT (SELECT rolsuper AND rolcreaterole FROM pg_roles WHERE rolname='postgres') THEN
+--     RAISE EXCEPTION 'P0B_BOOTSTRAP_ROOT_POSTGRES_AUTHORITY_REQUIRED';
+--   END IF;
+--   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname IN ('gbrain_p0b_owner','gbrain_p0b_runtime','gbrain_p0b_migrator')) THEN
+--     RAISE EXCEPTION 'P0B_BOOTSTRAP_PARTIAL_OR_REPLAY';
+--   END IF;
+-- END $bootstrap$;
+-- CREATE ROLE gbrain_p0b_owner NOLOGIN NOINHERIT NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1;
+-- CREATE ROLE gbrain_p0b_runtime LOGIN NOINHERIT NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1;
+-- CREATE ROLE gbrain_p0b_migrator LOGIN NOINHERIT NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1;
+-- GRANT gbrain_p0b_owner TO gbrain_p0b_migrator WITH INHERIT FALSE, SET TRUE;
+-- GRANT USAGE ON SCHEMA public TO gbrain_p0b_runtime;
+-- GRANT USAGE, CREATE ON SCHEMA public TO gbrain_p0b_owner;
+-- COMMIT;
+-- -- Run verify.sql.NOEXEC in a new read-only transaction and publish its exact stdout as the bootstrap receipt.

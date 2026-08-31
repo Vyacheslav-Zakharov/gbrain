@@ -1,0 +1,40 @@
+{
+  "authorization_nonce_claim": "REQUIRES_SEPARATE_ROOT_COMMITTED_CLAIM",
+  "blockers": [
+    "fresh artifact-bound authorization",
+    "durable root nonce claim/finalize launcher",
+    "independent review",
+    "hosted PostgreSQL 16 proof",
+    "separate literal GO"
+  ],
+  "current_gbrain_connection_can_execute": false,
+  "execution_state": "ROOT_POSTGRES_NOEXEC_CANDIDATE",
+  "files": {
+    "forward.sql.NOEXEC": {
+      "path": "forward.sql.NOEXEC",
+      "sha256": "86d5373e3225b006648a9bb04aca7b149163e8649b1311872ca88ccc9ec88ed6"
+    },
+    "inverse.sql.NOEXEC": {
+      "path": "inverse.sql.NOEXEC",
+      "sha256": "92bce03508c1f25c63dba5bb3c3f885227d316817b49ca079bfca96680c89d33"
+    },
+    "verify.sql.NOEXEC": {
+      "path": "verify.sql.NOEXEC",
+      "sha256": "aab58d8214bb76041b1820c656231dc8cc7a7a5d875c849b2daf518a542d814a"
+    }
+  },
+  "package_kind": "gbrain-p0b-google-role-bootstrap-v4c3-noexec-v1",
+  "package_root_definition": "SHA-256 of UTF-8 records logical_name NUL raw_file_sha256 LF, sorted by logical_name; manifest excluded",
+  "package_root_sha256": "8943048f8e36ab07d2c8b7b32b598ff0325266cee5a6cdbd1ca44011dee6f94c",
+  "production_mutation_authorized": false,
+  "required_database_session_user": "postgres",
+  "required_os_identity": "root",
+  "roles": [
+    "gbrain_p0b_owner",
+    "gbrain_p0b_runtime",
+    "gbrain_p0b_migrator"
+  ],
+  "schema_version": 1,
+  "topology_execution_status_sha256": "5e22d7d2330957d8ecec4105f014a8f4ff20d37b6821bbb3abb42847a0bd058c",
+  "topology_receipt_sha256": "067e7a1689a08ca73be2df7881ccef4b84ad1a78c02e9d20652712b3d8f60811"
+}

@@ -1,0 +1,80 @@
+-- INERT REVIEW PAYLOAD: NO STATEMENT IN THIS FILE IS EXECUTABLE.
+-- -- NOEXEC: root/postgres read-only exact role-bootstrap verifier.
+-- \set ON_ERROR_STOP on
+-- BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+-- SET LOCAL search_path = pg_catalog, public;
+-- DO $verify$
+-- DECLARE role_projection text; membership_projection text; schema_acl_projection text; role_policy_sha256 text;
+-- BEGIN
+--   IF session_user <> 'postgres' OR current_user <> 'postgres' THEN
+--     RAISE EXCEPTION 'P0B_BOOTSTRAP_ROOT_POSTGRES_AUTHORITY_REQUIRED';
+--   END IF;
+--   IF EXISTS (
+--     WITH expected(rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolconnlimit,rolvaliduntil_is_null,rolbypassrls) AS (VALUES
+--       ('gbrain_p0b_owner',false,false,false,false,false,false,-1,true,false),
+--       ('gbrain_p0b_runtime',false,false,false,false,true,false,-1,true,false),
+--       ('gbrain_p0b_migrator',false,false,false,false,true,false,-1,true,false)
+--     ), actual AS (
+--       SELECT rolname::text,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolconnlimit,(rolvaliduntil IS NULL),rolbypassrls
+--       FROM pg_roles WHERE rolname LIKE 'gbrain_p0b_%'
+--     )
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+--     UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_BOOTSTRAP_ROLE_SET_MISMATCH'; END IF;
+--
+--   IF EXISTS (
+--     WITH expected(role_name,member_name,grantor_name,admin_option,inherit_option,set_option) AS (VALUES
+--       ('gbrain_p0b_owner','gbrain_p0b_migrator','postgres',false,false,true)
+--     ), actual AS (
+--       SELECT role_role.rolname::text, member_role.rolname::text, grantor_role.rolname::text,
+--              m.admin_option,m.inherit_option,m.set_option
+--       FROM pg_auth_members m
+--       JOIN pg_roles role_role ON role_role.oid=m.roleid
+--       JOIN pg_roles member_role ON member_role.oid=m.member
+--       JOIN pg_roles grantor_role ON grantor_role.oid=m.grantor
+--       WHERE role_role.rolname LIKE 'gbrain_p0b_%' OR member_role.rolname LIKE 'gbrain_p0b_%'
+--     )
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+--     UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_BOOTSTRAP_MEMBERSHIP_SET_MISMATCH'; END IF;
+--
+--   IF EXISTS (
+--     WITH expected(grantor,grantee,privilege_type,is_grantable) AS (VALUES
+--       ('pg_database_owner','PUBLIC','USAGE',false),
+--       ('pg_database_owner','gbrain','CREATE',false),('pg_database_owner','gbrain','USAGE',false),
+--       ('pg_database_owner','pg_database_owner','CREATE',false),('pg_database_owner','pg_database_owner','USAGE',false),
+--       ('postgres','gbrain_p0b_owner','CREATE',false),('postgres','gbrain_p0b_owner','USAGE',false),
+--       ('postgres','gbrain_p0b_runtime','USAGE',false)
+--     ), actual AS (
+--       SELECT CASE WHEN acl.grantor=0 THEN 'PUBLIC' ELSE grantor.rolname END::text,
+--              CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE grantee.rolname END::text,
+--              acl.privilege_type::text,acl.is_grantable
+--       FROM pg_namespace n
+--       CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) acl
+--       LEFT JOIN pg_roles grantor ON grantor.oid=acl.grantor
+--       LEFT JOIN pg_roles grantee ON grantee.oid=acl.grantee
+--       WHERE n.nspname='public'
+--     )
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual)
+--     UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_BOOTSTRAP_SCHEMA_ACL_SET_MISMATCH'; END IF;
+--
+--   SELECT string_agg(concat_ws('|',rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolconnlimit,coalesce(rolvaliduntil::text,'NULL'),rolbypassrls),E'\n' ORDER BY rolname)
+--     INTO role_projection FROM pg_roles WHERE rolname LIKE 'gbrain_p0b_%';
+--   SELECT string_agg(concat_ws('|',rr.rolname,mr.rolname,gr.rolname,m.admin_option,m.inherit_option,m.set_option),E'\n' ORDER BY rr.rolname,mr.rolname)
+--     INTO membership_projection FROM pg_auth_members m JOIN pg_roles rr ON rr.oid=m.roleid JOIN pg_roles mr ON mr.oid=m.member JOIN pg_roles gr ON gr.oid=m.grantor
+--     WHERE rr.rolname LIKE 'gbrain_p0b_%' OR mr.rolname LIKE 'gbrain_p0b_%';
+--   SELECT string_agg(concat_ws('|',CASE WHEN acl.grantor=0 THEN 'PUBLIC' ELSE grantor.rolname END,CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE grantee.rolname END,acl.privilege_type,acl.is_grantable),E'\n' ORDER BY 1)
+--     INTO schema_acl_projection FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) acl LEFT JOIN pg_roles grantor ON grantor.oid=acl.grantor LEFT JOIN pg_roles grantee ON grantee.oid=acl.grantee WHERE n.nspname='public';
+--   role_policy_sha256 := encode(digest(role_projection,'sha256'),'hex');
+--   PERFORM digest(role_projection,'sha256');
+--   PERFORM digest(coalesce(membership_projection,''),'sha256');
+--   PERFORM digest(schema_acl_projection,'sha256');
+-- END $verify$;
+-- SELECT 'P0B_ROLE_BOOTSTRAP_VERIFY_OK'::text AS status,
+--  encode(digest((SELECT string_agg(concat_ws('|',rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolconnlimit,coalesce(rolvaliduntil::text,'NULL'),rolbypassrls),E'\n' ORDER BY rolname) FROM pg_roles WHERE rolname LIKE 'gbrain_p0b_%'),'sha256'),'hex') AS role_policy_sha256,
+--  encode(digest(coalesce((SELECT string_agg(concat_ws('|',rr.rolname,mr.rolname,gr.rolname,m.admin_option,m.inherit_option,m.set_option),E'\n' ORDER BY rr.rolname,mr.rolname) FROM pg_auth_members m JOIN pg_roles rr ON rr.oid=m.roleid JOIN pg_roles mr ON mr.oid=m.member JOIN pg_roles gr ON gr.oid=m.grantor WHERE rr.rolname LIKE 'gbrain_p0b_%' OR mr.rolname LIKE 'gbrain_p0b_%'),''),'sha256'),'hex') AS membership_policy_sha256,
+--  encode(digest((SELECT string_agg(concat_ws('|',CASE WHEN acl.grantor=0 THEN 'PUBLIC' ELSE grantor.rolname END,CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE grantee.rolname END,acl.privilege_type,acl.is_grantable),E'\n' ORDER BY 1) FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) acl LEFT JOIN pg_roles grantor ON grantor.oid=acl.grantor LEFT JOIN pg_roles grantee ON grantee.oid=acl.grantee WHERE n.nspname='public'),'sha256'),'hex') AS schema_acl_policy_sha256,
+--  current_setting('gbrain.p0b.bootstrap_package_root_sha256',true) AS package_root_sha256,
+--  current_setting('gbrain.p0b.authorization_claim_sha256',true) AS authorization_claim_sha256;
+-- COMMIT;

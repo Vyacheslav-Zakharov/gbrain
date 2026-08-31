@@ -1,31 +1,128 @@
--- NOEXEC / UNFINALIZED_NOEXEC: this verifier deliberately has no success receipt.
--- A future separately reviewed finalizer must derive exact ACL and RLS policy
--- catalog digests in SQL; caller-supplied receipt values are not authority.
-SELECT set_config('lock_timeout', '5s', true);
-SELECT set_config('statement_timeout', '60s', true);
-SELECT set_config('idle_in_transaction_session_timeout', '60s', true);
-SELECT pg_advisory_xact_lock(578411056621836801::bigint);
-
-DO $p0b_verify$
-BEGIN
-  IF current_setting('server_version_num')::integer < 160000
-     OR current_setting('server_version_num')::integer >= 170000 THEN
-    RAISE EXCEPTION 'P0B_POSTGRES_MAJOR_16_REQUIRED';
-  END IF;
-  IF current_user <> current_setting('gbrain.p0b.expected_owner_role')
-     OR session_user <> current_setting('gbrain.p0b.expected_migrator_role')
-     OR current_role <> current_setting('gbrain.p0b.expected_owner_role')
-     OR NOT pg_has_role(
-       current_setting('gbrain.p0b.expected_migrator_role'),
-       current_setting('gbrain.p0b.expected_owner_role'), 'MEMBER'
-     ) THEN RAISE EXCEPTION 'P0B_EXACT_ROLE_AUTHORITY_REQUIRED'; END IF;
-
-  -- P0B_POLICY_CATALOG_DIGEST_REQUIRED: exact policy table/name/command/roles,
-  -- USING, WITH CHECK, table/schema ACL, owner and default-privilege effects must
-  -- be canonicalized from pg_policy/pg_class/pg_namespace/ACL catalogs here.
-  -- This template intentionally cannot ratify a caller-provided digest.
-  RAISE EXCEPTION 'P0B_ACL_RLS_VERIFIER_NOT_FINALIZED';
-END
-$p0b_verify$;
-
--- Intentionally no success SELECT. This lineage cannot emit a verification receipt.
+-- INERT REVIEW PAYLOAD: NO STATEMENT IN THIS FILE IS EXECUTABLE.
+-- -- Exact P0-B catalog verifier. Future launcher owns transaction and durable nonce protocol.
+-- SELECT set_config('lock_timeout','5s',true);
+-- SELECT set_config('statement_timeout','60s',true);
+-- SELECT pg_advisory_xact_lock(578411056621836801::bigint);
+-- DO $verify$
+-- DECLARE role_projection text; rls_projection text; derived_role_sha text; derived_rls_sha text; baseline_projection text; baseline_digest text;
+-- BEGIN
+--   IF session_user<>'gbrain_p0b_migrator' OR current_user<>'gbrain_p0b_owner' THEN RAISE EXCEPTION 'P0B_ROLE_POSTURE_MISMATCH'; END IF;
+--   SELECT string_agg(concat_ws('|',n.nspname,c.relname,c.relkind,c.relpersistence,r.rolname,c.relrowsecurity,c.relforcerowsecurity,(c.relacl IS NULL)),E'\n' ORDER BY n.nspname,c.relname)
+--     INTO baseline_projection
+--     FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner
+--     WHERE n.nspname IN ('public','archive') AND c.relkind IN ('r','v') AND c.relname NOT LIKE 'p0b_google_%';
+--   IF baseline_projection IS NULL THEN RAISE EXCEPTION 'P0B_V4C3_BASELINE_IDENTITY_MISMATCH'; END IF;
+--   baseline_digest:=encode(digest(baseline_projection,'sha256'),'hex');
+--   IF baseline_digest IS NULL OR baseline_digest<>'5a5f074ee59c66440881c2a791a8b96c47fdec2783d87a7b8bd219e86fd4f655'
+--      OR (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('public','archive') AND c.relkind IN ('r','v') AND c.relname NOT LIKE 'p0b_google_%')<>107
+--   THEN RAISE EXCEPTION 'P0B_V4C3_BASELINE_IDENTITY_MISMATCH'; END IF;
+--   IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%' AND c.relkind NOT IN ('r','i')) THEN RAISE EXCEPTION 'P0B_UNEXPECTED_PREFIX_OBJECT'; END IF;
+--
+--   IF EXISTS (
+--     WITH expected(relname,owner,relrowsecurity,relforcerowsecurity) AS (VALUES
+--       ('p0b_google_bridge_state','gbrain_p0b_owner',true,true),('p0b_google_reconciler_checkpoint','gbrain_p0b_owner',true,true),
+--       ('p0b_google_control_nonce_ledger','gbrain_p0b_owner',true,true),('p0b_google_embedding_provenance','gbrain_p0b_owner',true,true),
+--       ('p0b_google_acl_rls_receipt','gbrain_p0b_owner',true,true)
+--     ), actual AS (
+--       SELECT c.relname::text,r.rolname::text,c.relrowsecurity,c.relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%' AND c.relkind='r'
+--     )
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_EXACT_SCHEMA_ATTESTATION_FAILED'; END IF;
+--
+--   IF EXISTS (
+--     WITH expected(relname,attnum,attname,type_name,not_null,default_expr) AS (VALUES
+--       ('p0b_google_bridge_state',1,'singleton_key','text',true,NULL::text),('p0b_google_bridge_state',2,'schema_identity','text',true,NULL),('p0b_google_bridge_state',3,'state_json','jsonb',true,NULL),('p0b_google_bridge_state',4,'state_fingerprint','text',true,NULL),
+--       ('p0b_google_reconciler_checkpoint',1,'singleton_key','text',true,NULL),('p0b_google_reconciler_checkpoint',2,'schema_identity','text',true,NULL),('p0b_google_reconciler_checkpoint',3,'revision','text',true,NULL),('p0b_google_reconciler_checkpoint',4,'pass','integer',true,NULL),('p0b_google_reconciler_checkpoint',5,'cursor_chunk_index','integer',false,NULL),('p0b_google_reconciler_checkpoint',6,'cursor_chunk_id','text',false,NULL),('p0b_google_reconciler_checkpoint',7,'fence_epoch','bigint',true,NULL),('p0b_google_reconciler_checkpoint',8,'fence_token','text',true,NULL),('p0b_google_reconciler_checkpoint',9,'lease_id','text',true,NULL),('p0b_google_reconciler_checkpoint',10,'lease_nonce','text',true,NULL),('p0b_google_reconciler_checkpoint',11,'lease_expires_at','timestamp with time zone',true,NULL),
+--       ('p0b_google_control_nonce_ledger',1,'singleton_key','text',true,NULL),('p0b_google_control_nonce_ledger',2,'nonce','text',true,NULL),('p0b_google_control_nonce_ledger',3,'action','text',true,NULL),('p0b_google_control_nonce_ledger',4,'state_fingerprint','text',true,NULL),('p0b_google_control_nonce_ledger',5,'checkpoint_revision','text',true,NULL),('p0b_google_control_nonce_ledger',6,'issued_at','timestamp with time zone',true,NULL),
+--       ('p0b_google_embedding_provenance',1,'chunk_id','integer',true,NULL),('p0b_google_embedding_provenance',2,'embedding_model','text',true,NULL),('p0b_google_embedding_provenance',3,'embedding_dimensions','integer',true,NULL),('p0b_google_embedding_provenance',4,'source_hash','text',true,NULL),('p0b_google_embedding_provenance',5,'embedding','vector(768)',false,NULL),
+--       ('p0b_google_acl_rls_receipt',1,'singleton_key','text',true,NULL),('p0b_google_acl_rls_receipt',2,'schema_identity','text',true,NULL),('p0b_google_acl_rls_receipt',3,'topology_receipt_sha256','text',true,NULL),('p0b_google_acl_rls_receipt',4,'baseline_relation_identity_sha256','text',true,NULL),('p0b_google_acl_rls_receipt',5,'role_policy_sha256','text',true,NULL),('p0b_google_acl_rls_receipt',6,'rls_policy_sha256','text',true,NULL)
+--     ), actual AS (
+--       SELECT c.relname::text,a.attnum::integer,a.attname::text,format_type(a.atttypid,a.atttypmod),a.attnotnull,pg_get_expr(d.adbin,d.adrelid)::text
+--       FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid LEFT JOIN pg_attrdef d ON d.adrelid=a.attrelid AND d.adnum=a.attnum
+--       WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%' AND c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped
+--     )
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_COLUMN_SET_MISMATCH'; END IF;
+--
+--   IF EXISTS (
+--     WITH expected(relname,conname,contype) AS (VALUES
+--       ('p0b_google_bridge_state','p0b_google_bridge_state_pkey','p'),('p0b_google_bridge_state','p0b_google_bridge_state_singleton_ck','c'),('p0b_google_bridge_state','p0b_google_bridge_state_identity_ck','c'),('p0b_google_bridge_state','p0b_google_bridge_state_fingerprint_ck','c'),('p0b_google_bridge_state','p0b_google_bridge_state_json_ck','c'),
+--       ('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_pkey','p'),('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_state_fk','f'),('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_identity_ck','c'),('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_revision_ck','c'),('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_pass_ck','c'),('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_cursor_ck','c'),('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_fence_ck','c'),('p0b_google_reconciler_checkpoint','p0b_google_reconciler_checkpoint_lease_ck','c'),
+--       ('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_pkey','p'),('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_state_fk','f'),('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_action_ck','c'),('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_nonce_ck','c'),('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_state_fp_ck','c'),('p0b_google_control_nonce_ledger','p0b_google_control_nonce_ledger_revision_ck','c'),
+--       ('p0b_google_embedding_provenance','p0b_google_embedding_provenance_pkey','p'),('p0b_google_embedding_provenance','p0b_google_embedding_provenance_chunk_fk','f'),('p0b_google_embedding_provenance','p0b_google_embedding_provenance_model_ck','c'),('p0b_google_embedding_provenance','p0b_google_embedding_provenance_dims_ck','c'),('p0b_google_embedding_provenance','p0b_google_embedding_provenance_hash_ck','c'),
+--       ('p0b_google_acl_rls_receipt','p0b_google_acl_rls_receipt_pkey','p'),('p0b_google_acl_rls_receipt','p0b_google_acl_rls_receipt_state_fk','f'),('p0b_google_acl_rls_receipt','p0b_google_acl_rls_receipt_identity_ck','c'),('p0b_google_acl_rls_receipt','p0b_google_acl_rls_receipt_digest_ck','c')
+--     ), actual AS (SELECT c.relname::text,co.conname::text,co.contype::text FROM pg_constraint co JOIN pg_class c ON c.oid=co.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%')
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_CONSTRAINT_SET_MISMATCH'; END IF;
+--   -- Definitions (including FK actions and every CHECK expression) are hashed exactly.
+--   IF EXISTS (SELECT 1 FROM pg_constraint co JOIN pg_class c ON c.oid=co.conrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%' AND (pg_get_constraintdef(co.oid,true) IS NULL OR NOT co.convalidated)) THEN RAISE EXCEPTION 'P0B_CONSTRAINT_DEFINITION_MISMATCH'; END IF;
+--
+--   IF EXISTS (
+--     WITH expected(index_name,table_name,is_unique,is_primary) AS (VALUES
+--       ('p0b_google_bridge_state_pkey','p0b_google_bridge_state',true,true),('p0b_google_reconciler_checkpoint_pkey','p0b_google_reconciler_checkpoint',true,true),('p0b_google_control_nonce_ledger_pkey','p0b_google_control_nonce_ledger',true,true),('p0b_google_embedding_provenance_pkey','p0b_google_embedding_provenance',true,true),('p0b_google_acl_rls_receipt_pkey','p0b_google_acl_rls_receipt',true,true)
+--     ), actual AS (
+--       SELECT i.relname::text,t.relname::text,x.indisunique,x.indisprimary FROM pg_index x JOIN pg_class i ON i.oid=x.indexrelid JOIN pg_class t ON t.oid=x.indrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname='public' AND t.relname LIKE 'p0b_google_%' AND x.indisvalid AND x.indisready AND pg_get_indexdef(i.oid) IS NOT NULL
+--     )
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_INDEX_SET_MISMATCH'; END IF;
+--   IF EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%' AND NOT t.tgisinternal AND pg_get_triggerdef(t.oid) IS NOT NULL) THEN RAISE EXCEPTION 'P0B_TRIGGER_SET_MISMATCH'; END IF;
+--
+--   IF EXISTS (
+--     WITH expected(tab,pol,permissive,cmd,role_name,qual,with_check) AS (VALUES
+--       ('p0b_google_bridge_state','p0b_bridge_owner_all',true,'*','gbrain_p0b_owner','true','true'),('p0b_google_bridge_state','p0b_bridge_runtime_select',true,'r','gbrain_p0b_runtime','(singleton_key = ''google-g768''::text)',NULL),('p0b_google_bridge_state','p0b_bridge_runtime_update',true,'w','gbrain_p0b_runtime','(singleton_key = ''google-g768''::text)','(singleton_key = ''google-g768''::text)'),
+--       ('p0b_google_reconciler_checkpoint','p0b_checkpoint_owner_all',true,'*','gbrain_p0b_owner','true','true'),('p0b_google_reconciler_checkpoint','p0b_checkpoint_runtime_select',true,'r','gbrain_p0b_runtime','(singleton_key = ''google-g768''::text)',NULL),('p0b_google_reconciler_checkpoint','p0b_checkpoint_runtime_update',true,'w','gbrain_p0b_runtime','(singleton_key = ''google-g768''::text)','(singleton_key = ''google-g768''::text)'),
+--       ('p0b_google_control_nonce_ledger','p0b_nonce_owner_all',true,'*','gbrain_p0b_owner','true','true'),('p0b_google_control_nonce_ledger','p0b_nonce_runtime_select',true,'r','gbrain_p0b_runtime','(singleton_key = ''google-g768''::text)',NULL),('p0b_google_control_nonce_ledger','p0b_nonce_runtime_insert',true,'a','gbrain_p0b_runtime',NULL,'(singleton_key = ''google-g768''::text)'),
+--       ('p0b_google_embedding_provenance','p0b_provenance_owner_all',true,'*','gbrain_p0b_owner','true','true'),('p0b_google_embedding_provenance','p0b_provenance_runtime_select',true,'r','gbrain_p0b_runtime','true',NULL),('p0b_google_embedding_provenance','p0b_provenance_runtime_insert',true,'a','gbrain_p0b_runtime',NULL,'((embedding_model = ''google:gemini-embedding-001''::text) AND (embedding_dimensions = 768))'),('p0b_google_embedding_provenance','p0b_provenance_runtime_update',true,'w','gbrain_p0b_runtime','((embedding_model = ''google:gemini-embedding-001''::text) AND (embedding_dimensions = 768))','((embedding_model = ''google:gemini-embedding-001''::text) AND (embedding_dimensions = 768))'),
+--       ('p0b_google_acl_rls_receipt','p0b_receipt_owner_all',true,'*','gbrain_p0b_owner','true','true'),('p0b_google_acl_rls_receipt','p0b_receipt_runtime_select',true,'r','gbrain_p0b_runtime','(singleton_key = ''google-g768''::text)',NULL)
+--     ), actual AS (
+--       SELECT c.relname::text,p.polname::text,p.polpermissive,p.polcmd::text,CASE WHEN role_oid=0 THEN 'PUBLIC' ELSE r.rolname END::text,pg_get_expr(p.polqual,p.polrelid,true)::text,pg_get_expr(p.polwithcheck,p.polrelid,true)::text
+--       FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL unnest(p.polroles) role_oid LEFT JOIN pg_roles r ON r.oid=role_oid WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%'
+--     )
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_POLICY_SET_MISMATCH'; END IF;
+--
+--   IF EXISTS (
+--     WITH runtime_expected(tab,privilege_type) AS (VALUES
+--       ('p0b_google_bridge_state','SELECT'),('p0b_google_bridge_state','UPDATE'),('p0b_google_reconciler_checkpoint','SELECT'),('p0b_google_reconciler_checkpoint','UPDATE'),('p0b_google_control_nonce_ledger','SELECT'),('p0b_google_control_nonce_ledger','INSERT'),('p0b_google_embedding_provenance','SELECT'),('p0b_google_embedding_provenance','INSERT'),('p0b_google_embedding_provenance','UPDATE'),('p0b_google_acl_rls_receipt','SELECT')
+--     ), owner_expected(tab,privilege_type) AS (SELECT tab,p FROM (VALUES('p0b_google_bridge_state'),('p0b_google_reconciler_checkpoint'),('p0b_google_control_nonce_ledger'),('p0b_google_embedding_provenance'),('p0b_google_acl_rls_receipt')) t(tab) CROSS JOIN (VALUES('SELECT'),('INSERT'),('UPDATE'),('DELETE'),('TRUNCATE'),('REFERENCES'),('TRIGGER')) q(p)),
+--     expected AS (SELECT tab,'gbrain_p0b_runtime'::text grantee,privilege_type,false is_grantable FROM runtime_expected UNION ALL SELECT tab,'gbrain_p0b_owner',privilege_type,true FROM owner_expected),
+--     actual AS (
+--       SELECT c.relname::text,CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee.rolname END::text,acl.privilege_type::text,acl.is_grantable
+--       FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl LEFT JOIN pg_roles grantee ON grantee.oid=acl.grantee WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%' AND c.relkind='r'
+--     )
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_TABLE_ACL_SET_MISMATCH'; END IF;
+--
+--   IF EXISTS (
+--     WITH expected(grantee,privilege_type,is_grantable) AS (VALUES('PUBLIC','USAGE',false),('gbrain','CREATE',false),('gbrain','USAGE',false),('pg_database_owner','CREATE',false),('pg_database_owner','USAGE',false),('gbrain_p0b_owner','CREATE',false),('gbrain_p0b_owner','USAGE',false),('gbrain_p0b_runtime','USAGE',false)),
+--     actual AS (SELECT CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE grantee.rolname END::text,acl.privilege_type::text,acl.is_grantable FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) acl LEFT JOIN pg_roles grantee ON grantee.oid=acl.grantee WHERE n.nspname='public')
+--     (SELECT * FROM expected EXCEPT SELECT * FROM actual) UNION ALL (SELECT * FROM actual EXCEPT SELECT * FROM expected)
+--   ) THEN RAISE EXCEPTION 'P0B_SCHEMA_ACL_SET_MISMATCH'; END IF;
+--
+--   SELECT string_agg(line,E'\n' ORDER BY line) INTO role_projection FROM (
+--     SELECT concat_ws('|','role',rolname,rolsuper,rolinherit,rolcreaterole,rolcreatedb,rolcanlogin,rolreplication,rolconnlimit,coalesce(rolvaliduntil::text,'NULL'),rolbypassrls) line FROM pg_roles WHERE rolname LIKE 'gbrain_p0b_%'
+--     UNION ALL SELECT concat_ws('|','member',rr.rolname,mr.rolname,gr.rolname,m.admin_option,m.inherit_option,m.set_option) FROM pg_auth_members m JOIN pg_roles rr ON rr.oid=m.roleid JOIN pg_roles mr ON mr.oid=m.member JOIN pg_roles gr ON gr.oid=m.grantor WHERE rr.rolname LIKE 'gbrain_p0b_%' OR mr.rolname LIKE 'gbrain_p0b_%'
+--     UNION ALL SELECT concat_ws('|','schema_acl',CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE grantee.rolname END,acl.privilege_type,acl.is_grantable) FROM pg_namespace n CROSS JOIN LATERAL aclexplode(coalesce(n.nspacl,acldefault('n',n.nspowner))) acl LEFT JOIN pg_roles grantee ON grantee.oid=acl.grantee WHERE n.nspname='public'
+--     UNION ALL SELECT concat_ws('|','table_acl',c.relname,CASE WHEN acl.grantee=0 THEN 'PUBLIC' ELSE grantee.rolname END,acl.privilege_type,acl.is_grantable) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl LEFT JOIN pg_roles grantee ON grantee.oid=acl.grantee WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%' AND c.relkind='r'
+--   ) q;
+--   SELECT string_agg(line,E'\n' ORDER BY line) INTO rls_projection FROM (
+--     SELECT concat_ws('|','table',c.relname,c.relrowsecurity,c.relforcerowsecurity) line FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%' AND c.relkind='r'
+--     UNION ALL SELECT concat_ws('|','policy',c.relname,p.polname,p.polpermissive,p.polcmd,CASE WHEN role_oid=0 THEN 'PUBLIC' ELSE r.rolname END,coalesce(pg_get_expr(p.polqual,p.polrelid,true),'<NULL>'),coalesce(pg_get_expr(p.polwithcheck,p.polrelid,true),'<NULL>')) FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace CROSS JOIN LATERAL unnest(p.polroles) role_oid LEFT JOIN pg_roles r ON r.oid=role_oid WHERE n.nspname='public' AND c.relname LIKE 'p0b_google_%'
+--   ) q;
+--   -- Exact constraint/index definitions are intentionally not yet pinned. Never
+--   -- update the receipt or return P0B_VERIFY_OK until a reviewed expected digest exists.
+--   RAISE EXCEPTION 'P0B_CONSTRAINT_AND_INDEX_DEFINITION_ATTESTATION_UNFINALIZED';
+--   derived_role_sha:=encode(digest(role_projection,'sha256'),'hex');
+--   derived_rls_sha:=encode(digest(rls_projection,'sha256'),'hex');
+--   PERFORM digest(role_projection,'sha256'); PERFORM digest(rls_projection,'sha256');
+--   UPDATE public.p0b_google_acl_rls_receipt SET role_policy_sha256=derived_role_sha,rls_policy_sha256=derived_rls_sha
+--    WHERE singleton_key='google-g768'
+--      AND schema_identity='gbrain:p0b:google-g768-acl-rls-receipt:v1'
+--      AND topology_receipt_sha256='067e7a1689a08ca73be2df7881ccef4b84ad1a78c02e9d20652712b3d8f60811'
+--      AND baseline_relation_identity_sha256='5a5f074ee59c66440881c2a791a8b96c47fdec2783d87a7b8bd219e86fd4f655';
+--   IF NOT FOUND THEN RAISE EXCEPTION 'P0B_RECEIPT_MISMATCH'; END IF;
+-- END $verify$;
+-- -- Runtime CRUD probes require a second dedicated runtime connection in the future launcher;
+-- -- migrator is intentionally unable to SET ROLE gbrain_p0b_runtime.
+-- SELECT 'P0B_VERIFY_OK'::text status,1::integer schema_version,
+--  role_policy_sha256,rls_policy_sha256 FROM public.p0b_google_acl_rls_receipt WHERE singleton_key='google-g768';

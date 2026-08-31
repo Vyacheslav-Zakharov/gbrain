@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { lstat, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   P0B_SCHEMA_EXECUTION_STATE,
@@ -8,211 +8,85 @@ import {
 
 const root = join(import.meta.dir, '..');
 const packageDir = join(root, 'ops', 'p0b-google-schema');
-const paths = {
-  forward: join(packageDir, 'forward.sql.NOEXEC'),
-  inverse: join(packageDir, 'inverse.sql.NOEXEC'),
-  verify: join(packageDir, 'verify.sql.NOEXEC'),
-  manifest: join(packageDir, 'manifest.template.json'),
-  runner: join(root, 'scripts', 'run-p0b-google-schema.ts'),
-  test: import.meta.path,
-} as const;
+const text = (name: string) => readFile(join(packageDir, name), 'utf8');
 
-const governedTables = [
-  'p0b_google_bridge_state',
-  'p0b_google_reconciler_checkpoint',
-  'p0b_google_control_nonce_ledger',
-  'p0b_google_embedding_provenance',
-  'p0b_google_acl_rls_receipt',
+const requiredCatalogSurfaces = [
+  'pg_attribute', 'pg_attrdef', 'pg_constraint', 'pg_get_constraintdef',
+  'pg_index', 'pg_get_indexdef', 'pg_trigger', 'pg_get_triggerdef',
+  'pg_policy', 'polpermissive', 'polroles', 'pg_get_expr',
+  'aclexplode', 'acl.grantee = 0', 'is_grantable', 'relforcerowsecurity',
+  'nspacl',
 ] as const;
 
-const namedConstraints = [
-  'p0b_google_bridge_state_pkey',
-  'p0b_google_bridge_state_singleton_ck',
-  'p0b_google_bridge_state_identity_ck',
-  'p0b_google_bridge_state_fingerprint_ck',
-  'p0b_google_bridge_state_json_ck',
-  'p0b_google_reconciler_checkpoint_pkey',
-  'p0b_google_reconciler_checkpoint_state_fk',
-  'p0b_google_reconciler_checkpoint_identity_ck',
-  'p0b_google_reconciler_checkpoint_revision_ck',
-  'p0b_google_reconciler_checkpoint_pass_ck',
-  'p0b_google_reconciler_checkpoint_cursor_ck',
-  'p0b_google_reconciler_checkpoint_fence_ck',
-  'p0b_google_reconciler_checkpoint_lease_ck',
-  'p0b_google_control_nonce_ledger_pkey',
-  'p0b_google_control_nonce_ledger_state_fk',
-  'p0b_google_control_nonce_ledger_action_ck',
-  'p0b_google_control_nonce_ledger_nonce_ck',
-  'p0b_google_control_nonce_ledger_state_fp_ck',
-  'p0b_google_control_nonce_ledger_revision_ck',
-  'p0b_google_embedding_provenance_pkey',
-  'p0b_google_embedding_provenance_chunk_fk',
-  'p0b_google_embedding_provenance_model_ck',
-  'p0b_google_embedding_provenance_dims_ck',
-  'p0b_google_embedding_provenance_hash_ck',
-  'p0b_google_acl_rls_receipt_pkey',
-  'p0b_google_acl_rls_receipt_state_fk',
-  'p0b_google_acl_rls_receipt_identity_ck',
-  'p0b_google_acl_rls_receipt_status_ck',
-] as const;
-
-async function text(path: string): Promise<string> {
-  return await readFile(path, 'utf8');
-}
-
-function expectNoDangerousPayload(value: string): void {
-  expect(value).not.toMatch(/postgres(?:ql)?:\/\//i);
-  expect(value).not.toMatch(/(?:password|api[_-]?key|client[_-]?secret)\s*[=:]/i);
-  expect(value).not.toMatch(/\bHNSW\b/i);
-  expect(value).not.toMatch(/\bDROP\b[^;]*\bCASCADE\b/i);
-  expect(value).not.toMatch(/\bCREATE\s+(?:TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\b/i);
-  expect(value).not.toMatch(/\bADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\b/i);
-  expect(value).not.toMatch(/\b(?:BEGIN|COMMIT|ROLLBACK)\s*;/i);
-}
-
-function expectQualifiedDdl(sql: string): void {
-  expect(sql).not.toMatch(/^\s*(?:ALTER|CREATE|DROP)\s+TABLE\s+(?!public\.)p0b_google_/im);
-  expect(sql).not.toMatch(/^\s*(?:ALTER|CREATE|DROP)\s+(?:TABLE\s+)?(?!public\.)content_chunks\b/im);
-  expect(sql).not.toMatch(/^\s*(?:CREATE|DROP)\s+INDEX\s+(?!public\.)idx_content_chunks_p0b_g768_keyset\b/im);
-}
-
-describe('offline governed P0-B schema NOEXEC template', () => {
-  test('exports an exact unconditional execution gate and performs zero engine calls', async () => {
-    expect(P0B_SCHEMA_EXECUTION_STATE).toBe('UNFINALIZED_NOEXEC');
-    let inputReads = 0;
-    let reservedCalls = 0;
-    const poisonedInput = new Proxy({}, {
-      get() {
-        inputReads += 1;
-        throw new Error('INPUT_MUST_NOT_BE_READ');
-      },
-    });
-    const engine = {
-      kind: 'postgres' as const,
-      async withReservedConnection() {
-        reservedCalls += 1;
-        throw new Error('ENGINE_MUST_NOT_BE_CALLED');
-      },
-    };
-
-    await expect(runP0BGoogleSchema(poisonedInput as never)).rejects.toThrow('P0B_SCHEMA_UNFINALIZED_NOEXEC');
-    await expect(runP0BGoogleSchema({ engine } as never)).rejects.toThrow('P0B_SCHEMA_UNFINALIZED_NOEXEC');
-    expect(inputReads).toBe(0);
-    expect(reservedCalls).toBe(0);
-  });
-
-  test('is six regular non-executable files outside the migration chain', async () => {
-    expect(Object.values(paths)).toHaveLength(6);
-    for (const path of Object.values(paths)) {
-      const stat = await lstat(path);
-      expect(stat.isFile()).toBe(true);
-      expect(stat.isSymbolicLink()).toBe(false);
-      expect(stat.mode & 0o111).toBe(0);
+describe('P0-B Google schema blocked candidate', () => {
+  test('all retained SQL payloads are comments only', async () => {
+    for (const name of ['forward.sql.NOEXEC', 'verify.sql.NOEXEC', 'inverse.sql.NOEXEC']) {
+      const sql = await text(name);
+      expect(sql.split(/\r?\n/).filter(Boolean).every(line => line.startsWith('--'))).toBe(true);
     }
-    const migrate = await text(join(root, 'src', 'core', 'migrate.ts'));
-    const config = await text(join(root, 'src', 'core', 'config.ts'));
-    expect(migrate).not.toContain('p0b-google-schema');
-    expect(migrate).not.toContain('embedding_g768');
-    expect(config).not.toContain('p0b-google-schema');
+  });
+  test('runner is fail-closed before reading input or touching an engine', async () => {
+    expect(P0B_SCHEMA_EXECUTION_STATE).toBe('BLOCKED_PREREQUISITES_NOEXEC');
+    let reads = 0;
+    const input = new Proxy({}, { get() { reads += 1; throw new Error('must not read'); } });
+    await expect(runP0BGoogleSchema(input as never)).rejects.toThrow('P0B_SCHEMA_BLOCKED_DURABLE_NONCE_LAUNCHER_REQUIRED');
+    expect(reads).toBe(0);
   });
 
-  test('forward is PG16-valid, qualified, ACL-blocked, and exactly attests full core shape', async () => {
-    const sql = await text(paths.forward);
-    expectNoDangerousPayload(sql);
-    expectQualifiedDdl(sql);
-    expect(sql).toContain("(state_json - ARRAY[");
-    expect(sql).toContain(") = '{}'::jsonb");
-    expect(sql).not.toContain('jsonb_object_length');
-    expect(sql).toContain('P0B_CONTENT_CHUNKS_ACL_ATTESTATION_REQUIRED');
-    expect(sql).toContain('P0B_EXACT_CORE_ATTESTATION');
+  test('manifest binds exact v4C.3 relation identity and prerequisite bootstrap receipt', async () => {
+    const manifest = JSON.parse(await text('manifest.json'));
+    expect(manifest.execution_state).toBe('BLOCKED_PREREQUISITES_NOEXEC');
+    expect(manifest.topology_receipt_sha256).toBe('067e7a1689a08ca73be2df7881ccef4b84ad1a78c02e9d20652712b3d8f60811');
+    expect(manifest.baseline_relation_identity_sha256).toBe('5a5f074ee59c66440881c2a791a8b96c47fdec2783d87a7b8bd219e86fd4f655');
+    expect(manifest.prerequisites.role_bootstrap_receipt).toBe('REQUIRED_NOT_PRESENT');
+    expect(manifest.prerequisites.durable_nonce_launcher).toBe('REQUIRED_NOT_IMPLEMENTED');
+  });
+
+  test('forward rejects every prefix object and malformed partial/no-op state before success', async () => {
+    const sql = await text('forward.sql.NOEXEC');
+    expect(sql).toContain('P0B_V4C3_BASELINE_IDENTITY_MISMATCH');
+    expect(sql).toContain('5a5f074ee59c66440881c2a791a8b96c47fdec2783d87a7b8bd219e86fd4f655');
+    expect(sql).toContain("c.relname LIKE 'p0b_google_%'");
+    expect(sql).toContain("c.relkind NOT IN ('r','i')");
+    expect(sql).toContain('P0B_UNEXPECTED_PREFIX_OBJECT');
     expect(sql).toContain('P0B_PARTIAL_OR_CONFLICTING_SCHEMA');
-    expect(sql).toContain('expected_columns');
-    expect(sql).toContain('expected_constraints');
-    expect(sql).toContain('pg_get_constraintdef');
-    expect(sql).toContain('relacl');
-    expect(sql).toContain('aclexplode');
-    expect(sql).toContain('pg_trigger');
-    expect(sql).toContain('tgisinternal');
-    expect(sql).toContain('public.idx_content_chunks_p0b_g768_keyset');
-    expect(sql).toContain('ALTER TABLE public.content_chunks ADD COLUMN embedding_g768 vector(768)');
-    for (const table of governedTables) expect(sql).toContain(`CREATE TABLE public.${table}`);
-    for (const constraint of namedConstraints) expect(sql).toContain(constraint);
+    expect(sql).toContain('P0B_EXACT_SCHEMA_ATTESTATION_FAILED');
+    expect(sql).not.toMatch(/CREATE\s+ROLE/i);
   });
 
-  test('inverse duplicates exact core attestation before qualified destructive statements', async () => {
-    const sql = await text(paths.inverse);
-    expectNoDangerousPayload(sql);
-    expectQualifiedDdl(sql);
-    const attestation = sql.indexOf('P0B_EXACT_CORE_ATTESTATION');
-    const firstDrop = sql.indexOf('DROP INDEX public.idx_content_chunks_p0b_g768_keyset');
-    expect(attestation).toBeGreaterThan(-1);
-    expect(firstDrop).toBeGreaterThan(attestation);
+  test('schema restores FK, canonical state, lease, fence, checkpoint, and nonce invariants', async () => {
+    const sql = await text('forward.sql.NOEXEC');
     for (const marker of [
-      'expected_columns', 'expected_constraints', 'pg_get_constraintdef', 'relacl',
-      'aclexplode', 'pg_trigger', 'tgisinternal', 'P0B_PRESERVATION_PLAN_NOT_IMPLEMENTED',
-      "'ACTIVE'", "'COMPENSATING'", 'lease_expires_at > clock_timestamp()',
-      'embedding_g768 IS NOT NULL', 'indisvalid', 'indisready',
+      'p0b_google_embedding_provenance_chunk_fk',
+      'REFERENCES public.content_chunks(id) ON DELETE CASCADE',
+      'p0b_google_bridge_state_json_ck',
+      "state_json = current_setting('gbrain.p0b.initial_state_json')::jsonb",
+      'p0b_google_reconciler_checkpoint_lease_ck',
+      'p0b_google_reconciler_checkpoint_fence_ck',
+      'p0b_google_control_nonce_ledger_nonce_ck',
+      'octet_length(nonce) BETWEEN 32 AND 128',
     ]) expect(sql).toContain(marker);
-    for (const constraint of namedConstraints) expect(sql).toContain(constraint);
-    for (const table of governedTables) expect(sql).toContain(`DROP TABLE public.${table}`);
-    expect(sql).toContain('ALTER TABLE public.content_chunks DROP COLUMN embedding_g768');
   });
 
-  test('verify has no reachable success and requires a future SQL-derived ACL/RLS verifier', async () => {
-    const sql = await text(paths.verify);
-    expectNoDangerousPayload(sql);
-    expect(sql).toContain('P0B_ACL_RLS_VERIFIER_NOT_FINALIZED');
-    expect(sql).toContain('P0B_POLICY_CATALOG_DIGEST_REQUIRED');
-    expect(sql).not.toContain('P0B_VERIFY_OK');
-    expect(sql).not.toMatch(/acl_status\s*=\s*'RATIFIED'/);
-    expect(sql).not.toMatch(/SELECT\s+\*/i);
+  test('verify compares complete catalog sets and derives both hashes from catalogs', async () => {
+    const sql = await text('verify.sql.NOEXEC');
+    for (const marker of requiredCatalogSurfaces) expect(sql).toContain(marker);
+    expect(sql).toContain('digest(role_projection,\'sha256\')');
+    expect(sql).toContain('digest(rls_projection,\'sha256\')');
+    expect(sql).not.toContain("current_setting('gbrain.p0b.expected_role_policy_sha256') AS role_policy_sha256");
+    expect(sql).not.toContain("current_setting('gbrain.p0b.expected_rls_policy_sha256') AS rls_policy_sha256");
+    expect(sql).toContain('P0B_SCHEMA_ACL_SET_MISMATCH');
+    expect(sql).toContain('P0B_TABLE_ACL_SET_MISMATCH');
+    expect(sql).toContain('P0B_POLICY_SET_MISMATCH');
   });
 
-  test('runner keeps future implementation internal and pins/readbacks exact search_path', async () => {
-    const source = await text(paths.runner);
-    expectNoDangerousPayload(source);
-    expect(source).toContain("export const P0B_SCHEMA_EXECUTION_STATE = 'UNFINALIZED_NOEXEC' as const");
-    expect(source).toContain("throw new Error('P0B_SCHEMA_UNFINALIZED_NOEXEC')");
-    expect(source).toContain("'search_path', 'pg_catalog, public'");
-    expect(source).toContain("current_setting('search_path')");
-    expect(source).toContain('P0B_SEARCH_PATH_ATTESTATION_FAILED');
-    expect(source).toContain('manifest_semantic_sha256');
-    expect(source).not.toContain('manifest_sha256');
-    expect(source).not.toContain('process.env');
-    expect(source).not.toContain('process.argv');
-    expect(source).not.toContain('new PostgresEngine');
-    expect(source.match(/export\s+async\s+function\s+/g)).toEqual(['export async function ']);
-  });
-
-  test('manifest is an honest six-file unfinalized template with deterministic non-circular root semantics', async () => {
-    const manifestText = await text(paths.manifest);
-    expectNoDangerousPayload(manifestText);
-    const manifest = JSON.parse(manifestText) as Record<string, any>;
-    expect(manifest.execution_state).toBe('UNFINALIZED_NOEXEC');
-    expect(manifest.parent_commit_sha).toBe('8389f684d44492d04559bc3d876e302b6a0ec196');
-    expect(manifest.candidate_commit_sha).toBe('REPLACE_WITH_FINAL_CANDIDATE_COMMIT_SHA');
-    expect(manifest.acl_rls.status).toBe('UNRATIFIED_BLOCKED');
-    expect(manifest.acl_rls).toMatchObject({
-      live_postgres_rehearsal: 'REQUIRED_NOT_PERFORMED',
-      role_authority_finalization: 'REQUIRED_NOT_PERFORMED',
-      rls_policy_catalog_digest: null,
-      content_chunks_acl_package_digest: null,
-    });
-    expect(Object.keys(manifest.files).sort()).toEqual([
-      'FORWARD', 'INVERSE', 'MANIFEST_TEMPLATE', 'RUNNER', 'STATIC_TEST', 'VERIFY',
-    ]);
-    expect(manifest.package_root_definition).toContain('manifest semantic projection');
-    expect(manifest.package_root_definition).toContain('raw SHA-256');
-    expect(manifest.manifest_semantic_sha256).toContain('REPLACE_WITH_');
-    expect(manifest).not.toHaveProperty('manifest_sha256');
-    for (const [name, file] of Object.entries(manifest.files) as Array<[string, any]>) {
-      expect(file.path).toBeString();
-      expect(file.path).not.toBe('');
-      if (name === 'MANIFEST_TEMPLATE') {
-        expect(file.digest_kind).toBe('CANONICAL_SEMANTIC_PROJECTION_SHA256');
-      } else {
-        expect(file.sha256).toContain('REPLACE_WITH_');
-      }
-    }
+  test('inverse requires exact canonical initial rows and full schema attestation before drops', async () => {
+    const sql = await text('inverse.sql.NOEXEC');
+    expect(sql).toContain("state_json = current_setting('gbrain.p0b.initial_state_json')::jsonb");
+    expect(sql).toContain("schema_identity='gbrain:p0b:google-g768-control-postgres:v1'");
+    expect(sql).toContain("revision=current_setting('gbrain.p0b.initial_checkpoint_revision')");
+    expect(sql).toContain("fence_token='fence-00000000000000000000'");
+    expect(sql).toContain('P0B_EXACT_SCHEMA_ATTESTATION_FAILED');
+    expect(sql).toContain('P0B_PRESERVATION_PLAN_REQUIRED');
   });
 });

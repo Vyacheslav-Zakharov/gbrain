@@ -1,0 +1,14 @@
+# UNFINALIZED NOEXEC TEMPLATE — DO NOT INSTALL OR ENABLE.
+[Unit]
+Description=GBrain P0-B Google provider socket (NOEXEC template)
+ConditionPathExists=!/
+
+[Socket]
+ListenStream=/run/gbrain-p0b-google/provider.sock
+SocketMode=0000
+DirectoryMode=0700
+RemoveOnStop=yes
+Accept=no
+
+# No [Install]. SocketGroup/SocketUser and stable bridge UID are intentionally absent.
+# ConditionPathExists=!/ is an always-false unit condition on a valid Linux root.

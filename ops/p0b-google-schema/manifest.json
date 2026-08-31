@@ -1,0 +1,68 @@
+{
+  "baseline_relation_identity_sha256": "5a5f074ee59c66440881c2a791a8b96c47fdec2783d87a7b8bd219e86fd4f655",
+  "blockers": [
+    "role bootstrap receipt absent",
+    "durable pre-action nonce claim launcher absent",
+    "inverse exact catalog attestation remains deliberately fail-closed",
+    "hosted PostgreSQL 16 proof absent",
+    "literal owner GO absent"
+  ],
+  "candidate_id": "p0b-v4c3-blocked-20260831",
+  "execution_state": "BLOCKED_PREREQUISITES_NOEXEC",
+  "files": {
+    "FORWARD": {
+      "path": "forward.sql.NOEXEC",
+      "sha256": "33be87dd8a008960523dc02f1f35c166c5b89524285856070d812ab1b1a68d91"
+    },
+    "INVERSE": {
+      "path": "inverse.sql.NOEXEC",
+      "sha256": "6b45782a859a29e09ea9a3c3001ab8f4427d719a1a0b12457658c31451271157"
+    },
+    "ROLE_BOOTSTRAP_MANIFEST": {
+      "path": "../p0b-google-role-bootstrap/manifest.json",
+      "sha256": "b6a46fc38847e3ea729dfab373f731c10564654abf6e33123296d166aefa52bd"
+    },
+    "RUNNER": {
+      "path": "../../scripts/run-p0b-google-schema.ts",
+      "sha256": "b48f37525e7a379bb313289b7d5be3dfdc4b6d77a9a05f448488d11c42d011d9"
+    },
+    "STATIC_TEST": {
+      "path": "../../test/p0b-google-schema-static.test.ts",
+      "sha256": "afee85bad2bb54e1d9a420501d6f4562ca385abe0eb7873990085903f06e919a"
+    },
+    "VERIFY": {
+      "path": "verify.sql.NOEXEC",
+      "sha256": "256173c614e4903120d4aba0251ec0c4c98044314098b7c810bfb8d0f1df1534"
+    }
+  },
+  "initial_state": {
+    "checkpoint_revision": "1366bb803287ce685bb96de2ba89f57a140b69e612cd7bcbf83145807dca11d7",
+    "state_fingerprint": "f58df3d1ad29e2901d947f6890fc21e6cc4771bfeb4f432942e052116070db78",
+    "state_json": {
+      "consumed_nonces": [],
+      "fingerprint": "f58df3d1ad29e2901d947f6890fc21e6cc4771bfeb4f432942e052116070db78",
+      "previous_search_column": "embedding_ze",
+      "rollback_target": null,
+      "schema_version": 1,
+      "state": "DRAFT"
+    }
+  },
+  "package_kind": "gbrain-p0b-google-schema-inert-review-payload-v3",
+  "package_root_definition": "SHA-256 of UTF-8 records logical_name NUL raw_file_sha256 LF sorted by logical_name; manifest excluded",
+  "package_root_sha256": "49c2167c52398c4c245bbf1d9b032cdf3478e7526f1f496a3eb3dd6d8ed2ccc7",
+  "prerequisites": {
+    "durable_nonce_launcher": "REQUIRED_NOT_IMPLEMENTED",
+    "postgres16_execution_proof": "REQUIRED_NOT_PRESENT",
+    "role_bootstrap_manifest_sha256": "b6a46fc38847e3ea729dfab373f731c10564654abf6e33123296d166aefa52bd",
+    "role_bootstrap_receipt": "REQUIRED_NOT_PRESENT"
+  },
+  "production_mutation_authorized": false,
+  "roles": {
+    "migrator": "gbrain_p0b_migrator",
+    "owner": "gbrain_p0b_owner",
+    "runtime": "gbrain_p0b_runtime"
+  },
+  "schema_version": 2,
+  "source_base_commit_sha": "44089db562dd436ccb5294d697ddd417dd9dbfc7",
+  "topology_receipt_sha256": "067e7a1689a08ca73be2df7881ccef4b84ad1a78c02e9d20652712b3d8f60811"
+}

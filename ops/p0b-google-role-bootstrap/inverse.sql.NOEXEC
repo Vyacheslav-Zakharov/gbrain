@@ -1,0 +1,22 @@
+-- INERT REVIEW PAYLOAD: NO STATEMENT IN THIS FILE IS EXECUTABLE.
+-- -- NOEXEC: root/postgres-only inverse; authorization nonce claimed before this child.
+-- \set ON_ERROR_STOP on
+-- BEGIN;
+-- SET LOCAL lock_timeout='5s';
+-- SELECT pg_advisory_xact_lock(578411056621836800::bigint);
+-- DO $inverse$
+-- BEGIN
+--   IF session_user<>'postgres' OR current_user<>'postgres' THEN RAISE EXCEPTION 'P0B_BOOTSTRAP_ROOT_POSTGRES_AUTHORITY_REQUIRED'; END IF;
+--   IF EXISTS (SELECT 1 FROM pg_depend d JOIN pg_roles r ON r.oid=d.refobjid WHERE d.refclassid='pg_authid'::regclass AND r.rolname LIKE 'gbrain_p0b_%' AND d.deptype IN ('n','a'))
+--      OR EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner WHERE r.rolname LIKE 'gbrain_p0b_%')
+--      OR EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON r.oid=n.nspowner WHERE r.rolname LIKE 'gbrain_p0b_%') THEN
+--     RAISE EXCEPTION 'P0B_BOOTSTRAP_DEPENDENCIES_PRESENT';
+--   END IF;
+-- END $inverse$;
+-- REVOKE ALL ON SCHEMA public FROM gbrain_p0b_runtime;
+-- REVOKE ALL ON SCHEMA public FROM gbrain_p0b_owner;
+-- REVOKE gbrain_p0b_owner FROM gbrain_p0b_migrator;
+-- DROP ROLE gbrain_p0b_runtime;
+-- DROP ROLE gbrain_p0b_migrator;
+-- DROP ROLE gbrain_p0b_owner;
+-- COMMIT;
