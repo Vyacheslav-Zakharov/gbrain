@@ -1,0 +1,22 @@
+-- UNFINALIZED NOEXEC DESIGN — DO NOT APPLY.
+-- This lineage deliberately contains no trigger/function DDL because the reviewed
+-- GUC-based writer identity was spoofable and snapshot-only lifecycle checks were
+-- not race-safe. Any attempt to execute this file fails before touching catalogs.
+DO $p0b_noexec$
+BEGIN
+  RAISE EXCEPTION 'P0B_LEGACY_FENCE_UNFINALIZED_NOEXEC'
+    USING ERRCODE = '42501';
+END
+$p0b_noexec$;
+
+-- Future finalization requirements (not implemented here):
+-- 1. Authenticated role-derived writer authority; never a caller-settable custom GUC.
+-- 2. One shared transaction-level activation/writer serialization lock with fixed
+--    ordering, plus adversarial PostgreSQL concurrency proof.
+-- 3. Exact inventory of every legacy ZE/default writer and job-level start fence.
+-- 4. Exact trigger/function owner, ACL, schema-CREATE, BYPASSRLS, superuser and
+--    session_replication_role attestations.
+-- 5. Exact existing-object tri-state checks; no CREATE OR REPLACE and no blind drop.
+-- 6. BEFORE UPDATE OF public.content_chunks.embedding_g768 backstop that does not
+--    block unrelated updates, with lifecycle singleton cardinality/state validation.
+-- 7. Activation must take the same database lock before committing ACTIVE.

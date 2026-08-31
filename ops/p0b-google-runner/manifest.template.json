@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "execution_state": "UNFINALIZED_NOEXEC",
+  "parent_commit_sha": "b59878f91b9c6537748220700ec6add739441597",
+  "candidate_commit_sha": "REPLACE_WITH_FINAL_CANDIDATE_COMMIT_SHA",
+  "package_root_sha256": "REPLACE_WITH_FINAL_PACKAGE_ROOT_SHA256",
+  "package_root_definition": "SHA-256 of UTF-8 lines sorted by logical file name as NAME:SHA256, using each non-manifest raw file SHA-256 and MANIFEST canonical JSON SHA-256 after replacing candidate_commit_sha, package_root_sha256, and files.MANIFEST.sha256 with their literal REPLACE_WITH placeholders",
+  "fixed_action": "P0B_GOOGLE_RECONCILE_FIXED",
+  "activation": "BLOCKED_PENDING_SCHEMA_ACL_RLS",
+  "rollback": "BLOCKED_PENDING_SCHEMA_ACL_RLS",
+  "files": {
+    "BLOCKER": {
+      "path": "ops/p0b-google-runner/ACTIVATION-ROLLBACK-BLOCKED.md",
+      "sha256": "REPLACE_WITH_BLOCKER_SHA256"
+    },
+    "CREDENTIAL": {
+      "path": "src/core/p0b-google-credential.ts",
+      "sha256": "REPLACE_WITH_CREDENTIAL_SHA256"
+    },
+    "LEGACY_FENCE": {
+      "path": "ops/p0b-google-runner/legacy-embed-fence.sql.NOEXEC",
+      "sha256": "REPLACE_WITH_LEGACY_FENCE_SHA256"
+    },
+    "MANIFEST": {
+      "path": "ops/p0b-google-runner/manifest.template.json",
+      "sha256": "REPLACE_WITH_MANIFEST_SEMANTIC_SHA256"
+    },
+    "PROVIDER": {
+      "path": "src/core/p0b-google-provider-process.ts",
+      "sha256": "REPLACE_WITH_PROVIDER_SHA256"
+    },
+    "RUNNER": {
+      "path": "src/core/p0b-google-offline-runner.ts",
+      "sha256": "REPLACE_WITH_RUNNER_SHA256"
+    },
+    "SERVICE": {
+      "path": "ops/p0b-google-runner/gbrain-p0b-google-bridge.service.NOEXEC",
+      "sha256": "REPLACE_WITH_SERVICE_SHA256"
+    },
+    "STATIC_TEST": {
+      "path": "test/p0b-google-runner-service-static.test.ts",
+      "sha256": "REPLACE_WITH_STATIC_TEST_SHA256"
+    },
+    "TIMER": {
+      "path": "ops/p0b-google-runner/gbrain-p0b-google-bridge.timer.NOEXEC",
+      "sha256": "REPLACE_WITH_TIMER_SHA256"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+# UNFINALIZED NOEXEC TEMPLATE — DO NOT INSTALL OR ENABLE.
+[Unit]
+Description=Schedule bounded GBrain P0-B Google reconciliation (NOEXEC template)
+
+[Timer]
+Unit=gbrain-p0b-google-bridge.service
+OnCalendar=hourly
+AccuracySec=1min
+RandomizedDelaySec=60
+Persistent=false
+FixedRandomDelay=yes
+
+# Intentionally no [Install]: activation remains blocked.
