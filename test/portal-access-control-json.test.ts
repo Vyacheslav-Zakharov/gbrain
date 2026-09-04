@@ -12,6 +12,7 @@ import {
   validatePortalEmail,
 } from '../src/core/portal-access-control-json';
 import { readUserSourceGrant } from '../src/core/oauth-provider';
+import { withEnv } from './helpers/with-env.ts';
 
 describe('Portal JSON access-control invariants', () => {
   const current = {
@@ -100,10 +101,10 @@ describe('Portal JSON access-control invariants', () => {
     }
   });
 
-  test('OAuth ACL reads recover an unfinished approval transaction first', () => {
+  test('OAuth ACL reads recover an unfinished approval transaction first', async () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-oauth-access-control-'));
     const brainDir = join(home, '.gbrain');
-    const previousHome = process.env.HOME;
+
     mkdirSync(brainDir);
     const targetPermissions = {
       'alice@avers.kz': { source_id: 'alice', federated_read: ['alice', 'internal-it'], federated_write: ['alice'] },
@@ -118,7 +119,7 @@ describe('Portal JSON access-control invariants', () => {
       requests: targetRequests,
     })}\n`);
     try {
-      process.env.HOME = home;
+      await withEnv({ HOME: home }, async () => {
       expect(readUserSourceGrant('alice@avers.kz')).toEqual({
         user_email: 'alice@avers.kz',
         source_id: 'alice',
@@ -127,9 +128,8 @@ describe('Portal JSON access-control invariants', () => {
       });
       expect(JSON.parse(readFileSync(join(brainDir, 'access_requests.json'), 'utf8'))).toEqual(targetRequests);
       expect(existsSync(join(brainDir, 'access_control_transaction.json'))).toBe(false);
+      });
     } finally {
-      if (previousHome === undefined) delete process.env.HOME;
-      else process.env.HOME = previousHome;
       rmSync(home, { recursive: true, force: true });
     }
   });

@@ -178,6 +178,7 @@ describe('op-layer capture — query', () => {
   test('explicit source_id overrides ctx.sourceId for query retrieval', async () => {
     const ctx = makeCtx({
       sourceId: 'default',
+      auth: { allowedSources: ['default', 'testsrc'] } as any,
       config: makeConfig({ capture: false }),
     });
 

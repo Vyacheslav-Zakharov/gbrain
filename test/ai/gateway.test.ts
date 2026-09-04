@@ -40,13 +40,10 @@ describe('gateway configuration', () => {
     expect(getExpansionModel()).toBe('anthropic:claude-haiku-4-5-20251001');
   });
 
-  test('defaults are ZE 1280d as of v0.36.0.0 (D3)', () => {
-    // The default flipped from openai:text-embedding-3-large 1536d to
-    // zeroentropyai:zembed-1 1280d in v0.36.0.0. The cost story is in
-    // CHANGELOG.md; the rationale lives in src/core/ai/gateway.ts:45-54.
+  test('defaults are Google Gemini 768d for the Avers R1 provider exit', () => {
     configureGateway({ env: {} });
-    expect(getEmbeddingModel()).toBe('zeroentropyai:zembed-1');
-    expect(getEmbeddingDimensions()).toBe(1280);
+    expect(getEmbeddingModel()).toBe('google:gemini-embedding-001');
+    expect(getEmbeddingDimensions()).toBe(768);
     expect(getExpansionModel()).toBe('anthropic:claude-haiku-4-5-20251001');
   });
 });

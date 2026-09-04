@@ -45,6 +45,7 @@ import {
 import type { OperationContext } from '../src/core/operations.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PAGE_SORT_SQL, type Page, type PageFilters } from '../src/core/types.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 function proven(proposals: ProposedTake[]): ExtractorResult {
   const raw_response = JSON.stringify(proposals);
@@ -868,9 +869,7 @@ describe('runPhaseProposeTakes — phase integration', () => {
   });
 
   test('strict runtime page limit caps provider dispatches', async () => {
-    const previous = process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT;
-    process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT = '5';
-    try {
+    await withEnv({ GBRAIN_PROPOSE_TAKES_PAGE_LIMIT: '5' }, async () => {
       const pages = Array.from({ length: 6 }, (_, i) =>
         buildPage({ slug: `meetings/pilot-${i}`, type: 'meeting', body: `Meeting evidence ${i}.` }));
       const { engine } = buildMockEngine({ pages });
@@ -884,17 +883,12 @@ describe('runPhaseProposeTakes — phase integration', () => {
       expect(result.status).toBe('ok');
       expect(calls).toBe(5);
       expect((result.details as Record<string, unknown>).selected_pages).toBe(5);
-    } finally {
-      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT;
-      else process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT = previous;
-    }
+    });
   });
 
   test('invalid runtime page limit refuses before scan or provider dispatch', async () => {
-    const previous = process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT;
-    try {
-      for (const value of ['', '0', '-1', '5.0', '101', ' 5']) {
-        process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT = value;
+    for (const value of ['', '0', '-1', '5.0', '101', ' 5']) {
+      await withEnv({ GBRAIN_PROPOSE_TAKES_PAGE_LIMIT: value }, async () => {
         const { engine, captured, listPageFilters } = buildMockEngine({
           pages: [buildPage({ slug: 'meetings/must-not-run', body: 'Meeting evidence.' })],
         });
@@ -909,17 +903,12 @@ describe('runPhaseProposeTakes — phase integration', () => {
         expect(listPageFilters).toHaveLength(0);
         expect(calls).toBe(0);
         expect(captured.some(c => c.sql.includes('INSERT INTO take_proposal_scans'))).toBe(false);
-      }
-    } finally {
-      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT;
-      else process.env.GBRAIN_PROPOSE_TAKES_PAGE_LIMIT = previous;
+      });
     }
   });
 
   test('strict runtime output cap rejects an over-cap response before proposal persistence', async () => {
-    const previous = process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
-    process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = '10';
-    try {
+    await withEnv({ GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES: '10' }, async () => {
       const { engine, captured } = buildMockEngine({
         pages: [buildPage({ slug: 'meetings/output-cap', body: 'Synthetic operational evidence.' })],
       });
@@ -941,16 +930,11 @@ describe('runPhaseProposeTakes — phase integration', () => {
       expect(details.proposals_inserted).toBe(0);
       expect(details.technical_failures).toBe(1);
       expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(0);
-    } finally {
-      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
-      else process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = previous;
-    }
+    });
   });
 
   test('reaching the runtime output cap stops later provider dispatches', async () => {
-    const previous = process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
-    process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = '10';
-    try {
+    await withEnv({ GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES: '10' }, async () => {
       const { engine, captured } = buildMockEngine({
         pages: [
           buildPage({ slug: 'alpha/output-cap', body: 'First operational evidence.' }),
@@ -974,17 +958,12 @@ describe('runPhaseProposeTakes — phase integration', () => {
       expect(details.proposals_inserted).toBe(10);
       expect(details.output_cap_exhausted).toBe(true);
       expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(10);
-    } finally {
-      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
-      else process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = previous;
-    }
+    });
   });
 
   test('invalid runtime output cap refuses before scan or provider dispatch', async () => {
-    const previous = process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
-    try {
-      for (const value of ['', '0', '-1', '10.0', '101', ' 10']) {
-        process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = value;
+    for (const value of ['', '0', '-1', '10.0', '101', ' 10']) {
+      await withEnv({ GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES: value }, async () => {
         const { engine, captured, listPageFilters } = buildMockEngine({
           pages: [buildPage({ slug: 'meetings/must-not-run-output', body: 'Meeting evidence.' })],
         });
@@ -999,10 +978,7 @@ describe('runPhaseProposeTakes — phase integration', () => {
         expect(listPageFilters).toHaveLength(0);
         expect(calls).toBe(0);
         expect(captured.some(c => c.sql.includes('INSERT INTO take_proposal_scans'))).toBe(false);
-      }
-    } finally {
-      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES;
-      else process.env.GBRAIN_PROPOSE_TAKES_MAX_NEW_TAKES = previous;
+      });
     }
   });
 
@@ -1077,9 +1053,7 @@ describe('runPhaseProposeTakes — phase integration', () => {
   });
 
   test('runtime write-attempt cap disables application transaction retries', async () => {
-    const previous = process.env.GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS;
-    process.env.GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS = '1';
-    try {
+    await withEnv({ GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS: '1' }, async () => {
       const pages = [buildPage({ slug: 'wiki/no-write-retry', body: 'One governed claim.' })];
       const { engine, captured, transactionAttempts } = buildMockEngine({ pages, insertConflicts: 1 });
       let calls = 0;
@@ -1096,10 +1070,7 @@ describe('runPhaseProposeTakes — phase integration', () => {
       expect(result.status).toBe('fail');
       expect(transactionAttempts()).toBe(2); // stale-check + exactly one atomic write
       expect(captured.filter(c => c.sql.includes('INSERT INTO take_proposals'))).toHaveLength(1);
-    } finally {
-      if (previous === undefined) delete process.env.GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS;
-      else process.env.GBRAIN_PROPOSE_TAKES_WRITE_ATTEMPTS = previous;
-    }
+    });
   });
 
   test('cache hit: page already in take_proposals is skipped', async () => {
