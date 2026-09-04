@@ -128,6 +128,12 @@ describe('boundChangelogDiff', () => {
     expect(bounded.length).toBeLessThan(25_000);
     expect(bounded).toContain('[truncated: full changelog omitted]');
   });
+
+  test('bounds escaped UTF-8 JSON payloads, not only source characters', () => {
+    const bounded = boundChangelogDiff('"\\\n🙂'.repeat(20_000));
+    expect(Buffer.byteLength(JSON.stringify(bounded), 'utf8')).toBeLessThanOrEqual(24_000);
+    expect(bounded).toContain('[truncated: full changelog omitted]');
+  });
 });
 
 describe('check-update CLI', () => {
