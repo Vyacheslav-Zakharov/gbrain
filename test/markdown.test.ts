@@ -269,6 +269,24 @@ Some content.`;
     expect(parsed.frontmatter.custom_field).toBe('hello');
   });
 
+  test('uses the first H1 when frontmatter title is missing', () => {
+    const md = `---
+type: regulation
+---
+
+# ГОСТ 31108-2016 «Цементы общестроительные»
+
+Article body.`;
+    const parsed = parseMarkdown(md, 'business-architecture/regulations/gost-31108-2016.md');
+    expect(parsed.title).toBe('ГОСТ 31108-2016 «Цементы общестроительные»');
+  });
+
+  test('uses a CRLF H1 immediately before the Timeline sentinel', () => {
+    const md = '---\r\ntype: regulation\r\n---\r\n# Canonical Title ###\r\n<!-- timeline -->\r\n- 2026: Event';
+    const parsed = parseMarkdown(md, 'business-architecture/regulations/filename-fallback.md');
+    expect(parsed.title).toBe('Canonical Title');
+  });
+
   test('handles content with no frontmatter at all', () => {
     const md = `Just plain text with no YAML.`;
     const parsed = parseMarkdown(md);

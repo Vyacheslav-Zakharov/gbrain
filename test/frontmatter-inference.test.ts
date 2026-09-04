@@ -73,13 +73,36 @@ describe('extractTitleFromHeading', () => {
     expect(extractTitleFromHeading('Some text\n## Not this\n# This one')).toBe('This one');
   });
 
+  test('ignores an empty ATX H1 made only of a closing hash sequence', () => {
+    expect(extractTitleFromHeading('# ###\n# Canonical Heading')).toBe('Canonical Heading');
+  });
+
   test('returns null when no heading found', () => {
     expect(extractTitleFromHeading('Just some text\nwithout headings')).toBe(null);
   });
 
-  test('looks within first 20 lines only', () => {
-    const lines = Array(25).fill('text').join('\n') + '\n# Too Late';
-    expect(extractTitleFromHeading(lines)).toBe(null);
+  test('finds the first H1 after a long preamble', () => {
+    const lines = Array(25).fill('text').join('\n') + '\n# Canonical Heading';
+    expect(extractTitleFromHeading(lines)).toBe('Canonical Heading');
+  });
+
+  test('ignores H1-like lines inside fenced code blocks', () => {
+    const content = '```md\n# Not A Heading\n```\n# Canonical Heading';
+    expect(extractTitleFromHeading(content)).toBe('Canonical Heading');
+  });
+
+  test('does not open a backtick fence when its info string contains a backtick', () => {
+    const content = '``` lang`invalid\n# Canonical Heading';
+    expect(extractTitleFromHeading(content)).toBe('Canonical Heading');
+  });
+
+  test('accepts an ATX H1 indented by up to three spaces', () => {
+    expect(extractTitleFromHeading('   # Canonical Heading')).toBe('Canonical Heading');
+  });
+
+  test('recognizes H1 and fenced code in CRLF content', () => {
+    const content = '```md\r\n# Not A Heading\r\n```\r\n# Canonical Heading\r\n';
+    expect(extractTitleFromHeading(content)).toBe('Canonical Heading');
   });
 });
 
