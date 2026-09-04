@@ -269,6 +269,18 @@ Some content.`;
     expect(parsed.frontmatter.custom_field).toBe('hello');
   });
 
+  test('uses the first H1 when frontmatter title is missing', () => {
+    const md = `---
+type: regulation
+---
+
+# ГОСТ 31108-2016 «Цементы общестроительные»
+
+Article body.`;
+    const parsed = parseMarkdown(md, 'business-architecture/regulations/gost-31108-2016.md');
+    expect(parsed.title).toBe('ГОСТ 31108-2016 «Цементы общестроительные»');
+  });
+
   test('handles content with no frontmatter at all', () => {
     const md = `Just plain text with no YAML.`;
     const parsed = parseMarkdown(md);

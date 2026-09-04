@@ -2,6 +2,7 @@ import matter from 'gray-matter';
 import { safeLoad as yamlSafeLoad } from 'js-yaml';
 import type { Page, PageType } from './types.ts';
 import { slugifyPath } from './sync.ts';
+import { extractTitleFromHeading } from './frontmatter-inference.ts';
 
 export type ParseValidationCode =
   | 'MISSING_OPEN'
@@ -89,6 +90,8 @@ export function coerceFrontmatterString(v: unknown): string {
  * or a plain `---` immediately preceding a `## Timeline` / `## History`
  * heading (backward-compat for existing files). A bare `---` in body text
  * is treated as a markdown horizontal rule, not a timeline separator.
+ * Title precedence is explicit frontmatter, then the first ATX H1 outside
+ * fenced code blocks, then the filename-derived fallback.
  */
 export function parseMarkdown(
   content: string,
@@ -135,7 +138,9 @@ export function parseMarkdown(
   const type = coerceFrontmatterString(frontmatter.type) || (
     opts?.activePack ? inferTypeFromPack(filePath, opts.activePack) : inferType(filePath)
   );
-  const title = coerceFrontmatterString(frontmatter.title).trim() || inferTitle(filePath);
+  const title = coerceFrontmatterString(frontmatter.title).trim()
+    || extractTitleFromHeading(compiled_truth)
+    || inferTitle(filePath);
   const tags = extractTags(frontmatter);
   const slug = coerceFrontmatterString(frontmatter.slug) || inferSlug(filePath);
 

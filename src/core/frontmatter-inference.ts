@@ -302,12 +302,32 @@ export function extractTitleFromFilename(filename: string): string {
   return title || 'Untitled';
 }
 
-/** Extract title from first heading (# ...) in content. */
+/** Extract the first ATX H1 outside fenced code blocks. */
 export function extractTitleFromHeading(content: string): string | null {
-  const lines = content.split('\n');
-  for (const line of lines.slice(0, 20)) {
-    const m = line.match(/^#\s+(.+)/);
-    if (m) return m[1].trim();
+  let fenceChar = '';
+  let fenceLength = 0;
+
+  for (const line of content.split(/\r?\n/)) {
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fence) {
+      const marker = fence[1];
+      if (!fenceChar) {
+        // CommonMark: a backtick-fence info string cannot contain backticks.
+        if (marker[0] === '`' && fence[2].includes('`')) continue;
+        fenceChar = marker[0];
+        fenceLength = marker.length;
+      } else if (marker[0] === fenceChar && marker.length >= fenceLength && !fence[2].trim()) {
+        fenceChar = '';
+        fenceLength = 0;
+      }
+      continue;
+    }
+    if (fenceChar) continue;
+
+    const heading = line.match(/^ {0,3}#[ \t]+(.+)$/);
+    if (!heading) continue;
+    const title = heading[1].replace(/[ \t]+#+[ \t]*$/, '').trim();
+    if (title) return title;
   }
   return null;
 }
