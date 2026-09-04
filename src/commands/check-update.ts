@@ -116,6 +116,31 @@ export function extractChangelogBetween(changelog: string, from: string, to: str
   return entries.join('\n').trim();
 }
 
+const CHANGELOG_DIFF_MAX_JSON_BYTES = 24_000;
+const CHANGELOG_TRUNCATION_MARKER = '\n\n[truncated: full changelog omitted]';
+
+function jsonStringBytes(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+export function boundChangelogDiff(changelogDiff: string): string {
+  if (jsonStringBytes(changelogDiff) <= CHANGELOG_DIFF_MAX_JSON_BYTES) return changelogDiff;
+
+  // Bound the encoded JSON string rather than source characters: quotes,
+  // backslashes, control characters, and non-ASCII code points have different
+  // UTF-8 costs after JSON escaping. Array.from() keeps surrogate pairs intact.
+  const codePoints = Array.from(changelogDiff);
+  let low = 0;
+  let high = codePoints.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = codePoints.slice(0, mid).join('') + CHANGELOG_TRUNCATION_MARKER;
+    if (jsonStringBytes(candidate) <= CHANGELOG_DIFF_MAX_JSON_BYTES) low = mid;
+    else high = mid - 1;
+  }
+  return codePoints.slice(0, low).join('') + CHANGELOG_TRUNCATION_MARKER;
+}
+
 /**
  * Fetch the latest release and write the self-upgrade cache (the marker line
  * read by the CLI startup hook). Fail-open: on any network failure we cache
@@ -199,7 +224,7 @@ export async function runCheckUpdate(args: string[]) {
 
   let changelogDiff = '';
   if (updateAvailable) {
-    changelogDiff = await fetchChangelog(VERSION, latestVersion);
+    changelogDiff = boundChangelogDiff(await fetchChangelog(VERSION, latestVersion));
   }
 
   const result: CheckUpdateResult = {

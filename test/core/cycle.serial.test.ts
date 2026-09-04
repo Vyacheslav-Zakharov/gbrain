@@ -339,10 +339,11 @@ describe('runCycle — status derivation', () => {
     await truncateCycleLocks(sharedEngine);
   });
 
-  test('ok when work was done (non-dry-run)', async () => {
-    const report = await runCycle(sharedEngine,{ brainDir: '/tmp/brain' });
-    expect(['ok', 'partial']).toContain(report.status);
-    // Non-dry-run fixtures produce work (fixes:2, added:4 etc.), so:
+  test('ok when mocked work phases complete (non-dry-run)', async () => {
+    const report = await runCycle(sharedEngine, {
+      brainDir: '/tmp/brain',
+      phases: ['lint', 'backlinks', 'sync', 'extract', 'embed', 'orphans'],
+    });
     expect(report.status).toBe('ok');
     expect(report.totals.lint_fixes).toBe(2);
     expect(report.totals.backlinks_added).toBe(3);

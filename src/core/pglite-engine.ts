@@ -514,7 +514,17 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name='source_ingest_profiles') AS source_ingest_profiles_exists,
         EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema='public' AND table_name='source_ingest_run_items') AS source_ingest_run_items_exists
+                WHERE table_schema='public' AND table_name='source_ingest_run_items') AS source_ingest_run_items_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='source_base_views') AS source_base_views_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='source_base_views' AND column_name='primary_key_field') AS source_base_views_primary_key_field_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='source_base_views' AND column_name='updated_at_field') AS source_base_views_updated_at_field_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='concept_proposals') AS concept_proposals_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='concept_proposals' AND column_name='source_takes') AS concept_proposals_source_takes_exists
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
@@ -562,6 +572,11 @@ export class PGLiteEngine implements BrainEngine {
       source_sync_state_last_source_snapshot_exists: boolean;
       source_ingest_profiles_exists: boolean;
       source_ingest_run_items_exists: boolean;
+      source_base_views_exists: boolean;
+      source_base_views_primary_key_field_exists: boolean;
+      source_base_views_updated_at_field_exists: boolean;
+      concept_proposals_exists: boolean;
+      concept_proposals_source_takes_exists: boolean;
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
@@ -647,6 +662,9 @@ export class PGLiteEngine implements BrainEngine {
     // v125 (source_ingest_run_items_backfill): repair brains stamped at v120+
     // before the append-only run ledger table was folded into v120.
     const needsSourceIngestRunItems = probe.source_ingest_profiles_exists && !probe.source_ingest_run_items_exists;
+    const needsSourceBaseViewIdentity = probe.source_base_views_exists
+      && (!probe.source_base_views_primary_key_field_exists || !probe.source_base_views_updated_at_field_exists);
+    const needsConceptProposalSourceTakes = probe.concept_proposals_exists && !probe.concept_proposals_source_takes_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -661,7 +679,9 @@ export class PGLiteEngine implements BrainEngine {
         && !needsPagesLinksExtractedAt
         && !needsSourceSyncManagedBlockHash
         && !needsSourceSyncLastSourceSnapshot
-        && !needsSourceIngestRunItems) return;
+        && !needsSourceIngestRunItems
+        && !needsSourceBaseViewIdentity
+        && !needsConceptProposalSourceTakes) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -952,6 +972,20 @@ export class PGLiteEngine implements BrainEngine {
           ON source_ingest_run_items (run_id, approved_source_id, slug);
         CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
           ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
+      `);
+    }
+
+    if (needsSourceBaseViewIdentity) {
+      await this.db.exec(`
+        ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS primary_key_field TEXT;
+        ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS updated_at_field TEXT;
+      `);
+    }
+
+    if (needsConceptProposalSourceTakes) {
+      await this.db.exec(`
+        ALTER TABLE concept_proposals
+          ADD COLUMN IF NOT EXISTS source_takes JSONB NOT NULL DEFAULT '[]'::jsonb;
       `);
     }
   }
