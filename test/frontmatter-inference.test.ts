@@ -73,6 +73,10 @@ describe('extractTitleFromHeading', () => {
     expect(extractTitleFromHeading('Some text\n## Not this\n# This one')).toBe('This one');
   });
 
+  test('ignores an empty ATX H1 made only of a closing hash sequence', () => {
+    expect(extractTitleFromHeading('# ###\n# Canonical Heading')).toBe('Canonical Heading');
+  });
+
   test('returns null when no heading found', () => {
     expect(extractTitleFromHeading('Just some text\nwithout headings')).toBe(null);
   });

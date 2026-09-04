@@ -307,7 +307,7 @@ export function extractTitleFromHeading(content: string): string | null {
   let fenceChar = '';
   let fenceLength = 0;
 
-  for (const line of content.split(/\r?\n/)) {
+  for (const line of content.split(/\r\n?|\n/)) {
     const fence = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
     if (fence) {
       const marker = fence[1];
@@ -324,7 +324,7 @@ export function extractTitleFromHeading(content: string): string | null {
     }
     if (fenceChar) continue;
 
-    const heading = line.match(/^ {0,3}#[ \t]+(.+)$/);
+    const heading = line.match(/^ {0,3}#(?=$|[ \t])(.*)$/);
     if (!heading) continue;
     const title = heading[1].replace(/[ \t]+#+[ \t]*$/, '').trim();
     if (title) return title;
