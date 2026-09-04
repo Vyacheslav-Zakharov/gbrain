@@ -1,8 +1,8 @@
 /**
- * Avers R1 provider exit — every shipped mode defaults reranker_enabled=false.
+ * v0.36.0.0 (D6 + C2) — balanced mode bundle now defaults reranker_enabled=true.
  *
  * Pins:
- *  - every bundle keeps hosted reranking disabled
+ *  - MODE_BUNDLES.balanced.reranker_enabled === true (the flip)
  *  - applyReranker honors the flag (calls injected rerankerFn)
  *  - Fail-open contract: missing key / network error returns input unchanged
  *  - rerankerFn is called with input_type-equivalent shape for the query path
@@ -15,20 +15,20 @@ import type { SearchResult } from '../src/core/types.ts';
 import { RerankError } from '../src/core/ai/gateway.ts';
 
 describe('Mode bundle defaults (D6)', () => {
-  test('balanced reranker is disabled for Avers R1', () => {
-    expect(MODE_BUNDLES.balanced.reranker_enabled).toBe(false);
+  test('balanced.reranker_enabled is true (the v0.36.0.0 flip)', () => {
+    expect(MODE_BUNDLES.balanced.reranker_enabled).toBe(true);
   });
 
-  test('balanced dormant reranker model is off hosted ZeroEntropy', () => {
-    expect(MODE_BUNDLES.balanced.reranker_model).toBe('voyage:rerank-2.5');
+  test('balanced reranker model is zeroentropyai:zerank-2', () => {
+    expect(MODE_BUNDLES.balanced.reranker_model).toBe('zeroentropyai:zerank-2');
   });
 
   test('conservative reranker stays off (cheap tier)', () => {
     expect(MODE_BUNDLES.conservative.reranker_enabled).toBe(false);
   });
 
-  test('tokenmax reranker is also disabled', () => {
-    expect(MODE_BUNDLES.tokenmax.reranker_enabled).toBe(false);
+  test('tokenmax reranker still on', () => {
+    expect(MODE_BUNDLES.tokenmax.reranker_enabled).toBe(true);
   });
 });
 

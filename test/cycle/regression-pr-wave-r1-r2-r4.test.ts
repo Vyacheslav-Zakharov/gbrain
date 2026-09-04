@@ -50,8 +50,6 @@ function makeCtx(overrides: Partial<OperationContext> = {}): OperationContext {
     }),
     getTags: async () => [],
     resolveSlugs: async () => [],
-    resolveSlugWithAlias: async (slug: string) => slug,
-    executeRaw: async () => [],
     putPage: async () => ({ slug: 'stub', id: 1, created: true }),
   } as unknown as BrainEngine;
   return {
