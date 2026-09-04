@@ -11,12 +11,28 @@ import {
 } from '../src/core/ai-review.ts';
 import { acceptConceptProposal, createManualConceptRevision } from '../src/core/concept-review.ts';
 import { importFromContent } from '../src/core/import-file.ts';
-import { contentHash, proposalClaimHash, runPhaseProposeTakes, PROPOSE_TAKES_PROMPT_VERSION, type ProposedTake } from '../src/core/cycle/propose-takes.ts';
+import { contentHash, proposalClaimHash, runPhaseProposeTakes, PROPOSE_TAKES_PROMPT_VERSION, type ExtractorResult, type ProposedTake } from '../src/core/cycle/propose-takes.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
 let dir = '';
+
+function proven(proposals: ProposedTake[]): ExtractorResult {
+  const raw_response = JSON.stringify(proposals);
+  return {
+    proposals,
+    outcome: proposals.length === 0 ? 'model_empty_valid' : 'model_nonempty_valid',
+    actual_model: 'anthropic:claude-sonnet-4-6',
+    stop_reason: 'end',
+    usage: { input_tokens: 10, output_tokens: 2, cache_read_tokens: 0, cache_creation_tokens: 0 },
+    raw_response,
+    response_length: Buffer.byteLength(raw_response),
+    response_sha256: contentHash(raw_response),
+    parsed_count: proposals.length,
+    dropped_count: 0,
+  };
+}
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -179,7 +195,7 @@ describe('AI review canonical acceptance', () => {
     await engine.executeRaw(`UPDATE take_proposals SET claim_hash='0123456789abcdef0123456789abcdef' WHERE id=$1`, [id]);
     await rejectTakeProposal(engine, id, 'admin-test', 'confirmed generic low-value claim');
     const proposal: ProposedTake = {
-      claim_text: 'Supported bounded claim 1', kind: 'take', holder: 'world', weight: 0.7, domain: 'testing',
+      claim_text: 'Supported bounded claim 1', kind: 'take', claim_class: 'judgment', holder: 'world', weight: 0.7, domain: 'testing',
     };
     const ctx: OperationContext = {
       engine,
@@ -191,7 +207,7 @@ describe('AI review canonical acceptance', () => {
     };
     const result = await runPhaseProposeTakes(ctx, {
       promptVersion: 'future-governed-v2',
-      extractor: async () => [proposal],
+      extractor: async () => proven([proposal]),
     });
     expect((result.details as Record<string, unknown>).proposals_inserted).toBe(0);
     expect((result.details as Record<string, unknown>).proposals_suppressed).toBe(1);
@@ -204,7 +220,7 @@ describe('AI review canonical acceptance', () => {
   test('producer replaces a restored old revision and leaves other claims independent', async () => {
     const oldId = await seedProposal();
     const proposal: ProposedTake = {
-      claim_text: 'Supported bounded claim 1', kind: 'take', holder: 'world', weight: 0.7, domain: 'testing',
+      claim_text: 'Supported bounded claim 1', kind: 'take', claim_class: 'judgment', holder: 'world', weight: 0.7, domain: 'testing',
     };
     const claimHash = proposalClaimHash(proposal);
     await engine.executeRaw(`UPDATE take_proposals SET claim_hash=$2 WHERE id=$1`, [oldId, claimHash]);
@@ -227,7 +243,7 @@ describe('AI review canonical acceptance', () => {
       remote: false,
       sourceId: 'review-test',
     };
-    const result = await runPhaseProposeTakes(ctx, { extractor: async () => [proposal] });
+    const result = await runPhaseProposeTakes(ctx, { extractor: async () => proven([proposal]) });
     expect(result.status).toBe('ok');
 
     const sameClaim = await engine.executeRaw<{ id: number; status: string }>(
