@@ -39,7 +39,12 @@ mock.module('../../src/core/embedding.ts', () => ({
   embed: async () => new Float32Array(1536),
   embedQuery: async () => new Float32Array(1536),
   embedBatch: async (texts: string[]) => texts.map(() => new Float32Array(1536)),
-  embedMultimodal: async () => [],
+  embedMultimodal: async (inputs: unknown[]) => inputs.map(() => new Float32Array(1536)),
+  embedMultimodalSafe: async (inputs: unknown[]) => ({
+    embeddings: inputs.map(() => new Float32Array(1536)), failedIndices: [],
+  }),
+  embedQueryMultimodal: async () => new Float32Array(1536),
+  embedQueryMultimodalImage: async () => new Float32Array(1536),
   getEmbeddingModelName: () => 'text-embedding-3-large',
   getEmbeddingDimensions: () => 1536,
   EMBEDDING_MODEL: 'text-embedding-3-large',
@@ -48,6 +53,12 @@ mock.module('../../src/core/embedding.ts', () => ({
   estimateEmbeddingCostUsd: (tokens: number) => (tokens / 1000) * 0.00013,
   // v0.41.31: embed phase reads the current signature to stamp provenance.
   currentEmbeddingSignature: () => 'text-embedding-3-large:1536',
+  // Pure helper contracts used by sync's dynamic import. No gateway/network.
+  currentEmbeddingPricePerMTok: () => 0.13,
+  willEmbedSynchronously: (opts: { v2Enabled: boolean; serialFlag: boolean; noEmbed: boolean }): 'deferred' | 'inline' =>
+    opts.noEmbed || (opts.v2Enabled && !opts.serialFlag) ? 'deferred' : 'inline',
+  shouldBlockSync: (costUsd: number, floorUsd: number, mode: 'deferred' | 'inline', posture: 'gated' | 'tokenmax' = 'gated'): boolean =>
+    posture !== 'tokenmax' && mode === 'inline' && costUsd > floorUsd,
 }));
 
 const { runCycle, ALL_PHASES } = await import('../../src/core/cycle.ts');
@@ -124,6 +135,7 @@ const EXPECTED_PHASES: CyclePhase[] = [
   'synthesize_concepts',         // v0.41 T9 — concept synthesis (pack-gated)
   'recompute_emotional_weight', // v0.29
   'consolidate',                // v0.31
+  'source_refresh',             // source ingestion, enqueue-only
   'propose_takes',              // v0.36.1.0 — hindsight calibration wave
   'grade_takes',                // v0.36.1.0
   'calibration_profile',        // v0.36.1.0

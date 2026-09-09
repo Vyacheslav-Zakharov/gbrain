@@ -29,15 +29,17 @@ jobs:
           --health-cmd "pg_isready -U postgres -d gbrain_test"
           --health-interval 10s --health-timeout 5s --health-retries 10
     env:
-      EXPECTED_SHA: 2959bf3f6016c09cf1f8fa3da62bc029b3c543af
+      PRODUCT_BASE_SHA: 2959bf3f6016c09cf1f8fa3da62bc029b3c543af
+      EXPECTED_SHA: ${{ github.sha }}
       SHARD: ${{ matrix.shard }}/4
       DATABASE_URL: postgresql://postgres:ephemeral_test_only@127.0.0.1:5432/gbrain_test
-      EVIDENCE: ${{ github.workspace }}/../e2e-evidence
+      EVIDENCE: ${{ github.workspace }}/e2e-evidence
       LC_ALL: C
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
-          ref: 2959bf3f6016c09cf1f8fa3da62bc029b3c543af
+          ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
@@ -46,6 +48,17 @@ jobs:
         run: |
           mkdir -p "$EVIDENCE" "$RUNNER_TEMP/isolated-home"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          base = os.environ['PRODUCT_BASE_SHA']
+          subprocess.run(['git', 'merge-base', '--is-ancestor', base, 'HEAD'], check=True)
+          changed = subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines()
+          allowed = {'.github/workflows/e2e.yml', 'test/e2e/facts-recall-render.test.ts', 'test/e2e/engine-parity.test.ts', 'test/e2e/sources-remote-mcp.test.ts', 'test/e2e/dream-cycle-phase-order-pglite.test.ts', 'test/e2e/sync-lock-recovery.test.ts', 'test/e2e/serve-http-oauth.test.ts', 'test/e2e/upgrade.test.ts', 'test/e2e/fixtures/sync-lock-held.preload.ts', 'test/e2e/fixtures/check-update-404.ts'}
+          unexpected = sorted(set(changed) - allowed)
+          receipt = dict(productBaseSHA=base, fixtureSHA=os.environ['EXPECTED_SHA'], changedFiles=changed, unexpectedFiles=unexpected, productBytesUnchanged=not unexpected)
+          pathlib.Path(os.environ['EVIDENCE'], 'product-parity.json').write_text(json.dumps(receipt, indent=2)+'\n')
+          assert not unexpected, unexpected
+          PY
           test "$(bun --version)" = 1.3.13
           command -v psql || { sudo apt-get update && sudo apt-get install -y postgresql-client; }
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector;' -c 'SHOW server_version;'
@@ -96,6 +109,6 @@ jobs:
         if: always()
         with:
           name: reconciliation-e2e-${{ matrix.shard }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/../e2e-evidence/
+          path: ${{ env.EVIDENCE }}/
           if-no-files-found: error
           retention-days: 14
