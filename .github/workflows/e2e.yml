@@ -1,165 +1,129 @@
-name: E2E Tests
-
-# Manual-only in this private fork: push/PR triggers plus the nightly cron
-# billed ~25-30 Actions minutes per run, and tier2 spends OpenAI/Anthropic
-# API credits on every run. Trigger on demand from the Actions tab
-# (Run workflow) / `gh workflow run e2e.yml`.
-on:
+# Verification only: replace e2e.yml on a separate CI branch; no product edits.
+# Expected RED is evidence, NEVER converted into a successful gate.
+name: Portal ACL PostgreSQL exact-source RED gate
+'on':
   workflow_dispatch:
-
 permissions:
   contents: read
-
-# Cancel a superseded run when a newer commit lands on the same PR/branch.
-# PR number for pull_request events (fork-safe), github.ref fallback for
-# push/scheduled runs.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+defaults:
+  run:
+    shell: bash
 jobs:
-  jsonb-parity:
-    # Dedicated required guard for the JSONB double-encode bug-class (#2339).
-    # PGLite parses a double-encoded jsonb string silently, so this assertion can
-    # ONLY be made on real Postgres — a normal gated e2e file would skip without
-    # DATABASE_URL and let the bug ship green (as #2339 did). This job provisions
-    # Postgres and HARD-FAILS if DATABASE_URL is missing, so the guard can never
-    # silently skip.
-    name: JSONB parity (#2339 regression guard)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  portal-acl:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     services:
       postgres:
         image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: gbrain_test
-        ports:
-          - 5432:5432
+          POSTGRES_PASSWORD: ephemeral_portal_only
+          POSTGRES_DB: portal_acl_gate
+        ports: ['5432/tcp']
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+          --cpus 2 --memory 2g --pids-limit 256
+          --health-cmd "pg_isready -U postgres -d portal_acl_gate"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      EXPECTED_SHA: 8f213fd033e4125d88347cf95de99549aa0f2649
+      EVIDENCE: ${{ github.workspace }}/portal-gate-evidence
+      ISOLATED_HOME: ${{ github.workspace }}/portal-gate-home
+      LC_ALL: C
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: 8f213fd033e4125d88347cf95de99549aa0f2649
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: 1.3.13
-      - run: bun install
-      - name: Require DATABASE_URL (no silent skip)
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
+      - name: Exact source and isolated paths
         run: |
-          if [ -z "$DATABASE_URL" ]; then
-            echo "::error::DATABASE_URL must be set for the jsonb-parity job — the #2339 guard would silently skip (the exact failure PGLite hides). Failing the job." >&2
-            exit 1
-          fi
-      - name: Run JSONB double-encode parity tests on real Postgres
+          mkdir -p "$EVIDENCE" "$ISOLATED_HOME/.gbrain"
+          test "$(realpath -m "$EVIDENCE")" = "$EVIDENCE"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(bun --version)" = 1.3.13
+          git diff --exit-code HEAD --
+          sha256sum test/e2e/portal-access-control-postgres.test.ts scripts/run-e2e.sh > "$EVIDENCE/source-sha256.txt"
+      - name: Frozen isolated install
+        id: install
+        run: |
+          env -i PATH="$PATH" HOME="$ISOLATED_HOME" GBRAIN_HOME="$ISOLATED_HOME" TMPDIR="$RUNNER_TEMP" CI=true LC_ALL=C timeout --signal=TERM --kill-after=10s 6m bun install --frozen-lockfile 2>&1 | tee "$EVIDENCE/install.log"
+          git diff --exit-code HEAD --
+      - name: Direct portal suite (unchanged assertions; expected RED)
+        id: tests
         env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
-        run: bun test test/e2e/op-checkpoint-jsonb-parity.test.ts test/e2e/jsonb-roundtrip.test.ts
-
-  tier1:
-    name: Tier 1 (Mechanical)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
+          PORTAL_PORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          # Do not use or modify run-e2e.sh: its GBRAIN_* scrub is intentional.
+          # Only this job's disposable service URL enters the empty environment.
+          test -n "$PORTAL_PORT"
+          set +e
+          env -i PATH="$PATH" HOME="$ISOLATED_HOME" GBRAIN_HOME="$ISOLATED_HOME" TMPDIR="$RUNNER_TEMP" CI=true LC_ALL=C NO_COLOR=1 GBRAIN_TEST_POSTGRES_URL="postgresql://postgres:ephemeral_portal_only@127.0.0.1:$PORTAL_PORT/portal_acl_gate" timeout --signal=TERM --kill-after=10s 2m bun test --timeout=60000 --reporter=junit --reporter-outfile="$EVIDENCE/junit.xml" ./test/e2e/portal-access-control-postgres.test.ts 2>&1 | tee "$EVIDENCE/portal.log"
+          codes=("${PIPESTATUS[@]}")
+          printf '%s\n' "${codes[0]}" > "$EVIDENCE/test-exit-code.txt"
+          printf '%s\n' "${codes[1]}" > "$EVIDENCE/tee-exit-code.txt"
+          test "${codes[0]}" = 0 && test "${codes[1]}" = 0
+      - name: Always record parity and actual execution; preserve RED
+        if: always()
         env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: gbrain_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+          TEST_OUTCOME: ${{ steps.tests.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess, xml.etree.ElementTree as ET
+          p = pathlib.Path(os.environ['EVIDENCE']); p.mkdir(parents=True, exist_ok=True)
+          def git(*args):
+              r = subprocess.run(['git', *args], capture_output=True, text=True)
+              return {'rc': r.returncode, 'stdout': r.stdout.strip(), 'stderr': r.stderr.strip()}
+          head = git('rev-parse', 'HEAD')
+          drift = git('diff', '--name-status', 'HEAD', '--')
+          status = git('status', '--porcelain=v1', '--untracked-files=no')
+          expected = os.environ['EXPECTED_SHA']
+          parity = head['rc'] == drift['rc'] == status['rc'] == 0 and head['stdout'] == expected and not drift['stdout'] and not status['stdout']
+          source = {}
+          for name in ['test/e2e/portal-access-control-postgres.test.ts', 'scripts/run-e2e.sh']:
+              r = subprocess.run(['git', 'show', expected + ':' + name], capture_output=True)
+              actual = pathlib.Path(name).read_bytes() if pathlib.Path(name).is_file() else None
+              same = r.returncode == 0 and actual == r.stdout
+              source[name] = {'matchesPinnedBlob': same, 'sha256': hashlib.sha256(actual).hexdigest() if actual is not None else None}
+              parity = parity and same
+          def read(name):
+              f = p/name
+              return f.read_text(errors='replace') if f.exists() else ''
+          log = re.sub(r'\x1b\[[0-9;]*m', '', read('portal.log'))
+          names = [
+              'applies v138 and creates the same authority-plane tables and indexes',
+              'enforces grant invariants and transactional repository SQL on PostgreSQL',
+              'binds an imported Keycloak subject when PostgreSQL returns BIGINT versions',
+          ]
+          cases, parse_error = [], None
+          try:
+              root = ET.parse(p/'junit.xml').getroot()
+              cases = list(root.iter('testcase'))
+          except Exception as exc:
+              parse_error = str(exc)
+          observed = [c.get('name', '') for c in cases]
+          skipped = sum(len(c.findall('skipped')) for c in cases)
+          failures = [c.get('name') for c in cases if c.find('failure') is not None]
+          errors = sum(len(c.findall('error')) for c in cases)
+          summary = re.findall(r'Ran (\d+) tests? across (\d+) files?', log)
+          complete = len(cases) == 3 and sorted(observed) == sorted(names) and skipped == 0 and errors == 0 and summary == [('3', '1')] and not re.search(r'^\s*[1-9]\d* skip', log, re.M)
+          exit_code, tee_code = read('test-exit-code.txt').strip(), read('tee-exit-code.txt').strip()
+          expected_red = bool(parity and complete and failures == [names[0]] and exit_code == '1' and tee_code == '0' and os.environ['INSTALL_OUTCOME'] == 'success' and os.environ['TEST_OUTCOME'] == 'failure' and re.search(r'Expected:\s*138\b', log) and re.search(r'Received:\s*140\b', log))
+          receipt = dict(expectedSourceSHA=expected, actualCheckout=head, workflowSHA=os.environ.get('GITHUB_SHA'), runId=os.environ.get('GITHUB_RUN_ID'), runAttempt=os.environ.get('GITHUB_RUN_ATTEMPT'), sourceParity=parity, sourceFiles=source, trackedDrift=drift, trackedStatus=status, installOutcome=os.environ['INSTALL_OUTCOME'], testOutcome=os.environ['TEST_OUTCOME'], exitCode=exit_code or None, teeExitCode=tee_code or None, observedTestNames=observed, executedCount=len(cases), skipped=skipped, errors=errors, failures=failures, completedSummary=summary, junitReadError=parse_error, completeThreeTestsNoSkips=complete, expectedRedObserved=expected_red, status='expected-red' if expected_red else 'unexpected-or-incomplete', gatePassed=False, productionAuthorization=False)
+          (p/'receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
+          if not (p/'portal.log').exists():
+              (p/'portal.log').write_text('NOT RUN: inspect install/setup outcome; no execution claim.\n')
+          print(json.dumps(receipt, indent=2))
+          # RED remains a failed job. Missing tests/skips/infra errors also fail closed.
+          raise SystemExit(1)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          bun-version: 1.3.13
-      - run: bun install
-      - name: Run Tier 1 E2E tests
-        run: bun test test/e2e/mechanical.test.ts test/e2e/mcp.test.ts
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
-
-  tier2:
-    name: Tier 2 (LLM Skills)
-    runs-on: ubuntu-latest
-    # Runs on every push/PR now (promoted from schedule-only in v0.19.0).
-    # Tier 1 must pass first; Tier 2 uses OPENAI_API_KEY + ANTHROPIC_API_KEY
-    # from repo/org secrets. Nightly + manual triggers still supported via
-    # the workflow-level `on:` list.
-    needs: tier1
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: gbrain_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: 1.3.13
-      - run: bun install
-      - name: Install OpenClaw
-        # Bound + retry the install: a transient npm/registry stall here used to
-        # hang unbounded and (since the v0.42.50.0 job timeout) burn the entire
-        # 30m Tier 2 budget before failing — even though the install normally
-        # finishes in well under a minute. `timeout` kills a hung attempt fast;
-        # up to 3 attempts ride out a flaky registry. Step cap is a backstop.
-        timeout-minutes: 8
-        run: |
-          for attempt in 1 2 3; do
-            if timeout 120 npm install -g openclaw@2026.4.9; then
-              exit 0
-            fi
-            echo "::warning::openclaw install attempt $attempt failed or timed out; retrying in 10s" >&2
-            sleep 10
-          done
-          echo "::error::openclaw install failed after 3 attempts" >&2
-          exit 1
-      - name: Configure OpenClaw MCP
-        run: |
-          mkdir -p ~/.openclaw
-          cat > ~/.openclaw/config.json << 'EOF'
-          {
-            "mcpServers": {
-              "gbrain": {
-                "command": "bun",
-                "args": ["run", "src/cli.ts", "serve"],
-                "env": {
-                  "DATABASE_URL": "${{ env.DATABASE_URL }}"
-                }
-              }
-            }
-          }
-          EOF
-      - name: Run Tier 2 skill tests
-        run: bun test test/e2e/skills.test.ts test/e2e/zeroentropy-live.test.ts
-        env:
-          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/gbrain_test
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          # v0.33.3.0: ZE live API tests skip gracefully when this is unset,
-          # so forks without the secret stay green. The test exercises the
-          # zeroEntropyCompatFetch response-rewriter + URL rewrite + flexible
-          # dim handling + gateway.rerank against the real provider.
-          ZEROENTROPY_API_KEY: ${{ secrets.ZEROENTROPY_API_KEY }}
+          name: portal-acl-red-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}/
+          if-no-files-found: error
+          retention-days: 14
