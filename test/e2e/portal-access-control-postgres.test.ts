@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
+import { LATEST_VERSION } from '../../src/core/migrate.ts';
 import { PortalAccessControlRepository } from '../../src/core/portal-access-control.ts';
 
 const databaseUrl = process.env.GBRAIN_TEST_POSTGRES_URL;
@@ -28,7 +29,9 @@ suite('portal access-control PostgreSQL migration parity', () => {
     const version = await engine.executeRaw<{ value: string }>(
       `SELECT value FROM config WHERE key = 'version'`,
     );
-    expect(Number(version[0]?.value)).toBe(138);
+    // initSchema applies every migration, including the v138 authority plane.
+    expect(Number(version[0]?.value)).toBe(LATEST_VERSION);
+    expect(Number(version[0]?.value)).toBeGreaterThanOrEqual(138);
 
     const tables = await engine.executeRaw<{ table_name: string }>(`
       SELECT table_name
