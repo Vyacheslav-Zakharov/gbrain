@@ -184,8 +184,8 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     const eng = getEngine();
     let output = '';
     let stopping = false;
-    const child = spawn(CLI[0], ['--preload', join(import.meta.dir, 'fixtures/sync-lock-held.preload.ts'),
-      ...CLI.slice(1), 'sync', '--repo', repoDir, '--full', '--yes', '--no-embed', '--source', 'default'], {
+    const child = spawn(CLI[0], [CLI[1], '--preload', join(import.meta.dir, 'fixtures/sync-lock-held.preload.ts'),
+      ...CLI.slice(2), 'sync', '--repo', repoDir, '--full', '--yes', '--no-embed', '--source', 'default'], {
       env: { ...process.env, GBRAIN_HOME: tmpHome, DATABASE_URL: process.env.DATABASE_URL! },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
