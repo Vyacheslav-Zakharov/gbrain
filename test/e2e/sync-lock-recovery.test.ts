@@ -43,6 +43,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (skip) return;
   try { rmSync(tmpHome, { recursive: true, force: true }); } catch { /* */ }
+  if (repoDir) rmSync(repoDir, { recursive: true, force: true });
   await teardownDB();
 });
 
@@ -115,7 +116,7 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
     expect(handle).not.toBeNull();
 
     try {
-      const result = runCli(['sync', '--repo', repoDir, '--full', '--yes']);
+      const result = runCli(['sync', '--repo', repoDir, '--full', '--yes', '--no-embed', '--source', 'default']);
       expect(result.code).not.toBe(0);
       const msg = result.stderr + result.stdout;
       expect(msg).toMatch(new RegExp(`pid ${process.pid}`));
@@ -180,47 +181,61 @@ describeE2E('v0.41.6.0 — sync lock recovery scenarios', () => {
   });
 
   test('SIGTERM during sync releases the lock within 3s', async () => {
-    // Start a sync subprocess that will hold the lock briefly.
-    // We'd ideally watch for the lock row to appear, then SIGTERM. Since
-    // sync is fast on a 5-file repo, we use a tight polling loop with
-    // an early-exit if we see the row.
     const eng = getEngine();
-    const sigtermProc = spawn(CLI[0], [...CLI.slice(1), 'sync', '--repo', repoDir, '--full', '--yes', '--no-embed'], {
-      env: {
-        ...process.env,
-        GBRAIN_HOME: tmpHome,
-        DATABASE_URL: process.env.DATABASE_URL!,
-      } as Record<string, string>,
+    let output = '';
+    let stopping = false;
+    const child = spawn(CLI[0], [CLI[1], '--preload', join(import.meta.dir, 'fixtures/sync-lock-held.preload.ts'),
+      ...CLI.slice(2), 'sync', '--repo', repoDir, '--full', '--yes', '--no-embed', '--source', 'default'], {
+      env: { ...process.env, GBRAIN_HOME: tmpHome, DATABASE_URL: process.env.DATABASE_URL! },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-
-    // Wait up to 5s for the lock row to appear, then SIGTERM.
-    let lockSeen = false;
-    for (let i = 0; i < 50; i++) {
-      const snap = await inspectLock(eng, 'gbrain-sync:default');
-      if (snap && snap.holder_pid === sigtermProc.pid) { lockSeen = true; break; }
-      await new Promise(r => setTimeout(r, 100));
+    // Subscribe immediately, including spawn failure; never await a missed event.
+    let ended = false;
+    const exited = new Promise<{ code: number | null; signal: string | null; error?: Error }>(resolve => {
+      child.once('exit', (code, signal) => { ended = true; resolve({ code, signal }); });
+      child.once('error', error => { ended = true; resolve({ code: null, signal: null, error }); });
+    });
+    const drain = (data: Buffer) => { output = (output + data.toString()).slice(-16_000); };
+    child.stdout!.on('data', drain);
+    child.stderr!.on('data', drain);
+    async function bounded<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+      let timer: ReturnType<typeof setTimeout>;
+      try {
+        return await Promise.race([promise, new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label} timed out; child output:\n${output}`)), ms);
+        })]);
+      } finally { clearTimeout(timer!); }
     }
-    if (!lockSeen) {
-      // Sync may have completed before we caught the lock. That's also fine.
-      sigtermProc.kill('SIGTERM');
-      await new Promise(r => sigtermProc.on('exit', r));
-      // Skip the rest of the assertion.
-      return;
+    try {
+      await bounded((async () => {
+        while (!stopping && !output.includes(`E2E_SYNC_LOCK_HELD:${child.pid}`)) {
+          if (ended || child.exitCode !== null || child.signalCode !== null) {
+            throw new Error(`Child exited before held-lock handshake:\n${output}`);
+          }
+          await Bun.sleep(25);
+        }
+      })(), 15_000, 'held-lock handshake');
+      const snap = await bounded(inspectLock(eng, 'gbrain-sync:default'), 2_000, 'inspect held lock');
+      expect(snap?.holder_pid).toBe(child.pid);
+      expect(ended).toBe(false);
+      expect(child.kill('SIGTERM')).toBe(true);
+      // Deadline starts at signal, not at exit. Cleanup must remove the row,
+      // not merely replace its owner; no harness delete until assertions finish.
+      await bounded((async () => {
+        while (!stopping && await bounded(inspectLock(eng, 'gbrain-sync:default'), 1_000, 'inspect released lock')) await Bun.sleep(50);
+      })(), 3_000, 'SIGTERM lock release');
+      const result = await bounded(exited, 5_000, 'SIGTERM exit');
+      expect(result.error).toBeUndefined();
+      expect(result.signal === 'SIGTERM' || result.code === 143 || result.code === 0).toBe(true);
+    } finally {
+      stopping = true;
+      if (!ended) {
+        child.kill('SIGKILL');
+        await bounded(exited, 3_000, 'SIGKILL cleanup');
+      }
+      await bounded((eng as any).sql`DELETE FROM gbrain_cycle_locks WHERE id = 'gbrain-sync:default' AND holder_pid = ${child.pid ?? -1}`, 2_000, 'fixture lock cleanup');
     }
-
-    sigtermProc.kill('SIGTERM');
-    await new Promise(r => sigtermProc.on('exit', r));
-
-    // Within 3s of exit, lock should be gone.
-    let lockGone = false;
-    for (let i = 0; i < 30; i++) {
-      const snap = await inspectLock(eng, 'gbrain-sync:default');
-      if (!snap || snap.holder_pid !== sigtermProc.pid) { lockGone = true; break; }
-      await new Promise(r => setTimeout(r, 100));
-    }
-    expect(lockGone).toBe(true);
-  });
+  }, 35_000);
 
   // v0.41.7+ follow-up: this test's timing is brittle on slow CI.
   // The SIGPIPE cleanup-registry codepath IS exercised structurally by

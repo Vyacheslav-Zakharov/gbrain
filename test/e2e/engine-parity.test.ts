@@ -642,10 +642,14 @@ async function seedFederated(eng: BrainEngine) {
 describeBoth('Engine parity — federated sourceIds[] secondary reads (#2200)', () => {
   let pgEngine: BrainEngine;
   let pgliteEngine: PGLiteEngine;
+  let ownsPgBeta = false;
   const grant = { sourceIds: ['beta'] };
 
   beforeAll(async () => {
     pgEngine = await setupDB();
+    // Claim the fixture row explicitly; a pre-existing beta is not ours to delete.
+    await pgEngine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('beta', 'beta', '/tmp/beta')");
+    ownsPgBeta = true;
     await seedFederated(pgEngine);
     pgliteEngine = new PGLiteEngine();
     await pgliteEngine.connect({});
@@ -654,8 +658,17 @@ describeBoth('Engine parity — federated sourceIds[] secondary reads (#2200)', 
   }, 90_000);
 
   afterAll(async () => {
-    await pgliteEngine.disconnect();
-    await teardownDB();
+    try {
+      // setupDB does not truncate sources. Remove only this fixture's beta,
+      // otherwise /tmp/beta can become the next file's implicit recall source.
+      if (pgEngine && ownsPgBeta) {
+        await pgEngine.executeRaw("DELETE FROM sources WHERE id = 'beta' AND local_path = '/tmp/beta'");
+        expect(await pgEngine.executeRaw("SELECT id FROM sources WHERE id = 'beta' AND local_path = '/tmp/beta'")).toEqual([]);
+      }
+    } finally {
+      try { if (pgliteEngine) await pgliteEngine.disconnect(); }
+      finally { await teardownDB(); }
+    }
   }, 30_000);
 
   test('getTags identical under sourceIds[]', async () => {
