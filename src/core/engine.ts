@@ -966,12 +966,12 @@ export interface BrainEngine {
    */
   upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string } & BatchOpts): Promise<void>;
   /**
-   * Read every chunk for a page. `opts.sourceId` source-scopes the page
-   * lookup; without it, multi-source brains return chunks from every
-   * same-slug source (importCodeFile uses this for incremental embedding
-   * reuse, which would then attach the wrong source's embeddings).
+   * Read every chunk for a page. `opts.sourceId` scopes to one source;
+   * `opts.sourceIds` scopes to a federated allow-list and includes `source_id`
+   * on each returned chunk. Without either option, the legacy `default`
+   * source behavior is preserved.
    */
-  getChunks(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]>;
+  getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Chunk[]>;
   /**
    * Count chunks across the brain where embedding IS NULL.
    * Pre-flight short-circuit for `embed --stale` so a 100%-embedded brain

@@ -27,6 +27,7 @@ import { hashToken, generateToken, isUndefinedColumnError } from './utils.ts';
 import { hasScope, assertAllowedScopes, parseScopeString, InvalidScopeError } from './scope.ts';
 import type { AuthInfo as CoreAuthInfo } from './operations.ts';
 import { parseLegacyTokenScope } from './legacy-token-scope.ts';
+import { recoverAccessControlJsonTransaction } from './portal-access-control-json.ts';
 import type { SqlQuery, SqlValue } from './sql-query.ts';
 export type { SqlQuery, SqlValue };
 
@@ -184,7 +185,7 @@ interface GBrainOAuthProviderOptions {
    */
   dcrDisabled?: boolean;
   /** Test/embedding seam; production defaults to user_permissions.json. */
-  userSourceGrantResolver?: (email: string) => SourceGrant | undefined;
+  userSourceGrantResolver?: (email: string) => SourceGrant | undefined | Promise<SourceGrant | undefined>;
 }
 
 // ---------------------------------------------------------------------------
@@ -369,13 +370,19 @@ function normalizeUserSourceGrant(emailRaw: unknown, raw: unknown): SourceGrant 
   };
 }
 
-function readUserSourceGrant(emailRaw: unknown): SourceGrant | undefined {
+export function readUserSourceGrant(emailRaw: unknown): SourceGrant | undefined {
   const email = typeof emailRaw === 'string' ? emailRaw.trim().toLowerCase() : '';
   if (!email) return undefined;
   try {
     const fs = require('fs');
     const path = require('path');
-    const configPath = path.join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
+    const brainDir = path.join(process.env.HOME || '/home/avers', '.gbrain');
+    const configPath = path.join(brainDir, 'user_permissions.json');
+    recoverAccessControlJsonTransaction({
+      permissionsPath: configPath,
+      requestsPath: path.join(brainDir, 'access_requests.json'),
+      journalPath: path.join(brainDir, 'access_control_transaction.json'),
+    });
     if (!fs.existsSync(configPath)) return undefined;
     const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     return normalizeUserSourceGrant(email, data[email]);
@@ -395,7 +402,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
   private readonly dcrDisabled: boolean;
   private tokenTtl: number;
   private refreshTtl: number;
-  private readonly resolveUserSourceGrant: (email: string) => SourceGrant | undefined;
+  private readonly resolveUserSourceGrant: (email: string) => SourceGrant | undefined | Promise<SourceGrant | undefined>;
 
   constructor(options: GBrainOAuthProviderOptions) {
     this.sql = options.sql;
@@ -460,7 +467,7 @@ export class GBrainOAuthProvider implements OAuthServerProvider {
     const portalEmail = (res as any).locals?.gbrainPortalUser;
     const userGrant = normalizeUserSourceGrant(
       portalEmail,
-      this.resolveUserSourceGrant(String(portalEmail ?? '')),
+      await this.resolveUserSourceGrant(String(portalEmail ?? '')),
     );
     if (!userGrant) {
       throw new Error('OAuth authorization denied: valid Portal user source grant required');

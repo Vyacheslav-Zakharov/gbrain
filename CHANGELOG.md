@@ -2,6 +2,11 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## Unreleased
+
+### Fixed
+- **Federated MCP clients can read chunks and resolve slugs in every granted source.** `get_chunks`, `get_page`, and `resolve_slugs` now accept an optional `source_id`, validate it against the OAuth source grant, and honor the full federated grant when the parameter is omitted. Federated chunk rows include `source_id`, so same-slug pages remain distinguishable instead of silently falling back to the caller's personal/default source.
+
 ## [0.42.53.0] - 2026-06-23
 
 **`gbrain sync` works again on managed Postgres brains: the durable-checkpoint pin write was encoding its value the wrong way, so every multi-source sync aborted at the very first checkpoint. Fixed, plus a repo-wide sweep of the same JSONB footgun and a new CI guard so it can't come back.** A recent release added a structural check on the sync checkpoint table; the pin write that runs before every drain bound its value as a string rather than a real array, so the check rejected it and the run bailed before importing anything. The bug was invisible on the embedded engine (its driver parses the value either way) and only bit managed Postgres.

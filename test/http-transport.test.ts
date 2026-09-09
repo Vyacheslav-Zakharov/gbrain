@@ -16,6 +16,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { createHash } from 'crypto';
 import { startHttpTransport } from '../src/mcp/http-transport.ts';
+import { GBRAIN_MCP_INSTRUCTIONS } from '../src/mcp/server-instructions.ts';
 import { RateLimiter } from '../src/mcp/rate-limit.ts';
 
 type SqlResult = unknown[] | unknown;
@@ -213,6 +214,21 @@ describe('http-transport: auth', () => {
     expect(body.result.tools).toBeArray();
     expect(body.result.tools.length).toBeGreaterThan(0);
     expect(body.jsonrpc).toBe('2.0');
+  });
+
+  test('initialize advertises the exact retrieval-first instructions', async () => {
+    const r = await fetch(`${srv.url}/mcp`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${VALID_TOKEN}`, 'Content-Type': 'application/json' },
+      body: rpc('initialize', {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'http-transport-test', version: '1' },
+      }),
+    });
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    expect(body.result.instructions).toBe(GBRAIN_MCP_INSTRUCTIONS);
   });
 
   test('2. missing Authorization header → 401', async () => {

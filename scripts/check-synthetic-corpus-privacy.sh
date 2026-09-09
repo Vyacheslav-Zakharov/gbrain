@@ -50,7 +50,7 @@ while IFS= read -r match; do
     echo "  VIOLATION: explicit dollar amount in $match"
     VIOLATIONS=$((VIOLATIONS + 1))
   fi
-done < <(grep -rEn '\$[0-9]+[MBKkmb]\b' "$CORPUS_DIR" --include='*.md' 2>/dev/null || true)
+done < <(grep -rEn '\$[0-9]+[MBKkmb]\b' "$CORPUS_DIR" --include='*.md' --include='*.json' 2>/dev/null || true)
 
 # Check 2: explicit year-specific dates outside the 2024-2026 placeholder window.
 # The corpus uses placeholder timeline references like "2024-Q2", "2026-04-03".
@@ -63,7 +63,7 @@ while IFS= read -r match; do
     # This is a low-precision heuristic; manual review decides.
     : # informational, not a failure for v0.36.1.0
   fi
-done < <(grep -rEn '\b(201[0-8]|2030|2031)\b' "$CORPUS_DIR" --include='*.md' 2>/dev/null || true)
+done < <(grep -rEn '\b(201[0-8]|2030|2031)\b' "$CORPUS_DIR" --include='*.md' --include='*.json' 2>/dev/null || true)
 
 # Check 3: presence of expected placeholders. Synthetic pages should reference
 # at least one canonical placeholder. A page with ZERO placeholder names is
@@ -89,6 +89,25 @@ while IFS= read -r file; do
   fi
 done < <(find "$CORPUS_DIR" -name '*.md' -type f 2>/dev/null)
 
+# Check 4: JSON fixtures that declare themselves synthetic must carry the exact
+# privacy contract and contain no URL or email indicators. This closes the gap
+# where the original guard scanned only Markdown fixtures.
+echo "[corpus-privacy] validating synthetic JSON declarations..."
+while IFS= read -r file; do
+  if ! node -e '
+    const fs = require("node:fs");
+    const file = process.argv[1];
+    const raw = fs.readFileSync(file, "utf8");
+    const value = JSON.parse(raw);
+    if (!Object.prototype.hasOwnProperty.call(value, "synthetic")) process.exit(0);
+    const privacy = "No real people, companies, systems, dates, or source text.";
+    if (value.synthetic !== true || value.privacy !== privacy || /https?:\/\/|[\w.+-]+@[\w.-]+/i.test(raw)) process.exit(1);
+  ' "$file"; then
+    echo "  VIOLATION: synthetic JSON privacy declaration or content check failed in $file"
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
+done < <(find "$CORPUS_DIR" -name '*.json' -type f 2>/dev/null)
+
 if [ "$VIOLATIONS" -gt 0 ]; then
   echo ""
   echo "❌ $VIOLATIONS privacy violation(s) found in $CORPUS_DIR."
@@ -104,4 +123,4 @@ if [ "$VIOLATIONS" -gt 0 ]; then
   exit 1
 fi
 
-echo "✓ corpus privacy: $VIOLATIONS violations across $(find "$CORPUS_DIR" -name '*.md' -type f 2>/dev/null | wc -l | tr -d ' ') pages"
+echo "✓ corpus privacy: $VIOLATIONS violations across $(find "$CORPUS_DIR" \( -name '*.md' -o -name '*.json' \) -type f 2>/dev/null | wc -l | tr -d ' ') fixtures"

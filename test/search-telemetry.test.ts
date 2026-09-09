@@ -99,6 +99,39 @@ describe('recordSearchTelemetry — in-memory bucket', () => {
     expect(b.sum_budget_dropped).toBe(19); // 12 + 7
   });
 
+  test('records expansion-arm denominator, degradation shape, and sanitized reasons', () => {
+    const w = getTelemetryWriter();
+    w.setEngine(engine);
+    recordSearchTelemetry(engine, makeMeta({
+      expansion_applied: true,
+      arms: {
+        status: 'degraded',
+        used: 1,
+        total: 3,
+        failed: 2,
+        failure_reasons: { embedding_timeout: 2 },
+      },
+    }));
+    recordSearchTelemetry(engine, makeMeta({
+      expansion_applied: true,
+      arms: {
+        status: 'ok',
+        used: 3,
+        total: 3,
+        failed: 0,
+        failure_reasons: {},
+      },
+    }));
+    const today = new Date().toISOString().slice(0, 10);
+    const b = w.bucketForTest(today, 'balanced', 'general')!;
+    expect(b.expansion_calls).toBe(2);
+    expect(b.expansion_arms_total).toBe(6);
+    expect(b.expansion_arms_failed).toBe(2);
+    expect(b.expansion_partial_failures).toBe(1);
+    expect(b.expansion_all_failures).toBe(0);
+    expect(b.expansion_embedding_timeout_failures).toBe(2);
+  });
+
   test('missing mode / intent fall back to "unset" — telemetry is non-blocking', () => {
     const w = getTelemetryWriter();
     w.setEngine(engine);
@@ -220,6 +253,37 @@ describe('readSearchStats — read-time derived averages', () => {
     expect(s.intent_distribution.temporal).toBe(1);
     expect(s.mode_distribution.conservative).toBe(2);
     expect(s.mode_distribution.tokenmax).toBe(1);
+  });
+
+  test('read stats exposes expansion-arm daily aggregates and degraded rates', async () => {
+    const w = getTelemetryWriter();
+    w.setEngine(engine);
+    recordSearchTelemetry(engine, makeMeta({
+      expansion_applied: true,
+      arms: { status: 'degraded', used: 1, total: 3, failed: 2, failure_reasons: { embedding_timeout: 2 } },
+    }));
+    recordSearchTelemetry(engine, makeMeta({
+      expansion_applied: true,
+      arms: { status: 'degraded', used: 0, total: 3, failed: 3, failure_reasons: { embedding_provider: 3 } },
+    }));
+    recordSearchTelemetry(engine, makeMeta()); // no expansion arms; excluded from denominator
+    await w.flush();
+
+    const s = await readSearchStats(engine, { days: 1 });
+    expect(s.expansion_arms.calls).toBe(2);
+    expect(s.expansion_arms.total).toBe(6);
+    expect(s.expansion_arms.failed).toBe(5);
+    expect(s.expansion_arms.partial_failure_calls).toBe(1);
+    expect(s.expansion_arms.all_failure_calls).toBe(1);
+    expect(s.expansion_arms.degraded_call_rate).toBe(1);
+    expect(s.expansion_arms.failure_reasons).toEqual({
+      embedding_timeout: 2,
+      embedding_rate_limit: 0,
+      embedding_provider: 3,
+      vector_timeout: 0,
+      vector_database: 0,
+      unknown: 0,
+    });
   });
 
   test('days window clamps to [1, 365]', async () => {

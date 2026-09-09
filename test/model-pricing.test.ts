@@ -49,6 +49,11 @@ describe('CANONICAL_PRICING — table integrity', () => {
       CANONICAL_PRICING['google:gemini-2.0-flash'],
     );
   });
+
+  test('Gemini 3.6 Flash uses official standard paid-tier pricing', () => {
+    expect(CANONICAL_PRICING['google:gemini-3.6-flash']).toEqual({ input: 1.5, output: 7.5 });
+    expect(canonicalLookup('google:gemini-3.6-flash')).toEqual({ input: 1.5, output: 7.5 });
+  });
 });
 
 describe('canonicalLookup — id normalization', () => {
@@ -76,6 +81,13 @@ describe('canonicalLookup — id normalization', () => {
     expect(canonicalLookup('together:meta-llama/Llama-3.3-70B-Instruct-Turbo')).toEqual({
       input: 0.88,
       output: 0.88,
+    });
+  });
+
+  test('Gemini 3.7 Flash is conservatively priced for bounded production phases', () => {
+    expect(canonicalLookup('google:gemini-3.7-flash')).toEqual({
+      input: 1.50,
+      output: 7.50,
     });
   });
 

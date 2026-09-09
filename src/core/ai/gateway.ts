@@ -175,6 +175,10 @@ let _embedTransportInstalled = false;
 // Test-only seam for chat(). When set, chat() skips provider resolution and
 // returns this function's result directly. See __setChatTransportForTests.
 let _chatTransport: ((opts: ChatOpts) => Promise<ChatResult>) | null = null;
+type GenerateTextFn = typeof generateText;
+type ResolveChatProviderFn = typeof resolveChatProvider;
+let _generateTextTransport: GenerateTextFn = generateText;
+let _resolveChatProviderTransport: ResolveChatProviderFn = resolveChatProvider;
 
 /**
  * Per-recipe shrink-on-miss state. When a recipe's pre-split misses the
@@ -547,6 +551,8 @@ export function resetGateway(): void {
   _embedTransport = embedMany;
   _embedTransportInstalled = false;
   _chatTransport = null;
+  _generateTextTransport = generateText;
+  _resolveChatProviderTransport = resolveChatProvider;
   _warnedRecipes.clear();
   _extendedModels.clear();
 }
@@ -580,6 +586,16 @@ export function __setChatTransportForTests(
   fn: ((opts: ChatOpts) => Promise<ChatResult>) | null,
 ): void {
   _chatTransport = fn;
+}
+
+/** @internal test seam at the final AI SDK invocation boundary. */
+export function __setGenerateTextTransportForTests(fn: GenerateTextFn | null): void {
+  _generateTextTransport = fn ?? generateText;
+}
+
+/** @internal test seam that avoids provider/network setup while exercising SDK args. */
+export function __setResolveChatProviderForTests(fn: ResolveChatProviderFn | null): void {
+  _resolveChatProviderTransport = fn ?? resolveChatProvider;
 }
 
 function requireConfig(): AIGatewayConfig {
@@ -2399,6 +2415,8 @@ export interface ChatOpts {
   messages: ChatMessage[];
   tools?: ChatToolDef[];
   maxTokens?: number;
+  /** AI SDK transport retries. Omit for the SDK default; governed callers may force zero. */
+  maxRetries?: number;
   abortSignal?: AbortSignal;
   /**
    * Anthropic-specific: cache the system prompt + last tool def. Silently
@@ -2709,7 +2727,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   }
 
   const modelStr = modelStrEarly;
-  const { model, recipe, modelId } = await resolveChatProvider(modelStr);
+  const { model, recipe, modelId } = await _resolveChatProviderTransport(modelStr);
 
   const supportsCache = recipe.touchpoints.chat?.supports_prompt_cache === true;
   const useCache = !!opts.cacheSystem && supportsCache;
@@ -2752,12 +2770,13 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   };
 
   try {
-    const result = await generateText({
+    const result = await _generateTextTransport({
       model,
       system: opts.system,
       messages: toModelMessages(opts.messages) as any,
       tools: opts.tools && opts.tools.length > 0 ? tools : undefined,
       maxOutputTokens: opts.maxTokens ?? 4096,
+      maxRetries: opts.maxRetries,
       // v0.42.20.0 — default a chat timeout (composes with the caller's signal,
       // shorter wins). Covers native-anthropic (the default provider + facts Haiku).
       abortSignal: withDefaultTimeout(opts.abortSignal, AI_CHAT_TIMEOUT_MS),

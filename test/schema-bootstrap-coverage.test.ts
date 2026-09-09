@@ -168,6 +168,11 @@ const REQUIRED_BOOTSTRAP_COVERAGE: ForwardReference[] = [
   // SCHEMA_SQL replay creates the index. Powers `gbrain extract --stale` + the
   // `links_extraction_lag` doctor check.
   { kind: 'column', table: 'pages', column: 'links_extracted_at' },
+  // v129/v134 — additive columns on tables that already exist in older
+  // source-ingest / review brains. CREATE TABLE IF NOT EXISTS cannot add them.
+  { kind: 'column', table: 'source_base_views', column: 'primary_key_field' },
+  { kind: 'column', table: 'source_base_views', column: 'updated_at_field' },
+  { kind: 'column', table: 'concept_proposals', column: 'source_takes' },
   // v125 — append-only source-ingest run ledger. Brains that already applied
   // v120 before the ledger DDL was folded in can have profiles/sync state but
   // no run-items table; bootstrap must create it before schema/migration replay.
@@ -259,6 +264,9 @@ test('applyForwardReferenceBootstrap covers every forward reference declared in 
       ALTER TABLE pages DROP COLUMN IF EXISTS corpus_generation;
       DROP INDEX IF EXISTS pages_links_extracted_at_idx;
       ALTER TABLE pages DROP COLUMN IF EXISTS links_extracted_at;
+      ALTER TABLE source_base_views DROP COLUMN IF EXISTS primary_key_field;
+      ALTER TABLE source_base_views DROP COLUMN IF EXISTS updated_at_field;
+      ALTER TABLE concept_proposals DROP COLUMN IF EXISTS source_takes;
       DROP INDEX IF EXISTS source_ingest_run_items_run_idx;
       DROP INDEX IF EXISTS source_ingest_run_items_external_idx;
       DROP TABLE IF EXISTS source_ingest_run_items;
@@ -683,6 +691,21 @@ const COLUMN_EXEMPTIONS = new Set<string>([
   'search_telemetry.rank1_lt_solid',
   'search_telemetry.rank1_solid',
   'search_telemetry.rank1_high',
+  // v139 — bounded query-expansion arm counters. search_telemetry remains
+  // migration-only; no schema-blob index forward-references these columns.
+  'search_telemetry.expansion_calls',
+  'search_telemetry.expansion_arms_total',
+  'search_telemetry.expansion_arms_failed',
+  'search_telemetry.expansion_partial_failures',
+  'search_telemetry.expansion_all_failures',
+  'search_telemetry.expansion_original_failed',
+  'search_telemetry.expansion_original_recovered',
+  'search_telemetry.expansion_embedding_timeout_failures',
+  'search_telemetry.expansion_embedding_rate_limit_failures',
+  'search_telemetry.expansion_embedding_provider_failures',
+  'search_telemetry.expansion_vector_timeout_failures',
+  'search_telemetry.expansion_vector_database_failures',
+  'search_telemetry.expansion_unknown_failures',
   // Schema-blob-not-yet-refreshed: each of these columns is added by a
   // migration but NOT (yet) referenced by `PGLITE_SCHEMA_SQL` (neither in a
   // CREATE TABLE body nor in any CREATE INDEX). Bootstrap doesn't need to

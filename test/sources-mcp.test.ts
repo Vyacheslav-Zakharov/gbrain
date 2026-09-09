@@ -80,13 +80,14 @@ function findOp(name: string): Operation {
   return op;
 }
 
-function ctxRemote(scopes: string[]): OperationContext {
+function ctxRemote(scopes: string[], allowedSources?: string[]): OperationContext {
   const auth: AuthInfo = {
     token: 'gbrain_at_xxx',
     clientId: 'gbrain_cl_test',
     clientName: 'test-client',
     scopes,
     expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    allowedSources,
   };
   return {
     engine: engine as any,
@@ -154,7 +155,10 @@ describe('sources_* handlers — happy path', () => {
         url: 'https://github.com/example/repo',
       });
       const listOp = findOp('sources_list');
-      const result = (await listOp.handler(ctxRemote(['read']), {})) as any;
+      const result = (await listOp.handler(
+        ctxRemote(['read'], ['default', 'mcp-list-test']),
+        {},
+      )) as any;
       expect(Array.isArray(result.sources)).toBe(true);
       const found = result.sources.find((s: any) => s.id === 'mcp-list-test');
       expect(found).toBeDefined();
@@ -358,7 +362,7 @@ describe('sources_list — include_archived honored (was silently leaking)', () 
       );
 
       const listOp = findOp('sources_list');
-      const result = (await listOp.handler(ctxRemote(['read']), {
+      const result = (await listOp.handler(ctxRemote(['read'], ['default', 'archived-included']), {
         include_archived: true,
       })) as any;
       const found = result.sources.find((s: any) => s.id === 'archived-included');

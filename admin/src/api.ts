@@ -29,10 +29,69 @@ export function adminApiErrorMessage(body: unknown, status: number): string {
   return `HTTP ${status}`;
 }
 
+export function shouldStartPortalAdminRevalidation(body: unknown): boolean {
+  return Boolean(
+    body
+    && typeof body === 'object'
+    && (body as { error?: unknown }).error === 'portal_revalidation_required',
+  );
+}
+
+export type PortalAdminRevalidationFence = {
+  claim(): boolean;
+  started(): boolean;
+};
+
+export function createPortalAdminRevalidationFence(): PortalAdminRevalidationFence {
+  let navigationStarted = false;
+  return {
+    claim: () => {
+      if (navigationStarted) return false;
+      navigationStarted = true;
+      return true;
+    },
+    started: () => navigationStarted,
+  };
+}
+
+export type PortalAdminUnauthorizedAction = 'revalidate' | 'wait' | 'login';
+
+export function portalAdminUnauthorizedAction(
+  body: unknown,
+  fence: PortalAdminRevalidationFence,
+): PortalAdminUnauthorizedAction {
+  if (shouldStartPortalAdminRevalidation(body)) {
+    return fence.claim() ? 'revalidate' : 'wait';
+  }
+  return fence.started() ? 'wait' : 'login';
+}
+
+const portalAdminRevalidationFence = createPortalAdminRevalidationFence();
+
+async function handleAdminUnauthorized(res: Response): Promise<never> {
+  const body = await res.json().catch(() => ({}));
+  const action = portalAdminUnauthorizedAction(body, portalAdminRevalidationFence);
+
+  if (action === 'revalidate') {
+    // Concurrent Admin loads can all cross the same freshness boundary. Claim
+    // one navigation before creating an OIDC transaction so later 401 handlers
+    // cannot overwrite its browser-binding cookie or switch to local #login.
+    window.location.assign('/login?return_to=%2Fadmin%2F');
+  }
+  if (action !== 'login') {
+    throw new Error('Portal revalidation required');
+  }
+
+  // Real unauthorized states (missing/revoked/no-role/fallback) must not enter
+  // an automatic redirect loop.
+  window.location.hash = '#login';
+  throw new Error('Unauthorized');
+}
+
 // v0.26.3 trust model (D11 + D12): the admin UI does NOT cache the
-// bootstrap token in browser JS state. On 401, redirect to login —
-// no auto-reauth via saved token, no localStorage/sessionStorage read.
-// The HttpOnly cookie set by /admin/login is the only session credential.
+// bootstrap token in browser JS state. Generic 401 responses still go to the
+// local login screen. Only the server-classified Keycloak freshness boundary
+// starts a top-level prompt=none revalidation; no browser token cache is read.
 async function apiFetch(path: string, options?: RequestInit) {
   const res = await fetchWithTimeout(`${BASE}${path}`, {
     ...options,
@@ -40,9 +99,7 @@ async function apiFetch(path: string, options?: RequestInit) {
     headers: { 'Content-Type': 'application/json', ...options?.headers },
   });
   if (res.status === 401) {
-    // No token cache to retry from. Redirect to login.
-    window.location.hash = '#login';
-    throw new Error('Unauthorized');
+    await handleAdminUnauthorized(res);
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -55,8 +112,7 @@ async function apiFetch(path: string, options?: RequestInit) {
 async function apiFetchText(path: string) {
   const res = await fetchWithTimeout(`${BASE}${path}`, { credentials: 'same-origin' });
   if (res.status === 401) {
-    window.location.hash = '#login';
-    throw new Error('Unauthorized');
+    await handleAdminUnauthorized(res);
   }
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();
@@ -65,6 +121,14 @@ async function apiFetchText(path: string) {
 export const api = {
   login: (token: string) => apiFetch('/admin/login', { method: 'POST', body: JSON.stringify({ token }) }),
   signOutEverywhere: () => apiFetch('/admin/api/sign-out-everywhere', { method: 'POST' }),
+  accessControlPermissions: () => apiFetch('/admin/api/permissions'),
+  accessControlSavePermissions: (email: string, payload: { grants: Array<{ source_id: string; read: boolean; write: boolean }>; expected_version: string | number }) =>
+    apiFetch(`/admin/api/permissions/${encodeURIComponent(email)}`, { method: 'POST', body: JSON.stringify(payload) }),
+  accessControlRequests: () => apiFetch('/admin/api/access-requests'),
+  accessControlApproveRequest: (id: string, payload: { grants: Array<{ index: number; read: boolean; write: boolean }>; expected_version: string | number }) =>
+    apiFetch(`/admin/api/access-requests/${encodeURIComponent(id)}/approve`, { method: 'POST', body: JSON.stringify(payload) }),
+  accessControlRejectRequest: (id: string, expected_version: string | number, reason = '') =>
+    apiFetch(`/admin/api/access-requests/${encodeURIComponent(id)}/reject`, { method: 'POST', body: JSON.stringify({ expected_version, reason }) }),
   stats: () => apiFetch('/admin/api/stats'),
   health: () => apiFetch('/admin/api/health-indicators'),
   agents: () => apiFetch('/admin/api/agents'),
@@ -77,6 +141,7 @@ export const api = {
   // v0.36.1.0 (T15 / E6) — calibration endpoints.
   calibrationProfile: (holder?: string) =>
     apiFetch(`/admin/api/calibration/profile${holder ? `?holder=${encodeURIComponent(holder)}` : ''}`),
+  startCalibration: () => apiFetch('/admin/api/calibration/run', { method: 'POST' }),
   calibrationChart: (type: string, holder?: string) =>
     apiFetchText(`/admin/api/calibration/charts/${encodeURIComponent(type)}${holder ? `?holder=${encodeURIComponent(holder)}` : ''}`),
   // v0.41 D2 — live minion-jobs dashboard snapshot.
@@ -88,15 +153,20 @@ export const api = {
     }
     return apiFetch(`/admin/api/activity/runs?${qs.toString()}`);
   },
-  meetingReviewItems: (params: { status?: string; q?: string; limit?: number } = {}) => {
+  meetingReviewItems: (params: { status?: string; review_class?: 'ready' | 'exception'; q?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') qs.set(key, String(value));
     return apiFetch(`/admin/api/meeting-review/items?${qs.toString()}`);
   },
   meetingReviewItem: (id: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}`),
+  meetingReviewSources: () => apiFetch('/admin/api/meeting-review/sources'),
+  meetingReviewEntities: (q = '') => apiFetch(`/admin/api/meeting-review/entities?q=${encodeURIComponent(q)}`),
+  meetingReviewResolution: (id: string, resolution: object) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/resolution`, { method: 'POST', body: JSON.stringify(resolution) }),
+  meetingReviewAdvisor: (id: string, question: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/advisor`, { method: 'POST', body: JSON.stringify({ question }) }),
   meetingReviewManualRevision: (id: string, draft: object) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/revisions/manual`, { method: 'POST', body: JSON.stringify({ draft }) }),
   meetingReviewLlmRevision: (id: string, field: string, comment: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/revisions/llm`, { method: 'POST', body: JSON.stringify({ field, comment }) }),
-  meetingReviewAccept: (id: string, draft: object) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/accept`, { method: 'POST', body: JSON.stringify({ draft }) }),
+  // Backward-compatible client surface only: the server endpoint is a fail-closed 409 kill switch.
+  meetingReviewAccept: (id: string, draft: object, revision_id?: number) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/accept`, { method: 'POST', body: JSON.stringify({ draft, revision_id }) }),
   meetingReviewReject: (id: string, reason?: string) => apiFetch(`/admin/api/meeting-review/items/${encodeURIComponent(id)}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   meetingReviewRefresh: () => apiFetch('/admin/api/meeting-review/refresh', { method: 'POST' }),
   aiReviewProposals: (params: { status?: string; q?: string; source_id?: string; limit?: number; offset?: number } = {}) => {
@@ -119,6 +189,26 @@ export const api = {
   aiReviewReject: (id: number, reason?: string) => apiFetch(`/admin/api/ai-review/proposals/${id}/reject`, {
     method: 'POST', body: JSON.stringify({ reason }),
   }),
+  aiReviewDefer: (id: number, reason?: string) => apiFetch(`/admin/api/ai-review/proposals/${id}/defer`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  }),
+  aiReviewRestore: (id: number, reason?: string) => apiFetch(`/admin/api/ai-review/proposals/${id}/restore`, {
+    method: 'POST', body: JSON.stringify({ reason }),
+  }),
+  // Multi-reviewer rounds. Finalize is available only for escalated rounds and
+  // always carries a mandatory override reason (revalidated server-side).
+  reviewRounds: (params: { status?: string; limit?: number; offset?: number } = {}) => {
+    const qs = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') qs.set(key, String(value));
+    return apiFetch(`/admin/api/ai-review/rounds?${qs.toString()}`);
+  },
+  reviewRound: (id: number) => apiFetch(`/admin/api/ai-review/rounds/${id}`),
+  reviewRoundFinalize: (id: number, action: 'accepted' | 'rejected', reason: string) =>
+    apiFetch(`/admin/api/ai-review/rounds/${id}/finalize`, { method: 'POST', body: JSON.stringify({ action, reason }) }),
+  reviewRoundReconcileStale: (id: number) =>
+    apiFetch(`/admin/api/ai-review/rounds/${id}/reconcile-stale`, { method: 'POST', body: '{}' }),
+  reviewRoundOpen: (target_type: string, target_id: number) =>
+    apiFetch('/admin/api/ai-review/rounds', { method: 'POST', body: JSON.stringify({ target_type, target_id }) }),
   aiReviewConcepts: (params: { status?: string; q?: string; limit?: number } = {}) => {
     const qs = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== '') qs.set(key, String(value));

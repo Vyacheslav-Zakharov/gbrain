@@ -6,6 +6,21 @@ import type {
   SearchResult,
   TreeResponse,
 } from './types';
+import type {
+  ReviewDeckCard,
+  ReviewItemDetail,
+  ReviewRejectReason,
+  ReviewSummary,
+  ReviewVoteResponse,
+} from './review/types';
+
+/** Machine-stable code from the review API, carried alongside the message. */
+export class ReviewApiError extends Error {
+  constructor(message: string, public readonly code: string, public readonly status: number) {
+    super(message);
+    this.name = 'ReviewApiError';
+  }
+}
 
 async function requestJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(url, {
@@ -36,9 +51,12 @@ function qs(values: Record<string, string>): string {
 }
 
 export const portalApi = {
-  logout: async () => {
-    const response = await fetch('/logout', { method: 'POST', credentials: 'same-origin' });
+  logout: async (): Promise<string | null> => {
+    const response = await fetch('/logout', { method: 'POST', credentials: 'same-origin', headers: { Accept: 'application/json' } });
     if (!response.ok && response.status !== 401) throw new Error(`HTTP ${response.status}`);
+    if (response.status === 204) return null;
+    const body = await response.json().catch(() => ({})) as { logout_url?: unknown };
+    return typeof body.logout_url === 'string' ? body.logout_url : null;
   },
   session: () => requestJson<PortalSession>('/portal/api/session'),
   sources: async () => (await requestJson<{ sources: PortalSource[] }>('/portal/api/sources')).sources,
@@ -55,4 +73,35 @@ export const portalApi = {
   context: (source: string, path: string, signal?: AbortSignal) =>
     requestJson<ContextResponse>(`/portal/api/context?${qs({ source, path })}`, signal),
   downloadUrl: (source: string, path: string) => `/portal/download?${qs({ source, path })}`,
+  reviewSummary: () => requestJson<ReviewSummary>('/portal/api/review/summary'),
+  reviewDeck: (limit = 10, signal?: AbortSignal) =>
+    requestJson<{ cards: ReviewDeckCard[]; total: number }>(`/portal/api/review/deck?${qs({ limit: String(limit) })}`, signal),
+  reviewItem: (assignmentId: number, signal?: AbortSignal) =>
+    requestJson<{ item: ReviewItemDetail; reasons: ReviewRejectReason[] }>(`/portal/api/review/items/${assignmentId}`, signal),
+  /**
+   * The idempotency key belongs to ONE user attempt: a retry after a network
+   * error replays the same key so a double-tap can never become two votes.
+   */
+  reviewVote: async (
+    assignmentId: number,
+    body: { decision: 'approve' | 'reject' | 'abstain'; reason_code?: string; comment?: string; proposal_snapshot_hash: string },
+    idempotencyKey: string,
+  ): Promise<ReviewVoteResponse> => {
+    const response = await fetch(`/portal/api/review/items/${assignmentId}/vote`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify(body),
+    });
+    if (response.status === 401) {
+      // Keep the staged payload in the current tab. The review UI offers
+      // re-authentication in a new tab, then an exact idempotent retry.
+      throw new ReviewApiError('Требуется вход', 'unauthenticated', 401);
+    }
+    const payload = await response.json().catch(() => ({})) as { error?: string; message?: string };
+    if (!response.ok) {
+      throw new ReviewApiError(payload.message || `HTTP ${response.status}`, payload.error || 'unknown', response.status);
+    }
+    return payload as unknown as ReviewVoteResponse;
+  },
 };

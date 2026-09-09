@@ -4,6 +4,9 @@ import { PORTAL_ASSET_COUNT, PORTAL_ASSETS, PORTAL_INDEX_HTML } from '../src/por
 const serveSource = await Bun.file(new URL('../src/commands/serve-http.ts', import.meta.url)).text();
 const oauthSource = await Bun.file(new URL('../src/core/oauth-provider.ts', import.meta.url)).text();
 const portalAppSource = await Bun.file(new URL('../portal/src/PortalApp.tsx', import.meta.url)).text();
+const adminAppSource = await Bun.file(new URL('../admin/src/App.tsx', import.meta.url)).text();
+const adminApiSource = await Bun.file(new URL('../admin/src/api.ts', import.meta.url)).text();
+const accessControlSource = await Bun.file(new URL('../admin/src/pages/AccessControl.tsx', import.meta.url)).text();
 
 describe('portal SPA contract', () => {
   test('ships an embedded index, JavaScript, and CSS bundle', () => {
@@ -32,15 +35,77 @@ describe('portal SPA contract', () => {
 
   test('uses opaque server-side Portal sessions and never trusts the legacy identity cookie', () => {
     expect(serveSource).toContain('new PortalSessionStore(');
-    expect(serveSource).toContain('portalSessions.issue(email)');
+    expect(serveSource).toContain("portalSessions.issue({ ...identity, authMethod: 'keycloak' })");
     expect(serveSource).toContain('const portalEmail = resolvePortalUser(req, res)');
     expect(serveSource).toContain('res.locals.gbrainPortalUser = portalEmail');
     expect(serveSource).toContain("return res.redirect(`/login?${req.originalUrl.split('?')[1] || ''}`)");
+    expect(serveSource).toContain("app.get(DEFAULT_KEYCLOAK_CALLBACK_PATH");
+    expect(serveSource).toContain("transaction.prompt === 'none'");
+    expect(serveSource).toContain('portalSessions.revalidate(transaction.existingSessionToken, identity)');
     expect(oauthSource).toContain('this.resolveUserSourceGrant(String(portalEmail');
     expect(oauthSource).toContain('OAuth authorization denied: valid Portal user source grant required');
     expect(oauthSource).not.toContain('cookies?.session_user');
     expect(serveSource).not.toContain('res.cookie("session_user"');
     expect(serveSource).not.toContain("const portalEmail = typeof cookies.session_user");
+  });
+
+  test('admin sign-out-everywhere completes the backing Portal and Keycloak logout', () => {
+    expect(adminAppSource).toContain("fetch('/logout'");
+    expect(adminAppSource).toContain("method: 'POST'");
+    expect(adminAppSource).toContain('logout_url');
+    expect(adminAppSource).toContain("window.location.assign(logoutUrl || '/login')");
+    expect(adminAppSource).toContain('finally');
+    expect(adminAppSource).not.toContain("navigate('login');");
+  });
+
+  test('makes user permissions and access requests discoverable in the Admin SPA', () => {
+    expect(adminAppSource).toContain("'access-control'");
+    expect(adminAppSource).toContain("label: 'Доступы'");
+    expect(adminAppSource).toContain('<AccessControlPage />');
+    expect(adminApiSource).toContain("accessControlPermissions: () => apiFetch('/admin/api/permissions')");
+    expect(adminApiSource).toContain("accessControlRequests: () => apiFetch('/admin/api/access-requests')");
+    expect(accessControlSource).toContain('Права пользователей');
+    expect(accessControlSource).toContain('Заявки');
+    expect(accessControlSource).toContain('Администраторы');
+    expect(accessControlSource).toContain('expected_version');
+  });
+
+  test('renders access decisions faithfully and keeps Admin navigation keyboard-operable', () => {
+    expect(adminAppSource).toContain("type=\"button\"\n            className={`nav-item");
+    expect(adminAppSource).toContain("aria-current={page === item.page ? 'page' : undefined}");
+    expect(accessControlSource).toContain("grant.write && grant.read ? 'R/W'");
+    expect(accessControlSource).toContain('role="tabpanel"');
+    expect(accessControlSource).toContain('handleTabKey');
+    expect(accessControlSource).toContain('Права сохранены, но обновить список не удалось');
+    expect(accessControlSource).toContain('aria-label={`${user.email}, ${area.label}, чтение`}');
+  });
+
+  test('hardens access-control mutations with same-origin and optimistic concurrency', () => {
+    expect(serveSource).toContain("app.post('/admin/api/permissions/:email', requireAdmin, requireAdminSameOrigin, express.json()");
+    expect(serveSource).toContain('app.post("/admin/api/access-requests/:id/approve", requireAdmin, requireAdminSameOrigin, express.json()');
+    expect(serveSource).toContain('app.post("/admin/api/access-requests/:id/reject", requireAdmin, requireAdminSameOrigin, express.json()');
+    expect(serveSource).toContain('const beforeVersion = portalPermissionsVersion(user);');
+    expect(serveSource).toContain('beforeVersion !== expectedVersion');
+    expect(serveSource).toContain("res.status(409).json({ error: 'permissions_changed' });");
+    expect(serveSource).toContain('portalAccessRequestVersion(item) !== expectedVersion');
+    expect(serveSource).toContain("res.status(409).json({ error: 'request_changed' });");
+    expect(serveSource).toContain('normalizeRequestGrantDecisions(requestedRows, req.body?.grants)');
+    expect(serveSource).toContain('loadJsonFileStrictLocal');
+    expect(serveSource).toContain('commitAccessControlJsonTransaction(accessControlTransactionPaths(), perms, requests)');
+    expect(serveSource).toContain('recoverAccessControlTransactionLocal();');
+    expect(serveSource).toContain('const data = readAccessRequestsStrict();');
+    expect(serveSource).toContain("actor: portalEmail");
+    expect(serveSource).toContain("fallbackAdminActor('magic-link', sessionId)");
+    expect(serveSource).toContain("action: 'permissions_changed'");
+    expect(serveSource).toContain("res.status(400).json({ error: 'rejection_reason_required' });");
+  });
+
+  test('keeps compare mode JSON-authoritative, read-only, and request-aware', () => {
+    expect(serveSource).toContain('await verifyCompareAclSnapshot();');
+    expect(serveSource).toContain('comparePortalAccessControlSnapshot(engine, snapshot)');
+    expect(serveSource).toContain("res.status(409).json({ error: 'acl_compare_mode_read_only' });");
+    expect(serveSource).toContain('Заявки временно приостановлены на время проверки ACL.');
+    expect(serveSource).toContain("if (portalAclMode === 'compare') {\n      const permissions = await portalAclAuthority.getUserPermissions(email);");
   });
 
   test('ships browser containment and private caching headers', () => {

@@ -12,12 +12,137 @@ describe('migrate', () => {
     expect(LATEST_VERSION).toBeGreaterThanOrEqual(1);
   });
 
+  test('v140 adds bounded take proposal observability without raw model output and gates RLS to Postgres', async () => {
+    const migration = MIGRATIONS.find(m => m.version === 140);
+    expect(migration?.name).toBe('take_proposal_scan_observability');
+    const sql = migration?.sql ?? '';
+    for (const column of [
+      'dispatch_status', 'outcome', 'actual_model_id', 'stop_reason',
+      'input_tokens', 'output_tokens', 'request_sha256', 'response_sha256',
+      'reserved_call_usd', 'actual_call_usd', 'reservation_released_usd', 'usage_reconciled',
+      'parsed_count', 'dropped_count', 'suppressed_count', 'claim_class',
+      'take_proposal_scan_attempts', 'snapshot', 'archived_at',
+    ]) expect(sql).toContain(column);
+    expect(sql).not.toContain('raw_response');
+    expect(sql).not.toContain('raw_output');
+    expect(sql).not.toContain('rolbypassrls');
+    expect(sql).not.toContain('ROW LEVEL SECURITY');
+    expect(typeof migration?.handler).toBe('function');
+    let pgliteCalls = 0;
+    await migration?.handler?.({
+      kind: 'pglite',
+      async executeRaw() { pgliteCalls += 1; return []; },
+    } as unknown as BrainEngine);
+    expect(pgliteCalls).toBe(0);
+    const postgresSql: string[] = [];
+    await migration?.handler?.({
+      kind: 'postgres',
+      async executeRaw(statement: string) { postgresSql.push(statement); return []; },
+    } as unknown as BrainEngine);
+    expect(postgresSql).toHaveLength(1);
+    expect(postgresSql[0]).toContain('rolbypassrls');
+    expect(postgresSql[0]).toContain('IF NOT has_bypass THEN');
+    expect(postgresSql[0]).toContain('RAISE EXCEPTION');
+    expect(postgresSql[0]).toContain('ENABLE ROW LEVEL SECURITY');
+  });
+
   test('runMigrations is exported and callable', async () => {
     expect(typeof runMigrations).toBe('function');
   });
 
-  // Integration tests for actual migration execution require DATABASE_URL
-  // and are covered in the E2E suite (test/e2e/mechanical.test.ts)
+  test('v140 upgrades a real v139 PGLite schema, preserves legacy scans, enforces checks, and is idempotent', async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    try {
+      await engine.executeRaw(`CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+      await engine.executeRaw(`CREATE TABLE sources (id TEXT PRIMARY KEY)`);
+      await engine.executeRaw(`
+        CREATE TABLE take_proposal_scans (
+          id BIGSERIAL PRIMARY KEY,
+          source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+          page_slug TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          prompt_version TEXT NOT NULL,
+          proposal_run_id TEXT NOT NULL,
+          model_id TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed')),
+          proposal_count INTEGER NOT NULL DEFAULT 0,
+          error_text TEXT,
+          started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          completed_at TIMESTAMPTZ,
+          UNIQUE (source_id, page_slug, content_hash, prompt_version)
+        )
+      `);
+      await engine.executeRaw(`
+        CREATE TABLE take_proposals (
+          id BIGSERIAL PRIMARY KEY,
+          scan_id BIGINT REFERENCES take_proposal_scans(id) ON DELETE SET NULL,
+          source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+          page_slug TEXT NOT NULL,
+          content_hash TEXT NOT NULL,
+          prompt_version TEXT NOT NULL,
+          proposal_run_id TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          claim_text TEXT NOT NULL,
+          claim_hash TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          holder TEXT NOT NULL,
+          weight REAL NOT NULL,
+          domain TEXT,
+          model_id TEXT NOT NULL
+        )
+      `);
+      await engine.executeRaw(`INSERT INTO sources(id) VALUES ('migration-source')`);
+      for (const status of ['running', 'completed', 'failed']) {
+        await engine.executeRaw(
+          `INSERT INTO take_proposal_scans
+             (source_id,page_slug,content_hash,prompt_version,proposal_run_id,model_id,status)
+           VALUES ($1,$2,$3,'v139','legacy-run','legacy-model',$4)`,
+          ['migration-source', `page-${status}`, `hash-${status}`, status],
+        );
+      }
+      await engine.setConfig('version', '139');
+
+      const first = await runMigrations(engine);
+      expect(first).toEqual({ applied: 1, current: 140 });
+      expect(await engine.getConfig('version')).toBe('140');
+      const rows = await engine.executeRaw<{ status: string }>(
+        `SELECT status FROM take_proposal_scans ORDER BY status`,
+      );
+      expect(rows.map(row => row.status)).toEqual(['completed', 'failed', 'running']);
+      const attempts = await engine.executeRaw<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables WHERE table_name='take_proposal_scan_attempts'`,
+      );
+      expect(attempts).toHaveLength(1);
+      await expect(engine.executeRaw(
+        `UPDATE take_proposal_scans SET outcome='not-a-real-outcome' WHERE page_slug='page-running'`,
+      )).rejects.toThrow();
+      await expect(engine.executeRaw(
+        `UPDATE take_proposal_scans SET input_tokens=-1 WHERE page_slug='page-running'`,
+      )).rejects.toThrow();
+
+      const second = await runMigrations(engine);
+      expect(second).toEqual({ applied: 0, current: 140 });
+
+      // A no-op at version 140 proves only version gating. Rewind the marker in
+      // this disposable engine and execute v140 again to prove DDL idempotency.
+      await engine.setConfig('version', '139');
+      const replay = await runMigrations(engine);
+      expect(replay).toEqual({ applied: 1, current: 140 });
+      expect(await engine.executeRaw(`SELECT status FROM take_proposal_scans ORDER BY status`)).toEqual([
+        { status: 'completed' }, { status: 'failed' }, { status: 'running' },
+      ]);
+      await expect(engine.executeRaw(
+        `UPDATE take_proposal_scans SET outcome='not_an_outcome' WHERE status='running'`,
+      )).rejects.toThrow();
+    } finally {
+      await engine.disconnect();
+    }
+  }, 30000);
+
+  // Real Postgres execution remains covered by the E2E suite
+  // (test/e2e/mechanical.test.ts); the supported embedded upgrade path above
+  // executes v140 against a real PGLite engine without provider/network use.
 });
 
 // v0.28.5 — A1: cheap probe used by `connectEngine` to gate `initSchema()`

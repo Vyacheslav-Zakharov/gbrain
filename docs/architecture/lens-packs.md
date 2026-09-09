@@ -30,7 +30,12 @@ Atom + concept content-creator lifecycle. Drives two cycle phases:
   transcript with the closed 11-value `atom_type` enum (insight,
   anecdote, quote, framework, statistic, story_angle, strategy_angle,
   strategy, endorsement, critique, collection). Writes
-  `atoms/{YYYY-MM-DD}/{slug}` pages. Budget cap $0.30/source/run.
+  `atoms/{YYYY-MM-DD}/{slug}` pages. `title`, `body`, and `lesson` use
+  the source's primary natural language; `source_quote` must be an exact
+  contiguous substring copied without translation, paraphrase, spelling,
+  case, or punctuation changes. The runtime rejects clear Cyrillic/Latin
+  output-language mismatches and non-verbatim quotes before persistence.
+  Budget cap $0.30/source/run.
 - `synthesize_concepts` — globally aggregates atoms by frontmatter
   `concepts:` ref. Tier by count: T1 ≥10, T2 ≥5, T3 ≥2. T1/T2 get
   Sonnet narratives; T3 falls back to a deterministic stub. Writes

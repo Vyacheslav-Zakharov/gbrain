@@ -18,7 +18,11 @@ import {
   resetGateway,
   __setEmbedTransportForTests,
 } from '../../src/core/ai/gateway.ts';
-import { embedQueryBounded, makeQueryEmbedDeadline } from '../../src/core/search/hybrid.ts';
+import {
+  embedQueryBounded,
+  makeQueryEmbedDeadline,
+  runWithinAbsoluteDeadline,
+} from '../../src/core/search/hybrid.ts';
 
 describe('embedQueryBounded — query-embed deadline', () => {
   beforeEach(() => {
@@ -72,6 +76,27 @@ describe('embedQueryBounded — query-embed deadline', () => {
     // healthy inner embed). So: rejects after ~2s, comfortably under 6s.
     expect(elapsed).toBeGreaterThanOrEqual(1800);
     expect(elapsed).toBeLessThan(3500);
+  });
+
+  test('strict retry deadline does not apply the ordinary 2s floor', async () => {
+    __setEmbedTransportForTests(() => new Promise(() => { /* hang forever */ }));
+    const dl = makeQueryEmbedDeadline(100, 0);
+    const start = Date.now();
+    await expect(embedQueryBounded('q', undefined, dl)).rejects.toThrow('deadline');
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(75);
+    expect(elapsed).toBeLessThan(750);
+  });
+
+  test('complete retry arm bounds a vector-search stall', async () => {
+    const start = Date.now();
+    await expect(runWithinAbsoluteDeadline(
+      async () => new Promise(() => { /* vector search hangs forever */ }),
+      start + 100,
+    )).rejects.toThrow('deadline');
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(75);
+    expect(elapsed).toBeLessThan(750);
   });
 
   test('resolves with the embedding when the transport returns in time', async () => {

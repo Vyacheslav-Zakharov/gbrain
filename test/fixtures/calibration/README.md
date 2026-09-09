@@ -25,6 +25,15 @@ new fixture, the guard catches accidental leakage.
   authored independently by the operator. Production prompt's F1 must
   hit >= 0.8 on this holdout for the prompt to ship.
 
+- `operational-meeting-golden-v1.json` — privacy-safe synthetic positive and
+  negative controls for durable organizational/process recommendations. It
+  pins holder, modality, weight ranges, required mechanisms, forbidden
+  unsupported inferences, and when `[]` is acceptable. Hermetic tests prove
+  the prompt carries this contract; they do not substitute for provider-backed
+  semantic scoring. `scripts/check-synthetic-corpus-privacy.sh` validates its
+  synthetic declaration and scans JSON as well as Markdown for bounded privacy
+  indicators.
+
 ## Placeholder names (per CLAUDE.md)
 
 - People: `alice-example`, `charlie-example`, `you`

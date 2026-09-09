@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "kind": "propose_takes_operational_meeting_golden_set",
+  "synthetic": true,
+  "privacy": "No real people, companies, systems, dates, or source text.",
+  "rubric": {
+    "positive_classes": ["recommendation"],
+    "organizational_control_holder": "brain",
+    "holder_policy": "unattributed_collective_claimant",
+    "approved_control_weight_range": [0.7, 0.85],
+    "proposed_or_pilot_control_weight_range": [0.5, 0.7],
+    "one_off_tasks_are_negative": true,
+    "recurring_named_role_controls_are_positive": true
+  },
+  "fixtures": [
+    {
+      "id": "positive-approved-operational-controls",
+      "page_type": "meeting",
+      "modality": "approved",
+      "acceptable_empty": false,
+      "prose": "Команда утвердила четыре постоянных правила: условия применения учебного материала должны храниться как структурные теги отдельно от текста инструкции; при сбое интеграции система должна уведомлять дежурного для запуска процедуры восстановления; работы следует назначать только исполнителям, чье присутствие на смене подтверждено системой доступа; владелец безопасности должен проверять каждое изменение привилегированного доступа до его применения.",
+      "expected": [
+        {
+          "claim_class": "recommendation",
+          "kind": "take",
+          "holder": "brain",
+          "weight_range": [0.7, 0.85],
+          "required_mechanisms": ["структурные теги", "отдельно от текста инструкции"],
+          "forbidden_inferences": ["ROI", "юридический эффект", "оценка сотрудника"]
+        },
+        {
+          "claim_class": "recommendation",
+          "kind": "take",
+          "holder": "brain",
+          "weight_range": [0.7, 0.85],
+          "required_mechanisms": ["при сбое интеграции", "уведомлять дежурного", "процедуры восстановления"],
+          "forbidden_inferences": ["гарантия доступности"]
+        },
+        {
+          "claim_class": "recommendation",
+          "kind": "take",
+          "holder": "brain",
+          "weight_range": [0.7, 0.85],
+          "required_mechanisms": ["присутствие на смене", "подтверждено системой доступа", "назначать"],
+          "forbidden_inferences": ["оценка компетентности"]
+        },
+        {
+          "claim_class": "recommendation",
+          "kind": "take",
+          "holder": "brain",
+          "weight_range": [0.7, 0.85],
+          "required_mechanisms": ["владелец безопасности", "каждое изменение привилегированного доступа", "до его применения"],
+          "forbidden_inferences": ["разовая проверка", "конкретный сотрудник"]
+        }
+      ]
+    },
+    {
+      "id": "positive-proposed-strategy-and-quality-controls",
+      "page_type": "meeting",
+      "modality": "proposed",
+      "acceptable_empty": false,
+      "prose": "Команда рекомендует три изменения: развивать единый рабочий контур вместо временной переписки; автоматически сверять отчеты о дефектах с первичными записями; использовать критичность дефекта для выбора остановки, запрета запуска или срока ремонта.",
+      "expected": [
+        {
+          "claim_class": "recommendation",
+          "kind": "take",
+          "holder": "brain",
+          "weight_range": [0.5, 0.7],
+          "required_mechanisms": ["единый рабочий контур", "вместо временной переписки"],
+          "forbidden_inferences": ["название продукта", "экономический эффект"]
+        },
+        {
+          "claim_class": "recommendation",
+          "kind": "take",
+          "holder": "brain",
+          "weight_range": [0.5, 0.7],
+          "required_mechanisms": ["автоматически сверять", "первичными записями"],
+          "forbidden_inferences": ["полная безошибочность"]
+        },
+        {
+          "claim_class": "recommendation",
+          "kind": "take",
+          "holder": "brain",
+          "weight_range": [0.5, 0.7],
+          "required_mechanisms": ["критичность дефекта", "остановки", "запрета запуска", "срока ремонта"],
+          "forbidden_inferences": ["конкретный срок без evidence"]
+        }
+      ]
+    },
+    {
+      "id": "negative-one-off-meeting-administration",
+      "page_type": "meeting",
+      "modality": "negative",
+      "acceptable_empty": true,
+      "prose": "Координатор должен купить тестовое устройство до пятницы. Пилот запускается в понедельник. Схема разделов уже утверждена. Ответственный должен проверить документ и закрыть задачу. Протокол встречи опубликован.",
+      "expected": [],
+      "rejection_reasons": [
+        "one-off procurement task",
+        "calendar-bound launch task",
+        "completed architecture fact",
+        "one-off role-assigned checklist item",
+        "meeting/report status"
+      ]
+    },
+    {
+      "id": "negative-unsupported-overreach",
+      "page_type": "meeting",
+      "modality": "negative",
+      "acceptable_empty": true,
+      "prose": "Команда обсудила возможность автоматизации процесса и договорилась изучить варианты.",
+      "expected": [],
+      "rejection_reasons": [
+        "no durable normative rule",
+        "no operational control mechanism",
+        "no bounded condition or recurring scope",
+        "no evidence-backed consequence"
+      ]
+    }
+  ]
+}

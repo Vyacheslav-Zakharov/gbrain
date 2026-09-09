@@ -24,6 +24,7 @@ import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
 import { DELETE_BATCH_SIZE } from './engine-constants.ts';
 import { acquireLock, releaseLock, type LockHandle } from './pglite-lock.ts';
+import { prepareEmbeddedPgliteRuntime } from './pglite-embedded-assets.ts';
 import type {
   Page, PageInput, PageFilters, PageType,
   Chunk, ChunkInput, StaleChunkRow, StalePageRow,
@@ -272,11 +273,19 @@ export class PGLiteEngine implements BrainEngine {
     // why the CLI's exit paths read gbrain's own verdict
     // (cli-force-exit.ts currentExitCode), never ambient process.exitCode.
     try {
+      const embeddedRuntime = await prepareEmbeddedPgliteRuntime();
       this._db = await preservingProcessExitCode(() =>
         PGlite.create({
           dataDir,
           loadDataDir,
-          extensions: { vector, pg_trgm },
+          ...(embeddedRuntime
+            ? {
+                fsBundle: embeddedRuntime.fsBundle,
+                pgliteWasmModule: embeddedRuntime.pgliteWasmModule,
+                initdbWasmModule: embeddedRuntime.initdbWasmModule,
+                extensions: embeddedRuntime.extensions,
+              }
+            : { extensions: { vector, pg_trgm } }),
         }),
       );
     } catch (err) {
@@ -505,7 +514,17 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name='source_ingest_profiles') AS source_ingest_profiles_exists,
         EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema='public' AND table_name='source_ingest_run_items') AS source_ingest_run_items_exists
+                WHERE table_schema='public' AND table_name='source_ingest_run_items') AS source_ingest_run_items_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='source_base_views') AS source_base_views_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='source_base_views' AND column_name='primary_key_field') AS source_base_views_primary_key_field_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='source_base_views' AND column_name='updated_at_field') AS source_base_views_updated_at_field_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name='concept_proposals') AS concept_proposals_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='concept_proposals' AND column_name='source_takes') AS concept_proposals_source_takes_exists
     `);
     const probe = rows[0] as {
       pages_exists: boolean;
@@ -553,6 +572,11 @@ export class PGLiteEngine implements BrainEngine {
       source_sync_state_last_source_snapshot_exists: boolean;
       source_ingest_profiles_exists: boolean;
       source_ingest_run_items_exists: boolean;
+      source_base_views_exists: boolean;
+      source_base_views_primary_key_field_exists: boolean;
+      source_base_views_updated_at_field_exists: boolean;
+      concept_proposals_exists: boolean;
+      concept_proposals_source_takes_exists: boolean;
     };
 
     const needsPagesBootstrap = probe.pages_exists && !probe.source_id_exists;
@@ -638,6 +662,9 @@ export class PGLiteEngine implements BrainEngine {
     // v125 (source_ingest_run_items_backfill): repair brains stamped at v120+
     // before the append-only run ledger table was folded into v120.
     const needsSourceIngestRunItems = probe.source_ingest_profiles_exists && !probe.source_ingest_run_items_exists;
+    const needsSourceBaseViewIdentity = probe.source_base_views_exists
+      && (!probe.source_base_views_primary_key_field_exists || !probe.source_base_views_updated_at_field_exists);
+    const needsConceptProposalSourceTakes = probe.concept_proposals_exists && !probe.concept_proposals_source_takes_exists;
 
     // Fresh installs (no tables yet) and modern brains both no-op.
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
@@ -652,7 +679,9 @@ export class PGLiteEngine implements BrainEngine {
         && !needsPagesLinksExtractedAt
         && !needsSourceSyncManagedBlockHash
         && !needsSourceSyncLastSourceSnapshot
-        && !needsSourceIngestRunItems) return;
+        && !needsSourceIngestRunItems
+        && !needsSourceBaseViewIdentity
+        && !needsConceptProposalSourceTakes) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -943,6 +972,20 @@ export class PGLiteEngine implements BrainEngine {
           ON source_ingest_run_items (run_id, approved_source_id, slug);
         CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
           ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
+      `);
+    }
+
+    if (needsSourceBaseViewIdentity) {
+      await this.db.exec(`
+        ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS primary_key_field TEXT;
+        ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS updated_at_field TEXT;
+      `);
+    }
+
+    if (needsConceptProposalSourceTakes) {
+      await this.db.exec(`
+        ALTER TABLE concept_proposals
+          ADD COLUMN IF NOT EXISTS source_takes JSONB NOT NULL DEFAULT '[]'::jsonb;
       `);
     }
   }
@@ -1530,7 +1573,7 @@ export class PGLiteEngine implements BrainEngine {
     // `source_id = $N`. When neither is set, preserve the pre-fix unscoped
     // behavior so internal CLI callers (`gbrain query --resolve` etc.)
     // continue to walk every source.
-    const sources = opts?.sourceIds ?? null;
+    const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
     const scalar = opts?.sourceId ?? null;
     const scopeSql = sources
       ? ` AND source_id = ANY($${'__N__'}::text[])`
@@ -2238,14 +2281,18 @@ export class PGLiteEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
-    const sourceId = opts?.sourceId ?? 'default';
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Chunk[]> {
+    const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
+    const sourceId = opts?.sourceId ?? (sources ? null : 'default');
+    const scopeSql = sources
+      ? 'p.source_id = ANY($2::text[])'
+      : 'p.source_id = $2';
     const { rows } = await this.db.query(
-      `SELECT cc.* FROM content_chunks cc
+      `SELECT cc.*, p.source_id FROM content_chunks cc
        JOIN pages p ON p.id = cc.page_id
-       WHERE p.slug = $1 AND p.source_id = $2
-       ORDER BY cc.chunk_index`,
-      [slug, sourceId]
+       WHERE p.slug = $1 AND ${scopeSql}
+       ORDER BY p.source_id, cc.chunk_index`,
+      [slug, sources ?? sourceId]
     );
     return (rows as Record<string, unknown>[]).map(r => rowToChunk(r));
   }

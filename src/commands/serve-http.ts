@@ -15,11 +15,12 @@ import type { Request, Response, NextFunction } from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
-import { randomBytes, randomInt, createHash } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { safeHexEqual } from '../core/timing-safe.ts';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { GBRAIN_MCP_INSTRUCTIONS } from '../mcp/server-instructions.ts';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
@@ -54,11 +55,49 @@ import { sourceIngestConnectorDescriptors } from '../core/source-ingest/connecto
 import { getSourceConnector } from '../core/source-ingest/connectors/fake.ts';
 import { recordSourceConnectorTest } from '../core/source-ingest/catalog.ts';
 import {
+  applyManagedPortalGrants,
+  commitAccessControlJsonTransaction,
+  normalizeRequestGrantDecisions,
+  portalAccessRequestVersion,
+  portalPermissionsVersion,
+  recoverAccessControlJsonTransaction,
+  validatePortalEmail,
+  writeJsonAtomically,
+} from '../core/portal-access-control-json.ts';
+import {
+  PortalAccessControlRepository,
+  PortalAccessControlError,
+} from '../core/portal-access-control.ts';
+import type { PortalAccessRequest as DbPortalAccessRequest } from '../core/portal-access-control.ts';
+import {
+  PortalAccessControlAuthority,
+  parsePortalAclMode,
+} from '../core/portal-access-control-authority.ts';
+import {
+  comparePortalAccessControlSnapshot,
+  loadPortalAccessControlJson,
+} from '../core/portal-access-control-migration.ts';
+import {
   PortalSessionStore,
   isPortalFileAllowed,
   portalSessionCookieName,
   resolvePortalPathSecure,
+  type PortalSessionInspection,
 } from '../core/portal-security.ts';
+import {
+  resolvePortalAdminAuthMode,
+  resolvePortalAdminDecision,
+} from '../core/portal-admin-rbac.ts';
+import { portalAdminAuthFailurePayload } from '../core/portal-admin-http.ts';
+import {
+  DEFAULT_KEYCLOAK_CALLBACK_PATH,
+  DEFAULT_KEYCLOAK_CLIENT_ID,
+  DEFAULT_KEYCLOAK_ISSUER,
+  KeycloakOidcClient,
+  PortalOidcTransactions,
+  normalizePortalReturnTo,
+  parseAdminFallbackDeadline,
+} from '../core/portal-keycloak-auth.ts';
 import {
   classifyPortalSearchMatch,
   cleanPortalSearchSnippet,
@@ -73,10 +112,12 @@ import {
   acceptTakeProposal,
   createLlmTakeRevision,
   createManualTakeRevision,
+  deferTakeProposal,
   getTakeProposalReview,
   listTakeProposals,
   rejectTakeProposal,
   ReviewConflictError,
+  restoreTakeProposalToPending,
   type TakeProposalStatus,
 } from '../core/ai-review.ts';
 import {
@@ -88,16 +129,36 @@ import {
   rejectConceptProposal,
 } from '../core/concept-review.ts';
 import {
-  acceptMeetingReview,
-  attachMeetingReviewJob,
+  askMeetingReviewAdvisor,
   createLlmMeetingRevision,
   createManualMeetingRevision,
   getMeetingReviewItem,
+  isCanonicalMeetingPersonSlug,
   listMeetingReviewItems,
+  MEETING_INTERNAL_SOURCE_OPTIONS,
   rejectMeetingReview,
-  reopenMeetingReviewAfterQueueFailure,
+  saveMeetingReviewResolution,
+  type MeetingReviewClass,
   type MeetingReviewStatus,
 } from '../core/meeting-review.ts';
+import {
+  adminFinalizeRound,
+  adminReconcileStaleRound,
+  castReviewerVote,
+  ensurePendingReviewRounds,
+  escalateOverdueRounds,
+  getReviewRoundDetail,
+  getReviewerItem,
+  listReviewRounds,
+  listReviewerDeck,
+  openReviewRound,
+  resolveReviewCutoverAtFromConfig,
+  reviewerSummary,
+  type ReviewerScope,
+  type RoundStatus,
+} from '../core/ai-review-rounds.ts';
+import { rejectReasonsFor } from '../core/ai-review-reasons.ts';
+import type { ReviewerPermissionMap } from '../core/ai-review-aggregation.ts';
 
 /**
  * /health endpoint timeout. 3s rather than 5s: Fly.io's default
@@ -539,6 +600,20 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // brains too. The narrow SqlQuery contract is scalar-binds-only; JSONB
   // writes use executeRawJsonb (see mcp_request_log INSERT sites below).
   const sql = sqlQueryForEngine(engine);
+  const portalAclMode = parsePortalAclMode(process.env.GBRAIN_PORTAL_ACL_MODE);
+  const portalAccessControl = new PortalAccessControlRepository(engine);
+  const portalAclMismatchCounters = { user_grants: 0, reviewer_map: 0, snapshot: 0 };
+  const portalAclAuthority = new PortalAccessControlAuthority({
+    mode: portalAclMode,
+    repository: portalAccessControl,
+    jsonReader: email => getJsonUserPermissions(email),
+    jsonListReader: () => loadJsonUserPermissionsMap() as any,
+    onMismatch: event => {
+      portalAclMismatchCounters[event.kind] += 1;
+      console.warn(`[Portal ACL compare] ${event.kind}_mismatch_count=${portalAclMismatchCounters[event.kind]}`);
+    },
+  });
+  console.error(`[serve-http] Portal ACL authority mode: ${portalAclMode}`);
 
   // Initialize OAuth provider. F12 cleanup: DCR-disable now flips a
   // constructor option instead of monkey-patching `_clientsStore` after
@@ -548,6 +623,10 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     sql,
     tokenTtl,
     dcrDisabled: !enableDcr,
+    userSourceGrantResolver: async email => {
+      const permissions = await portalAclAuthority.getUserPermissions(email);
+      return permissions ? { ...permissions, user_email: email.trim().toLowerCase() } : undefined;
+    },
   });
 
   // Sweep expired tokens on startup (non-blocking)
@@ -575,7 +654,16 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   let bootstrapFromEnv: boolean = resolved.fromEnv;
   const bootstrapHash = createHash('sha256').update(bootstrapToken).digest('hex');
   const suppressBootstrapPrint = options.suppressBootstrapToken === true;
-  const adminSessions = new Map<string, number>(); // sessionId → expiresAt
+  type AdminSession = {
+    expiresAt: number;
+    authMethod: 'bootstrap_fallback' | 'magic_link_fallback' | 'keycloak_bridge';
+    actor: string;
+    backingPortalToken?: string;
+  };
+  const adminSessions = new Map<string, AdminSession>();
+  const fallbackAdminActor = (method: 'bootstrap' | 'magic-link', sessionId: string): string =>
+    `${method}-fallback:${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}`;
+  const adminFallbackDeadline = (): number | null => parseAdminFallbackDeadline(process.env.GBRAIN_ADMIN_FALLBACK_UNTIL);
 
   // SSE clients for live activity feed
   const sseClients = new Set<express.Response>();
@@ -588,15 +676,45 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     }
   }
 
+  async function persistRequestLog(input: {
+    tokenName: string;
+    agentName: string;
+    operation: string;
+    latencyMs: number;
+    status: 'success' | 'error';
+    errorMessage?: string | null;
+    params: unknown;
+  }): Promise<number | undefined> {
+    try {
+      const rows = await executeRawJsonb<{ id: number | string }>(
+        engine,
+        `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+         RETURNING id`,
+        [input.tokenName, input.agentName, input.operation, input.latencyMs, input.status, input.errorMessage ?? null],
+        [input.params],
+      );
+      const id = Number(rows[0]?.id);
+      return Number.isSafeInteger(id) ? id : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   // Express 5 app
   const app = express();
   app.set('json replacer', jsonBigIntReplacer);
 
-  const portalSessionTtlMs = 30 * 24 * 60 * 60 * 1000;
+  const portalSessionTtlMs = 8 * 60 * 60 * 1000;
+  const portalRevalidationMs = 5 * 60 * 1000;
   const portalSessions = new PortalSessionStore(
     process.env.GBRAIN_PORTAL_SESSION_FILE || require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'portal_sessions.json'),
     portalSessionTtlMs,
+    portalRevalidationMs,
   );
+  const portalSessionPruneTimer = setInterval(() => portalSessions.prune(), 60 * 60 * 1_000);
+  portalSessionPruneTimer.unref();
+  const portalOidcTransactions = new PortalOidcTransactions();
   const isSecurePortalRequest = (req: express.Request): boolean => req.secure || issuerUrl.protocol === 'https:';
   const portalCookieOptions = (req: express.Request, maxAge = portalSessionTtlMs) => ({
     httpOnly: true,
@@ -605,6 +723,16 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     maxAge,
     path: '/',
   });
+  const portalOidcBindingCookieName = (req: express.Request): string =>
+    isSecurePortalRequest(req) ? '__Host-gbrain_oidc' : 'gbrain_oidc';
+  const portalOidcBrowserBinding = (req: express.Request): string => {
+    const cookies = (req.cookies as Record<string, string> | undefined) || {};
+    return cookies['__Host-gbrain_oidc'] || cookies.gbrain_oidc || '';
+  };
+  const clearPortalOidcBindingCookies = (res: express.Response): void => {
+    res.clearCookie('__Host-gbrain_oidc', { httpOnly: true, secure: true, sameSite: 'lax', path: '/' });
+    res.clearCookie('gbrain_oidc', { httpOnly: true, secure: false, sameSite: 'lax', path: '/' });
+  };
   const portalSessionToken = (req: express.Request): string => {
     const cookies = (req.cookies as Record<string, string> | undefined) || {};
     return cookies.__Host_gbrain_portal || cookies['__Host-gbrain_portal'] || cookies.gbrain_portal || '';
@@ -615,19 +743,25 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
     // Remove the legacy unsigned identity cookie during the migration release.
     res.clearCookie('session_user', { httpOnly: true, secure: isSecurePortalRequest(req), sameSite: 'lax', path: '/' });
   };
+  const inspectPortalSession = (req: express.Request): PortalSessionInspection => portalSessions.inspect(portalSessionToken(req));
   const resolvePortalUser = (req: express.Request, res?: express.Response): string | null => {
     const token = portalSessionToken(req);
-    const email = portalSessions.resolve(token);
-    if (!email && res && (token || (req.cookies as Record<string, string> | undefined)?.session_user)) {
+    const inspected = portalSessions.inspect(token);
+    if (inspected.state !== 'valid' && res && inspected.state !== 'revalidation_required'
+      && (token || (req.cookies as Record<string, string> | undefined)?.session_user)) {
       clearPortalSessionCookies(req, res);
     }
-    return email;
+    return inspected.state === 'valid' ? inspected.email || null : null;
   };
-  const issuePortalSession = (req: express.Request, res: express.Response, email: string): void => {
+  const issuePortalSession = (
+    req: express.Request,
+    res: express.Response,
+    identity: { email: string; sub: string; isAdmin: boolean },
+  ): void => {
     const oldToken = portalSessionToken(req);
     if (oldToken) portalSessions.revoke(oldToken);
     clearPortalSessionCookies(req, res);
-    const token = portalSessions.issue(email);
+    const token = portalSessions.issue({ ...identity, authMethod: 'keycloak' });
     res.cookie(portalSessionCookieName(isSecurePortalRequest(req)), token, portalCookieOptions(req));
   };
 
@@ -642,10 +776,39 @@ function isAdminEmail(email: string | undefined): boolean {
   if (!email) return false;
   return adminEmails.has(String(email).toLowerCase().trim());
 }
-
-const otpPepper = randomBytes(32).toString('hex');
-const pendingOtps = new Map<string, { codeHash: string; expiresAt: number; attempts: number }>();
-const hashPortalOtp = (email: string, code: string) => createHash('sha256').update(otpPepper).update('\0').update(email).update('\0').update(code).digest('hex');
+const adminAuthMode = resolvePortalAdminAuthMode(process.env.GBRAIN_ADMIN_AUTH_MODE);
+const loggedAdminRbacMismatches = new Set<string>();
+const resolveAdminFromPortalInspection = (inspection: PortalSessionInspection) => {
+  const email = inspection.state === 'valid' ? inspection.email || '' : '';
+  const decision = resolvePortalAdminDecision(adminAuthMode, {
+    authMethod: inspection.authMethod,
+    authorizationVersion: inspection.authorizationVersion,
+    keycloakRole: inspection.isAdmin === true,
+    emailAllowlisted: isAdminEmail(email),
+  });
+  if (email && decision.mismatch) {
+    const mismatchKey = `${email}:${decision.emailAdmin}:${decision.keycloakAdmin}`;
+    if (!loggedAdminRbacMismatches.has(mismatchKey)) {
+      loggedAdminRbacMismatches.add(mismatchKey);
+      console.info('[Admin RBAC]', JSON.stringify({
+        event: 'authority_mismatch',
+        mode: adminAuthMode,
+        actor: email,
+        email_admin: decision.emailAdmin,
+        keycloak_admin: decision.keycloakAdmin,
+      }));
+    }
+  }
+  return { ...decision, email };
+};
+const wasPortalAdminAuthorized = (inspection: PortalSessionInspection): boolean => (
+  resolvePortalAdminDecision(adminAuthMode, {
+    authMethod: inspection.authMethod,
+    authorizationVersion: inspection.authorizationVersion,
+    keycloakRole: inspection.isAdmin === true,
+    emailAllowlisted: isAdminEmail(inspection.email),
+  }).authorized
+);
 
 const userPermissionsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
 const accessRequestsPath = () => require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'access_requests.json');
@@ -683,18 +846,21 @@ const internalAccessAreas = [
   { id: "руководство", sourceId: "internal-management", label: "Руководство и стратегия", hint: "закрытые планы, стратегические инициативы, протоколы" }
 ];
 const managedAccessAreas = [sharedAccessArea, ...internalAccessAreas];
-const getUserPermissions = async (email: string) => {
+const getJsonUserPermissions = async (email: string) => {
+  recoverAccessControlTransactionLocal();
   const configPath = require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'user_permissions.json');
   try {
-    let data: any = {};
+    let data: Record<string, PortalUserPermissions> = {};
     if (require('fs').existsSync(configPath)) {
-      data = JSON.parse(require('fs').readFileSync(configPath, 'utf8'));
+      data = loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(configPath);
+      if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('access_control_store_invalid');
     }
     if (data[email]) {
+      portalPermissionsVersion(data[email]);
       return {
-        source_id: data[email].source_id || 'shared',
-        federated_read: data[email].federated_read || ['shared'],
-        federated_write: data[email].federated_write || [data[email].source_id].filter(Boolean)
+        source_id: data[email].source_id || '',
+        federated_read: data[email].federated_read || [],
+        federated_write: data[email].federated_write || []
       };
     } else {
       const emailPrefix = email.split('@')[0].trim().toLowerCase();
@@ -708,12 +874,45 @@ const getUserPermissions = async (email: string) => {
   } catch (err) {
     console.error(`[GBrain] Failed to read ${configPath}:`, err);
     return {
-      source_id: 'shared',
-      federated_read: ['shared'],
+      source_id: '',
+      federated_read: [],
       federated_write: []
     };
   }
 };
+const getUserPermissions = async (email: string) => {
+  const permissions = await portalAclAuthority.getUserPermissions(email);
+  return permissions ?? { source_id: '', federated_read: [], federated_write: [] };
+};
+/**
+ * The WHOLE permission map, used only by multi-reviewer AI Review to freeze a
+ * round's mandatory-reviewer list. Read-only; a parse failure returns `{}` so
+ * round creation fails closed with `no_reviewers` instead of guessing.
+ */
+const loadJsonUserPermissionsMap = (): ReviewerPermissionMap => {
+  recoverAccessControlTransactionLocal();
+  const configPath = userPermissionsPath();
+  try {
+    if (!require('fs').existsSync(configPath)) return {};
+    const parsed = JSON.parse(require('fs').readFileSync(configPath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as ReviewerPermissionMap;
+  } catch (err) {
+    console.error(`[GBrain] Failed to read ${configPath} for review reviewer resolution:`, err);
+    return {};
+  }
+};
+const loadUserPermissionsMap = async (): Promise<ReviewerPermissionMap> =>
+  portalAclAuthority.listReviewerPermissions() as Promise<ReviewerPermissionMap>;
+
+/**
+ * Source ids this user may currently WRITE to. Re-read per request so a
+ * revoked grant immediately closes the reviewer surface, even for an
+ * assignment that was frozen while the grant was still live.
+ */
+const getWriteSourceIdsForUser = async (email: string): Promise<string[]> =>
+  portalAclAuthority.getWriteSourceIds(email);
+
 const managedAreaById = (areaId: string) => managedAccessAreas.find((a) => a.id === areaId);
 const managedSourceIdForArea = (areaId: string) => managedAreaById(areaId)?.sourceId || null;
 
@@ -767,6 +966,7 @@ type PortalUserPermissions = {
 };
 
 const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, reasonRaw: unknown): Promise<void> => {
+    recoverAccessControlTransactionLocal();
     const selected = normalizeAccessRequestValues(rawValues);
     if (selected.length === 0)
       return;
@@ -806,19 +1006,7 @@ const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, 
     }).filter((row): row is PortalAccessRow => row !== null);
     if (requests.length === 0)
       return;
-    const fs = require("fs");
-    const path = require("path");
-    const requestPath = path.join(process.env.HOME || "/home/avers", ".gbrain", "access_requests.json");
-    let data: PortalAccessRequest[] = [];
-    try {
-      if (fs.existsSync(requestPath)) {
-        const parsed = JSON.parse(fs.readFileSync(requestPath, "utf8"));
-        if (Array.isArray(parsed))
-          data = parsed;
-      }
-    } catch (e3) {
-      console.error("[Auth] Error reading access_requests.json:", e3);
-    }
+    const requestPath = accessRequestsPath();
     const request2 = {
       id: `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       email: userEmail,
@@ -829,8 +1017,23 @@ const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, 
       approved_by: null,
       approved_at: null
     };
-    data.push(request2);
-    fs.writeFileSync(requestPath, JSON.stringify(data, null, 2), "utf8");
+    if (portalAclMode === 'db') {
+      await portalAccessControl.createRequest({
+        id: request2.id,
+        email: userEmail,
+        reason: request2.reason,
+        requestedAt: request2.requested_at,
+        grants: requests.map(row => ({
+          sourceId: row.source_id,
+          requestedRead: row.read || row.write,
+          requestedWrite: row.write,
+        })),
+      });
+    } else {
+      const data = readAccessRequestsStrict();
+      data.push(request2);
+      writeJsonFileLocal(requestPath, data);
+    }
     console.log(`[Auth] Saved access request ${request2.id} for ${userEmail}`);
     try {
       const body2 = [
@@ -848,7 +1051,7 @@ const saveInternalAccessRequest = async (userEmail: string, rawValues: unknown, 
         ``,
         `Админка заявок: ${publicUrl || "http://127.0.0.1:" + port}/admin/access-requests`,
         ``,
-        `Файл заявок: ${requestPath}`
+        portalAclMode === 'db' ? `Хранилище заявок: PostgreSQL` : `Файл заявок: ${requestPath}`
       ].join(`
 `);
       const { spawn: spawn5 } = require("child_process");
@@ -903,10 +1106,29 @@ const loadJsonFileLocal = <T>(filePath: string, fallback: T): T => {
     }
   }
 
-const writeJsonFileLocal = (filePath: string, value: unknown): void => {
+const loadJsonFileStrictLocal = <T>(filePath: string): T => {
     const fs = require("fs");
-    fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf8");
+    if (!fs.existsSync(filePath)) throw new Error('access_control_store_missing');
+    try {
+      return JSON.parse(fs.readFileSync(filePath, "utf8")) as T;
+    } catch (error) {
+      console.error(`[GBrain] Failed to parse access-control store ${filePath}:`, error);
+      throw new Error('access_control_store_invalid');
+    }
   }
+
+const writeJsonFileLocal = (filePath: string, value: unknown): void => {
+    writeJsonAtomically(filePath, value);
+  }
+
+const accessControlTransactionPaths = () => ({
+    permissionsPath: userPermissionsPath(),
+    requestsPath: accessRequestsPath(),
+    journalPath: require('path').join(process.env.HOME || '/home/avers', '.gbrain', 'access_control_transaction.json'),
+  });
+
+const recoverAccessControlTransactionLocal = (): boolean => recoverAccessControlJsonTransaction(accessControlTransactionPaths());
+recoverAccessControlTransactionLocal();
 
 const personalSourceIdFromEmail = (email: string): string => {
     const prefix = String(email || "").split("@")[0].trim().toLowerCase();
@@ -967,12 +1189,17 @@ const schedulePersonalSourceSync = (sourceId: string) => {
     }
   }
 
-const ensurePortalUserProvisioned = async (emailRaw: string) => {
+const ensurePortalUserProvisioned = async (emailRaw: string, keycloakSubRaw?: string) => {
     const fs = require("fs");
     const path = require("path");
     const email = String(emailRaw || "").trim().toLowerCase();
     if (!email.endsWith("@avers.kz"))
       throw new Error("Only @avers.kz users can be provisioned");
+    if (portalAclMode === 'compare') {
+      const permissions = await portalAclAuthority.getUserPermissions(email);
+      if (!permissions) throw new Error('portal_acl_user_missing');
+      return;
+    }
     const sourceId = personalSourceIdFromEmail(email);
     const dirName = personalDirNameFromEmail(email);
     const personalRoot = path.join(process.env.HOME || "/home/avers", "brain-repos", "personal", dirName);
@@ -1000,33 +1227,132 @@ const ensurePortalUserProvisioned = async (emailRaw: string) => {
       console.log(`[Provision] Registered personal source ${sourceId} for ${email}`);
     }
 
-    const permsPath = userPermissionsPath();
-    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(permsPath, {});
-    const existing = perms[email] || { source_id: sourceId, federated_read: [], federated_write: [] };
-    existing.source_id = existing.source_id || sourceId;
-    const read = new Set(Array.isArray(existing.federated_read) ? existing.federated_read : []);
-    const write = new Set(Array.isArray(existing.federated_write) ? existing.federated_write : []);
-    read.add(sourceId);
-    read.add("shared");
-    write.add(sourceId);
-    existing.federated_read = Array.from(read).filter(Boolean);
-    existing.federated_write = Array.from(write).filter(Boolean);
-    if (JSON.stringify(perms[email]) !== JSON.stringify(existing)) {
-      perms[email] = existing;
-      writeJsonFileLocal(permsPath, perms);
-      console.log(`[Provision] Updated permissions for ${email}`);
+    const keycloakSub = String(keycloakSubRaw || '').trim();
+    if (portalAclMode === 'db') {
+      if (keycloakSub) {
+        await portalAccessControl.provisionUser({ email, keycloakSub, personalSourceId: sourceId });
+      } else {
+        const existingDbUser = await portalAccessControl.getUser(email);
+        if (!existingDbUser || existingDbUser.status !== 'active') throw new Error('portal_acl_user_missing');
+      }
+    } else {
+      const permsPath = userPermissionsPath();
+      recoverAccessControlTransactionLocal();
+      const perms = fs.existsSync(permsPath)
+        ? loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(permsPath)
+        : {};
+      if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
+      const existing = perms[email] || { source_id: sourceId, federated_read: [], federated_write: [] };
+      if (perms[email]) portalPermissionsVersion(existing);
+      existing.source_id = existing.source_id || sourceId;
+      const read = new Set(Array.isArray(existing.federated_read) ? existing.federated_read : []);
+      const write = new Set(Array.isArray(existing.federated_write) ? existing.federated_write : []);
+      read.add(sourceId);
+      read.add("shared");
+      write.add(sourceId);
+      existing.federated_read = Array.from(read).filter(Boolean);
+      existing.federated_write = Array.from(write).filter(Boolean);
+      if (JSON.stringify(perms[email]) !== JSON.stringify(existing)) {
+        perms[email] = existing;
+        writeJsonFileLocal(permsPath, perms);
+        console.log(`[Provision] Updated permissions for ${email}`);
+      }
     }
 
     if (shouldSync)
       schedulePersonalSourceSync(sourceId);
   }
 
-const readAccessRequests = (): PortalAccessRequest[] => {
-    const data = loadJsonFileLocal<PortalAccessRequest[]>(accessRequestsPath(), []);
-    return Array.isArray(data) ? data : [];
+const readAccessRequests = (): PortalAccessRequest[] => readAccessRequestsStrict();
+
+const verifyCompareAclSnapshot = async (): Promise<void> => {
+  if (portalAclMode !== 'compare') return;
+  try {
+    const snapshot = loadPortalAccessControlJson({
+      permissionsPath: userPermissionsPath(),
+      requestsPath: accessRequestsPath(),
+    });
+    const comparison = await comparePortalAccessControlSnapshot(engine, snapshot);
+    if (comparison.total === 0) return;
+  } catch {
+    // A corrupt/unavailable plane is itself one aggregate mismatch. JSON remains authority.
+  }
+  portalAclMismatchCounters.snapshot += 1;
+  console.warn(`[Portal ACL compare] snapshot_mismatch_count=${portalAclMismatchCounters.snapshot}`);
+};
+
+const readAccessRequestsStrict = (): PortalAccessRequest[] => {
+    recoverAccessControlTransactionLocal();
+    const requestPath = accessRequestsPath();
+    if (!require('fs').existsSync(requestPath)) return [];
+    const data = loadJsonFileStrictLocal<PortalAccessRequest[]>(requestPath);
+    if (!Array.isArray(data)) throw new Error('access_control_store_invalid');
+    return data;
   }
 
-const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFileLocal(accessRequestsPath(), items);
+const writeAccessRequests = (items: PortalAccessRequest[]): void => {
+    recoverAccessControlTransactionLocal();
+    writeJsonFileLocal(accessRequestsPath(), items);
+  };
+
+const dbAccessRequestToApi = (request: DbPortalAccessRequest) => {
+  const toRow = (grant: DbPortalAccessRequest['grants'][number]) => {
+    const area = managedAccessAreas.find(item => item.sourceId === grant.sourceId)?.id || grant.sourceId;
+    return {
+      area,
+      source_id: grant.sourceId,
+      read: grant.requestedRead,
+      write: grant.requestedWrite,
+    };
+  };
+  const requested = request.grants.map(toRow);
+  const approved = request.grants.filter(grant => grant.approvedRead || grant.approvedWrite).map(grant => ({
+    ...toRow(grant),
+    read: grant.approvedRead === true || grant.approvedWrite === true,
+    write: grant.approvedWrite === true,
+    requested_read: grant.requestedRead,
+    requested_write: grant.requestedWrite,
+  }));
+  const denied = request.grants.filter(grant =>
+    grant.approvedRead === false || grant.approvedWrite === false,
+  ).map(grant => ({
+    ...toRow(grant),
+    read: grant.requestedRead && grant.approvedRead !== true,
+    write: grant.requestedWrite && grant.approvedWrite !== true,
+  })).filter(grant => grant.read || grant.write);
+  return {
+    id: request.id,
+    email: request.userEmail,
+    requested_at: request.requestedAt,
+    requests: requested,
+    reason: request.reason,
+    status: request.status,
+    decided_at: request.decidedAt,
+    decided_by: request.decidedBy,
+    rejection_reason: request.rejectionReason,
+    approved_requests: approved,
+    denied_requests: denied,
+    version: request.version,
+  };
+};
+
+const readLatestAclAudit = async (filters: { subjectEmail?: string; requestId?: string; action?: string; stateVersion: number }) => {
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+  if (filters.subjectEmail) { params.push(filters.subjectEmail); clauses.push(`subject_email = $${params.length}`); }
+  if (filters.requestId) { params.push(filters.requestId); clauses.push(`request_id = $${params.length}`); }
+  if (filters.action) { params.push(filters.action); clauses.push(`action = $${params.length}`); }
+  params.push(filters.stateVersion);
+  clauses.push(`CAST(after_state->>'version' AS BIGINT) = $${params.length}`);
+  const rows = await engine.executeRaw<{ actor_email: string; created_at: string }>(`
+    SELECT actor_email, created_at
+      FROM portal_acl_audit
+     ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}
+     ORDER BY id DESC
+     LIMIT 1
+  `, params);
+  return rows[0] ? { actor: rows[0].actor_email, changed_at: rows[0].created_at } : null;
+};
 
 
 
@@ -1111,21 +1437,6 @@ const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFil
     standardHeaders: true,
     legacyHeaders: false,
     message: 'Too many magic-link attempts. Wait a minute before trying again.',
-  });
-
-  const portalOtpSendRateLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 5,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: 'Слишком много запросов кода. Повторите позже.',
-  });
-  const portalOtpVerifyRateLimiter = rateLimit({
-    windowMs: 10 * 60 * 1000,
-    max: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: 'Слишком много попыток входа. Повторите позже.',
   });
 
   const mcpRateLimiter = rateLimit({
@@ -1238,6 +1549,19 @@ const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFil
   // (RFC 8414 §3.3). Honor --public-url for production deployments behind
   // reverse proxies / tunnels; default to localhost for dev.
   const issuerUrl = new URL(publicUrl || `http://localhost:${port}`);
+  const portalPublicOrigin = issuerUrl.origin;
+  const keycloakIssuer = DEFAULT_KEYCLOAK_ISSUER;
+  const keycloakClientId = process.env.GBRAIN_KEYCLOAK_CLIENT_ID || DEFAULT_KEYCLOAK_CLIENT_ID;
+  const keycloakClientSecret = process.env.GBRAIN_KEYCLOAK_CLIENT_SECRET || '';
+  let keycloakOidc: KeycloakOidcClient | null = null;
+  if (keycloakClientSecret) {
+    keycloakOidc = new KeycloakOidcClient({
+      issuer: keycloakIssuer,
+      clientId: keycloakClientId,
+      clientSecret: keycloakClientSecret,
+      redirectUri: `${portalPublicOrigin}${DEFAULT_KEYCLOAK_CALLBACK_PATH}`,
+    });
+  }
 
   // F9: cookie `secure` flag honors both the request's TLS state (req.secure
   // is set when express trust-proxy lands an X-Forwarded-Proto: https) AND
@@ -1287,64 +1611,118 @@ const writeAccessRequests = (items: PortalAccessRequest[]): void => writeJsonFil
     next();
   });
 
-const escapePortalHtml = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch] || ch));
-const portalLoginHtml = (title: string, body: string) => `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapePortalHtml(title)}</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#151515;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.card{width:min(420px,calc(100vw - 32px));padding:28px;background:#242424;border:1px solid #3b3b3b;border-radius:12px}h1{font-size:22px;margin:0 0 10px}.muted{color:#aaa;font-size:14px;line-height:1.45}label{display:block;margin:18px 0 7px}input{width:100%;padding:12px;background:#181818;color:#fff;border:1px solid #555;border-radius:7px;font-size:16px}button{width:100%;margin-top:18px;padding:12px;border:0;border-radius:7px;background:#1677ff;color:#fff;font-weight:700;cursor:pointer}</style></head><body><main class="card">${body}</main></body></html>`;
+  const authNoStore = (_req: Request, res: Response, next: NextFunction): void => {
+    res.set('Cache-Control', 'no-store');
+    res.set('Pragma', 'no-cache');
+    res.set('Referrer-Policy', 'no-referrer');
+    next();
+  };
 
-app.get("/login", (req: any, res: any) => {
-    if (resolvePortalUser(req, res)) return res.redirect("/portal");
-    const oauthQuery = new URLSearchParams(req.query as Record<string, string>).toString();
-    res.type("html").send(portalLoginHtml("Вход в GBrain", `<h1>Вход в GBrain</h1><p class="muted">Введите корпоративный email. Одноразовый код действует 10 минут.</p><form action="/login/send-code" method="POST"><input type="hidden" name="oauth_query" value="${escapePortalHtml(oauthQuery)}"><label for="email">Рабочий email</label><input type="email" id="email" name="email" placeholder="user@avers.kz" autocomplete="email" required><button type="submit">Получить код</button></form>`));
+  const portalLoginRateLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: 30,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: 'Too many login attempts',
   });
 
-  app.post("/login/send-code", portalOtpSendRateLimiter, express.urlencoded({ extended: false }), async (req: any, res: any) => {
-    const email = String(req.body?.email || "").trim().toLowerCase();
-    const oauthQuery = String(req.body?.oauth_query || "");
-    if (!/^[^@\s]+@avers\.kz$/.test(email)) return res.status(400).send("Допускаются только корпоративные адреса @avers.kz");
-    const code = randomInt(100000, 1000000).toString();
-    pendingOtps.set(email, { codeHash: hashPortalOtp(email, code), expiresAt: Date.now() + 10 * 60 * 1000, attempts: 0 });
-    const { spawnSync } = require("child_process");
-    const sent = spawnSync("/home/avers/.gbrain/send_otp.py", [email, code], { encoding: "utf8", timeout: 15000 });
-    if (sent.error || sent.status !== 0) {
-      pendingOtps.delete(email);
-      console.error(`[OTP] Delivery failed for ${email}:`, sent.error?.message || String(sent.stderr || "sender failed").trim());
-      return res.status(500).send("Ошибка при отправке письма с кодом подтверждения.");
-    }
-    res.type("html").send(portalLoginHtml("Подтверждение входа", `<h1>Введите код</h1><p class="muted">Код отправлен на ${escapePortalHtml(email)}.</p><form action="/login/verify-code" method="POST"><input type="hidden" name="email" value="${escapePortalHtml(email)}"><input type="hidden" name="oauth_query" value="${escapePortalHtml(oauthQuery)}"><label for="code">6-значный код</label><input type="text" id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus><button type="submit">Войти</button></form>`));
-  });
+  const beginPortalOidc = async (
+    req: Request,
+    res: Response,
+    input: { returnTo: string; prompt: 'normal' | 'none'; existingSessionToken?: string },
+  ): Promise<string> => {
+    if (!keycloakOidc) throw new Error('keycloak_not_configured');
+    const browserBinding = randomBytes(32).toString('base64url');
+    const transaction = portalOidcTransactions.create({ ...input, browserBinding });
+    const authorizationUrl = await keycloakOidc.authorizationUrl(transaction);
+    res.cookie(portalOidcBindingCookieName(req), browserBinding, portalCookieOptions(req, 10 * 60 * 1_000));
+    return authorizationUrl;
+  };
 
-  app.post("/login/verify-code", portalOtpVerifyRateLimiter, express.urlencoded({ extended: false }), async (req: any, res: any) => {
-    const email = String(req.body?.email || "").trim().toLowerCase();
-    const code = String(req.body?.code || "").trim();
-    const oauthQuery = String(req.body?.oauth_query || "");
-    const saved = pendingOtps.get(email);
-    if (!saved || saved.expiresAt < Date.now()) {
-      pendingOtps.delete(email);
-      return res.status(400).send("Код истёк или не запрашивался. Запросите новый код.");
+  app.get('/login', authNoStore, portalLoginRateLimiter, async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
+    res.set('Referrer-Policy', 'no-referrer');
+    if (!keycloakOidc) return res.status(503).send('Keycloak authentication is not configured');
+    const directReturnTo = typeof req.query.return_to === 'string' ? req.query.return_to : '';
+    const oauthParams = new URLSearchParams();
+    for (const [key, value] of Object.entries(req.query)) {
+      if (key !== 'return_to' && typeof value === 'string') oauthParams.set(key, value);
     }
-    saved.attempts += 1;
-    if (saved.attempts > 5) {
-      pendingOtps.delete(email);
-      return res.status(429).send("Превышено число попыток. Запросите новый код.");
-    }
-    if (!/^\d{6}$/.test(code) || !safeHexEqual(saved.codeHash, hashPortalOtp(email, code))) {
-      return res.status(400).send("Неверный код подтверждения.");
-    }
-    pendingOtps.delete(email);
+    const oauthQuery = oauthParams.toString();
+    const returnTo = normalizePortalReturnTo(directReturnTo || (oauthQuery ? `/authorize?${oauthQuery}` : '/portal'));
+    const inspection = inspectPortalSession(req);
+    if (inspection.state === 'valid') return res.redirect(returnTo);
+    const prompt = inspection.state === 'revalidation_required' ? 'none' : 'normal';
     try {
-      await ensurePortalUserProvisioned(email);
-    } catch (e) {
-      console.error(`[Provision] Failed to provision ${email}:`, e);
-      return res.status(500).send("Не удалось подготовить личную базу GBrain. Обратитесь к администратору.");
+      return res.redirect(await beginPortalOidc(req, res, {
+        returnTo,
+        prompt,
+        existingSessionToken: prompt === 'none' ? portalSessionToken(req) : undefined,
+      }));
+    } catch {
+      return res.status(503).send('Keycloak authentication is temporarily unavailable');
     }
-    issuePortalSession(req, res, email);
-    const oauthParams = new URLSearchParams(oauthQuery);
-    return res.redirect(oauthParams.get("client_id") ? `/authorize?${oauthParams.toString()}` : "/portal");
   });
 
-  app.post('/logout', (req: Request, res: Response) => {
-    portalSessions.revoke(portalSessionToken(req));
+  app.get(DEFAULT_KEYCLOAK_CALLBACK_PATH, authNoStore, portalLoginRateLimiter, async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
+    res.set('Referrer-Policy', 'no-referrer');
+    if (!keycloakOidc) return res.status(503).send('Keycloak authentication is not configured');
+    const browserBinding = portalOidcBrowserBinding(req);
+    clearPortalOidcBindingCookies(res);
+    const transaction = portalOidcTransactions.consume(req.query.state, browserBinding);
+    if (!transaction) return res.status(400).send('Invalid or expired OIDC state');
+
+    // A silent check can legitimately report login_required after the IdP SSO
+    // session expires. Fall back once to the normal authorization flow.
+    if (typeof req.query.error === 'string') {
+      if (transaction.prompt === 'none') {
+        try {
+          return res.redirect(await beginPortalOidc(req, res, { returnTo: transaction.returnTo, prompt: 'normal' }));
+        } catch {
+          return res.status(503).send('Keycloak authentication is temporarily unavailable');
+        }
+      }
+      return res.status(401).send('Keycloak authentication failed');
+    }
+
+    try {
+      const { idToken } = await keycloakOidc.exchangeCode(String(req.query.code || ''), transaction.codeVerifier);
+      const identity = await keycloakOidc.verifyIdToken(idToken, transaction.nonce);
+      await ensurePortalUserProvisioned(identity.email, identity.sub);
+      if (transaction.prompt === 'none' && transaction.existingSessionToken) {
+        if (!portalSessions.revalidate(transaction.existingSessionToken, identity)) {
+          clearPortalSessionCookies(req, res);
+          return res.redirect('/login');
+        }
+      } else {
+        issuePortalSession(req, res, identity);
+      }
+      return res.redirect(transaction.returnTo);
+    } catch (error) {
+      // Never log the code, ID token, access token, refresh token, or claims.
+      console.error('[Portal OIDC] Authentication callback rejected:', error instanceof Error ? error.message : 'unknown_error');
+      clearPortalSessionCookies(req, res);
+      return res.status(401).send('Keycloak identity could not be verified');
+    }
+  });
+
+  app.post('/logout', authNoStore, async (req: Request, res: Response) => {
+    const revokedPortalToken = portalSessionToken(req);
+    portalSessions.revoke(revokedPortalToken);
+    for (const [sessionId, session] of adminSessions) {
+      if (session.authMethod === 'keycloak_bridge' && session.backingPortalToken === revokedPortalToken) {
+        adminSessions.delete(sessionId);
+      }
+    }
     clearPortalSessionCookies(req, res);
-    res.status(204).end();
+    if (!keycloakOidc) return res.status(204).end();
+    try {
+      const logoutUrl = await keycloakOidc.logoutUrl(`${portalPublicOrigin}/login`);
+      return logoutUrl ? res.json({ logout_url: logoutUrl }) : res.status(204).end();
+    } catch {
+      return res.status(204).end();
+    }
   });
 
 app.get("/portal/welcome", async (req: any, res: any) => {
@@ -1397,6 +1775,9 @@ app.post("/portal/welcome", express.urlencoded({ extended: false }), async (req:
     const userEmail = resolvePortalUser(req, res);
     if (!userEmail)
       return res.redirect("/login");
+    if (portalAclMode === 'compare' && !req.body?.skip) {
+      return res.status(409).send("Заявки временно приостановлены на время проверки ACL.");
+    }
     try {
       await ensurePortalUserProvisioned(String(userEmail));
       if (!req.body?.skip)
@@ -1507,6 +1888,9 @@ if (portalDevAssets) {
   });
 }
 app.get(['/portal', '/portal/'], requirePortalPage, sendPortalIndex);
+// Reviewer workspace. Same SPA bundle, selected client-side by pathname, so
+// the knowledge explorer and the review deck share one asset pipeline.
+app.get(['/portal/review', '/portal/review/'], requirePortalPage, sendPortalIndex);
 
 app.use('/portal/api', (_req: Request, res: Response, next: NextFunction) => {
   res.setHeader('Cache-Control', 'private, no-store');
@@ -1519,14 +1903,225 @@ app.use('/portal/download', (_req: Request, res: Response, next: NextFunction) =
   next();
 });
 
-app.get('/portal/api/session', (req: any, res: any) => {
+app.get('/portal/api/session', async (req: any, res: any) => {
   const userEmail = requirePortalUser(req, res);
   if (!userEmail) return;
+  const normalized = String(userEmail).trim().toLowerCase();
+  // canReview is a capability, NOT a permission grant: it only decides whether
+  // the reviewer nav entry renders. Every review endpoint re-derives identity
+  // and ACL server-side regardless of what the browser believes.
+  const permissionMap = await loadUserPermissionsMap();
+  const configured = Object.keys(permissionMap).some(k => String(k).trim().toLowerCase() === normalized);
+  const writeSources = configured ? await getWriteSourceIdsForUser(normalized).catch(() => []) : [];
   res.json({
     email: userEmail,
-    isAdmin: adminEmails.has(String(userEmail).trim().toLowerCase()),
+    isAdmin: resolveAdminFromPortalInspection(inspectPortalSession(req)).authorized,
     readOnly: true,
+    canReview: configured && writeSources.length > 0,
   });
+});
+
+// ---------------------------------------------------------------------------
+// Portal reviewer API (multi-reviewer AI Review)
+// ---------------------------------------------------------------------------
+// Every handler derives the actor from the opaque Portal session and the ACL
+// from user_permissions.json. Nothing here reads an actor, reviewer list, or
+// source grant out of the request body — a browser cannot widen its own scope.
+
+const reviewErrorStatus: Record<string, number> = {
+  not_found: 404,
+  unauthenticated: 401,
+  foreign_assignment: 403,
+  source_access_revoked: 403,
+  round_closed: 409,
+  round_escalated: 409,
+  round_already_open: 409,
+  stale_proposal: 409,
+  stale_status: 409,
+  concurrent_vote: 409,
+  concurrent_finalization: 409,
+  round_not_escalated: 409,
+  no_reviewers: 422,
+  invalid_decision: 422,
+  invalid_action: 422,
+  invalid_target_id: 422,
+  unsupported_target_type: 422,
+  override_reason_required: 422,
+  reason_code_required: 422,
+  reason_code_unknown: 422,
+  reason_comment_required: 422,
+  reason_comment_too_long: 422,
+  file_write_failed: 503,
+};
+
+function sendReviewRoundError(res: express.Response, error: unknown): void {
+  if (error instanceof ReviewConflictError) {
+    res.status(reviewErrorStatus[error.code] ?? 409).json({ error: error.code, message: error.message });
+    return;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  res.status(500).json({ error: 'review_round_failed', message });
+}
+
+/** Mirrors requireAdminSameOrigin: a reviewer vote is a state change. */
+function requirePortalSameOrigin(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const fetchSite = req.get('sec-fetch-site');
+  if (fetchSite && fetchSite !== 'same-origin') {
+    res.status(403).json({ error: 'cross_site_review_mutation_rejected' });
+    return;
+  }
+  const origin = req.get('origin');
+  if (origin) {
+    try {
+      if (new URL(origin).origin !== `${req.protocol}://${req.get('host')}`) {
+        res.status(403).json({ error: 'cross_origin_review_mutation_rejected' });
+        return;
+      }
+    } catch {
+      res.status(403).json({ error: 'invalid_origin' });
+      return;
+    }
+  } else if (fetchSite !== 'same-origin') {
+    res.status(403).json({ error: 'missing_same_origin_evidence' });
+    return;
+  }
+  next();
+}
+
+const reviewerScopeFor = async (email: string): Promise<ReviewerScope> => ({
+  email: String(email).trim().toLowerCase(),
+  allowedWriteSources: await getWriteSourceIdsForUser(String(email).trim().toLowerCase()),
+});
+
+let reviewAssignmentSyncInFlight: ReturnType<typeof ensurePendingReviewRounds> | null = null;
+const synchronizePendingReviewAssignments = () => {
+  if (reviewAssignmentSyncInFlight) return reviewAssignmentSyncInFlight;
+  reviewAssignmentSyncInFlight = (async () => ensurePendingReviewRounds(engine, {
+    permissions: await loadUserPermissionsMap(),
+    actor: 'system:assignment-sync',
+    limit: 100,
+  }))().finally(() => {
+    reviewAssignmentSyncInFlight = null;
+  });
+  return reviewAssignmentSyncInFlight;
+};
+
+type ProposalReviewGovernance = {
+  managed: boolean;
+  state: 'legacy_manual' | 'pending_assignment' | 'round';
+  round_id: number | null;
+  round_status: RoundStatus | null;
+};
+const proposalReviewGovernance = async (
+  targetType: 'take_proposal' | 'concept_proposal',
+  targetId: number,
+): Promise<ProposalReviewGovernance> => {
+  const proposalTable = targetType === 'take_proposal' ? 'take_proposals' : 'concept_proposals';
+  const proposals = await engine.executeRaw<{ status: string; proposed_at: string }>(
+    `SELECT status, proposed_at::text AS proposed_at FROM ${proposalTable} WHERE id = $1`,
+    [targetId],
+  );
+  if (!proposals[0]) throw new ReviewConflictError('proposal not found', 'not_found');
+  const rounds = await engine.executeRaw<{ id: number; status: RoundStatus }>(
+    `SELECT id, status FROM ai_review_rounds
+      WHERE target_type = $1 AND target_id = $2
+        AND status IN ('open','escalated','finalizing')
+      ORDER BY id DESC LIMIT 1`,
+    [targetType, targetId],
+  );
+  if (rounds[0]) {
+    return { managed: true, state: 'round', round_id: Number(rounds[0].id), round_status: rounds[0].status };
+  }
+  const cutoverAt = await resolveReviewCutoverAtFromConfig(engine);
+  const managed = proposals[0].status === 'pending'
+    && Date.parse(proposals[0].proposed_at) > Date.parse(cutoverAt);
+  return {
+    managed,
+    state: managed ? 'pending_assignment' : 'legacy_manual',
+    round_id: null,
+    round_status: null,
+  };
+};
+const assertDirectAdminReviewAllowed = async (
+  targetType: 'take_proposal' | 'concept_proposal',
+  targetId: number,
+): Promise<void> => {
+  const governance = await proposalReviewGovernance(targetType, targetId);
+  if (governance.managed) {
+    throw new ReviewConflictError(
+      governance.round_id
+        ? `proposal is governed by review round ${governance.round_id}`
+        : 'proposal is waiting for mandatory reviewer assignment',
+      'managed_by_review_round',
+    );
+  }
+};
+
+app.get('/portal/api/review/summary', async (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  try {
+    const scope = await reviewerScopeFor(userEmail);
+    res.json({ ...await reviewerSummary(engine, scope), reasons: rejectReasonsFor('take_proposal') });
+  } catch (error) {
+    sendReviewRoundError(res, error);
+  }
+});
+
+app.get('/portal/api/review/deck', async (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  try {
+    await synchronizePendingReviewAssignments();
+    const scope = await reviewerScopeFor(userEmail);
+    const targetTypeRaw = String(req.query.type ?? '');
+    const deck = await listReviewerDeck(engine, scope, {
+      limit: Number(req.query.limit ?? 10),
+      targetType: targetTypeRaw === 'take_proposal' || targetTypeRaw === 'concept_proposal' ? targetTypeRaw : undefined,
+    });
+    res.json(deck);
+  } catch (error) {
+    sendReviewRoundError(res, error);
+  }
+});
+
+app.get('/portal/api/review/items/:assignmentId', async (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  try {
+    const scope = await reviewerScopeFor(userEmail);
+    const item = await getReviewerItem(engine, scope, Number(req.params.assignmentId), { markDetailsOpened: true });
+    res.json({ item, reasons: rejectReasonsFor(item.target_type) });
+  } catch (error) {
+    sendReviewRoundError(res, error);
+  }
+});
+
+app.post('/portal/api/review/items/:assignmentId/vote', requirePortalSameOrigin, express.json({ limit: '32kb' }), async (req: any, res: any) => {
+  const userEmail = requirePortalUser(req, res);
+  if (!userEmail) return;
+  try {
+    const scope = await reviewerScopeFor(userEmail);
+    const result = await castReviewerVote(engine, scope, {
+      assignmentId: Number(req.params.assignmentId),
+      decision: req.body?.decision,
+      reasonCode: req.body?.reason_code,
+      comment: req.body?.comment,
+      proposalSnapshotHash: req.body?.proposal_snapshot_hash,
+      idempotencyKey: req.get('idempotency-key') || req.body?.idempotency_key,
+    });
+    // Blind until closure: a reviewer learns only their own decision and
+    // whether the round is still collecting votes.
+    res.json({
+      decision: result.vote.decision,
+      replayed: result.replayed,
+      round_status: result.round.status,
+      outcome: result.round.status === 'finalized' ? result.round.outcome : null,
+      publication_pending: Boolean(result.finalizationError),
+    });
+  } catch (error) {
+    sendReviewRoundError(res, error);
+  }
 });
 
 app.get("/portal/api/sources", async (req: any, res: any) => {
@@ -2118,47 +2713,182 @@ function requestedLabel(a){return a.write?'чтение+запись':(a.read?'�
 function renderPendingRows(r){return '<table class="grant-table"><thead><tr><th>Область</th><th>Source</th><th>Запрошено</th><th>Дать чтение</th><th>Дать запись</th></tr></thead><tbody>'+((r.requests||[]).map((a,i)=>'<tr><td>'+esc(a.area)+'</td><td><code>'+esc(a.source_id||'')+'</code></td><td>'+esc(requestedLabel(a))+'</td><td><input class="grant-read" type="checkbox" data-index="'+i+'" '+((a.read||a.write)?'checked':'')+'></td><td><input class="grant-write" type="checkbox" data-index="'+i+'" '+(a.write?'checked':'')+'></td></tr>').join(''))+'</tbody></table>'}
 function renderDecidedRows(r){const approved=(r.approved_requests||[]).map(a=>'<div class="approved-list">✓ '+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</div>').join('');const denied=(r.denied_requests||[]).map(a=>'<div class="denied">\xD7 '+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</div>').join('');if(approved||denied)return '<div style="margin-top:10px">'+approved+denied+'</div>';return '<div style="margin-top:10px">'+((r.requests||[]).map(a=>'<span>'+esc(a.area)+' \xB7 '+esc(a.source_id||'')+' \xB7 '+esc(requestedLabel(a))+'</span>').join('<br>'))+'</div>'}
 function collectGrants(card){const grants=[];card.querySelectorAll('tbody tr').forEach(row=>{const idx=Number(row.querySelector('input').dataset.index);const read=row.querySelector('.grant-read').checked;const write=row.querySelector('.grant-write').checked;grants.push({index:idx,read:read||write,write})});return grants}
-function renderReq(r){const pending=r.status==='pending';const rows=pending?renderPendingRows(r):renderDecidedRows(r);const actions=pending?'<div class="actions"><button class="btn js-decision" data-id="'+esc(r.id)+'" data-action="approve">Утвердить выбранные права</button><button class="btn gray js-check-all" type="button">Отметить всё как запрошено</button><button class="btn gray js-clear" type="button">Снять все галочки</button><button class="btn red js-decision" data-id="'+esc(r.id)+'" data-action="reject">Отклонить всё</button></div>':'';return '<div class="card" data-request-id="'+esc(r.id)+'"><h3>'+esc(r.email)+' <span class="status-'+esc(r.status)+'">'+esc(r.status)+'</span></h3><div class="muted">'+esc(r.id)+' \xB7 '+esc(r.requested_at||'')+'</div>'+rows+'<pre>'+esc(r.reason||'(причина не указана)')+'</pre>'+actions+(r.decided_at?'<div class="muted">Решение: '+esc(r.decided_at)+' \xB7 '+esc(r.decided_by||'')+'</div>':'')+'</div>'}
+function renderReq(r){const pending=r.status==='pending';const rows=pending?renderPendingRows(r):renderDecidedRows(r);const actions=pending?'<div class="actions"><button class="btn js-decision" data-id="'+esc(r.id)+'" data-action="approve">Утвердить выбранные права</button><button class="btn gray js-check-all" type="button">Отметить всё как запрошено</button><button class="btn gray js-clear" type="button">Снять все галочки</button><button class="btn red js-decision" data-id="'+esc(r.id)+'" data-action="reject">Отклонить всё</button></div>':'';return '<div class="card" data-request-id="'+esc(r.id)+'" data-version="'+esc(r.version||'')+'"><h3>'+esc(r.email)+' <span class="status-'+esc(r.status)+'">'+esc(r.status)+'</span></h3><div class="muted">'+esc(r.id)+' \xB7 '+esc(r.requested_at||'')+'</div>'+rows+'<pre>'+esc(r.reason||'(причина не указана)')+'</pre>'+actions+(r.decided_at?'<div class="muted">Решение: '+esc(r.decided_at)+' \xB7 '+esc(r.decided_by||'')+'</div>':'')+'</div>'}
 function bindCard(card){card.querySelectorAll('.grant-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=card.querySelector('.grant-read[data-index="'+w.dataset.index+'"]');if(r)r.checked=true}});card.querySelectorAll('.grant-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=card.querySelector('.grant-write[data-index="'+r.dataset.index+'"]');if(w)w.checked=false}});const all=card.querySelector('.js-check-all');if(all)all.onclick=()=>{card.querySelectorAll('tbody tr').forEach(row=>{const read=row.querySelector('.grant-read');const write=row.querySelector('.grant-write');read.checked=true;write.checked=row.children[2].textContent.includes('запись')})};const clear=card.querySelector('.js-clear');if(clear)clear.onclick=()=>{card.querySelectorAll('input[type="checkbox"]').forEach(i=>i.checked=false)}}
 async function load(){try{const data=await api('/admin/api/access-requests');document.getElementById('list').innerHTML=data.requests.map(renderReq).join('')||'<div class="card muted">Заявок нет</div>';document.querySelectorAll('.card').forEach(bindCard);document.querySelectorAll('.js-decision').forEach(b=>b.onclick=()=>decide(b))}catch(e){document.getElementById('list').innerHTML='<div class="card">Ошибка: '+esc(e.message)+'</div>'}}
-async function decide(button){const id=button.dataset.id,action=button.dataset.action;const card=button.closest('.card');if(action==='approve'){const grants=collectGrants(card);const selected=grants.filter(g=>g.read||g.write).length;if(!selected){alert('Не выбрано ни одного права. Если нужно отказать полностью, нажмите \xABОтклонить всё\xBB.');return}if(!confirm('Утвердить выбранные права? Неотмеченные пункты будут записаны как невыданные.'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants})})}else{if(!confirm('Отклонить заявку полностью?'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})}await load()}
+async function decide(button){const id=button.dataset.id,action=button.dataset.action;const card=button.closest('.card');const expected_version=card.dataset.version||'';if(action==='approve'){const grants=collectGrants(card);const selected=grants.filter(g=>g.read||g.write).length;if(!selected){alert('Не выбрано ни одного права. Если нужно отказать полностью, нажмите \xABОтклонить всё\xBB.');return}if(!confirm('Утвердить выбранные права? Неотмеченные пункты будут записаны как невыданные.'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants,expected_version})})}else{if(!confirm('Отклонить заявку полностью?'))return;await api('/admin/api/access-requests/'+encodeURIComponent(id)+'/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({expected_version})})}await load()}
 load();
 </script></body></html>`);
   });
-  app.get("/admin/api/access-requests", requireAdmin, (_req: any, res: any) => {
-    const requests = readAccessRequests().sort((a, b) => String(b.requested_at || "").localeCompare(String(a.requested_at || "")));
-    res.json({ requests });
+  app.get("/admin/api/access-requests", requireAdmin, async (_req: any, res: any) => {
+    try {
+      if (portalAclMode === 'db') {
+        const requests = (await portalAccessControl.listRequests()).map(dbAccessRequestToApi);
+        res.json({ requests, authority: 'db' });
+        return;
+      }
+      await verifyCompareAclSnapshot();
+      const requests = readAccessRequestsStrict()
+        .sort((a, b) => String(b.requested_at || "").localeCompare(String(a.requested_at || "")))
+        .map(request => ({ ...request, version: portalAccessRequestVersion(request) }));
+      res.json({ requests, authority: 'json' });
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+    }
   });
-  app.post("/admin/api/access-requests/:id/approve", requireAdmin, express.json(), (req: any, res: any) => {
+  app.post("/admin/api/access-requests/:id/approve", requireAdmin, requireAdminSameOrigin, express.json(), async (req: any, res: any) => {
     const id = String(req.params.id || "");
-    const requests = readAccessRequests();
+    if (portalAclMode === 'compare') {
+      res.status(409).json({ error: 'acl_compare_mode_read_only' });
+      return;
+    }
+    if (portalAclMode === 'db') {
+      try {
+        const item = await portalAccessControl.getRequest(id);
+        if (!item) { res.status(404).json({ error: 'Request not found' }); return; }
+        const expectedVersion = Number(req.body?.expected_version);
+        if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+          res.status(400).json({ error: 'expected_version_required' });
+          return;
+        }
+        const requestedRows = item.grants.map(grant => ({
+          area: managedAccessAreas.find(area => area.sourceId === grant.sourceId)?.id || grant.sourceId,
+          source_id: grant.sourceId,
+          read: grant.requestedRead,
+          write: grant.requestedWrite,
+        }));
+        let decisions;
+        try {
+          decisions = normalizeRequestGrantDecisions(requestedRows, req.body?.grants);
+        } catch {
+          res.status(400).json({ error: 'invalid_request_decision' });
+          return;
+        }
+        if (!decisions.some(decision => decision.read || decision.write)) {
+          res.status(400).json({ error: 'no_permissions_selected' });
+          return;
+        }
+        const partial = decisions.some((decision, index) =>
+          (requestedRows[index].read && !decision.read) || (requestedRows[index].write && !decision.write),
+        );
+        const updated = await portalAccessControl.decideRequest({
+          requestId: id,
+          expectedVersion,
+          decision: partial ? 'approved_partial' : 'approved',
+          grants: decisions.map((decision, index) => ({
+            sourceId: requestedRows[index].source_id,
+            approvedRead: decision.read || decision.write,
+            approvedWrite: decision.write,
+          })),
+        }, adminActor(req, res));
+        const audit = await readLatestAclAudit({ requestId: id, action: 'approve_access_request', stateVersion: updated.version });
+        res.json({ approved: true, partial, request: dbAccessRequestToApi(updated), audit });
+      } catch (error) {
+        if (error instanceof PortalAccessControlError) {
+          const status = error.code === 'conflict' ? 409 : error.code === 'not_found' ? 404 : 400;
+          res.status(status).json({ error: error.code === 'conflict' ? 'request_changed' : error.code });
+          return;
+        }
+        res.status(503).json({ error: 'access_control_store_unavailable' });
+      }
+      return;
+    }
+    let requests: PortalAccessRequest[];
+    try {
+      requests = readAccessRequestsStrict();
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+      return;
+    }
     const item = requests.find((r4) => r4.id === id);
     if (!item) {
       res.status(404).json({ error: "Request not found" });
+      return;
+    }
+    const expectedVersion = typeof req.body?.expected_version === 'string' ? req.body.expected_version : '';
+    if (!expectedVersion) {
+      res.status(400).json({ error: 'expected_version_required' });
+      return;
+    }
+    if (portalAccessRequestVersion(item) !== expectedVersion) {
+      res.status(409).json({ error: 'request_changed' });
       return;
     }
     if (item.status !== "pending") {
       res.status(400).json({ error: "Request is not pending" });
       return;
     }
-    const requestedRows = Array.isArray(item.requests) ? item.requests : [];
-    const rawGrants: Array<{ index?: unknown; read?: unknown; write?: unknown }> | null = Array.isArray(req.body?.grants) ? req.body.grants : null;
-    const selectedRows = requestedRows.map((row, index): PortalAccessRow | null => {
-      const grant = rawGrants ? rawGrants.find((g8) => Number(g8?.index) === index) : row;
-      const write2 = !!grant?.write && !!row.write;
-      const read2 = (!!grant?.read || write2) && (!!row.read || !!row.write);
+    let subjectEmail: string;
+    try {
+      subjectEmail = validatePortalEmail(item.email);
+    } catch {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    if (subjectEmail !== item.email) {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    if (!Array.isArray(item.requests) || item.requests.length === 0) {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    const requestedRows = item.requests;
+    if (requestedRows.some(row => !row || typeof row !== 'object' || typeof row.read !== 'boolean' || typeof row.write !== 'boolean' || (!row.read && !row.write))) {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    let grantDecisions: Array<{ index: number; read: boolean; write: boolean }>;
+    try {
+      grantDecisions = normalizeRequestGrantDecisions(requestedRows, req.body?.grants);
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : 'invalid_request_grants' });
+      return;
+    }
+    const allowedRequestedSources = new Set(managedAccessAreas.map(area => area.sourceId));
+    const resolvedRequestedRows = requestedRows.map((row): PortalAccessRow | null => {
       const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
-      if (!sourceId) return null;
-      return { area: row.area, source_id: sourceId, read: read2, write: write2, requested_read: !!row.read, requested_write: !!row.write };
-    }).filter((row): row is PortalAccessRow => row !== null && (row.read || row.write));
+      if (!sourceId || !allowedRequestedSources.has(sourceId)) return null;
+      return { area: row.area, source_id: sourceId, read: !!row.read || !!row.write, write: !!row.write };
+    });
+    if (resolvedRequestedRows.some(row => row === null)) {
+      res.status(400).json({ error: 'unknown_requested_source' });
+      return;
+    }
+    const resolvedSourceIds = (resolvedRequestedRows as PortalAccessRow[]).map(row => row.source_id);
+    if (new Set(resolvedSourceIds).size !== resolvedSourceIds.length) {
+      res.status(503).json({ error: 'access_control_request_invalid' });
+      return;
+    }
+    const selectedRows = (resolvedRequestedRows as PortalAccessRow[]).map((row, index): PortalAccessRow | null => {
+      const grant = grantDecisions[index];
+      if (!grant.read && !grant.write) return null;
+      return { ...row, read: grant.read, write: grant.write, requested_read: !!row.read, requested_write: !!row.write };
+    }).filter((row): row is PortalAccessRow => row !== null);
     if (selectedRows.length === 0) {
       res.status(400).json({ error: "No permissions selected. Reject the request if nothing should be granted." });
       return;
     }
     const permsPath = userPermissionsPath();
-    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(permsPath, {});
-    const defaultSource = String(item.email || "").split("@")[0].replace(/[^a-z0-9]/g, "-");
-    const user = perms[item.email] || { source_id: defaultSource, federated_read: [defaultSource, "shared"], federated_write: [defaultSource] };
+    let perms: Record<string, PortalUserPermissions>;
+    try {
+      perms = loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(permsPath);
+      if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+      return;
+    }
+    const defaultSource = personalSourceIdFromEmail(subjectEmail);
+    const existingUser = perms[subjectEmail];
+    if (existingUser) {
+      try {
+        portalPermissionsVersion(existingUser);
+      } catch {
+        res.status(503).json({ error: 'access_control_store_invalid' });
+        return;
+      }
+    }
+    const user = existingUser || { source_id: defaultSource, federated_read: [defaultSource, "shared"], federated_write: [defaultSource] };
     const read = new Set(Array.isArray(user.federated_read) ? user.federated_read : []);
     const write = new Set(Array.isArray(user.federated_write) ? user.federated_write : []);
     if (user.source_id)
@@ -2173,8 +2903,7 @@ load();
     }
     user.federated_read = Array.from(read).filter(Boolean);
     user.federated_write = Array.from(write).filter(Boolean);
-    perms[item.email] = user;
-    writeJsonFileLocal(permsPath, perms);
+    perms[subjectEmail] = user;
     const selectedBySource = new Map(selectedRows.map((row) => [row.source_id, row]));
     const deniedRows = requestedRows.map((row): PortalAccessRow | null => {
       const sourceId = row.source_id || managedSourceIdForArea(String(row.area || ""));
@@ -2189,30 +2918,88 @@ load();
     const fullyApproved = deniedRows.length === 0 && selectedRows.length === requestedRows.length;
     item.status = fullyApproved ? "approved" : "approved_partial";
     item.decided_at = new Date().toISOString();
-    item.decided_by = resolvePortalUser(req) || "admin";
+    item.decided_by = String(res.locals.gbrainAdminActor || 'admin-session-unattributed');
     item.approved_at = item.decided_at;
     item.approved_by = item.decided_by;
     item.approved_requests = selectedRows.map((row) => ({ area: row.area, source_id: row.source_id, read: row.read, write: row.write }));
     item.denied_requests = deniedRows;
-    writeAccessRequests(requests);
+    commitAccessControlJsonTransaction(accessControlTransactionPaths(), perms, requests);
     res.json({ approved: true, partial: item.status === "approved_partial", permissions: user, approved_requests: item.approved_requests, denied_requests: item.denied_requests });
   });
-  app.post("/admin/api/access-requests/:id/reject", requireAdmin, express.json(), (req: any, res: any) => {
+  app.post("/admin/api/access-requests/:id/reject", requireAdmin, requireAdminSameOrigin, express.json(), async (req: any, res: any) => {
     const id = String(req.params.id || "");
-    const requests = readAccessRequests();
+    if (portalAclMode === 'compare') {
+      res.status(409).json({ error: 'acl_compare_mode_read_only' });
+      return;
+    }
+    if (portalAclMode === 'db') {
+      try {
+        const item = await portalAccessControl.getRequest(id);
+        if (!item) { res.status(404).json({ error: 'Request not found' }); return; }
+        const expectedVersion = Number(req.body?.expected_version);
+        if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+          res.status(400).json({ error: 'expected_version_required' });
+          return;
+        }
+        const rejectionReason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 1000) : '';
+        if (!rejectionReason) { res.status(400).json({ error: 'rejection_reason_required' }); return; }
+        const updated = await portalAccessControl.decideRequest({
+          requestId: id,
+          expectedVersion,
+          decision: 'rejected',
+          rejectionReason,
+          grants: item.grants.map(grant => ({
+            sourceId: grant.sourceId,
+            approvedRead: false,
+            approvedWrite: false,
+          })),
+        }, adminActor(req, res));
+        const audit = await readLatestAclAudit({ requestId: id, action: 'reject_access_request', stateVersion: updated.version });
+        res.json({ rejected: true, request: dbAccessRequestToApi(updated), audit });
+      } catch (error) {
+        if (error instanceof PortalAccessControlError) {
+          const status = error.code === 'conflict' ? 409 : error.code === 'not_found' ? 404 : 400;
+          res.status(status).json({ error: error.code === 'conflict' ? 'request_changed' : error.code });
+          return;
+        }
+        res.status(503).json({ error: 'access_control_store_unavailable' });
+      }
+      return;
+    }
+    let requests: PortalAccessRequest[];
+    try {
+      requests = readAccessRequestsStrict();
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+      return;
+    }
     const item = requests.find((r4) => r4.id === id);
     if (!item) {
       res.status(404).json({ error: "Request not found" });
+      return;
+    }
+    const expectedVersion = typeof req.body?.expected_version === 'string' ? req.body.expected_version : '';
+    if (!expectedVersion) {
+      res.status(400).json({ error: 'expected_version_required' });
+      return;
+    }
+    if (portalAccessRequestVersion(item) !== expectedVersion) {
+      res.status(409).json({ error: 'request_changed' });
       return;
     }
     if (item.status !== "pending") {
       res.status(400).json({ error: "Request is not pending" });
       return;
     }
+    const rejectionReason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 1000) : '';
+    if (!rejectionReason) {
+      res.status(400).json({ error: 'rejection_reason_required' });
+      return;
+    }
     item.status = "rejected";
     item.decided_at = new Date().toISOString();
-    item.decided_by = "admin";
-    item.rejection_reason = String(req.body?.reason || "").slice(0, 1000);
+    item.decided_by = String(res.locals.gbrainAdminActor || 'admin-session-unattributed');
+    item.rejection_reason = rejectionReason;
     writeAccessRequests(requests);
     res.json({ rejected: true });
   });
@@ -2222,49 +3009,147 @@ load();
   app.get('/admin/permissions', requireAdmin, (_req: Request, res: Response) => {
     res.set('Content-Type', 'text/html');
     res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>GBrain User Permissions</title><style>
-body{margin:0;background:#101014;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}.wrap{max-width:1320px;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;cursor:pointer}.btn.gray{background:#444}.muted{color:#aaa;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:18px;background:#1d1d24;border:1px solid #333;border-radius:10px;overflow:hidden}th,td{border-bottom:1px solid #333;padding:8px;text-align:center;vertical-align:middle}th{color:#bbb;font-weight:600;background:#181820;position:sticky;top:0}td.email{text-align:left;white-space:nowrap}td.source{text-align:left;color:#aaa;font-size:12px}input[type=checkbox]{transform:scale(1.1)}.cell{display:flex;gap:6px;justify-content:center;align-items:center}.r{color:#8cc8ff}.w{color:#ffd479}.saved{color:#91e091;margin-left:10px}.err{color:#ff9c9c;margin-left:10px}</style></head><body><div class="wrap"><div class="top"><div><h1>Права пользователей GBrain</h1><div class="muted">Таблица читает и меняет <code>~/.gbrain/user_permissions.json</code>. R = чтение, W = запись.</div></div><div><a class="btn gray" href="/admin/access-requests">Заявки</a> <a class="btn gray" href="/admin/">Админ-панель</a></div></div><div id="msg" class="muted"></div><div id="root">Загрузка...</div></div><script>
+body{margin:0;background:#101014;color:#e5e5e5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}.wrap{max-width:1320px;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px}.btn{background:#007acc;color:white;border:0;border-radius:6px;padding:8px 12px;text-decoration:none;cursor:pointer}.btn.gray{background:#444}.muted{color:#aaa;font-size:13px}table{width:100%;border-collapse:collapse;margin-top:18px;background:#1d1d24;border:1px solid #333;border-radius:10px;overflow:hidden}th,td{border-bottom:1px solid #333;padding:8px;text-align:center;vertical-align:middle}th{color:#bbb;font-weight:600;background:#181820;position:sticky;top:0}td.email{text-align:left;white-space:nowrap}td.source{text-align:left;color:#aaa;font-size:12px}input[type=checkbox]{transform:scale(1.1)}.cell{display:flex;gap:6px;justify-content:center;align-items:center}.r{color:#8cc8ff}.w{color:#ffd479}.saved{color:#91e091;margin-left:10px}.err{color:#ff9c9c;margin-left:10px}</style></head><body><div class="wrap"><div class="top"><div><h1>Права пользователей GBrain</h1><div class="muted">${portalAclMode === 'db' ? 'Источник прав: PostgreSQL. R = чтение, W = запись.' : 'Переходный источник прав: ~/.gbrain/user_permissions.json. R = чтение, W = запись.'}</div></div><div><a class="btn gray" href="/admin/access-requests">Заявки</a> <a class="btn gray" href="/admin/">Админ-панель</a></div></div><div id="msg" class="muted"></div><div id="root">Загрузка...</div></div><script>
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(url,opt){const r=await fetch(url,opt);if(!r.ok)throw new Error(await r.text());return r.json()}
-function render(data){const areas=data.areas||[];const users=data.users||[];let html='<table><thead><tr><th>Пользователь</th><th>Личная область</th>'+areas.map(a=>'<th>'+esc(a.label)+'<br><span class="muted">'+esc(a.sourceId)+'</span></th>').join('')+'<th></th></tr></thead><tbody>';for(const u of users){html+='<tr data-email="'+esc(u.email)+'"><td class="email">'+esc(u.email)+'</td><td class="source"><code>'+esc(u.source_id||'')+'</code></td>'+areas.map(a=>{const r=(u.federated_read||[]).includes(a.sourceId);const w=(u.federated_write||[]).includes(a.sourceId);return '<td><div class="cell"><label class="r">R <input class="p-read" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(r?'checked':'')+'></label><label class="w">W <input class="p-write" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(w?'checked':'')+'></label></div></td>'}).join('')+'<td><button class="btn save">Сохранить</button></td></tr>'}html+='</tbody></table>';document.getElementById('root').innerHTML=html;document.querySelectorAll('tr[data-email]').forEach(bindRow)}
-function bindRow(row){row.querySelectorAll('.p-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=row.querySelector('.p-read[data-source="'+w.dataset.source+'"]');if(r)r.checked=true}});row.querySelectorAll('.p-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');if(w)w.checked=false}});row.querySelector('.save').onclick=async()=>{const email=row.dataset.email;const grants=[];row.querySelectorAll('.p-read').forEach(r=>{const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');grants.push({source_id:r.dataset.source,read:r.checked||w.checked,write:w.checked})});const msg=document.getElementById('msg');msg.className='muted';msg.textContent='Сохранение...';try{await api('/admin/api/permissions/'+encodeURIComponent(email),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants})});msg.className='saved';msg.textContent='Сохранено: '+email}catch(e){msg.className='err';msg.textContent='Ошибка: '+e.message}}}
+function render(data){const areas=data.areas||[];const users=data.users||[];let html='<table><thead><tr><th>Пользователь</th><th>Личная область</th>'+areas.map(a=>'<th>'+esc(a.label)+'<br><span class="muted">'+esc(a.sourceId)+'</span></th>').join('')+'<th></th></tr></thead><tbody>';for(const u of users){html+='<tr data-email="'+esc(u.email)+'" data-version="'+esc(u.version||'')+'"><td class="email">'+esc(u.email)+'</td><td class="source"><code>'+esc(u.source_id||'')+'</code></td>'+areas.map(a=>{const r=(u.federated_read||[]).includes(a.sourceId);const w=(u.federated_write||[]).includes(a.sourceId);return '<td><div class="cell"><label class="r">R <input class="p-read" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(r?'checked':'')+'></label><label class="w">W <input class="p-write" data-source="'+esc(a.sourceId)+'" type="checkbox" '+(w?'checked':'')+'></label></div></td>'}).join('')+'<td><button class="btn save">Сохранить</button></td></tr>'}html+='</tbody></table>';document.getElementById('root').innerHTML=html;document.querySelectorAll('tr[data-email]').forEach(bindRow)}
+function bindRow(row){row.querySelectorAll('.p-write').forEach(w=>w.onchange=()=>{if(w.checked){const r=row.querySelector('.p-read[data-source="'+w.dataset.source+'"]');if(r)r.checked=true}});row.querySelectorAll('.p-read').forEach(r=>r.onchange=()=>{if(!r.checked){const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');if(w)w.checked=false}});row.querySelector('.save').onclick=async()=>{const email=row.dataset.email;const grants=[];row.querySelectorAll('.p-read').forEach(r=>{const w=row.querySelector('.p-write[data-source="'+r.dataset.source+'"]');grants.push({source_id:r.dataset.source,read:r.checked||w.checked,write:w.checked})});const msg=document.getElementById('msg');msg.className='muted';msg.textContent='Сохранение...';try{const result=await api('/admin/api/permissions/'+encodeURIComponent(email),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({grants,expected_version:row.dataset.version||''})});row.dataset.version=result.version||'';msg.className='saved';msg.textContent='Сохранено: '+email}catch(e){msg.className='err';msg.textContent='Ошибка: '+e.message}}}
 async function load(){try{render(await api('/admin/api/permissions'))}catch(e){document.getElementById('root').innerHTML='<div class="err">'+esc(e.message)+'</div>'}}load();
 </script></body></html>`);
   });
 
-  app.get('/admin/api/permissions', requireAdmin, (_req: Request, res: Response) => {
-    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(userPermissionsPath(), {});
-    const users = Object.entries(perms).sort(([a], [b]) => a.localeCompare(b)).map(([email, p]: any) => ({
-      email,
-      source_id: p?.source_id || '',
-      federated_read: Array.isArray(p?.federated_read) ? p.federated_read : [],
-      federated_write: Array.isArray(p?.federated_write) ? p.federated_write : [],
-    }));
-    res.json({ areas: managedAccessAreas, users });
+  app.get('/admin/api/permissions', requireAdmin, async (_req: Request, res: Response) => {
+    try {
+      if (portalAclMode === 'db') {
+        const users = (await portalAccessControl.listUsers()).map(user => ({
+          email: user.email,
+          source_id: user.personalSourceId,
+          federated_read: user.grants.filter(grant => grant.canRead).map(grant => grant.sourceId),
+          federated_write: user.grants.filter(grant => grant.canWrite).map(grant => grant.sourceId),
+          status: user.status,
+          version: user.version,
+        }));
+        res.json({ areas: managedAccessAreas, users, authority: 'db' });
+        return;
+      }
+      await verifyCompareAclSnapshot();
+      recoverAccessControlTransactionLocal();
+      const perms = loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(userPermissionsPath());
+      if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
+      const users = Object.entries(perms).sort(([a], [b]) => a.localeCompare(b)).map(([email, p]: any) => ({
+        email,
+        source_id: p?.source_id || '',
+        federated_read: Array.isArray(p?.federated_read) ? p.federated_read : [],
+        federated_write: Array.isArray(p?.federated_write) ? p.federated_write : [],
+        version: portalPermissionsVersion(p),
+      }));
+      res.json({ areas: managedAccessAreas, users, authority: 'json' });
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+    }
   });
 
-  app.post('/admin/api/permissions/:email', requireAdmin, express.json(), (req: Request, res: Response) => {
-    const email = String(req.params.email || '').toLowerCase();
-    const perms = loadJsonFileLocal<Record<string, PortalUserPermissions>>(userPermissionsPath(), {});
+  app.post('/admin/api/permissions/:email', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    let email: string;
+    try {
+      email = validatePortalEmail(req.params.email);
+    } catch {
+      res.status(400).json({ error: 'invalid_portal_email' });
+      return;
+    }
+    if (portalAclMode === 'compare') {
+      res.status(409).json({ error: 'acl_compare_mode_read_only' });
+      return;
+    }
+    if (portalAclMode === 'db') {
+      try {
+        const expectedVersion = Number(req.body?.expected_version);
+        if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+          res.status(400).json({ error: 'expected_version_required' });
+          return;
+        }
+        if (!Array.isArray(req.body?.grants)) {
+          res.status(400).json({ error: 'invalid_grants' });
+          return;
+        }
+        const managedSourceIds = managedAccessAreas.map(area => area.sourceId);
+        const updated = await portalAccessControl.replaceManagedGrants({
+          email,
+          expectedVersion,
+          managedSourceIds,
+          grants: req.body.grants.map((grant: any) => ({
+            sourceId: String(grant?.source_id || ''),
+            canRead: grant?.read === true || grant?.write === true,
+            canWrite: grant?.write === true,
+          })),
+        }, adminActor(req, res));
+        const fresh = await portalAccessControl.getUser(email);
+        if (!fresh) { res.status(503).json({ error: 'access_control_store_unavailable' }); return; }
+        const audit = await readLatestAclAudit({ subjectEmail: email, action: 'replace_managed_grants', stateVersion: fresh.version });
+        res.json({
+          ok: true,
+          user: {
+            email: fresh.email,
+            source_id: fresh.personalSourceId,
+            federated_read: fresh.grants.filter(grant => grant.canRead).map(grant => grant.sourceId),
+            federated_write: fresh.grants.filter(grant => grant.canWrite).map(grant => grant.sourceId),
+            status: fresh.status,
+          },
+          version: updated.version,
+          audit,
+          authority: 'db',
+        });
+      } catch (error) {
+        if (error instanceof PortalAccessControlError) {
+          const status = error.code === 'conflict' ? 409 : error.code === 'not_found' ? 404 : 400;
+          res.status(status).json({ error: error.code === 'conflict' ? 'permissions_changed' : error.code });
+          return;
+        }
+        res.status(503).json({ error: 'access_control_store_unavailable' });
+      }
+      return;
+    }
+    let perms: Record<string, PortalUserPermissions>;
+    try {
+      recoverAccessControlTransactionLocal();
+      perms = loadJsonFileStrictLocal<Record<string, PortalUserPermissions>>(userPermissionsPath());
+      if (!perms || typeof perms !== 'object' || Array.isArray(perms)) throw new Error('access_control_store_invalid');
+    } catch {
+      res.status(503).json({ error: 'access_control_store_unavailable' });
+      return;
+    }
     const user = perms[email];
     if (!user) { res.status(404).json({ error: 'User not found' }); return; }
-    const allowedManaged = new Set(managedAccessAreas.map(a => a.sourceId));
-    const grants = Array.isArray(req.body?.grants) ? req.body.grants : [];
-    const read = new Set<string>(Array.isArray(user.federated_read) ? user.federated_read.filter((x: string) => !allowedManaged.has(x)) : []);
-    const write = new Set<string>(Array.isArray(user.federated_write) ? user.federated_write.filter((x: string) => !allowedManaged.has(x)) : []);
-    if (user.source_id) { read.add(user.source_id); write.add(user.source_id); }
-    for (const grant of grants) {
-      const sourceId = String(grant?.source_id || '');
-      if (!allowedManaged.has(sourceId)) continue;
-      const canWrite = !!grant.write;
-      const canRead = !!grant.read || canWrite;
-      if (canRead) read.add(sourceId);
-      if (canWrite) write.add(sourceId);
+    const expectedVersion = typeof req.body?.expected_version === 'string' ? req.body.expected_version : '';
+    if (!expectedVersion) { res.status(400).json({ error: 'expected_version_required' }); return; }
+    try {
+      const beforeVersion = portalPermissionsVersion(user);
+      if (beforeVersion !== expectedVersion) {
+        res.status(409).json({ error: 'permissions_changed' });
+        return;
+      }
+      const managedSourceIds = managedAccessAreas.map(area => area.sourceId);
+      const updated = applyManagedPortalGrants(user, req.body?.grants, managedSourceIds);
+      const afterVersion = portalPermissionsVersion(updated);
+      perms[email] = updated;
+      writeJsonFileLocal(userPermissionsPath(), perms);
+      console.info('[AccessControl]', JSON.stringify({
+        action: 'permissions_changed',
+        actor: String(res.locals.gbrainAdminActor || 'admin-session-unattributed'),
+        subject_email: email,
+        before_version: beforeVersion,
+        after_version: afterVersion,
+        changed_at: new Date().toISOString(),
+      }));
+      res.json({ ok: true, user: updated, version: afterVersion });
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'invalid_grants';
+      if (code === 'invalid_permissions_shape' || code === 'personal_source_required' || code === 'write_without_read') {
+        res.status(503).json({ error: 'access_control_store_invalid' });
+        return;
+      }
+      res.status(400).json({ error: code });
     }
-    user.federated_read = Array.from(read).filter(Boolean);
-    user.federated_write = Array.from(write).filter(Boolean);
-    perms[email] = user;
-    writeJsonFileLocal(userPermissionsPath(), perms);
-    res.json({ ok: true, user });
   });
   // OAuth authorization must be bound to the same opaque, server-side Portal
   // session used by the rest of the application. Never let the SDK issue an
@@ -2295,7 +3180,12 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   // v0.40 D15.5: safeHexEqual extracted to src/core/timing-safe.ts so the new
   // /webhooks/github HMAC verifier reuses the same constant-time compare.
   // POST /admin/login — JSON body with token (for programmatic/UI login)
-  app.post('/admin/login', express.json(), (req, res) => {
+  app.post('/admin/login', authNoStore, express.json(), (req, res) => {
+    const fallbackUntil = adminFallbackDeadline();
+    if (!fallbackUntil) {
+      res.status(410).json({ error: 'admin_fallback_expired' });
+      return;
+    }
     const token = req.body?.token;
     if (!token || typeof token !== 'string') {
       res.status(400).json({ error: 'Token required' });
@@ -2309,10 +3199,10 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
 
     const sessionId = randomBytes(32).toString('hex');
-    const expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
-    adminSessions.set(sessionId, expiresAt);
+    const expiresAt = Math.min(Date.now() + 24 * 60 * 60 * 1000, fallbackUntil);
+    adminSessions.set(sessionId, { expiresAt, authMethod: 'bootstrap_fallback', actor: fallbackAdminActor('bootstrap', sessionId) });
 
-    res.cookie('gbrain_admin', sessionId, adminCookie(req, 24 * 60 * 60 * 1000));
+    res.cookie('gbrain_admin', sessionId, adminCookie(req, expiresAt - Date.now()));
     res.json({ status: 'authenticated' });
   });
 
@@ -2365,7 +3255,12 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   // POST /admin/api/issue-magic-link — agent-callable mint endpoint.
   // Auth: Authorization: Bearer <bootstrapToken>. Returns one-time nonce.
-  app.post('/admin/api/issue-magic-link', express.json(), (req: Request, res: Response) => {
+  app.post('/admin/api/issue-magic-link', authNoStore, express.json(), (req: Request, res: Response) => {
+    const fallbackUntil = adminFallbackDeadline();
+    if (!fallbackUntil) {
+      res.status(410).json({ error: 'admin_fallback_expired' });
+      return;
+    }
     const auth = (req.headers.authorization || '') as string;
     const m = auth.match(/^Bearer\s+(\S+)$/i);
     if (!m) {
@@ -2379,16 +3274,19 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
     pruneExpiredNonces();
     const nonce = randomBytes(32).toString('hex');
-    magicLinkNonces.set(nonce, Date.now() + NONCE_TTL_MS);
+    const nonceExpiresAt = Math.min(Date.now() + NONCE_TTL_MS, fallbackUntil);
+    magicLinkNonces.set(nonce, nonceExpiresAt);
     const baseUrl = publicUrl || `http://localhost:${port}`;
-    res.json({ url: `${baseUrl}/admin/auth/${nonce}`, expires_in: NONCE_TTL_MS / 1000 });
+    res.json({ url: `${baseUrl}/admin/auth/${nonce}`, expires_in: Math.max(0, Math.floor((nonceExpiresAt - Date.now()) / 1000)) });
   });
 
   // GET /admin/auth/:nonce — single-use magic link redemption.
   // Browser hits it, server validates the nonce (exists + unconsumed +
   // unexpired), marks consumed, sets cookie, redirects to dashboard.
   // Rate-limited at 10/min/IP to harden against DoS via bad-token loops.
-  app.get('/admin/auth/:token', adminAuthRateLimiter, (req: Request, res: Response) => {
+  app.get('/admin/auth/:token', authNoStore, adminAuthRateLimiter, (req: Request, res: Response) => {
+    const fallbackUntil = adminFallbackDeadline();
+    if (!fallbackUntil) return res.status(410).send('Admin fallback has expired');
     const nonce = String(req.params.token ?? '');
     pruneExpiredNonces();
 
@@ -2420,10 +3318,10 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     consumedNonces.add(nonce);
 
     const sessionId = randomBytes(32).toString('hex');
-    const sessionExpiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days for magic link
-    adminSessions.set(sessionId, sessionExpiresAt);
+    const sessionExpiresAt = Math.min(Date.now() + 7 * 24 * 60 * 60 * 1000, fallbackUntil);
+    adminSessions.set(sessionId, { expiresAt: sessionExpiresAt, authMethod: 'magic_link_fallback', actor: fallbackAdminActor('magic-link', sessionId) });
 
-    res.cookie('gbrain_admin', sessionId, adminCookie(req, 7 * 24 * 60 * 60 * 1000));
+    res.cookie('gbrain_admin', sessionId, adminCookie(req, sessionExpiresAt - Date.now()));
     res.redirect('/admin/');
   });
 
@@ -2432,27 +3330,66 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     const cookies = (req.cookies as Record<string, string>) || {};
     const sessionId = cookies.gbrain_admin;
     if (sessionId && adminSessions.has(sessionId)) {
-      const expiresAt = adminSessions.get(sessionId)!;
-      if (Date.now() <= expiresAt) {
-        next();
-        return;
+      const session = adminSessions.get(sessionId)!;
+      const now = Date.now();
+      if (now <= session.expiresAt) {
+        if (session.authMethod !== 'keycloak_bridge') {
+          const fallbackUntil = adminFallbackDeadline();
+          if (fallbackUntil && now <= fallbackUntil) {
+            res.locals.gbrainAdminActor = session.actor;
+            next();
+            return;
+          }
+        } else if (session.backingPortalToken) {
+          const backingInspection = portalSessions.inspect(session.backingPortalToken);
+          const adminDecision = resolveAdminFromPortalInspection(backingInspection);
+          if (backingInspection.state === 'valid' && adminDecision.authorized) {
+            res.locals.gbrainAdminActor = adminDecision.email;
+            next();
+            return;
+          }
+        }
       }
       adminSessions.delete(sessionId);
+      res.clearCookie('gbrain_admin', { path: '/admin' });
     }
 
-    // Bridge only a server-resolved opaque Portal session into an admin session.
+    // Bridge only a currently-valid server-resolved Keycloak Portal session.
     // The legacy unsigned session_user cookie is intentionally ignored.
-    const portalEmail = resolvePortalUser(req, res) || '';
-    if (isAdminEmail(portalEmail)) {
+    const backingPortalToken = portalSessionToken(req);
+    const portalInspection = portalSessions.inspect(backingPortalToken);
+    const adminDecision = resolveAdminFromPortalInspection(portalInspection);
+    const portalEmail = adminDecision.email;
+    if (portalInspection.state === 'valid' && adminDecision.authorized) {
       const bridgedSessionId = randomBytes(32).toString('hex');
-      const bridgedTtlMs = 30 * 24 * 60 * 60 * 1000;
-      adminSessions.set(bridgedSessionId, Date.now() + bridgedTtlMs);
+      const freshnessDeadline = (portalInspection.lastValidatedAt || 0) + portalRevalidationMs;
+      const bridgedTtlMs = Math.min(
+        Math.max(0, (portalInspection.expiresAt || 0) - Date.now()),
+        Math.max(0, freshnessDeadline - Date.now()),
+      );
+      if (bridgedTtlMs <= 0) {
+        const boundaryInspection = portalSessions.inspect(backingPortalToken);
+        return res.status(401).json(portalAdminAuthFailurePayload(
+          boundaryInspection,
+          wasPortalAdminAuthorized(boundaryInspection),
+        ));
+      }
+      adminSessions.set(bridgedSessionId, {
+        expiresAt: Date.now() + bridgedTtlMs,
+        authMethod: 'keycloak_bridge',
+        actor: portalEmail,
+        backingPortalToken,
+      });
       res.cookie('gbrain_admin', bridgedSessionId, adminCookie(req, bridgedTtlMs));
+      res.locals.gbrainAdminActor = portalEmail;
       next();
       return;
     }
 
-    res.status(401).json({ error: 'Admin authentication required' });
+    res.status(401).json(portalAdminAuthFailurePayload(
+      portalInspection,
+      wasPortalAdminAuthorized(portalInspection),
+    ));
   }
 
   function requireAdminSameOrigin(req: express.Request, res: express.Response, next: express.NextFunction) {
@@ -2504,13 +3441,37 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       idempotency_key: idempotencyKey,
     }, { allowProtectedSubmit: true });
   };
+  const enqueueCalibrationProfile = async () => {
+    const cliEntry = process.argv[1];
+    if (!cliEntry) throw new Error('calibration_cli_entry_unavailable');
+    const data = { cwd: homedir(), argv: [process.execPath, cliEntry, 'dream', '--phase', 'calibration_profile'] };
+    validateShellJobParams(data);
+    const hourBucket = new Date().toISOString().slice(0, 13);
+    let job = await meetingReviewQueue.add('shell', data, {
+      max_attempts: 1,
+      timeout_ms: 1_800_000,
+      idempotency_key: `admin-calibration-profile:${hourBucket}`,
+    }, { allowProtectedSubmit: true });
+    if (['failed', 'dead', 'cancelled'].includes(job.status)) {
+      const minuteBucket = new Date().toISOString().slice(0, 16);
+      job = await meetingReviewQueue.add('shell', data, {
+        max_attempts: 1,
+        timeout_ms: 1_800_000,
+        idempotency_key: `admin-calibration-profile:retry:${job.id}:${minuteBucket}`,
+      }, { allowProtectedSubmit: true });
+    }
+    return job;
+  };
 
   app.get('/admin/api/meeting-review/items', requireAdmin, async (req: Request, res: Response) => {
     try {
       const statusRaw = String(req.query.status ?? 'pending');
       const status = ['pending', 'accepted', 'rejected'].includes(statusRaw) ? statusRaw as MeetingReviewStatus : 'pending';
+      const reviewClassRaw = String(req.query.review_class ?? '');
+      const review_class = ['ready', 'exception'].includes(reviewClassRaw) ? reviewClassRaw as MeetingReviewClass : undefined;
       res.json(await listMeetingReviewItems({
         status,
+        review_class,
         query: typeof req.query.q === 'string' ? req.query.q : undefined,
         limit: Number(req.query.limit ?? 100),
       }));
@@ -2519,13 +3480,37 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
   });
 
+  app.get('/admin/api/meeting-review/sources', requireAdmin, async (_req: Request, res: Response) => {
+    res.json({ rows: MEETING_INTERNAL_SOURCE_OPTIONS });
+  });
+
+  const isCanonicalMeetingEntity = (page: Awaited<ReturnType<typeof engine.getPage>>): boolean => {
+    if (!page || page.type !== 'person' || /\/(?:index|readme)$/i.test(page.slug)) return false;
+    const status = String(page.frontmatter?.status ?? '').trim().toLowerCase();
+    return status === 'active' || status === 'stable';
+  };
+
+  app.get('/admin/api/meeting-review/entities', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      const query = String(req.query.q ?? '').trim().toLowerCase();
+      const pages = await engine.listPages({ sourceId: 'shared', limit: 5_000, sort: 'slug' });
+      const rows = pages
+        .filter(page => isCanonicalMeetingPersonSlug(page.slug))
+        .filter(page => isCanonicalMeetingEntity(page))
+        .filter(page => !query || `${page.title || ''} ${page.slug}`.toLowerCase().includes(query))
+        .slice(0, 50)
+        .map(page => ({ slug: page.slug, title: page.title || page.slug, kind: page.slug.startsWith('hcm/employees/') ? 'employee' : 'contact' }));
+      res.json({ rows });
+    } catch (error) { sendReviewError(res, error); }
+  });
+
   app.get('/admin/api/meeting-review/items/:id', requireAdmin, async (req: Request, res: Response) => {
     try { res.json(await getMeetingReviewItem(String(req.params.id))); }
     catch (error) { sendReviewError(res, error); }
   });
 
   app.post('/admin/api/meeting-review/items/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
-    try { res.json(await createManualMeetingRevision(String(req.params.id), req.body?.draft, adminActor(req))); }
+    try { res.json(await createManualMeetingRevision(String(req.params.id), req.body?.draft, adminActor(req, res))); }
     catch (error) { sendReviewError(res, error); }
   });
 
@@ -2535,29 +3520,53 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         String(req.params.id),
         String(req.body?.field ?? 'canonical_markdown') as 'canonical_markdown' | 'shared_markdown' | 'split_markdown',
         String(req.body?.comment ?? ''),
-        adminActor(req),
+        adminActor(req, res),
+      ));
+    } catch (error) { sendReviewError(res, error); }
+  });
+
+  app.post('/admin/api/meeting-review/items/:id/resolution', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const resolution = await saveMeetingReviewResolution(id, req.body, adminActor(req, res), {
+        entityExists: async slug => isCanonicalMeetingEntity(await engine.getPage(slug, { sourceId: 'shared' })),
+      });
+      try {
+        const job = await enqueueMeetingIngest(
+          ['--dry-run', '--ids', id, '--limit', '1'],
+          `meeting-review:resolution:${id}:${resolution.updated_at}`,
+        );
+        res.status(202).json({ resolution, job_id: job.id });
+      } catch {
+        res.status(202).json({
+          resolution,
+          job_id: null,
+          warning: 'resolution_saved_preview_queue_failed',
+          message: 'Решение сохранено, но повторная проверка не поставлена в очередь. Запустите «Обновить предпросмотр».',
+        });
+      }
+    } catch (error) { sendReviewError(res, error); }
+  });
+
+  app.post('/admin/api/meeting-review/items/:id/advisor', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await askMeetingReviewAdvisor(
+        String(req.params.id),
+        String(req.body?.question ?? ''),
+        adminActor(req, res),
       ));
     } catch (error) { sendReviewError(res, error); }
   });
 
   app.post('/admin/api/meeting-review/items/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
-    const id = String(req.params.id);
-    const actor = adminActor(req);
-    try {
-      await acceptMeetingReview(id, req.body?.draft, actor);
-      try {
-        const job = await enqueueMeetingIngest(['--wait-lock', '--apply', '--ids', id], `meeting-review:${id}:accepted-v1`);
-        const item = await attachMeetingReviewJob(id, job.id, actor);
-        res.status(202).json({ item, job_id: job.id });
-      } catch (queueError) {
-        await reopenMeetingReviewAfterQueueFailure(id, queueError instanceof Error ? queueError.message : String(queueError), actor);
-        throw queueError;
-      }
-    } catch (error) { sendReviewError(res, error); }
+    res.status(409).json({
+      error: 'direct_meeting_accept_disabled',
+      message: 'Прямой импорт отключён. Устраните указанную причину; clean-встречи публикуются transactional autopublisher автоматически.',
+    });
   });
 
   app.post('/admin/api/meeting-review/items/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
-    try { res.json(await rejectMeetingReview(String(req.params.id), String(req.body?.reason ?? ''), adminActor(req))); }
+    try { res.json(await rejectMeetingReview(String(req.params.id), String(req.body?.reason ?? ''), adminActor(req, res))); }
     catch (error) { sendReviewError(res, error); }
   });
 
@@ -2572,7 +3581,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   app.get('/admin/api/ai-review/proposals', requireAdmin, async (req: Request, res: Response) => {
     try {
       const statusRaw = String(req.query.status ?? 'pending');
-      const status = ['pending', 'accepted', 'rejected', 'superseded'].includes(statusRaw)
+      const status = ['pending', 'accepted', 'rejected', 'superseded', 'deferred'].includes(statusRaw)
         ? statusRaw as TakeProposalStatus
         : 'pending';
       res.json(await listTakeProposals(engine, {
@@ -2589,7 +3598,11 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.get('/admin/api/ai-review/proposals/:id', requireAdmin, async (req: Request, res: Response) => {
     try {
-      res.json(await getTakeProposalReview(engine, Number(req.params.id)));
+      const id = Number(req.params.id);
+      res.json({
+        ...await getTakeProposalReview(engine, id),
+        review_governance: await proposalReviewGovernance('take_proposal', id),
+      });
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -2597,7 +3610,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/proposals/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
-      res.json(await createManualTakeRevision(engine, Number(req.params.id), req.body?.draft, adminActor(req)));
+      res.json(await createManualTakeRevision(engine, Number(req.params.id), req.body?.draft, adminActor(req, res)));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -2609,7 +3622,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         engine,
         Number(req.params.id),
         String(req.body?.comment ?? ''),
-        adminActor(req),
+        adminActor(req, res),
         typeof req.body?.model === 'string' ? req.body.model : undefined,
       ));
     } catch (error) {
@@ -2619,11 +3632,12 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/proposals/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
+      await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));
       res.json(await acceptTakeProposal(
         engine,
         Number(req.params.id),
         req.body?.draft,
-        adminActor(req),
+        adminActor(req, res),
         typeof req.body?.revision_id === 'number' ? req.body.revision_id : undefined,
       ));
     } catch (error) {
@@ -2633,9 +3647,102 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/proposals/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
-      res.json(await rejectTakeProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+      await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));
+      res.json(await rejectTakeProposal(engine, Number(req.params.id), adminActor(req, res), req.body?.reason));
     } catch (error) {
       sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/defer', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));
+      res.json(await deferTakeProposal(engine, Number(req.params.id), adminActor(req, res), req.body?.reason));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/proposals/:id/restore', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      await assertDirectAdminReviewAllowed('take_proposal', Number(req.params.id));
+      res.json(await restoreTakeProposalToPending(engine, Number(req.params.id), adminActor(req, res), req.body?.reason));
+    } catch (error) {
+      sendReviewError(res, error);
+    }
+  });
+
+  // --- Multi-reviewer rounds -------------------------------------------------
+  // Admin sees named votes and can finalize ONLY an escalated round, with a
+  // mandatory override reason. Open rounds belong to their reviewers.
+
+  app.post('/admin/api/ai-review/rounds', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await openReviewRound(engine, {
+        targetType: String(req.body?.target_type ?? 'take_proposal'),
+        targetId: Number(req.body?.target_id),
+        permissions: await loadUserPermissionsMap(),
+        actor: adminActor(req, res),
+        deadlineHours: req.body?.deadline_hours,
+      }));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/rounds', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      await synchronizePendingReviewAssignments();
+      const statusRaw = String(req.query.status ?? 'escalated');
+      const allowed = ['open', 'escalated', 'finalizing', 'finalized', 'cancelled', 'active'];
+      res.json(await listReviewRounds(engine, {
+        status: (allowed.includes(statusRaw) ? statusRaw : 'escalated') as RoundStatus | 'active',
+        limit: Number(req.query.limit ?? 50),
+        offset: Number(req.query.offset ?? 0),
+      }));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.get('/admin/api/ai-review/rounds/:id', requireAdmin, async (req: Request, res: Response) => {
+    try {
+      res.json(await getReviewRoundDetail(engine, Number(req.params.id)));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/rounds/:id/finalize', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await adminFinalizeRound(engine, {
+        roundId: Number(req.params.id),
+        actor: adminActor(req, res),
+        action: String(req.body?.action ?? ''),
+        reason: req.body?.reason,
+      }));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/rounds/:id/reconcile-stale', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
+    try {
+      res.json(await adminReconcileStaleRound(engine, {
+        roundId: Number(req.params.id),
+        actor: adminActor(req, res),
+        permissions: await loadUserPermissionsMap(),
+      }));
+    } catch (error) {
+      sendReviewRoundError(res, error);
+    }
+  });
+
+  app.post('/admin/api/ai-review/rounds/sweep', requireAdmin, requireAdminSameOrigin, express.json(), async (_req: Request, res: Response) => {
+    try {
+      res.json(await escalateOverdueRounds(engine));
+    } catch (error) {
+      sendReviewRoundError(res, error);
     }
   });
 
@@ -2653,7 +3760,11 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.get('/admin/api/ai-review/concepts/:id', requireAdmin, async (req: Request, res: Response) => {
     try {
-      res.json(await getConceptProposalReview(engine, Number(req.params.id)));
+      const id = Number(req.params.id);
+      res.json({
+        ...await getConceptProposalReview(engine, id),
+        review_governance: await proposalReviewGovernance('concept_proposal', id),
+      });
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -2661,7 +3772,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/concepts/:id/revisions/manual', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
-      res.json(await createManualConceptRevision(engine, Number(req.params.id), String(req.body?.proposed_markdown ?? ''), adminActor(req)));
+      res.json(await createManualConceptRevision(engine, Number(req.params.id), String(req.body?.proposed_markdown ?? ''), adminActor(req, res)));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -2669,7 +3780,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/concepts/:id/revisions/llm', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
-      res.json(await createLlmConceptRevision(engine, Number(req.params.id), String(req.body?.comment ?? ''), adminActor(req), req.body?.model));
+      res.json(await createLlmConceptRevision(engine, Number(req.params.id), String(req.body?.comment ?? ''), adminActor(req, res), req.body?.model));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -2677,7 +3788,8 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/concepts/:id/accept', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
-      res.json(await acceptConceptProposal(engine, Number(req.params.id), req.body?.proposed_markdown, adminActor(req), {
+      await assertDirectAdminReviewAllowed('concept_proposal', Number(req.params.id));
+      res.json(await acceptConceptProposal(engine, Number(req.params.id), req.body?.proposed_markdown, adminActor(req, res), {
         revisionId: typeof req.body?.revision_id === 'number' ? req.body.revision_id : undefined,
         allowOverwriteExisting: req.body?.allow_overwrite_existing === true,
       }));
@@ -2688,7 +3800,8 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
 
   app.post('/admin/api/ai-review/concepts/:id/reject', requireAdmin, requireAdminSameOrigin, express.json(), async (req: Request, res: Response) => {
     try {
-      res.json(await rejectConceptProposal(engine, Number(req.params.id), adminActor(req), req.body?.reason));
+      await assertDirectAdminReviewAllowed('concept_proposal', Number(req.params.id));
+      res.json(await rejectConceptProposal(engine, Number(req.params.id), adminActor(req, res), req.body?.reason));
     } catch (error) {
       sendReviewError(res, error);
     }
@@ -3372,7 +4485,9 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
   });
 
-  function adminActor(req: Request): string {
+  function adminActor(req: Request, res?: Response): string {
+    const resolved = String(res?.locals?.gbrainAdminActor || '').trim();
+    if (resolved) return resolved;
     const sessionId = (req.cookies as Record<string, string>)?.gbrain_admin || 'unknown';
     return `admin-ui:${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}`;
   }
@@ -3384,7 +4499,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         res.status(400).json({ error: 'config_required' });
         return;
       }
-      const out = await operationsByName.source_connector_config_put.handler(ctx, { config: req.body.config, actor: adminActor(req) });
+      const out = await operationsByName.source_connector_config_put.handler(ctx, { config: req.body.config, actor: adminActor(req, res) });
       res.json(out);
     } catch (e) {
       res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
@@ -3405,7 +4520,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         connector_id,
         source_object,
         secrets: req.body.secrets,
-        actor: adminActor(req),
+        actor: adminActor(req, res),
       });
       res.json(out);
     } catch (e) {
@@ -3422,7 +4537,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         config_id: typeof req.body?.config_id === 'string' ? req.body.config_id : connectorSecretConfigId(connector_id),
         connector_id,
         source_object,
-        actor: adminActor(req),
+        actor: adminActor(req, res),
       });
       res.json(out);
     } catch (e) {
@@ -3776,6 +4891,15 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     }
   });
 
+  app.post('/admin/api/calibration/run', requireAdmin, requireAdminSameOrigin, async (_req: Request, res: Response) => {
+    try {
+      const job = await enqueueCalibrationProfile();
+      res.status(202).json({ job_id: job.id, status: job.status });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'calibration_enqueue_failed' });
+    }
+  });
+
   app.get('/admin/api/calibration/profile', requireAdmin, async (req: Request, res: Response) => {
     try {
       const { getLatestProfile } = await import('./calibration.ts');
@@ -4050,10 +5174,18 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
+    res.write('retry: 3000\n: connected\n\n');
 
     sseClients.add(res);
-    req.on('close', () => sseClients.delete(res));
+    const heartbeat = setInterval(() => {
+      try { res.write(': heartbeat\n\n'); } catch { clearInterval(heartbeat); sseClients.delete(res); }
+    }, 15_000);
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -4146,7 +5278,7 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
     // Create a fresh MCP server per request (stateless)
     const server = new Server(
       { name: 'gbrain', version: VERSION },
-      { capabilities: { tools: {} } },
+      { capabilities: { tools: {} }, instructions: GBRAIN_MCP_INSTRUCTIONS },
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -4155,16 +5287,16 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
       // ever called tools/list, and the v0.26.3 persistence regression test
       // asserting >= 2 rows after tools/list + tools/call was unreachable.
       const latency = Date.now() - startTime;
-      try {
-        await executeRawJsonb(
-          engine,
-          `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-          [authInfo.clientId, agentName, 'tools/list', latency, 'success'],
-          [null],
-        );
-      } catch { /* best effort */ }
+      const requestLogId = await persistRequestLog({
+        tokenName: authInfo.clientId,
+        agentName,
+        operation: 'tools/list',
+        latencyMs: latency,
+        status: 'success',
+        params: null,
+      });
       broadcastEvent({
+        id: requestLogId,
         agent: agentName,
         operation: 'tools/list',
         scopes: authInfo.scopes.join(','),
@@ -4195,16 +5327,17 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         // misbehaving agents need to see the full attempt log, not just
         // valid-op success/error.
         const latency = Date.now() - startTime;
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', `unknown_operation: ${name}`],
-            [null],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: name,
+          latencyMs: latency,
+          status: 'error',
+          errorMessage: `unknown_operation: ${name}`,
+          params: null,
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: name,
           scopes: authInfo.scopes.join(','),
@@ -4227,16 +5360,17 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         // motivation as the unknown-op path — and it makes the v0.26.3
         // persistence regression test reliable across both rejection paths.
         const latency = Date.now() - startTime;
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', `insufficient_scope: requires '${requiredScope}'`],
-            [null],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: name,
+          latencyMs: latency,
+          status: 'error',
+          errorMessage: `insufficient_scope: requires '${requiredScope}'`,
+          params: null,
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: name,
           scopes: authInfo.scopes.join(','),
@@ -4323,16 +5457,17 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         // real object, not a JSON-encoded string.
         const latency = Date.now() - startTime;
         const errorPayload = serializeError(e);
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', errorPayload.message],
-            [logParamsObj],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: name,
+          latencyMs: latency,
+          status: 'error',
+          errorMessage: errorPayload.message,
+          params: logParamsObj,
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: name,
           params: broadcastParams,
@@ -4355,16 +5490,17 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
           const parsed = JSON.parse(toolResult.content[0]?.text ?? '{}');
           errMsg = parsed.error?.message ?? parsed.message ?? errMsg;
         } catch { /* ignore */ }
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
-             VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-            [authInfo.clientId, agentName, name, latency, 'error', errMsg],
-            [logParamsObj],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: name,
+          latencyMs: latency,
+          status: 'error',
+          errorMessage: errMsg,
+          params: logParamsObj,
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: name,
           params: broadcastParams,
@@ -4377,16 +5513,16 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         return toolResult;
       }
 
-      try {
-        await executeRawJsonb(
-          engine,
-          `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-          [authInfo.clientId, agentName, name, latency, 'success'],
-          [logParamsObj],
-        );
-      } catch { /* best effort */ }
+      const requestLogId = await persistRequestLog({
+        tokenName: authInfo.clientId,
+        agentName,
+        operation: name,
+        latencyMs: latency,
+        status: 'success',
+        params: logParamsObj,
+      });
       broadcastEvent({
+        id: requestLogId,
         agent: agentName,
         operation: name,
         params: broadcastParams,
@@ -4614,16 +5750,16 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
         );
 
         const latency = Date.now() - startTime;
-        try {
-          await executeRawJsonb(
-            engine,
-            `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
-             VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
-            [authInfo.clientId, agentName, 'webhook_ingest', latency, 'success'],
-            [{ content_type: contentType, content_hash: contentHash, bytes: body.length, job_id: job.id }],
-          );
-        } catch { /* best effort */ }
+        const requestLogId = await persistRequestLog({
+          tokenName: authInfo.clientId,
+          agentName,
+          operation: 'webhook_ingest',
+          latencyMs: latency,
+          status: 'success',
+          params: { content_type: contentType, content_hash: contentHash, bytes: body.length, job_id: job.id },
+        });
         broadcastEvent({
+          id: requestLogId,
           agent: agentName,
           operation: 'webhook_ingest',
           scopes: authInfo.scopes.join(','),
@@ -4821,6 +5957,23 @@ async function load(){try{render(await api('/admin/api/permissions'))}catch(e){d
   // Start server
   // ---------------------------------------------------------------------------
   const clientCount = await sql`SELECT count(*)::int as count FROM oauth_clients`;
+
+  // Assignment is a governance queue, not Autopilot: it performs no model
+  // generation and no canonical mutation. The bounded synchronizer only opens
+  // review rounds for proposals created after the durable cutover timestamp.
+  const reviewAssignmentTimer = setInterval(() => {
+    void synchronizePendingReviewAssignments().then(result => {
+      if (result.opened > 0 || result.failed.length > 0) {
+        console.error(`[AI Review] assignment sync: opened=${result.opened} failed=${result.failed.length}`);
+      }
+    }).catch(error => {
+      console.error('[AI Review] assignment sync failed:', error instanceof Error ? error.message : String(error));
+    });
+  }, 60_000);
+  reviewAssignmentTimer.unref();
+  void synchronizePendingReviewAssignments().catch(error => {
+    console.error('[AI Review] initial assignment sync failed:', error instanceof Error ? error.message : String(error));
+  });
 
   app.listen(port, bind, () => {
     console.error(`

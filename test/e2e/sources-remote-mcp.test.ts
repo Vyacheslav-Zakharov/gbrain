@@ -112,6 +112,8 @@ describeE2E('sources-remote-mcp E2E (gstack /setup-gbrain Path 4)', () => {
   let token: string | undefined;
   let readOnlyClientId: string | undefined;
   let readOnlyToken: string | undefined;
+  let sourceReaderClientId: string | undefined;
+  let mintToken: (cid: string, secret: string, scope: string) => Promise<string>;
 
   beforeAll(async () => {
     // Truncate + apply schema/migrations before any subprocess hits the DB.
@@ -145,7 +147,7 @@ describeE2E('sources-remote-mcp E2E (gstack /setup-gbrain Path 4)', () => {
     // Register a sources_admin-scoped client (the "gstack token").
     const reg1 = execSync(
       'bun run src/cli.ts auth register-client e2e-sources-admin ' +
-        '--grant-types client_credentials --scopes "read sources_admin"',
+        '--grant-types client_credentials --scopes "read sources_admin" --source default --federated-read default',
       { cwd: process.cwd(), encoding: 'utf8', env: subprocessEnv },
     );
     clientId = reg1.match(/Client ID:\s+(gbrain_cl_\S+)/)?.[1];
@@ -155,7 +157,7 @@ describeE2E('sources-remote-mcp E2E (gstack /setup-gbrain Path 4)', () => {
     // Register a read-only client (proves the scope-enforcement gate).
     const reg2 = execSync(
       'bun run src/cli.ts auth register-client e2e-read-only ' +
-        '--grant-types client_credentials --scopes "read"',
+        '--grant-types client_credentials --scopes "read" --source default --federated-read default',
       { cwd: process.cwd(), encoding: 'utf8', env: subprocessEnv },
     );
     readOnlyClientId = reg2.match(/Client ID:\s+(gbrain_cl_\S+)/)?.[1];
@@ -189,7 +191,7 @@ describeE2E('sources-remote-mcp E2E (gstack /setup-gbrain Path 4)', () => {
     if (!ready) throw new Error('Server failed to start within 15s.\nstderr tail: ' + stderr.slice(-1000));
 
     // Mint tokens via the OAuth /token endpoint.
-    const mintToken = async (cid: string, secret: string, scope: string): Promise<string> => {
+    mintToken = async (cid: string, secret: string, scope: string): Promise<string> => {
       const body = new URLSearchParams({
         grant_type: 'client_credentials',
         client_id: cid,
@@ -216,7 +218,7 @@ describeE2E('sources-remote-mcp E2E (gstack /setup-gbrain Path 4)', () => {
       if (!serverProcess.killed) serverProcess.kill('SIGKILL');
     }
     const { execSync } = await import('child_process');
-    for (const id of [clientId, readOnlyClientId].filter(Boolean) as string[]) {
+    for (const id of [clientId, readOnlyClientId, sourceReaderClientId].filter(Boolean) as string[]) {
       try {
         execSync(`bun run src/cli.ts auth revoke-client ${id}`, {
           cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, GBRAIN_HOME },
@@ -275,8 +277,29 @@ describeE2E('sources-remote-mcp E2E (gstack /setup-gbrain Path 4)', () => {
     expect(result.remote_url).toBe(TEST_URL);
   });
 
-  test('sources_list surfaces remote_url for the new source', async () => {
+  test('sources_admin does not grant read visibility to a newly created source', async () => {
     const result = await callMcp(token!, 'sources_list', {});
+    expect(Array.isArray(result.sources)).toBe(true);
+    expect(result.sources.some((s: any) => s.id === 'default')).toBe(true);
+    expect(result.sources.find((s: any) => s.id === 'e2e-yc-artifacts')).toBeUndefined();
+  });
+
+  test('separately granted source reader sees remote_url for the new source', async () => {
+    // Register only after sources_add proved the source exists. Do not widen
+    // the original caller's grants or make sources_admin imply read access.
+    const { execSync } = await import('child_process');
+    const registration = execSync(
+      'bun run src/cli.ts auth register-client e2e-source-reader ' +
+        '--grant-types client_credentials --scopes "read" ' +
+        '--source e2e-yc-artifacts --federated-read e2e-yc-artifacts',
+      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, GBRAIN_HOME } },
+    );
+    sourceReaderClientId = registration.match(/Client ID:\s+(gbrain_cl_\S+)/)?.[1];
+    const secret = registration.match(/Client Secret:\s+(gbrain_cs_\S+)/)?.[1];
+    if (!sourceReaderClientId || !secret) throw new Error('Failed to register source reader');
+    const sourceReaderToken = await mintToken(sourceReaderClientId, secret, 'read');
+    const result = await callMcp(sourceReaderToken, 'sources_list', {});
+    expect(result.sources.map((s: any) => s.id)).toEqual(['e2e-yc-artifacts']);
     const found = result.sources.find((s: any) => s.id === 'e2e-yc-artifacts');
     expect(found).toBeDefined();
     expect(found.remote_url).toBe(TEST_URL);

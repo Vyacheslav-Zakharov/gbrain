@@ -8,7 +8,7 @@ import { resolve, relative, sep } from 'path';
 import type { BrainEngine } from './engine.ts';
 import { clampSearchLimit } from './engine.ts';
 import type { GBrainConfig } from './config.ts';
-import type { PageType } from './types.ts';
+import type { Chunk, PageType } from './types.ts';
 import { importFromContent } from './import-file.ts';
 import { writePageThrough } from './write-through.ts';
 import { hybridSearch, hybridSearchCached, stampContentFlags } from './search/hybrid.ts';
@@ -423,6 +423,8 @@ export interface OperationContext {
    * working without change).
    */
   brainId?: string;
+  /** Non-content MCP response metadata populated by operation handlers. */
+  responseMeta?: Record<string, unknown>;
   /**
    * v0.31 (eD4 / eE2): the in-DB tenancy axis for facts hot memory.
    * `sources.id` is TEXT (not INTEGER) — keep this as a string.
@@ -546,7 +548,7 @@ async function crossSourceLinkReadScopeOpts(ctx: OperationContext): Promise<{
  *
  * This is the SINGLE resolver for every read op that accepts a per-call
  * `source_id` / `all_sources` parameter (query, code_callers, code_callees,
- * get_page, search_by_image, code_blast, code_flow). Inlining the `__all__`
+ * get_page, get_chunks, resolve_slugs, search_by_image, code_blast, code_flow). Inlining the `__all__`
  * branch per handler is the bug class that leaked cross-source reads (#1924,
  * #1371): a remote client could pass `source_id: '__all__'` to opt out of its
  * grant, or pass an explicit out-of-grant `source_id` that was never checked.
@@ -573,7 +575,10 @@ export function resolveRequestedScope(
   }
   if (sourceIdParam !== undefined) {
     const allowed = ctx.auth?.allowedSources;
-    if (ctx.remote !== false && allowed && allowed.length > 0 && !allowed.includes(sourceIdParam)) {
+    const remoteAuthorized = allowed && allowed.length > 0
+      ? allowed.includes(sourceIdParam)
+      : ctx.sourceId === sourceIdParam;
+    if (ctx.remote !== false && !remoteAuthorized) {
       throw new OperationError(
         'permission_denied',
         `source '${sourceIdParam}' is outside your granted sources`,
@@ -583,6 +588,35 @@ export function resolveRequestedScope(
     return { sourceId: sourceIdParam };
   }
   return sourceScopeOpts(ctx);
+}
+
+/**
+ * Resolve a legacy slug alias without losing the source that owns it.
+ * A federated alias lookup is performed in grant order. Once an alias matches,
+ * the subsequent page/chunk read is pinned to that source so an identical
+ * canonical slug in another granted source cannot replace or augment it.
+ */
+async function resolveReadSlugAlias(
+  engine: BrainEngine,
+  requestedSlug: string,
+  sourceOpts: { sourceId?: string; sourceIds?: string[] },
+): Promise<{ slug: string; sourceOpts: { sourceId?: string; sourceIds?: string[] } }> {
+  if (sourceOpts.sourceIds?.length) {
+    for (const sourceId of sourceOpts.sourceIds) {
+      const canonical = await engine.resolveSlugWithAlias(requestedSlug, sourceId);
+      if (canonical !== requestedSlug) {
+        return { slug: canonical, sourceOpts: { sourceId } };
+      }
+    }
+    return { slug: requestedSlug, sourceOpts };
+  }
+
+  if (sourceOpts.sourceId) {
+    const slug = await engine.resolveSlugWithAlias(requestedSlug, sourceOpts.sourceId);
+    return { slug, sourceOpts };
+  }
+
+  return { slug: requestedSlug, sourceOpts };
 }
 
 /**
@@ -719,9 +753,10 @@ const get_page: Operation = {
     slug: { type: 'string', required: true, description: 'Page slug' },
     fuzzy: { type: 'boolean', description: 'Enable fuzzy slug resolution (default: false)' },
     include_deleted: { type: 'boolean', description: 'v0.26.5: surface soft-deleted pages with deleted_at populated (default: false). Used by restore workflows.' },
+    source_id: { type: 'string', required: false, description: 'Read from one granted source. Use __all__ to search across the caller grant.' },
   },
   handler: async (ctx, p) => {
-    const slug = p.slug as string;
+    const requestedSlug = p.slug as string;
     const fuzzy = (p.fuzzy as boolean) || false;
     const includeDeleted = (p.include_deleted as boolean) === true;
     // #1393: route BOTH the exact-match read and the fuzzy resolveSlugs through
@@ -730,16 +765,19 @@ const get_page: Operation = {
     // with a federated `allowedSources` grant (and no single ctx.sourceId) got
     // an UNSCOPED exact lookup — a cross-source read of any page by slug. getPage
     // now honors sourceIds[] (both engines), so the same scope closes both paths.
-    const sourceOpts = sourceScopeOpts(ctx);
-    const fuzzyScope = sourceOpts;
+    const sourceOpts = resolveRequestedScope(ctx, p.source_id as string | undefined);
+    const aliasResolution = await resolveReadSlugAlias(ctx.engine, requestedSlug, sourceOpts);
+    const slug = aliasResolution.slug;
+    const readOpts = aliasResolution.sourceOpts;
+    const fuzzyScope = readOpts;
 
-    let page = await ctx.engine.getPage(slug, { includeDeleted, ...sourceOpts });
-    let resolved_slug: string | undefined;
+    let page = await ctx.engine.getPage(slug, { includeDeleted, ...readOpts });
+    let resolved_slug: string | undefined = slug !== requestedSlug ? slug : undefined;
 
     if (!page && fuzzy) {
       const candidates = await ctx.engine.resolveSlugs(slug, fuzzyScope);
       if (candidates.length === 1) {
-        page = await ctx.engine.getPage(candidates[0], { includeDeleted, ...sourceOpts });
+        page = await ctx.engine.getPage(candidates[0], { includeDeleted, ...readOpts });
         resolved_slug = candidates[0];
       } else if (candidates.length > 1) {
         return { error: 'ambiguous_slug', candidates };
@@ -747,7 +785,7 @@ const get_page: Operation = {
     }
 
     if (!page) {
-      throw new OperationError('page_not_found', `Page not found: ${slug}`, includeDeleted ? 'Check the slug or use fuzzy: true' : 'Page may be soft-deleted; pass include_deleted: true to verify');
+      throw new OperationError('page_not_found', `Page not found: ${requestedSlug}`, includeDeleted ? 'Check the slug or use fuzzy: true' : 'Page may be soft-deleted; pass include_deleted: true to verify');
     }
 
     // v0.37.0 (D11): op-layer write-back for the `last_retrieved_at` stale
@@ -1561,6 +1599,21 @@ const search: Operation = {
   cliHints: { name: 'search', positional: ['query'] },
 };
 
+export function publishQueryArmsResponseMeta(
+  ctx: Pick<OperationContext, 'responseMeta'>,
+  meta: HybridSearchMeta | null,
+): void {
+  const arms = meta?.arms;
+  if (!arms || arms.status !== 'degraded') return;
+  ctx.responseMeta = {
+    ...(ctx.responseMeta ?? {}),
+    search: {
+      status: 'degraded',
+      arms: { used: arms.used, total: arms.total },
+    },
+  };
+}
+
 const query: Operation = {
   name: 'query',
   description: QUERY_DESCRIPTION,
@@ -1759,6 +1812,7 @@ const query: Operation = {
       // v0.43 — relational recall override. Omitted = smart default (mode bundle).
       relationalRetrieval: typeof p.relational === 'boolean' ? (p.relational as boolean) : undefined,
     });
+    publishQueryArmsResponseMeta(ctx, capturedMeta);
     const latency_ms = Date.now() - startedAt;
 
     // v0.37.0 (D11): op-layer last_retrieved_at write-back. Same shape as the
@@ -2422,6 +2476,29 @@ const get_skill: Operation = {
   cliHints: { name: 'skill', positional: ['name'] },
 };
 
+// Uniquely namespaced compatibility aliases for MCP clients that reserve or
+// suppress the generic `list_skills` / `get_skill` names. Keep the canonical
+// operations unchanged and share their handlers so publish-gate, confinement,
+// scope, and response semantics cannot drift.
+const gbrain_skills_catalog: Operation = {
+  name: 'gbrain_skills_catalog',
+  description:
+    'Compatibility alias for list_skills. Lists the prose skills this GBrain server publishes, ' +
+    'including triggers and usable/unavailable tools.',
+  params: list_skills.params,
+  handler: list_skills.handler,
+  scope: list_skills.scope,
+};
+
+const gbrain_skill_get: Operation = {
+  name: 'gbrain_skill_get',
+  description:
+    'Compatibility alias for get_skill. Fetches one published GBrain prose skill by exact name.',
+  params: get_skill.params,
+  handler: get_skill.handler,
+  scope: get_skill.scope,
+};
+
 const list_brain_skillpack: Operation = {
   name: 'list_brain_skillpack',
   description:
@@ -2703,26 +2780,40 @@ const get_raw_data: Operation = {
 
 const resolve_slugs: Operation = {
   name: 'resolve_slugs',
-  description: 'Fuzzy-resolve a partial slug to matching page slugs',
+  description: 'Fuzzy-resolve a partial slug to matching page slugs within the caller source grant.',
   params: {
     partial: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Read from one granted source. Use __all__ to search across the caller grant.' },
   },
   handler: async (ctx, p) => {
-    return ctx.engine.resolveSlugs(p.partial as string);
+    const sourceOpts = resolveRequestedScope(ctx, p.source_id as string | undefined);
+    return ctx.engine.resolveSlugs(p.partial as string, sourceOpts);
   },
   scope: 'read',
 };
 
+export type GetChunksItem = Omit<Chunk, 'embedding' | 'has_embedding'> & { has_embedding: boolean };
+
+export function formatChunksForCaller(chunks: Chunk[]): GetChunksItem[] {
+  return chunks.map(({ embedding, has_embedding, ...chunk }) => ({
+    ...chunk,
+    has_embedding: has_embedding ?? embedding !== null,
+  }));
+}
+
 const get_chunks: Operation = {
   name: 'get_chunks',
-  description: 'Get content chunks for a page',
+  description: 'Get content chunks for a page within the caller source grant. Vector bytes are omitted; has_embedding reports stored-vector availability.',
   params: {
     slug: { type: 'string', required: true },
+    source_id: { type: 'string', required: false, description: 'Read from one granted source. Use __all__ to read matching pages across the caller grant.' },
   },
   handler: async (ctx, p) => {
-    // v0.31.8 (D20): thread ctx.sourceId.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
-    return ctx.engine.getChunks(p.slug as string, sourceOpts);
+    const sourceOpts = resolveRequestedScope(ctx, p.source_id as string | undefined);
+    const requestedSlug = p.slug as string;
+    const aliasResolution = await resolveReadSlugAlias(ctx.engine, requestedSlug, sourceOpts);
+    const chunks = await ctx.engine.getChunks(aliasResolution.slug, aliasResolution.sourceOpts);
+    return formatChunksForCaller(chunks);
   },
   scope: 'read',
 };
@@ -3294,7 +3385,7 @@ const source_base_view_upsert: Operation = {
     object_name: { type: 'string', required: true },
     display_name: { type: 'string' },
     selected_fields: { type: 'array', items: { type: 'string' } },
-    row_filter: { type: 'array' },
+    row_filter: { type: 'array', items: { type: 'object' } },
     sample_limit: { type: 'number' },
     primary_key_field: { type: 'string' },
     updated_at_field: { type: 'string' },
@@ -3418,7 +3509,7 @@ const source_transform_view_upsert: Operation = {
   params: {
     transform_view_id: { type: 'string', required: true },
     display_name: { type: 'string' },
-    inputs: { type: 'array', required: true },
+    inputs: { type: 'array', required: true, items: { type: 'object' } },
     sql: { type: 'string', required: true },
     primary_key_field: { type: 'string', required: true },
     updated_at_field: { type: 'string' },
@@ -6116,6 +6207,58 @@ const schema_explain_type: Operation = {
   },
 };
 
+/**
+ * Build a namespaced MCP compatibility alias without changing the canonical
+ * operation. Spreading the canonical contract preserves mutating/localOnly
+ * flags and future metadata; CLI hints are deliberately removed so aliases
+ * remain MCP-only and cannot collide with canonical CLI commands.
+ */
+function mcpCompatibilityAlias(
+  name: string,
+  canonical: Operation,
+  description: string,
+): Operation {
+  return {
+    ...canonical,
+    name,
+    description,
+    cliHints: undefined,
+  };
+}
+
+const gbrain_identity = mcpCompatibilityAlias(
+  'gbrain_identity', whoami,
+  'Namespaced compatibility alias for whoami. Returns the authenticated MCP identity and effective source grants.',
+);
+const gbrain_pages_list = mcpCompatibilityAlias(
+  'gbrain_pages_list', list_pages,
+  'Namespaced compatibility alias for list_pages. Lists pages using the canonical filters and source scope.',
+);
+const gbrain_search = mcpCompatibilityAlias(
+  'gbrain_search', search,
+  'Namespaced compatibility alias for search. Runs canonical keyword search over caller-visible sources.',
+);
+const gbrain_page_get = mcpCompatibilityAlias(
+  'gbrain_page_get', get_page,
+  'Namespaced compatibility alias for get_page. Reads one page using canonical visibility and source rules.',
+);
+const gbrain_schema_explain_type = mcpCompatibilityAlias(
+  'gbrain_schema_explain_type', schema_explain_type,
+  'Namespaced compatibility alias for schema_explain_type. Explains one active schema type.',
+);
+const gbrain_schema_graph = mcpCompatibilityAlias(
+  'gbrain_schema_graph', schema_graph,
+  'Namespaced compatibility alias for schema_graph. Returns the active schema relationship graph.',
+);
+const gbrain_page_put = mcpCompatibilityAlias(
+  'gbrain_page_put', put_page,
+  'Namespaced compatibility alias for put_page. Writes a page with canonical validation, source scope, and audit behavior.',
+);
+const gbrain_link_add = mcpCompatibilityAlias(
+  'gbrain_link_add', add_link,
+  'Namespaced compatibility alias for add_link. Creates a link with canonical provenance and source checks.',
+);
+
 const schema_review_orphans: Operation = {
   name: 'schema_review_orphans',
   description: 'v0.40.6.0: list pages with no active-pack type match. Returns {orphan_count, orphans: [{slug, source_id}]}.',
@@ -6556,7 +6699,10 @@ export const operations: Operation[] = [
   // v0.31.1 (Issue #734): thin-client banner identity packet (read-scope, banner-only)
   get_brain_identity,
   // PR1: skill catalog over MCP — discover + fetch host-repo skills (read-scope)
-  list_skills, get_skill, list_brain_skillpack, advisor,
+  list_skills, get_skill, gbrain_skills_catalog, gbrain_skill_get,
+  gbrain_identity, gbrain_pages_list, gbrain_search, gbrain_page_get,
+  gbrain_schema_explain_type, gbrain_schema_graph, gbrain_page_put, gbrain_link_add,
+  list_brain_skillpack, advisor,
   // v0.41.19.0: thin-client `gbrain status` payload (admin-scope, sync + cycle only)
   get_status_snapshot,
   // Sync

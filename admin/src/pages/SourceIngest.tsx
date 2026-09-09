@@ -1768,7 +1768,7 @@ export function SourceIngestPage() {
         {err && <div style={{ color: 'var(--error)', marginTop: 6, fontSize: 12 }}><b>Ошибка:</b> {err}</div>}
       </div>
 
-      <div className="source-ingest-layout" style={{ display: 'grid', gridTemplateColumns: '320px minmax(0, 1fr)', gap: 18, alignItems: 'start' }}>
+      <div className="source-ingest-layout" style={{ display: 'grid', gridTemplateColumns: '360px minmax(0, 1fr)', gap: 22, alignItems: 'start' }}>
         <SourceIngestCatalogPanel
           tree={data.catalog_tree ?? { connectors: [], base_views: [], transform_views: [], article_views: [], schema: { read_only: true } }}
           activeArea={activeArea}

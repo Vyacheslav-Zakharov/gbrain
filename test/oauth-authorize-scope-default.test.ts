@@ -23,7 +23,15 @@ beforeAll(async () => {
   await engine.connect({});
   await engine.initSchema();
   sql = sqlQueryForEngine(engine);
-  provider = new GBrainOAuthProvider({ sql });
+  provider = new GBrainOAuthProvider({
+    sql,
+    userSourceGrantResolver: email => ({
+      user_email: email,
+      source_id: 'default',
+      federated_read: ['default'],
+      federated_write: ['default'],
+    }),
+  });
 });
 
 afterAll(async () => {
@@ -38,7 +46,10 @@ beforeEach(async () => {
 
 // authorize() writes the granted scope into oauth_codes then redirects; we
 // assert on the stored grant directly, so the redirect is a no-op.
-const noopRes = { redirect() {} } as any;
+const noopRes = {
+  locals: { gbrainPortalUser: 'oauth-scope-test@avers.kz' },
+  redirect() {},
+} as any;
 
 async function authorizeAndReadScopes(
   scope: string,

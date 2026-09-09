@@ -2,6 +2,7 @@ import { test, expect, describe, beforeAll, afterAll, beforeEach } from 'bun:tes
 import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { execFileSync } from 'node:child_process';
 import {
   GIT_SSRF_FLAGS,
   GIT_SSRF_SUBCOMMAND_FLAGS,
@@ -380,12 +381,19 @@ describe('validateRepoState', () => {
     expect(validateRepoState(p)).toBe('no-git');
   });
 
-  test("returns 'corrupted' when git remote get-url fails", async () => {
-    const p = join(fixtureDir, 'corrupted-repo');
+  test("returns 'healthy' for a path-only git repo without an origin remote", async () => {
+    const p = join(fixtureDir, 'path-only');
+    mkdirSync(p, { recursive: true });
+    execFileSync('git', ['init', '--quiet', p]);
+    expect(validateRepoState(p)).toBe('healthy');
+  });
+
+  test("returns 'corrupted' when git remote get-url fails for a managed clone", async () => {
+    const p = join(fixtureDir, 'corrupted');
     mkdirSync(join(p, '.git'), { recursive: true });
     setMode('fail');
     await withEnv({ PATH: fakePath() }, async () => {
-      expect(validateRepoState(p)).toBe('corrupted');
+      expect(validateRepoState(p, 'https://github.com/expected/url')).toBe('corrupted');
     });
   });
 
@@ -407,12 +415,10 @@ describe('validateRepoState', () => {
     });
   });
 
-  test("returns 'healthy' when no expected URL provided (just probe)", async () => {
+  test("returns 'healthy' when no expected URL provided (just probe)", () => {
     const p = join(fixtureDir, 'healthy-no-expect');
-    mkdirSync(join(p, '.git'), { recursive: true });
-    setMode('ok');
-    await withEnv({ PATH: fakePath() }, async () => {
-      expect(validateRepoState(p)).toBe('healthy');
-    });
+    mkdirSync(p, { recursive: true });
+    execFileSync('git', ['init', '--quiet', p]);
+    expect(validateRepoState(p)).toBe('healthy');
   });
 });

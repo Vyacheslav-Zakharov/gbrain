@@ -1477,9 +1477,9 @@ CREATE INDEX IF NOT EXISTS calibration_profiles_published_idx
   ON calibration_profiles (source_id, published, holder)
   WHERE published = true;
 
--- take_proposal_scans is the page-level idempotency ledger. It records empty
--- extractor results too, so unchanged pages never re-spend simply because no
--- claim was found. take_proposals remains the item-level review queue.
+-- take_proposal_scans is the page-level idempotency ledger. It caches only
+-- valid extractor results, including a valid JSON []; malformed, incomplete,
+-- refused, filtered, and truncated outputs remain failed/retryable.
 CREATE TABLE IF NOT EXISTS take_proposal_scans (
   id                BIGSERIAL PRIMARY KEY,
   source_id         TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
@@ -1490,12 +1490,44 @@ CREATE TABLE IF NOT EXISTS take_proposal_scans (
   model_id          TEXT        NOT NULL,
   status            TEXT        NOT NULL DEFAULT 'running'
                                 CHECK (status IN ('running','completed','failed')),
-  proposal_count    INTEGER     NOT NULL DEFAULT 0,
+  proposal_count    INTEGER     NOT NULL DEFAULT 0 CHECK (proposal_count >= 0),
+  suppressed_count  INTEGER     NOT NULL DEFAULT 0 CHECK (suppressed_count >= 0),
   error_text        TEXT,
+  dispatch_status   TEXT        NOT NULL DEFAULT 'selected'
+                                CHECK (dispatch_status IN ('selected','budget_blocked','provider_dispatched','provider_failed','provider_completed')),
+  outcome           TEXT        CHECK (outcome IS NULL OR outcome IN ('budget_denied_before_call','provider_failed','model_empty_valid','model_nonempty_valid','parse_failed','schema_rows_dropped','provider_empty','truncated','refused','content_filtered','provider_incomplete','legacy_unverified','stale_running','runtime_failed')),
+  actual_model_id   TEXT,
+  stop_reason       TEXT        CHECK (stop_reason IS NULL OR stop_reason IN ('end','tool_calls','length','refusal','content_filter','other')),
+  input_tokens      INTEGER     CHECK (input_tokens IS NULL OR input_tokens >= 0),
+  output_tokens     INTEGER     CHECK (output_tokens IS NULL OR output_tokens >= 0),
+  cache_read_tokens INTEGER     CHECK (cache_read_tokens IS NULL OR cache_read_tokens >= 0),
+  cache_creation_tokens INTEGER CHECK (cache_creation_tokens IS NULL OR cache_creation_tokens >= 0),
+  response_length   INTEGER     CHECK (response_length IS NULL OR response_length >= 0),
+  response_sha256   TEXT,
+  request_length    INTEGER     CHECK (request_length IS NULL OR request_length >= 0),
+  request_sha256    TEXT,
+  reserved_call_usd DOUBLE PRECISION CHECK (reserved_call_usd IS NULL OR reserved_call_usd >= 0),
+  actual_call_usd   DOUBLE PRECISION CHECK (actual_call_usd IS NULL OR actual_call_usd >= 0),
+  reservation_released_usd DOUBLE PRECISION NOT NULL DEFAULT 0 CHECK (reservation_released_usd >= 0),
+  usage_reconciled  BOOLEAN     NOT NULL DEFAULT false,
+  requested_at      TIMESTAMPTZ,
+  parsed_count      INTEGER     NOT NULL DEFAULT 0 CHECK (parsed_count >= 0),
+  dropped_count     INTEGER     NOT NULL DEFAULT 0 CHECK (dropped_count >= 0),
   started_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   completed_at      TIMESTAMPTZ,
   UNIQUE (source_id, page_slug, content_hash, prompt_version)
 );
+
+CREATE TABLE IF NOT EXISTS take_proposal_scan_attempts (
+  id              BIGSERIAL PRIMARY KEY,
+  scan_id         BIGINT      NOT NULL REFERENCES take_proposal_scans(id) ON DELETE CASCADE,
+  proposal_run_id TEXT        NOT NULL,
+  snapshot        JSONB       NOT NULL,
+  archived_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (scan_id, proposal_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_take_proposal_scan_attempts_scan
+  ON take_proposal_scan_attempts(scan_id, archived_at DESC);
 
 -- take_proposals: propose_takes phase item queue. Idempotency is per claim,
 -- not per page, so one extractor call can persist every returned claim.
@@ -1510,13 +1542,14 @@ CREATE TABLE IF NOT EXISTS take_proposals (
   proposed_at                 TIMESTAMPTZ  NOT NULL DEFAULT now(),
   proposal_run_id             TEXT         NOT NULL,
   status                      TEXT         NOT NULL DEFAULT 'pending'
-                                           CHECK (status IN ('pending','accepted','rejected','superseded')),
+                                           CHECK (status IN ('pending','accepted','rejected','superseded','deferred')),
   claim_text                  TEXT         NOT NULL,
   claim_hash                  TEXT         NOT NULL,
   kind                        TEXT         NOT NULL,
   holder                      TEXT         NOT NULL,
   weight                      REAL         NOT NULL,
   domain                      TEXT,
+  claim_class                 TEXT CHECK (claim_class IS NULL OR claim_class IN ('prediction','judgment','recommendation','bet')),
   dedup_against_fence_rows    JSONB,
   model_id                    TEXT         NOT NULL,
   acted_at                    TIMESTAMPTZ,
@@ -1585,6 +1618,7 @@ CREATE TABLE IF NOT EXISTS concept_proposals (
                                   CHECK (status IN ('pending','accepted','rejected','superseded','deferred')),
   proposed_markdown   TEXT        NOT NULL,
   source_atoms        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+  source_takes        JSONB       NOT NULL DEFAULT '[]'::jsonb,
   model_id            TEXT        NOT NULL,
   version             INTEGER     NOT NULL DEFAULT 1,
   proposed_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1595,6 +1629,84 @@ CREATE TABLE IF NOT EXISTS concept_proposals (
 CREATE INDEX IF NOT EXISTS concept_proposals_pending_idx
   ON concept_proposals (source_id, status, proposed_at DESC)
   WHERE status = 'pending';
+
+-- ============================================================
+-- Multi-reviewer AI Review (rounds / assignments / votes)
+-- ============================================================
+-- A round is the governance wrapper around ONE immutable proposal. Assignments
+-- freeze at round creation: every configured active Portal user with write
+-- access to the proposal's source is mandatory. Unanimity auto-finalizes
+-- through the existing guarded publisher; disagreement or a missed deadline
+-- escalates to Admin. See docs/architecture/ai-review-multi-review.md.
+CREATE TABLE IF NOT EXISTS ai_review_rounds (
+  id                     BIGSERIAL   PRIMARY KEY,
+  target_type            TEXT        NOT NULL CHECK (target_type IN ('take_proposal','concept_proposal')),
+  target_id              BIGINT      NOT NULL,
+  source_id              TEXT        NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  proposal_snapshot_hash TEXT        NOT NULL,
+  policy_kind            TEXT        NOT NULL CHECK (policy_kind IN ('personal','shared')),
+  status                 TEXT        NOT NULL DEFAULT 'open'
+                                     CHECK (status IN ('open','escalated','finalizing','finalized','cancelled')),
+  outcome                TEXT        CHECK (outcome IN ('accepted','rejected')),
+  escalation_reason      TEXT,
+  round_version          INTEGER     NOT NULL DEFAULT 1,
+  opened_by              TEXT        NOT NULL,
+  opened_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  due_at                 TIMESTAMPTZ NOT NULL,
+  closed_at              TIMESTAMPTZ,
+  finalized_by           TEXT,
+  finalized_at           TIMESTAMPTZ,
+  finalizing_at          TIMESTAMPTZ,
+  finalized_mode         TEXT        CHECK (finalized_mode IN ('auto_unanimous','auto_quorum','admin_override')),
+  final_reason           TEXT
+);
+-- One live round per proposal. Closed rounds may accumulate for the audit trail.
+CREATE UNIQUE INDEX IF NOT EXISTS ai_review_rounds_active_idx
+  ON ai_review_rounds (target_type, target_id)
+  WHERE status IN ('open','escalated','finalizing');
+CREATE INDEX IF NOT EXISTS ai_review_rounds_status_due_idx
+  ON ai_review_rounds (status, due_at);
+
+CREATE TABLE IF NOT EXISTS ai_review_assignments (
+  id                BIGSERIAL    PRIMARY KEY,
+  round_id          BIGINT       NOT NULL REFERENCES ai_review_rounds(id) ON DELETE CASCADE,
+  reviewer_email    TEXT         NOT NULL,
+  owns_source       BOOLEAN      NOT NULL DEFAULT false,
+  weight            NUMERIC(4,2) NOT NULL DEFAULT 1,
+  status            TEXT         NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','voted')),
+  assigned_at       TIMESTAMPTZ  NOT NULL DEFAULT now(),
+  details_opened_at TIMESTAMPTZ,
+  UNIQUE (round_id, reviewer_email)
+);
+CREATE INDEX IF NOT EXISTS ai_review_assignments_reviewer_idx
+  ON ai_review_assignments (reviewer_email, status);
+
+-- Append-only. A changed vote supersedes the prior row; nothing is deleted.
+-- voter_kind exists so that a non-human row can never reach the aggregator's
+-- auto-finalize path (model/audit output must not accept a proposal).
+CREATE TABLE IF NOT EXISTS ai_review_votes (
+  id                     BIGSERIAL   PRIMARY KEY,
+  round_id               BIGINT      NOT NULL REFERENCES ai_review_rounds(id) ON DELETE CASCADE,
+  assignment_id          BIGINT      NOT NULL REFERENCES ai_review_assignments(id) ON DELETE CASCADE,
+  decision               TEXT        NOT NULL CHECK (decision IN ('approve','reject','abstain')),
+  reason_code            TEXT,
+  comment                TEXT,
+  voter_kind             TEXT        NOT NULL DEFAULT 'portal_user'
+                                     CHECK (voter_kind IN ('portal_user','system')),
+  actor_email            TEXT        NOT NULL,
+  proposal_snapshot_hash TEXT        NOT NULL,
+  idempotency_key        TEXT        NOT NULL,
+  active                 BOOLEAN     NOT NULL DEFAULT true,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+  superseded_at          TIMESTAMPTZ,
+  CHECK (decision <> 'reject' OR reason_code IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ai_review_votes_active_idx
+  ON ai_review_votes (assignment_id) WHERE active = true;
+CREATE UNIQUE INDEX IF NOT EXISTS ai_review_votes_idempotency_idx
+  ON ai_review_votes (assignment_id, idempotency_key);
+CREATE INDEX IF NOT EXISTS ai_review_votes_round_idx
+  ON ai_review_votes (round_id, created_at DESC);
 
 -- take_grade_cache: grade_takes verdict cache. Composite PK on
 -- (take_id, prompt_version, judge_model_id, evidence_signature) means
@@ -1677,6 +1789,136 @@ CREATE TRIGGER minion_job_notify AFTER INSERT OR UPDATE OF status ON minion_jobs
   FOR EACH ROW EXECUTE FUNCTION notify_minion_job_change();
 
 -- ============================================================
+-- Portal access-control database authority (v138)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS portal_users (
+  email              TEXT        PRIMARY KEY,
+  keycloak_sub       TEXT        UNIQUE,
+  personal_source_id TEXT        NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  status             TEXT        NOT NULL CHECK (status IN ('active','disabled')),
+  version            BIGINT      NOT NULL DEFAULT 1 CHECK (version > 0),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_login_at      TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS portal_source_grants (
+  user_email TEXT        NOT NULL REFERENCES portal_users(email) ON DELETE RESTRICT,
+  source_id  TEXT        NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  can_read   BOOLEAN     NOT NULL,
+  can_write  BOOLEAN     NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_email, source_id),
+  CHECK (can_read OR can_write),
+  CHECK (NOT can_write OR can_read)
+);
+CREATE INDEX IF NOT EXISTS portal_source_grants_source_idx
+  ON portal_source_grants (source_id, user_email);
+
+CREATE TABLE IF NOT EXISTS portal_access_requests (
+  id               TEXT        PRIMARY KEY,
+  user_email       TEXT        NOT NULL REFERENCES portal_users(email) ON DELETE RESTRICT,
+  reason           TEXT        NOT NULL DEFAULT '',
+  status           TEXT        NOT NULL CHECK (status IN ('pending','approved','approved_partial','rejected','already_granted')),
+  requested_at     TIMESTAMPTZ NOT NULL,
+  decided_by       TEXT,
+  decided_at       TIMESTAMPTZ,
+  rejection_reason TEXT,
+  version          BIGINT      NOT NULL DEFAULT 1 CHECK (version > 0)
+);
+CREATE INDEX IF NOT EXISTS portal_access_requests_status_time_idx
+  ON portal_access_requests (status, requested_at DESC);
+
+CREATE TABLE IF NOT EXISTS portal_access_request_grants (
+  request_id      TEXT    NOT NULL REFERENCES portal_access_requests(id) ON DELETE CASCADE,
+  source_id       TEXT    NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+  requested_read  BOOLEAN NOT NULL,
+  requested_write BOOLEAN NOT NULL,
+  approved_read   BOOLEAN,
+  approved_write  BOOLEAN,
+  PRIMARY KEY (request_id, source_id),
+  CHECK (requested_read OR requested_write),
+  CHECK (NOT requested_write OR requested_read),
+  CHECK ((approved_read IS NULL) = (approved_write IS NULL)),
+  CHECK (approved_write IS NOT TRUE OR approved_read IS TRUE),
+  CHECK (approved_read IS NOT TRUE OR requested_read),
+  CHECK (approved_write IS NOT TRUE OR requested_write)
+);
+
+CREATE TABLE IF NOT EXISTS portal_acl_audit (
+  id            BIGSERIAL   PRIMARY KEY,
+  actor_email   TEXT        NOT NULL,
+  subject_email TEXT        NOT NULL,
+  action        TEXT        NOT NULL,
+  request_id    TEXT        REFERENCES portal_access_requests(id) ON DELETE SET NULL,
+  before_state  JSONB,
+  after_state   JSONB,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (before_state IS NOT NULL OR after_state IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS portal_acl_audit_subject_time_idx
+  ON portal_acl_audit(subject_email, created_at DESC);
+CREATE INDEX IF NOT EXISTS portal_acl_audit_request_idx
+  ON portal_acl_audit(request_id, created_at DESC);
+
+CREATE OR REPLACE FUNCTION portal_acl_guard_user_identity()
+RETURNS trigger AS \$\$
+BEGIN
+  IF OLD.keycloak_sub IS NOT NULL AND NEW.keycloak_sub IS DISTINCT FROM OLD.keycloak_sub THEN
+    RAISE EXCEPTION 'portal_keycloak_identity_immutable';
+  END IF;
+  IF NEW.personal_source_id IS DISTINCT FROM OLD.personal_source_id THEN
+    RAISE EXCEPTION 'portal_personal_source_immutable';
+  END IF;
+  RETURN NEW;
+END;
+\$\$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS portal_users_identity_guard ON portal_users;
+CREATE TRIGGER portal_users_identity_guard
+  BEFORE UPDATE OF keycloak_sub, personal_source_id ON portal_users
+  FOR EACH ROW EXECUTE FUNCTION portal_acl_guard_user_identity();
+
+CREATE OR REPLACE FUNCTION portal_acl_guard_personal_grant()
+RETURNS trigger AS \$\$
+DECLARE personal_id TEXT;
+BEGIN
+  SELECT personal_source_id INTO personal_id
+    FROM portal_users WHERE email = OLD.user_email;
+  IF OLD.source_id = personal_id AND TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'portal_personal_grant_immutable';
+  END IF;
+  IF TG_OP = 'UPDATE' THEN
+    SELECT personal_source_id INTO personal_id
+      FROM portal_users WHERE email = NEW.user_email;
+    IF NEW.source_id = personal_id AND (NEW.can_read IS NOT TRUE OR NEW.can_write IS NOT TRUE) THEN
+      RAISE EXCEPTION 'portal_personal_grant_requires_read_write';
+    END IF;
+    IF OLD.source_id = (SELECT personal_source_id FROM portal_users WHERE email = OLD.user_email)
+       AND (NEW.user_email IS DISTINCT FROM OLD.user_email OR NEW.source_id IS DISTINCT FROM OLD.source_id) THEN
+      RAISE EXCEPTION 'portal_personal_grant_immutable';
+    END IF;
+  END IF;
+  RETURN COALESCE(NEW, OLD);
+END;
+\$\$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS portal_source_grants_personal_guard ON portal_source_grants;
+CREATE TRIGGER portal_source_grants_personal_guard
+  BEFORE UPDATE OR DELETE ON portal_source_grants
+  FOR EACH ROW EXECUTE FUNCTION portal_acl_guard_personal_grant();
+
+CREATE OR REPLACE FUNCTION portal_acl_audit_append_only()
+RETURNS trigger AS \$\$
+BEGIN
+  RAISE EXCEPTION 'portal_acl_audit_append_only';
+END;
+\$\$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS portal_acl_audit_append_only_guard ON portal_acl_audit;
+CREATE TRIGGER portal_acl_audit_append_only_guard
+  BEFORE UPDATE OR DELETE ON portal_acl_audit
+  FOR EACH ROW EXECUTE FUNCTION portal_acl_audit_append_only();
+
+-- ============================================================
 -- Row Level Security: block anon access, postgres role bypasses
 -- ============================================================
 -- The postgres role (used by gbrain via pooler) has BYPASSRLS.
@@ -1719,9 +1961,15 @@ BEGIN
     ALTER TABLE eval_contradictions_runs ENABLE ROW LEVEL SECURITY;
     -- v0.36.1.0 Hindsight calibration wave tables
     ALTER TABLE calibration_profiles ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE take_proposal_scans ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE take_proposal_scan_attempts ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_proposals ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_grade_cache ENABLE ROW LEVEL SECURITY;
     ALTER TABLE take_nudge_log ENABLE ROW LEVEL SECURITY;
+    -- Multi-reviewer AI Review governance tables
+    ALTER TABLE ai_review_rounds ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ai_review_assignments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE ai_review_votes ENABLE ROW LEVEL SECURITY;
     -- v0.26 OAuth 2.1 tables
     ALTER TABLE oauth_clients ENABLE ROW LEVEL SECURITY;
     ALTER TABLE oauth_tokens ENABLE ROW LEVEL SECURITY;
@@ -1738,6 +1986,12 @@ BEGIN
     ALTER TABLE source_base_views ENABLE ROW LEVEL SECURITY;
     ALTER TABLE source_transform_views ENABLE ROW LEVEL SECURITY;
     ALTER TABLE source_article_views ENABLE ROW LEVEL SECURITY;
+    -- v138 Portal access-control authority tables
+    ALTER TABLE portal_users ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE portal_source_grants ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE portal_access_requests ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE portal_access_request_grants ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE portal_acl_audit ENABLE ROW LEVEL SECURITY;
     RAISE NOTICE 'RLS enabled on all tables (role % has BYPASSRLS)', current_user;
   ELSE
     RAISE WARNING 'Skipping RLS: role % does not have BYPASSRLS privilege. Run as postgres role to enable.', current_user;

@@ -3,13 +3,14 @@ import { api } from '../api';
 import { formatChangedDraftFields } from '../review-diff';
 import './AIReview.css';
 
-type Status = 'pending' | 'accepted' | 'rejected' | 'superseded';
+type Status = 'pending' | 'accepted' | 'rejected' | 'superseded' | 'deferred';
 
 const STATUS_LABELS: Record<Status, string> = {
   pending: 'Ожидают',
   accepted: 'Приняты',
   rejected: 'Отклонены',
   superseded: 'Заменены',
+  deferred: 'Отложены',
 };
 
 interface Proposal {
@@ -27,6 +28,8 @@ interface Proposal {
   page_title?: string | null;
   page_body?: string | null;
   promoted_row_num?: number | null;
+  draft_revision_id?: number | null;
+  draft_claim_text?: string | null;
 }
 
 interface Draft {
@@ -43,6 +46,13 @@ interface DetailPayload {
   proposal: Proposal;
   revisions: Array<Record<string, unknown>>;
   events: Array<Record<string, unknown>>;
+  active_draft?: { revision_id: number; draft: Draft } | null;
+  review_governance?: {
+    managed: boolean;
+    state: 'legacy_manual' | 'pending_assignment' | 'round';
+    round_id: number | null;
+    round_status: string | null;
+  };
 }
 
 function asDraft(p: Proposal): Draft {
@@ -76,7 +86,7 @@ export function AIReviewPage() {
   const [sourceFilter, setSourceFilter] = useState('');
   const [sourceOptions, setSourceOptions] = useState<string[]>([]);
   const [rows, setRows] = useState<Proposal[]>([]);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<DetailPayload | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -89,17 +99,24 @@ export function AIReviewPage() {
   const [receipt, setReceipt] = useState<Record<string, unknown> | null>(null);
   const [mobileDetail, setMobileDetail] = useState(false);
   const detailRequest = useRef(0);
+  const listRequest = useRef(0);
 
   const loadList = useCallback(async () => {
+    const request = ++listRequest.current;
     setLoading(true);
     try {
       const data = await api.aiReviewProposals({ status, q: query, source_id: sourceFilter, limit: 200 });
+      if (request !== listRequest.current) return;
       setRows(data.rows ?? []);
       setTotal(data.total ?? 0);
+      if (status === 'pending' && !query && !sourceFilter) {
+        window.dispatchEvent(new CustomEvent('gbrain:ai-review-pending-count', { detail: Number(data.total ?? 0) }));
+      }
       setSourceOptions(current => [...new Set([...current, ...(data.rows ?? []).map((row: Proposal) => row.source_id)])].sort());
       setPageError(null);
       if (!data.rows?.some((r: Proposal) => r.id === selectedId)) setSelectedId(null);
     } catch (e) {
+      if (request !== listRequest.current) return;
       setRows([]);
       setTotal(0);
       setSelectedId(null);
@@ -107,7 +124,7 @@ export function AIReviewPage() {
       setDraft(null);
       setPageError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (request === listRequest.current) setLoading(false);
     }
   }, [status, query, sourceFilter, selectedId]);
 
@@ -117,8 +134,8 @@ export function AIReviewPage() {
       const data = await api.aiReviewProposal(id) as DetailPayload;
       if (request !== detailRequest.current) return;
       setDetail(data);
-      setDraft(asDraft(data.proposal));
-      setRevisionId(undefined);
+      setDraft(data.active_draft ? normalizeDraft(data.active_draft.draft) : asDraft(data.proposal));
+      setRevisionId(data.active_draft?.revision_id);
       setReceipt(null);
       setPageError(null);
     } catch (e) {
@@ -142,7 +159,7 @@ export function AIReviewPage() {
 
   const changeStatus = (value: Status) => {
     if (diff.length > 0 && !confirm('Отменить несохранённые изменения черновика?')) return;
-    setRows([]); setTotal(0); setPageError(null); setActionError(null);
+    setRows([]); setTotal(null); setPageError(null); setActionError(null);
     setSelectedId(null); setMobileDetail(false); setStatus(value);
   };
 
@@ -218,6 +235,39 @@ export function AIReviewPage() {
     }
   };
 
+  const defer = async () => {
+    if (!detail) return;
+    const reason = prompt('Причина отсрочки (необязательно):', 'Ограничение текущей review capacity') ?? undefined;
+    if (reason === undefined) return;
+    setBusy('defer');
+    setActionError(null);
+    try {
+      await api.aiReviewDefer(detail.proposal.id, reason);
+      await loadList();
+      setMobileDetail(false);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const restore = async () => {
+    if (!detail) return;
+    if (!confirm(`Вернуть предложение #${detail.proposal.id} в очередь ожидания?`)) return;
+    setBusy('restore');
+    setActionError(null);
+    try {
+      await api.aiReviewRestore(detail.proposal.id, 'Явное восстановление оператором');
+      await loadList();
+      setMobileDetail(false);
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="ai-review">
       <header className="ai-review-header">
@@ -225,12 +275,12 @@ export function AIReviewPage() {
           <h1>Проверка AI-предложений</h1>
           <p>AI готовит предложения и черновики. Каноническое знание меняется только после явного принятия человеком.</p>
         </div>
-        <div className="ai-review-count">{total} · {STATUS_LABELS[status].toLowerCase()}</div>
+        <div className="ai-review-count" aria-busy={total === null}>{total === null ? '…' : total} · {STATUS_LABELS[status].toLowerCase()}</div>
       </header>
 
       <div className="ai-review-toolbar">
         <div className="ai-review-tabs">
-          {(['pending', 'accepted', 'rejected', 'superseded'] as Status[]).map(value => (
+          {(['pending', 'deferred', 'accepted', 'rejected', 'superseded'] as Status[]).map(value => (
             <button key={value} className={status === value ? 'active' : ''} onClick={() => changeStatus(value)}>{STATUS_LABELS[value]}</button>
           ))}
         </div>
@@ -254,8 +304,9 @@ export function AIReviewPage() {
           {rows.map(row => (
             <button key={row.id} className={`proposal-row ${selectedId === row.id ? 'selected' : ''}`} onClick={() => select(row.id)}>
               <div className="proposal-row-top"><span>#{row.id}</span><span>{row.source_id}</span><span>{Number(row.weight).toFixed(2)}</span></div>
-              <strong>{row.claim_text}</strong>
+              <strong>{row.draft_claim_text ?? row.claim_text}</strong>
               <div className="proposal-row-meta">{row.page_slug} · {row.kind} · {row.holder}</div>
+              {row.draft_revision_id && <span className="draft-badge">Есть русский черновик · revision #{row.draft_revision_id}</span>}
             </button>
           ))}
         </section>
@@ -270,15 +321,15 @@ export function AIReviewPage() {
 
             <div className="review-form">
               <label className={diff.includes('claim_text') ? 'changed' : ''}>Текст утверждения
-                <textarea value={draft.claim_text} onChange={e => updateDraft('claim_text', e.target.value)} rows={4} disabled={detail.proposal.status !== 'pending'} />
+                <textarea value={draft.claim_text} onChange={e => updateDraft('claim_text', e.target.value)} rows={4} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} />
               </label>
               <div className="field-grid">
-                <label className={diff.includes('kind') ? 'changed' : ''}>Тип (kind)<input value={draft.kind} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('kind', e.target.value)} /></label>
-                <label className={diff.includes('holder') ? 'changed' : ''}>Владелец (holder)<input value={draft.holder} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('holder', e.target.value)} /></label>
-                <label className={diff.includes('weight') ? 'changed' : ''}>Вес уверенности<input type="number" min="0" max="1" step="0.05" value={draft.weight} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('weight', Number(e.target.value))} /></label>
-                <label className={diff.includes('domain') ? 'changed' : ''}>Область (domain)<input value={draft.domain} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('domain', e.target.value)} /></label>
-                <label className={diff.includes('since_date') ? 'changed' : ''}>Действует с<input value={draft.since_date} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('since_date', e.target.value)} placeholder="ГГГГ-ММ-ДД" /></label>
-                <label className={diff.includes('source') ? 'changed' : ''}>Дополнительный источник<input value={draft.source} disabled={detail.proposal.status !== 'pending'} onChange={e => updateDraft('source', e.target.value)} placeholder="Необязательно; ссылка или примечание" /></label>
+                <label className={diff.includes('kind') ? 'changed' : ''}>Тип<input value={draft.kind} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('kind', e.target.value)} /></label>
+                <label className={diff.includes('holder') ? 'changed' : ''}>Владелец<input value={draft.holder} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('holder', e.target.value)} /></label>
+                <label className={diff.includes('weight') ? 'changed' : ''}>Вес уверенности<input type="number" min="0" max="1" step="0.05" value={draft.weight} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('weight', Number(e.target.value))} /></label>
+                <label className={diff.includes('domain') ? 'changed' : ''}>Область<input value={draft.domain} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('domain', e.target.value)} /></label>
+                <label className={diff.includes('since_date') ? 'changed' : ''}>Действует с<input value={draft.since_date} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('since_date', e.target.value)} placeholder="ГГГГ-ММ-ДД" /></label>
+                <label className={diff.includes('source') ? 'changed' : ''}>Дополнительный источник<input value={draft.source} disabled={detail.proposal.status !== 'pending' || detail.review_governance?.managed} onChange={e => updateDraft('source', e.target.value)} placeholder="Необязательно; ссылка или примечание" /></label>
               </div>
             </div>
 
@@ -287,7 +338,7 @@ export function AIReviewPage() {
               <pre>{diffText}</pre>
             </div>}
 
-            {detail.proposal.status === 'pending' && <div className="llm-box">
+            {detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className="llm-box">
               <label>Попросить LLM изменить только текст — метаданные сохраняются
                 <textarea value={llmComment} onChange={e => setLlmComment(e.target.value)} rows={3} placeholder="Например: переведи на русский, уточни или сократи…" />
               </label>
@@ -297,9 +348,21 @@ export function AIReviewPage() {
 
             {actionError && <div className="ai-review-inline-error" role="alert"><span>{actionError}</span><button onClick={() => setActionError(null)} aria-label="Закрыть сообщение">×</button></div>}
 
-            {detail.proposal.status === 'pending' && <div className="review-actions">
+            {detail.review_governance?.managed && (
+          <div className="receipt">
+            Это предложение управляется коллективной проверкой
+            {detail.review_governance.round_id ? ` (раунд #${detail.review_governance.round_id})` : ''}.
+            {' '}<a href="#review-rounds">Открыть голоса и решение</a>.
+          </div>
+        )}
+        {detail.proposal.status === 'pending' && !detail.review_governance?.managed && <div className="review-actions">
               <button className="reject" onClick={reject} disabled={busy !== null}>{busy === 'reject' ? 'Отклоняем…' : 'Отклонить'}</button>
+              <button onClick={defer} disabled={busy !== null}>{busy === 'defer' ? 'Откладываем…' : 'Отложить'}</button>
               <button className="accept" onClick={accept} disabled={busy !== null}>{busy === 'accept' ? 'Записываем и проверяем…' : diff.length ? 'Принять изменённый черновик' : 'Принять'}</button>
+            </div>}
+
+            {(detail.proposal.status === 'deferred' || detail.proposal.status === 'rejected') && !detail.review_governance?.managed && <div className="review-actions">
+              <button onClick={restore} disabled={busy !== null}>{busy === 'restore' ? 'Восстанавливаем…' : 'Вернуть в ожидающие'}</button>
             </div>}
 
             {receipt && <div className="receipt"><strong>Подтверждение публикации</strong><pre>{JSON.stringify(receipt, null, 2)}</pre></div>}

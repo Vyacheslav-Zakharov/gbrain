@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { parseSemver, isMinorOrMajorBump, extractChangelogBetween } from '../src/commands/check-update.ts';
+import { parseSemver, isMinorOrMajorBump, extractChangelogBetween, boundChangelogDiff } from '../src/commands/check-update.ts';
 
 describe('parseSemver', () => {
   test('parses standard version', () => {
@@ -118,6 +118,21 @@ describe('extractChangelogBetween', () => {
     const result = extractChangelogBetween(crossMajor, '1.2.0', '2.0.0');
     expect(result).toContain('Major 2');
     expect(result).not.toContain('Minor 5');
+  });
+});
+
+describe('boundChangelogDiff', () => {
+  test('preserves small diffs and truncates oversized payloads explicitly', () => {
+    expect(boundChangelogDiff('small')).toBe('small');
+    const bounded = boundChangelogDiff('x'.repeat(100_000));
+    expect(bounded.length).toBeLessThan(25_000);
+    expect(bounded).toContain('[truncated: full changelog omitted]');
+  });
+
+  test('bounds escaped UTF-8 JSON payloads, not only source characters', () => {
+    const bounded = boundChangelogDiff('"\\\n🙂'.repeat(20_000));
+    expect(Buffer.byteLength(JSON.stringify(bounded), 'utf8')).toBeLessThanOrEqual(24_000);
+    expect(bounded).toContain('[truncated: full changelog omitted]');
   });
 });
 

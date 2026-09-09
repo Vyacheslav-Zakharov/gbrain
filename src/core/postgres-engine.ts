@@ -428,6 +428,11 @@ export class PostgresEngine implements BrainEngine {
       source_sync_state_last_source_snapshot_exists: boolean;
       source_ingest_profiles_exists: boolean;
       source_ingest_run_items_exists: boolean;
+      source_base_views_exists: boolean;
+      source_base_views_primary_key_field_exists: boolean;
+      source_base_views_updated_at_field_exists: boolean;
+      concept_proposals_exists: boolean;
+      concept_proposals_source_takes_exists: boolean;
     }[]>`
       SELECT
         EXISTS (SELECT 1 FROM information_schema.tables
@@ -519,7 +524,17 @@ export class PostgresEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.tables
                 WHERE table_schema = current_schema() AND table_name = 'source_ingest_profiles') AS source_ingest_profiles_exists,
         EXISTS (SELECT 1 FROM information_schema.tables
-                WHERE table_schema = current_schema() AND table_name = 'source_ingest_run_items') AS source_ingest_run_items_exists
+                WHERE table_schema = current_schema() AND table_name = 'source_ingest_run_items') AS source_ingest_run_items_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_name = 'source_base_views') AS source_base_views_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'source_base_views' AND column_name = 'primary_key_field') AS source_base_views_primary_key_field_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'source_base_views' AND column_name = 'updated_at_field') AS source_base_views_updated_at_field_exists,
+        EXISTS (SELECT 1 FROM information_schema.tables
+                WHERE table_schema = current_schema() AND table_name = 'concept_proposals') AS concept_proposals_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'concept_proposals' AND column_name = 'source_takes') AS concept_proposals_source_takes_exists
     `;
     const probe = probeRows[0]!;
 
@@ -624,6 +639,9 @@ export class PostgresEngine implements BrainEngine {
     // v125: repair brains stamped at v120+ before the append-only run ledger
     // table was folded into v120.
     const needsSourceIngestRunItems = probe.source_ingest_profiles_exists && !probe.source_ingest_run_items_exists;
+    const needsSourceBaseViewIdentity = probe.source_base_views_exists
+      && (!probe.source_base_views_primary_key_field_exists || !probe.source_base_views_updated_at_field_exists);
+    const needsConceptProposalSourceTakes = probe.concept_proposals_exists && !probe.concept_proposals_source_takes_exists;
 
     if (!needsPagesBootstrap && !needsLinksBootstrap && !needsChunksBootstrap
         && !needsPagesDeletedAt && !needsMcpLogBootstrap && !needsSubagentProviderId
@@ -637,7 +655,9 @@ export class PostgresEngine implements BrainEngine {
         && !needsPagesLinksExtractedAt
         && !needsSourceSyncManagedBlockHash
         && !needsSourceSyncLastSourceSnapshot
-        && !needsSourceIngestRunItems) return;
+        && !needsSourceIngestRunItems
+        && !needsSourceBaseViewIdentity
+        && !needsConceptProposalSourceTakes) return;
 
     process.stderr.write('  Pre-v0.21 brain detected, applying forward-reference bootstrap\n');
 
@@ -928,6 +948,20 @@ export class PostgresEngine implements BrainEngine {
           ON source_ingest_run_items (run_id, approved_source_id, slug);
         CREATE INDEX IF NOT EXISTS source_ingest_run_items_external_idx
           ON source_ingest_run_items (connector_id, source_object, external_id, created_at DESC);
+      `);
+    }
+
+    if (needsSourceBaseViewIdentity) {
+      await conn.unsafe(`
+        ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS primary_key_field TEXT;
+        ALTER TABLE source_base_views ADD COLUMN IF NOT EXISTS updated_at_field TEXT;
+      `);
+    }
+
+    if (needsConceptProposalSourceTakes) {
+      await conn.unsafe(`
+        ALTER TABLE concept_proposals
+          ADD COLUMN IF NOT EXISTS source_takes JSONB NOT NULL DEFAULT '[]'::jsonb;
       `);
     }
   }
@@ -1577,7 +1611,7 @@ export class PostgresEngine implements BrainEngine {
     // for back-compat with internal callers. The `deleted_at IS NULL`
     // filter excludes soft-deleted rows (v0.26.5) from fuzzy candidates
     // — they're not legitimate match targets for a remote `get_page`.
-    const sources = opts?.sourceIds ?? null;
+    const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
     const scalar = opts?.sourceId ?? null;
     const scopeFragment = sources
       ? sql` AND source_id = ANY(${sources}::text[])`
@@ -1994,6 +2028,24 @@ export class PostgresEngine implements BrainEngine {
       modalityFilter = `AND cc.modality = 'text'`;
     }
 
+    // pgvector < 0.8 applies WHERE filters after the approximate HNSW scan.
+    // With the default ef_search=40, a selective source/type/date filter can
+    // therefore return only a few incidental rows even when stronger scoped
+    // matches exist deeper in the index. The production brain currently runs
+    // pgvector 0.6, so iterative_scan is unavailable. Increase exploration
+    // only for filtered searches, bounded by pgvector's hard maximum (1000).
+    // Keep this transaction-local so one request cannot change another
+    // connection's planner behavior.
+    const hasSelectiveHnswFilter = Boolean(
+      sourceClause || typeClause || typesClause || excludeSlugsClause ||
+      languageClause || symbolKindClause || afterDateClause || beforeDateClause ||
+      detailLow || (opts?.exclude_slug_prefixes?.length ?? 0) > 0 ||
+      (opts?.include_slug_prefixes?.length ?? 0) > 0,
+    );
+    const filteredHnswEfSearch = hasSelectiveHnswFilter
+      ? Math.min(1000, Math.max(200, innerLimit * 2))
+      : null;
+
     const rawQuery = `
       WITH hnsw_candidates AS (
         SELECT
@@ -2046,6 +2098,11 @@ export class PostgresEngine implements BrainEngine {
 
     const rows = await sql.begin(async sql => {
       await sql`SET LOCAL statement_timeout = '8s'`;
+      if (filteredHnswEfSearch !== null) {
+        // set_config(..., true) is transaction-local. Pass the bounded integer
+        // as a bind parameter rather than interpolating planner SQL.
+        await sql`SELECT set_config('hnsw.ef_search', ${String(filteredHnswEfSearch)}, true)`;
+      }
       return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
     });
     return rows.map(rowToSearchResult);
@@ -2289,14 +2346,18 @@ export class PostgresEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string, opts?: { sourceId?: string }): Promise<Chunk[]> {
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Chunk[]> {
     const sql = this.sql;
-    const sourceId = opts?.sourceId ?? 'default';
+    const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
+    const sourceId = opts?.sourceId ?? (sources ? null : 'default');
+    const scopeFragment = sources
+      ? sql` AND p.source_id = ANY(${sources}::text[])`
+      : sql` AND p.source_id = ${sourceId}`;
     const rows = await sql`
-      SELECT cc.* FROM content_chunks cc
+      SELECT cc.*, p.source_id FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
-      WHERE p.slug = ${slug} AND p.source_id = ${sourceId}
-      ORDER BY cc.chunk_index
+      WHERE p.slug = ${slug}${scopeFragment}
+      ORDER BY p.source_id, cc.chunk_index
     `;
     return rows.map((r) => rowToChunk(r as Record<string, unknown>));
   }

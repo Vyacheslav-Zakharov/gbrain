@@ -287,10 +287,12 @@ export function rowToChunk(row: Record<string, unknown>, includeEmbedding = fals
   return {
     id: row.id as number,
     page_id: row.page_id as number,
+    ...(typeof row.source_id === 'string' ? { source_id: row.source_id } : {}),
     chunk_index: row.chunk_index as number,
     chunk_text: row.chunk_text as string,
     chunk_source: row.chunk_source as 'compiled_truth' | 'timeline' | 'fenced_code',
     embedding: includeEmbedding ? parseEmbedding(row.embedding) : null,
+    has_embedding: typeof row.has_embedding === 'boolean' ? row.has_embedding : row.embedding != null,
     model: row.model as string,
     token_count: row.token_count as number | null,
     embedded_at: row.embedded_at ? new Date(row.embedded_at as string) : null,

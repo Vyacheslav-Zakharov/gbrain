@@ -41,12 +41,17 @@ Navigation state is represented by `source`, `path`, and `folder` query paramete
 
 Portal identity is never read from an email-valued browser cookie.
 
-1. OTP verification issues a random 256-bit opaque token.
-2. The cookie is `__Host-gbrain_portal` on HTTPS and `gbrain_portal` for local HTTP development.
-3. Only SHA-256 token hashes and server-side session records are persisted in `~/.gbrain/portal_sessions.json` with mode `0600`.
-4. Session expiry is checked server-side.
-5. Logout revokes the session and clears both current and legacy cookie names.
-6. The Admin bridge resolves the opaque Portal session before applying `GBRAIN_ADMIN_EMAILS`.
+1. Keycloak OIDC verifies the signed ID token issuer, audience/authorized party, nonce, subject, verified `@avers.kz` email, lifetime, and signature.
+2. The exact client-role claim `resource_access["gbrain-portal"].roles` is projected to a boolean capability; realm roles, other-client roles, malformed arrays, lookalikes, and OIDC client-ID overrides are ignored for Admin authority.
+3. A successful callback issues a random 256-bit opaque token. The cookie is `__Host-gbrain_portal` on HTTPS and `gbrain_portal` for local HTTP development.
+4. Only SHA-256 token hashes and server-side session records are persisted in `~/.gbrain/portal_sessions.json` with mode `0600`; Keycloak access and refresh tokens are never persisted.
+5. Session records store the derived capability with `authorizationVersion: 1`. Legacy Keycloak-backed records without this version remain Portal-readable and cannot receive role-derived Admin until signed-token revalidation.
+6. Keycloak sessions require silent revalidation every five minutes. Revalidation updates the capability in both directions, so a role grant or revocation becomes authoritative within that bound.
+7. Logout revokes the session and clears both current and legacy cookie names.
+
+The Admin bridge resolves the opaque Portal session on every request and requires `authMethod: keycloak` in every migration mode. `GBRAIN_ADMIN_AUTH_MODE` is startup-validated and supports `email` (default), `either`, and `keycloak`. In `email` mode `GBRAIN_ADMIN_EMAILS` remains authoritative only for Keycloak-backed Portal sessions while role differences are shadow-logged; `either` accepts either authority after the same session-origin gate; `keycloak` ignores the email allowlist. Portal fallback/legacy-login sessions can never enter this bridge. Time-bounded bootstrap/magic-link emergency fallback remains a separate authority until `GBRAIN_ADMIN_FALLBACK_UNTIL` expires.
+
+The `gbrain-admin` role grants only the Admin application capability. Portal/MCP source grants continue to come exclusively from the application ACL store; Keycloak roles never widen source access.
 
 `session_user` is a migration-only cookie name: it is cleared and never trusted.
 
@@ -108,7 +113,7 @@ Before deployment:
 6. prove cross-source access, traversal, hidden files and unsupported downloads fail closed;
 7. run desktop, search, keyboard, mobile drawer and console smoke checks.
 
-Deployment copies both `src/commands/serve-http.ts`, `src/core/portal-security.ts`, `src/portal-embedded.ts`, and the embedded Portal asset files into the installed package. The update-guard manifest must include every copied file and semantic markers for the embedded SPA and opaque session store. Two sequential service restarts are required to prove the guard does not revert the deployment.
+Deployment copies `src/commands/serve-http.ts`, `src/core/portal-keycloak-auth.ts`, `src/core/portal-admin-rbac.ts`, `src/core/portal-security.ts`, `src/portal-embedded.ts`, and the embedded Portal asset files into the installed package. The update-guard manifest must include every copied file and semantic markers for signed Keycloak role projection, staged Admin authority, the embedded SPA, and the opaque session store. Two sequential service restarts are required to prove the guard does not revert the deployment.
 
 ## Operational acceptance and backlog
 

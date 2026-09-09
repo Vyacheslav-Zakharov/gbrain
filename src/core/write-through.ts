@@ -22,7 +22,7 @@
  */
 
 import { existsSync, statSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'fs';
-import { dirname, join } from 'path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'path';
 import { randomBytes } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import { serializePageToMarkdown, resolvePageFilePath } from './markdown.ts';
@@ -56,6 +56,17 @@ export interface WritePageThroughOpts {
   /** Merged over the page's own frontmatter at render time (e.g. provenance). */
   frontmatterOverrides?: Record<string, unknown>;
   logger?: WriteThroughLogger;
+}
+
+function resolveConfinedSourcePath(root: string, storedPath: string | null, fallback: string): string {
+  const candidate = storedPath?.trim() || fallback;
+  if (isAbsolute(candidate)) throw new Error('page source_path must be relative to source local_path');
+  const target = resolve(root, candidate);
+  const rel = relative(resolve(root), target);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error('page source_path escapes source local_path');
+  }
+  return target;
 }
 
 /**
@@ -92,7 +103,11 @@ export async function writePageThrough(
       if (!existsSync(sourceLocalPath) || !statSync(sourceLocalPath).isDirectory()) {
         return { written: false, skipped: 'repo_not_found' };
       }
-      filePath = join(sourceLocalPath, `${slug}.md`);
+      const pageRows = await engine.executeRaw<{ source_path: string | null }>(
+        `SELECT source_path FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL LIMIT 1`,
+        [sourceId, slug],
+      );
+      filePath = resolveConfinedSourcePath(sourceLocalPath, pageRows[0]?.source_path ?? null, `${slug}.md`);
     } else {
       const repoPath = await engine.getConfig('sync.repo_path');
       if (!repoPath) {

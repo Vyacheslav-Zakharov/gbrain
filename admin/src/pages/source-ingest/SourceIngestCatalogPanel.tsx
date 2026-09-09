@@ -6,10 +6,10 @@ function TreeButton({ active, lineage, depth = 0, icon, label, meta, onClick }: 
   return <button type="button" onClick={onClick} style={{
     display: 'block', width: '100%', textAlign: 'left', border: 0, borderLeft: active ? '3px solid var(--accent)' : lineage ? '3px solid rgba(52,211,153,0.75)' : '3px solid transparent',
     background: active ? 'rgba(136,170,255,0.14)' : lineage ? 'rgba(52,211,153,0.10)' : 'transparent', color: active ? 'var(--text-primary)' : lineage ? 'var(--text-primary)' : 'var(--text-secondary)',
-    padding: `5px 8px 5px ${10 + depth * 18}px`, borderRadius: 6, cursor: 'pointer', fontSize: 13, lineHeight: 1.25,
+    padding: `8px 10px 8px ${12 + depth * 20}px`, borderRadius: 7, cursor: 'pointer', fontSize: 14, lineHeight: 1.4,
   }}>
     <span style={{ display: 'inline-block', width: 18, color: 'var(--accent)' }}>{icon}</span>{label}
-    {meta && <span style={{ display: 'block', paddingLeft: 18, color: 'var(--text-muted)', fontSize: 11 }}>{meta}</span>}
+    {meta && <span style={{ display: 'block', paddingLeft: 18, color: 'var(--text-muted)', fontSize: 12, lineHeight: 1.35, marginTop: 2 }}>{meta}</span>}
   </button>;
 }
 

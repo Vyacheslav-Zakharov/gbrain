@@ -38,14 +38,23 @@ beforeEach(async () => {
 });
 
 function stubChat(text: string): (o: ChatOpts) => Promise<ChatResult> {
-  return async (_o: ChatOpts) => ({
-    text,
-    blocks: [{ type: 'text', text }],
-    stopReason: 'end',
-    usage: { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 },
-    model: 'anthropic:claude-haiku-4-5',
-    providerId: 'anthropic',
-  });
+  return async (o: ChatOpts) => {
+    const prompt = typeof o.messages.at(-1)?.content === 'string' ? o.messages.at(-1)!.content as string : '';
+    const source = prompt.split('\n\n---\n\n')[1] ?? '';
+    const atoms = JSON.parse(text) as Array<Record<string, unknown>>;
+    const responseText = JSON.stringify(atoms.map((atom) => ({
+      ...atom,
+      source_quote: atom.source_quote ?? source.slice(0, 80),
+    })));
+    return {
+      text: responseText,
+      blocks: [{ type: 'text', text: responseText }],
+      stopReason: 'end',
+      usage: { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: 'anthropic:claude-haiku-4-5',
+      providerId: 'anthropic',
+    };
+  };
 }
 
 /**
@@ -55,9 +64,16 @@ function stubChat(text: string): (o: ChatOpts) => Promise<ChatResult> {
  */
 function stubChatUnique(): (o: ChatOpts) => Promise<ChatResult> {
   let counter = 0;
-  return async (_o: ChatOpts) => {
+  return async (o: ChatOpts) => {
     counter++;
-    const text = `[{"title":"unique-atom-${counter}","atom_type":"insight","body":"b${counter}"}]`;
+    const prompt = typeof o.messages.at(-1)?.content === 'string' ? o.messages.at(-1)!.content as string : '';
+    const source = prompt.split('\n\n---\n\n')[1] ?? '';
+    const text = JSON.stringify([{
+      title: `unique-atom-${counter}`,
+      atom_type: 'insight',
+      body: `b${counter}`,
+      source_quote: source.slice(0, 80),
+    }]);
     return {
       text,
       blocks: [{ type: 'text', text }],

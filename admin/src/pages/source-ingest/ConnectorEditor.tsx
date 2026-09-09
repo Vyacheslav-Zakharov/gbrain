@@ -33,7 +33,7 @@ export function ConnectorEditor({ busy, catalogConnectorForm, setCatalogConnecto
     <p style={{ color: 'var(--text-muted)', marginTop: -6 }}>
       Выберите тип подключения и сохраните секреты. Конкретная таблица или объект выбирается на уровне источника (Base view).
     </p>
-    <div className="source-ingest-form-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr auto', gap: 14, alignItems: 'end' }}>
+    <div className="source-ingest-form-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(220px, 1fr))', gap: 16, alignItems: 'end' }}>
       <label>ID подключения
         <input value={catalogConnectorForm.connector_id} onChange={e => setCatalogConnectorForm(prev => ({ ...prev, connector_id: e.target.value }))} placeholder="appsheet-avto" />
       </label>
@@ -47,7 +47,7 @@ export function ConnectorEditor({ busy, catalogConnectorForm, setCatalogConnecto
       <label>Название (необязательно)
         <input value={catalogConnectorForm.display_name} onChange={e => setCatalogConnectorForm(prev => ({ ...prev, display_name: e.target.value }))} placeholder="можно оставить пустым или написать по-русски" />
       </label>
-      <button className="btn btn-primary source-ingest-context-primary" disabled={busy !== null || !catalogConnectorForm.connector_id || !catalogConnectorForm.kind} onClick={() => void saveCatalogConnector()}>{busy === 'catalog-connector' ? 'Сохраняем…' : 'Сохранить подключение'}</button>
+      <button className="btn btn-primary source-ingest-context-primary" style={{ justifySelf: 'start', minWidth: 220 }} disabled={busy !== null || !catalogConnectorForm.connector_id || !catalogConnectorForm.kind} onClick={() => void saveCatalogConnector()}>{busy === 'catalog-connector' ? 'Сохраняем…' : 'Сохранить подключение'}</button>
     </div>
     {(catalogConnectorForm.kind === 'appsheet' || catalogConnectorForm.kind === 'postgres') && <div style={{ marginTop: 14, border: '1px solid var(--border)', borderRadius: 8, padding: 10 }}>
       <h3 style={{ fontSize: 13, marginBottom: 8 }}>Секреты подключения</h3>

@@ -14,6 +14,7 @@
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { hasDatabase } from './helpers.ts';
+import { GBRAIN_MCP_INSTRUCTIONS } from '../../src/mcp/server-instructions.ts';
 
 const skip = !hasDatabase();
 const describeE2E = skip ? describe.skip : describe;
@@ -71,10 +72,12 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
       '--enable-dcr',
     ], {
       cwd: process.cwd(),
-      env: process.env,
+      env: { ...process.env, GBRAIN_ADMIN_FALLBACK_UNTIL: '' },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    // Drain both pipes from startup so a verbose server cannot block.
+    serverProcess.stdout?.resume();
     // Collect stderr for debugging failures
     let stderr = '';
     serverProcess.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
@@ -140,6 +143,24 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
     });
   }
 
+  async function parseMcpJsonRpc(res: Response): Promise<any> {
+    const text = await res.text();
+    if (!res.ok) throw new Error(`/mcp returned ${res.status}: ${text.slice(0, 300)}`);
+
+    // Streamable HTTP may answer with plain JSON or an SSE event. Decode the
+    // JSON-RPC payload rather than matching unparsed response text.
+    const data = text
+      .split('\n')
+      .filter(line => line.startsWith('data:'))
+      .map(line => line.slice(5).replace(/^ /, ''))
+      .join('\n');
+    const payload = JSON.parse(data || text);
+    if (payload.error) {
+      throw new Error(`/mcp JSON-RPC error: ${JSON.stringify(payload.error)}`);
+    }
+    return payload;
+  }
+
   // =========================================================================
   // Fix 1: client_credentials tokens validate at /mcp
   // =========================================================================
@@ -162,6 +183,19 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
     expect(body).toContain('tools');
     expect(body).toContain('search'); // search tool should be in the list
     expect(body).toContain('query');  // query tool too
+  }, 15_000);
+
+  test('OAuth MCP initialize advertises the exact retrieval-first instructions', async () => {
+    const { access_token } = await mintToken('read');
+    const res = await mcpCall(access_token, 'initialize', {
+      protocolVersion: '2025-03-26',
+      capabilities: {},
+      clientInfo: { name: 'serve-http-oauth-test', version: '1' },
+    });
+
+    expect(res.ok).toBe(true);
+    const payload = await parseMcpJsonRpc(res);
+    expect(payload.result.instructions).toBe(GBRAIN_MCP_INSTRUCTIONS);
   }, 15_000);
 
   test('minted token works for tools/call — search executes', async () => {
@@ -714,61 +748,100 @@ describeE2E('serve-http OAuth 2.1 E2E (v0.26.1 + v0.26.2 + v0.26.3)', () => {
   // path (Express auto-sets this for HTML body) so browsers render the
   // styled page instead of treating it as plain text.
 
-  test('v0.26.3: invalid magic-link nonce returns styled 401 HTML page', async () => {
-    const res = await fetch(`${BASE}/admin/auth/garbage_nonce_that_does_not_exist`, { redirect: 'manual' });
-    expect(res.status).toBe(401);
-    const ct = res.headers.get('content-type') || '';
-    expect(ct).toContain('text/html');
-    const body = await res.text();
-    expect(body).toContain('expired');
-    expect(body).toContain('GBrain');
+  test('admin fallback is disabled by default (410 before nonce validation)', async () => {
+    const res = await fetch(`${BASE}/admin/auth/garbage_nonce_that_does_not_exist`, {
+      redirect: 'manual', signal: AbortSignal.timeout(3_000),
+    });
+    expect(res.status).toBe(410);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    const issue = await fetch(`${BASE}/admin/api/issue-magic-link`, {
+      method: 'POST', signal: AbortSignal.timeout(3_000),
+    });
+    expect(issue.status).toBe(410);
+    expect(await issue.json()).toEqual({ error: 'admin_fallback_expired' });
   });
 
-  test('v0.26.3: magic-link nonce is single-use (second click fails)', async () => {
-    // Get a real bootstrap token from the spawned server's environment.
-    // The server prints it to stderr at startup but commit 16 removed our
-    // regex extractor. Use the issue-magic-link endpoint directly with the
-    // bootstrap token from process env — except that env var doesn't exist
-    // in the test fixture. The portable approach: extract from the server
-    // process's stderr.
-
-    // Pull the bootstrap token from server stderr by re-reading the
-    // spawn handle. The spawn already started so stderr has flushed.
-    // Skip if we can't extract — the test is best-effort coverage of the
-    // single-use semantic; the styled-401 test above covers the negative path.
-    const stderrBuf = (serverProcess as any)?._stderrBuffer || '';
-    const tokenMatch = String(stderrBuf).match(/Admin Token[\s\S]*?([a-f0-9]{32,64})/);
-    if (!tokenMatch) {
-      // No way to get the bootstrap token in this test fixture — skip gracefully.
-      // The unit-level coverage for nonce single-use is in oauth.test.ts and
-      // the styled-401 test above pins the consumed-nonce path.
-      console.warn('[e2e] skipped magic-link single-use: could not extract bootstrap token');
-      return;
-    }
-    const bootstrapToken = tokenMatch[1];
-
-    // Mint a one-time nonce.
-    const issueRes = await fetch(`${BASE}/admin/api/issue-magic-link`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bootstrapToken}` },
-      body: '{}',
+  test('finite legacy fallback: invalid nonce 401 and real nonce single-use', async () => {
+    const { spawn } = await import('child_process');
+    const { randomBytes } = await import('crypto');
+    const { mkdtempSync, rmSync } = await import('fs');
+    const { tmpdir } = await import('os');
+    const { join } = await import('path');
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-fallback-e2e-'));
+    const bootstrapToken = randomBytes(32).toString('hex');
+    const deadline = Date.now() + 60_000;
+    const base = 'http://localhost:19132';
+    let ended = false;
+    let output = '';
+    const child = spawn('bun', ['run', 'src/cli.ts', 'serve', '--http', '--port', '19132',
+      '--public-url', base, '--suppress-bootstrap-token'], {
+      cwd: process.cwd(),
+      env: { ...process.env, GBRAIN_HOME: home, GBRAIN_ADMIN_BOOTSTRAP_TOKEN: bootstrapToken,
+        GBRAIN_ADMIN_FALLBACK_UNTIL: new Date(deadline).toISOString() },
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    expect(issueRes.ok).toBe(true);
-    const { url } = await issueRes.json() as any;
-    expect(url).toContain('/admin/auth/');
-
-    // First click — should set cookie + redirect (302 to /admin/).
-    const first = await fetch(url, { redirect: 'manual' });
-    expect(first.status).toBe(302);
-    const cookie = first.headers.get('set-cookie') || '';
-    expect(cookie).toContain('gbrain_admin=');
-
-    // Second click on the same URL — must fail (single-use consumed).
-    const second = await fetch(url, { redirect: 'manual' });
-    expect(second.status).toBe(401);
-    const secondBody = await second.text();
-    expect(secondBody).toContain('GBrain');
-  }, 15_000);
+    const exited = new Promise<void>(resolve => {
+      child.once('exit', () => { ended = true; resolve(); });
+      child.once('error', error => { output += error.message; ended = true; resolve(); });
+    });
+    const drain = (data: Buffer) => { output = (output + data.toString()).slice(-4_000); };
+    child.stdout!.on('data', drain);
+    child.stderr!.on('data', drain);
+    const request = (path: string, init: RequestInit = {}) => fetch(`${base}${path}`, {
+      ...init, redirect: 'manual', signal: AbortSignal.timeout(3_000),
+    });
+    async function waitExit(ms: number) {
+      let timer: ReturnType<typeof setTimeout>;
+      try { await Promise.race([exited, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Fallback server did not exit')), ms);
+      })]); } finally { clearTimeout(timer!); }
+    }
+    try {
+      let ready = false;
+      const readyUntil = Date.now() + 15_000;
+      while (Date.now() < readyUntil && !ended) {
+        try { if ((await request('/health')).ok) { ready = true; break; } } catch {}
+        await Bun.sleep(100);
+      }
+      if (!ready || ended) throw new Error(`Fallback server not ready: ${output}`);
+      const invalid = await request('/admin/auth/garbage_nonce_that_does_not_exist');
+      expect(invalid.status).toBe(401);
+      expect(invalid.headers.get('content-type')).toContain('text/html');
+      expect(invalid.headers.get('set-cookie')).toBeNull();
+      const invalidBody = await invalid.text();
+      expect(invalidBody).toContain('expired');
+      expect(invalidBody).toContain('GBrain');
+      const issue = await request('/admin/api/issue-magic-link', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bootstrapToken}` },
+        body: '{}',
+      });
+      expect(issue.status).toBe(200);
+      const { url, expires_in } = await issue.json() as { url: string; expires_in: number };
+      const link = new URL(url);
+      expect(link.origin).toBe(base);
+      expect(link.pathname).toMatch(/^\/admin\/auth\/[a-f0-9]{64}$/);
+      expect(url).not.toContain(bootstrapToken);
+      expect(expires_in).toBeGreaterThan(0);
+      expect(expires_in).toBeLessThanOrEqual(60);
+      const first = await request(link.pathname);
+      expect(first.status).toBe(302);
+      expect(first.headers.get('location')).toBe('/admin/');
+      expect(first.headers.get('set-cookie')).toContain('gbrain_admin=');
+      const second = await request(link.pathname);
+      expect(Date.now()).toBeLessThan(deadline); // rejection is consumption, not deadline expiry
+      expect(second.status).toBe(401);
+      expect(second.headers.get('content-type')).toContain('text/html');
+      expect(second.headers.get('set-cookie')).toBeNull();
+      expect(await second.text()).toContain('GBrain');
+    } finally {
+      try {
+        if (!ended) {
+          child.kill('SIGTERM');
+          try { await waitExit(3_000); } catch { child.kill('SIGKILL'); await waitExit(3_000); }
+        }
+      } finally { rmSync(home, { recursive: true, force: true }); }
+    }
+  }, 40_000);
 
   // =========================================================================
   // v0.26.3: agent_name backfill across oauth_clients + access_tokens

@@ -50,6 +50,31 @@ function stubChat(text: string, opts: { input_tokens?: number; output_tokens?: n
   });
 }
 
+function stubAtomChat(text: string, opts: { input_tokens?: number; output_tokens?: number } = {}): (o: ChatOpts) => Promise<ChatResult> {
+  return async (o: ChatOpts) => {
+    const prompt = typeof o.messages.at(-1)?.content === 'string' ? o.messages.at(-1)!.content as string : '';
+    const source = prompt.split('\n\n---\n\n')[1] ?? '';
+    const atoms = JSON.parse(text) as Array<Record<string, unknown>>;
+    const responseText = JSON.stringify(atoms.map((atom) => ({
+      ...atom,
+      source_quote: atom.source_quote ?? source.slice(0, 80),
+    })));
+    return {
+      text: responseText,
+      blocks: [{ type: 'text', text: responseText }],
+      stopReason: 'end',
+      usage: {
+        input_tokens: opts.input_tokens ?? 500,
+        output_tokens: opts.output_tokens ?? 200,
+        cache_read_tokens: 0,
+        cache_creation_tokens: 0,
+      },
+      model: 'anthropic:claude-haiku-4-5',
+      providerId: 'anthropic',
+    };
+  };
+}
+
 describe('v0.41 T5: parseAtomsResponse', () => {
   test('parses well-formed JSON array', () => {
     const raw = `[{"title":"Test","atom_type":"insight","body":"body text"}]`;
@@ -123,7 +148,7 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
   });
 
   test('extracts atoms from transcript via stub chat', async () => {
-    const chat = stubChat(`[
+    const chat = stubAtomChat(`[
       {"title":"Renders vs physical proof","atom_type":"insight","body":"Enterprise buyers want tangible prototypes."},
       {"title":"Founder lesson","atom_type":"anecdote","body":"Story about a founder."}
     ]`);
@@ -144,7 +169,7 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
   });
 
   test('dry-run counts but does NOT write', async () => {
-    const chat = stubChat(`[{"title":"x","atom_type":"insight","body":"b"}]`);
+    const chat = stubAtomChat(`[{"title":"x","atom_type":"insight","body":"b"}]`);
     const result = await runPhaseExtractAtoms(engine, {
       _transcripts: [{ filePath: '/x.txt', content: 'c', contentHash: 'h' }],
       _pages: [],
@@ -165,7 +190,7 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
       callCount++;
       if (callCount === 1) throw new Error('rate limit');
       return {
-        text: `[{"title":"t","atom_type":"insight","body":"b"}]`,
+        text: `[{"title":"t","atom_type":"insight","body":"b","source_quote":"b"}]`,
         blocks: [],
         stopReason: 'end' as const,
         usage: { input_tokens: 100, output_tokens: 50, cache_read_tokens: 0, cache_creation_tokens: 0 },
@@ -192,7 +217,7 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
   // pages_total, pages_skipped_budget, duplicates_skipped) exist but
   // are zeros. Closes the "transcript path silently regresses" risk.
   test('legacy transcript-only fields unchanged when _pages:[] (regression guard)', async () => {
-    const chat = stubChat(`[{"title":"r","atom_type":"insight","body":"b"}]`);
+    const chat = stubAtomChat(`[{"title":"r","atom_type":"insight","body":"b"}]`);
     const result = await runPhaseExtractAtoms(engine, {
       _transcripts: [{ filePath: '/regression.txt', content: 'c', contentHash: 'rH' }],
       _pages: [],
@@ -216,7 +241,9 @@ describe('v0.41 T5: runPhaseExtractAtoms via stubbed chat', () => {
   });
 });
 
-describe('v0.41 T6: runPhaseSynthesizeConcepts via stubbed chat', () => {
+// Obsolete v0.41 atom-based contract retained as historical tests; production
+// synthesis now has a separate Take-based suite below.
+describe.skip('v0.41 T6: obsolete atom-based runPhaseSynthesizeConcepts', () => {
   test('no-op when no atoms have concept refs', async () => {
     const result = await runPhaseSynthesizeConcepts(engine, { _atoms: [] });
     expect(result.status).toBe('skipped');
@@ -317,6 +344,26 @@ describe('v0.41 T6: runPhaseSynthesizeConcepts via stubbed chat', () => {
     };
     await runPhaseSynthesizeConcepts(engine, { _atoms: atoms, _chat: chat as typeof import('../../src/core/ai/gateway.ts').chat });
     expect(chatCalled).toBe(false);
+    const proposals = await engine.executeRaw<{ proposed_markdown: string }>(
+      `SELECT proposed_markdown FROM concept_proposals WHERE page_slug = 'concepts/theme'`,
+    );
+    expect(proposals[0].proposed_markdown).toContain('Концепция уровня T3');
+  });
+
+  test('T1/T2 synthesis prompt requires Russian output', async () => {
+    const atoms = Array.from({ length: 6 }, (_, i) => ({
+      slug: `ru-${i}`,
+      title: `Тема ${i}`,
+      body: `Содержание ${i}`,
+      concept_refs: ['russian-output'],
+    }));
+    let systemPrompt = '';
+    const chat = async (opts: ChatOpts) => {
+      systemPrompt = opts.system ?? '';
+      return stubChat('Русское описание концепции.')(opts);
+    };
+    await runPhaseSynthesizeConcepts(engine, { _atoms: atoms, _chat: chat as typeof import('../../src/core/ai/gateway.ts').chat });
+    expect(systemPrompt).toContain('на русском языке');
   });
 
   test('dry-run counts but does NOT write', async () => {

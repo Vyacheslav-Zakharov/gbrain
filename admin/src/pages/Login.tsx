@@ -29,7 +29,11 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
       setToken('');
       onLogin();
     } catch (err) {
-      setError('Недействительный токен.');
+      if (err instanceof Error && err.message === 'admin_fallback_expired') {
+        setError('Временный вход по bootstrap token отключён. Используйте корпоративный SSO.');
+      } else {
+        setError('Недействительный токен.');
+      }
     } finally {
       setLoading(false);
     }
@@ -39,6 +43,14 @@ export function LoginPage({ onLogin }: { onLogin: () => void }) {
     <div className="login-page">
       <div className="login-box">
         <div className="login-logo">GBrain</div>
+
+        <a
+          className="btn btn-primary"
+          href="/login?return_to=/admin/"
+          style={{ display: 'block', width: '100%', marginBottom: 20, textAlign: 'center' }}
+        >
+          Войти через корпоративный SSO
+        </a>
 
         <div style={{
           background: 'rgba(136, 170, 255, 0.08)',

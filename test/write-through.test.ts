@@ -156,20 +156,44 @@ describe('writePageThrough', () => {
     await engine.setConfig('sync.repo_path', globalDir);
 
     const slug = 'notes/alpha-thing';
+    const storedPath = 'legacy/alpha-thing.md';
     await importFromContent(engine, slug, `---\ntitle: T\ntype: note\n---\n\n# Body\n`, {
       noEmbed: true,
       sourceId: 'alpha',
-      sourcePath: `${slug}.md`,
+      sourcePath: storedPath,
     });
 
     const res = await writePageThrough(engine, slug, { sourceId: 'alpha' });
 
     expect(res.written).toBe(true);
-    // File at the source's tree ROOT, never nested under `.sources/<id>/`.
-    expect(res.path).toBe(path.join(alphaDir, `${slug}.md`));
-    expect(fs.existsSync(path.join(alphaDir, `${slug}.md`))).toBe(true);
+    // Preserve the path that sync imported instead of deriving a second file
+    // from the logical slug. Still never nest under `.sources/<id>/`.
+    expect(res.path).toBe(path.join(alphaDir, storedPath));
+    expect(fs.existsSync(path.join(alphaDir, storedPath))).toBe(true);
+    expect(fs.existsSync(path.join(alphaDir, `${slug}.md`))).toBe(false);
     // The global repo path is untouched.
     expect(walkFiles(globalDir).some((f) => f.endsWith('.md'))).toBe(false);
+  });
+
+  test('source_path cannot escape a source-owned local_path', async () => {
+    const alphaDir = path.join(tmpRoot, 'confined-alpha');
+    fs.mkdirSync(alphaDir, { recursive: true });
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES ('confined', 'Confined', $1, '{}'::jsonb)`,
+      [alphaDir],
+    );
+    const slug = 'notes/confined';
+    await importFromContent(engine, slug, `---\ntitle: T\ntype: note\n---\n\n# Body\n`, {
+      noEmbed: true,
+      sourceId: 'confined',
+      sourcePath: '../escape.md',
+    });
+
+    const res = await writePageThrough(engine, slug, { sourceId: 'confined' });
+
+    expect(res.written).toBe(false);
+    expect(res.error).toContain('escapes source local_path');
+    expect(fs.existsSync(path.join(tmpRoot, 'escape.md'))).toBe(false);
   });
 
   test('[REGRESSION] mkdir ENOTDIR (parent is a file) → error, no partial .md, no .tmp', async () => {

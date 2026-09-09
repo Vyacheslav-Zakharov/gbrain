@@ -747,7 +747,14 @@ export function attributeKnob<K extends keyof ModeBundle>(
 // to post-fix lookups. Same one-time global cold-miss pattern as the bumps
 // above (the hash is global, not per-provider); refills within
 // cache.ttl_seconds (3600s default).
-export const KNOBS_HASH_VERSION = 11;
+//
+// bump 11→12: scoped Postgres HNSW retrieval now raises transaction-local
+// ef_search for selective filters. Pre-fix cache rows can contain sparse,
+// lower-quality candidate sets produced by the default ef_search=40 and must
+// not mask the corrected retrieval path until their TTL expires.
+// v13: invalidate rows written from degraded expansion arms; new writes skip
+// degraded result sets so a transient timeout cannot poison semantic cache.
+export const KNOBS_HASH_VERSION = 13;
 
 /**
  * v0.36 (D8 / CDX-2) — second-arg context for the cache key. The

@@ -91,5 +91,26 @@ describe('operations contract parity', () => {
       expect(typeof tool.inputSchema.properties).toBe('object');
       expect(Array.isArray(tool.inputSchema.required)).toBe(true);
     }
+
+    const toolNames = tools.map(tool => tool.name);
+    const compatibilityAliases = {
+      gbrain_skills_catalog: 'list_skills',
+      gbrain_skill_get: 'get_skill',
+      gbrain_identity: 'whoami',
+      gbrain_pages_list: 'list_pages',
+      gbrain_search: 'search',
+      gbrain_page_get: 'get_page',
+      gbrain_schema_explain_type: 'schema_explain_type',
+      gbrain_schema_graph: 'schema_graph',
+      gbrain_page_put: 'put_page',
+      gbrain_link_add: 'add_link',
+    } as const;
+    for (const [alias, canonical] of Object.entries(compatibilityAliases)) {
+      expect(toolNames).toContain(alias);
+      expect(operationsByName[alias].params).toBe(operationsByName[canonical].params);
+      expect(operationsByName[alias].handler).toBe(operationsByName[canonical].handler);
+      expect(operationsByName[alias].scope).toBe(operationsByName[canonical].scope);
+      expect(operationsByName[alias].cliHints).toBeUndefined();
+    }
   });
 });

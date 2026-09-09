@@ -1,9 +1,9 @@
 /**
  * gbrain claw-test scripted-mode E2E.
  *
- * Invokes the harness via `bun run src/cli.ts` (NOT a compiled binary —
- * `bun build --compile` doesn't bundle PGLite's runtime assets like
- * pglite.data, so a compiled gbrain can't init a fresh PGLite brain).
+ * Invokes the harness via `bun run src/cli.ts` to keep this test focused and
+ * fast. Standalone compiled-PGLite asset coverage lives in
+ * `scripts/check-pglite-compiled.sh`.
  * Uses a tiny shim script that the harness can spawn as if it were the
  * gbrain binary.
  *

@@ -24,14 +24,25 @@ export interface ConceptProposalRow {
   proposed_at: string;
   current_page_body?: string | null;
   current_page_frontmatter?: Record<string, unknown> | null;
+  draft_revision_id?: number | null;
+  draft_proposed_markdown?: string | null;
 }
 
 export async function listConceptProposals(engine: BrainEngine, opts: { status?: string; query?: string; limit?: number } = {}) {
   const rows = await engine.executeRaw<ConceptProposalRow & { total_count: number }>(
     `SELECT cp.*, p.compiled_truth AS current_page_body, p.frontmatter AS current_page_frontmatter,
+            draft.id::int AS draft_revision_id,
+            draft.proposed_payload->>'proposed_markdown' AS draft_proposed_markdown,
             count(*) OVER()::int AS total_count
        FROM concept_proposals cp
        LEFT JOIN pages p ON p.source_id = cp.source_id AND p.slug = cp.page_slug AND p.deleted_at IS NULL
+       LEFT JOIN LATERAL (
+         SELECT r.id, r.proposed_payload
+           FROM ai_review_revisions r
+          WHERE r.target_type = 'concept_proposal' AND r.target_id = cp.id AND r.status = 'draft'
+          ORDER BY r.created_at DESC, r.id DESC
+          LIMIT 1
+       ) draft ON true
       WHERE cp.status = $1
         AND ($2::text IS NULL OR cp.page_slug ILIKE '%' || $2 || '%' OR cp.proposed_markdown ILIKE '%' || $2 || '%')
       ORDER BY cp.proposed_at DESC, cp.id DESC LIMIT $3`,
@@ -51,7 +62,13 @@ export async function getConceptProposalReview(engine: BrainEngine, id: number) 
     engine.executeRaw(`SELECT * FROM ai_review_revisions WHERE target_type = 'concept_proposal' AND target_id = $1 ORDER BY created_at DESC`, [id]),
     engine.executeRaw(`SELECT * FROM ai_review_events WHERE target_type = 'concept_proposal' AND target_id = $1 ORDER BY created_at DESC`, [id]),
   ]);
-  return { proposal: rows[0], revisions, events };
+  const activeRevision = (revisions as Array<{ id?: unknown; status?: unknown; proposed_payload?: unknown }>)
+    .find(revision => revision.status === 'draft');
+  const payload = activeRevision?.proposed_payload as { proposed_markdown?: unknown } | undefined;
+  const activeDraft = activeRevision && typeof activeRevision.id === 'number' && typeof payload?.proposed_markdown === 'string'
+    ? { revision_id: activeRevision.id, proposed_markdown: payload.proposed_markdown }
+    : null;
+  return { proposal: rows[0], revisions, events, active_draft: activeDraft };
 }
 
 export async function createLlmConceptRevision(engine: BrainEngine, id: number, comment: string, actor: string, model?: string) {
@@ -99,23 +116,25 @@ export async function createManualConceptRevision(engine: BrainEngine, id: numbe
 
 export async function rejectConceptProposal(engine: BrainEngine, id: number, actor: string, reason?: string) {
   const identity = await getConceptProposalReview(engine, id);
-  return withPageLock(`ai-review:${identity.proposal.source_id}:${identity.proposal.page_slug}`, async () => {
+  return withPageLock(identity.proposal.page_slug, async () => {
     const { proposal } = await getConceptProposalReview(engine, id);
-    const rows = await engine.executeRaw<ConceptProposalRow>(
-      `UPDATE concept_proposals SET status='rejected', acted_at=now(), acted_by=$2, version=version+1
-        WHERE id=$1 AND status='pending' RETURNING *`, [id, actor]);
-    if (!rows[0]) throw new ReviewConflictError('concept proposal changed concurrently', 'concurrent_change');
-    await engine.executeRaw(
-      `INSERT INTO ai_review_events (target_type,target_id,action,actor,expected_version,previous_state,new_state,details)
-       VALUES ('concept_proposal',$1,'reject',$2,$3,$4::text::jsonb,$5::text::jsonb,$6::text::jsonb)`,
-      [id, actor, proposal.version, JSON.stringify({ status: proposal.status }), JSON.stringify({ status: 'rejected' }), JSON.stringify({ reason: reason ?? null })]);
-    return rows[0];
+    return engine.transaction(async (tx) => {
+      const rows = await tx.executeRaw<ConceptProposalRow>(
+        `UPDATE concept_proposals SET status='rejected', acted_at=now(), acted_by=$2, version=version+1
+          WHERE id=$1 AND status='pending' RETURNING *`, [id, actor]);
+      if (!rows[0]) throw new ReviewConflictError('concept proposal changed concurrently', 'concurrent_change');
+      await tx.executeRaw(
+        `INSERT INTO ai_review_events (target_type,target_id,action,actor,expected_version,previous_state,new_state,details)
+         VALUES ('concept_proposal',$1,'reject',$2,$3,$4::text::jsonb,$5::text::jsonb,$6::text::jsonb)`,
+        [id, actor, proposal.version, JSON.stringify({ status: proposal.status }), JSON.stringify({ status: 'rejected' }), JSON.stringify({ reason: reason ?? null })]);
+      return rows[0];
+    });
   });
 }
 
 export async function acceptConceptProposal(engine: BrainEngine, id: number, markdownInput: string | undefined, actor: string, opts: { revisionId?: number; allowOverwriteExisting?: boolean } = {}) {
   const identity = await getConceptProposalReview(engine, id);
-  return withPageLock(`ai-review:${identity.proposal.source_id}:${identity.proposal.page_slug}`, async () => {
+  return withPageLock(identity.proposal.page_slug, async () => {
     const { proposal } = await getConceptProposalReview(engine, id);
     if (proposal.status !== 'pending') throw new ReviewConflictError('concept proposal is no longer pending', 'stale_status');
     const markdown = (markdownInput ?? proposal.proposed_markdown).trim();
@@ -156,10 +175,30 @@ export async function acceptConceptProposal(engine: BrainEngine, id: number, mar
       }
       throw new ReviewConflictError(`canonical file write/read-back failed: ${writeError}`, 'file_write_failed');
     }
-    const rows = await engine.executeRaw<ConceptProposalRow>(
-      `UPDATE concept_proposals SET status='accepted', acted_at=now(), acted_by=$2, version=version+1
-        WHERE id=$1 AND status='pending' AND version=$3 RETURNING *`, [id, actor, proposal.version]);
-    if (!rows[0]) {
+    let accepted: ConceptProposalRow;
+    try {
+      accepted = await engine.transaction(async (tx) => {
+        const rows = await tx.executeRaw<ConceptProposalRow>(
+          `UPDATE concept_proposals SET status='accepted', acted_at=now(), acted_by=$2, version=version+1
+            WHERE id=$1 AND status='pending' AND version=$3 RETURNING *`, [id, actor, proposal.version]);
+        if (!rows[0]) throw new ReviewConflictError('concept proposal changed concurrently', 'concurrent_change');
+        if (opts.revisionId) {
+          await tx.executeRaw(
+            `UPDATE ai_review_revisions SET status='applied', decided_at=now()
+              WHERE id=$1 AND target_type='concept_proposal' AND target_id=$2`,
+            [opts.revisionId, id],
+          );
+        }
+        const publication = { db_indexed: true, file_written: true, git_committed: false, git_pushed: false, path: write.path };
+        await tx.executeRaw(
+          `INSERT INTO ai_review_events (target_type,target_id,action,actor,expected_version,previous_state,new_state,details)
+           VALUES ('concept_proposal',$1,'accept',$2,$3,$4::text::jsonb,$5::text::jsonb,$6::text::jsonb)`,
+          [id, actor, proposal.version, JSON.stringify({ status: proposal.status }), JSON.stringify({ status: 'accepted' }), JSON.stringify({ revision_id: opts.revisionId ?? null, markdown_hash: contentHash(markdown), publication })]);
+        return rows[0];
+      });
+    } catch (error) {
+      // Keep canonical content aligned with the atomic proposal+revision+audit
+      // transaction when its commit path fails after the file was published.
       if (original) {
         await importFromContent(engine, proposal.page_slug, original, { sourceId: proposal.source_id, noEmbed: true });
         const rollbackWrite = await writePageThrough(engine, proposal.page_slug, { sourceId: proposal.source_id });
@@ -168,14 +207,9 @@ export async function acceptConceptProposal(engine: BrainEngine, id: number, mar
         await engine.deletePage(proposal.page_slug, { sourceId: proposal.source_id });
         if (write.path) await unlink(write.path).catch(() => undefined);
       }
-      throw new ReviewConflictError('concept proposal changed concurrently', 'concurrent_change');
+      throw error;
     }
-    if (opts.revisionId) await engine.executeRaw(`UPDATE ai_review_revisions SET status='applied', decided_at=now() WHERE id=$1 AND target_type='concept_proposal' AND target_id=$2`, [opts.revisionId, id]);
     const publication = { db_indexed: true, file_written: true, git_committed: false, git_pushed: false, path: write.path };
-    await engine.executeRaw(
-      `INSERT INTO ai_review_events (target_type,target_id,action,actor,expected_version,previous_state,new_state,details)
-       VALUES ('concept_proposal',$1,'accept',$2,$3,$4::text::jsonb,$5::text::jsonb,$6::text::jsonb)`,
-      [id, actor, proposal.version, JSON.stringify({ status: proposal.status }), JSON.stringify({ status: 'accepted' }), JSON.stringify({ revision_id: opts.revisionId ?? null, markdown_hash: contentHash(markdown), publication })]);
-    return { proposal: rows[0], publication };
+    return { proposal: accepted, publication };
   });
 }
