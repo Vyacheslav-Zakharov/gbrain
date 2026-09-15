@@ -38,6 +38,7 @@ import { join, dirname } from 'node:path';
 
 import type { BrainEngine, NewFact, FactVisibility } from '../engine.ts';
 import { withPageLock } from '../page-lock.ts';
+import { assertLegacyPageFileWriteAllowed } from '../page-file-writer-gate.ts';
 import { gbrainPath } from '../config.ts';
 import { upsertFactRow, parseFactsFence } from '../facts-fence.ts';
 import { extractFactsFromFenceText } from './extract-from-fence.ts';
@@ -172,6 +173,8 @@ export async function writeFactsToFence(
   return withPageLock(
     target.slug,
     async () => {
+      // Refuse before mkdir/temp writes; this bridge is not enrollment locking.
+      await assertLegacyPageFileWriteAllowed(engine, target.sourceId, target.slug, filePath);
       // 1. Read existing body or stub-create.
       let body: string;
       if (existsSync(filePath)) {

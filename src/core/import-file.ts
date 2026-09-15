@@ -1,5 +1,8 @@
 import { readFileSync, statSync, lstatSync } from 'fs';
-import { basename, extname } from 'path';
+import { basename, extname, resolve, join } from 'path';
+import { realpath } from 'node:fs/promises';
+import { resolvePageFileRuntime } from './page-file-runtime.ts';
+import type { GBrainConfig } from './config.ts';
 import { createHash } from 'crypto';
 import { marked } from 'marked';
 import type { BrainEngine, FileSpec } from './engine.ts';
@@ -39,6 +42,34 @@ import { normalizeAliasList } from './search/alias-normalize.ts';
 import { isUndefinedTableError, warnOncePerProcess } from './utils.ts';
 import { computeCorpusGeneration } from './contextual-retrieval-service.ts';
 import { runGuardrails } from './guardrails.ts';
+import { PageFileSyncConflict } from './page-file-sync.ts';
+import { assertLegacyPageFileWriteAllowed } from './page-file-writer-gate.ts';
+
+/** Until the server supplies an authoritative mutation host, imports cannot
+ * manufacture a fresh PageFileSync token from caller content or a late read.
+ * Refuse enrolled targets BEFORE every skip/provider branch. Never retry with
+ * a refreshed baseline: that would turn a stale approval into a new write. */
+async function assertUnenrolledImport(engine: BrainEngine, source: string, slug: string, filePath?: string): Promise<void> {
+  try {
+    if (filePath !== undefined) {
+      await assertLegacyPageFileWriteAllowed(engine, source, slug, filePath);
+      return;
+    }
+    const [schema] = await engine.executeRaw<{ present: boolean }>(
+      `SELECT to_regclass('public.page_file_bindings') IS NOT NULL AS present`,
+    );
+    if (!schema || typeof schema.present !== 'boolean') throw new Error('page_file_gate_unavailable');
+    if (!schema.present) return;
+    const rows = await engine.executeRaw(
+      'SELECT binding_id FROM public.page_file_bindings WHERE source_id=$1 AND slug=$2', [source, slug],
+    );
+    if (rows.length) throw new PageFileSyncConflict('unsupported_import_file_baseline');
+  } catch (error) {
+    if (error instanceof PageFileSyncConflict) throw error;
+    // Unknown gate/DB/FS failures are not malformed-file failures either.
+    throw new PageFileSyncConflict('unsupported_import_file_baseline');
+  }
+}
 
 /**
  * v0.20.0 Cathedral II Layer 8 D2 — markdown fence extraction helper.
@@ -290,6 +321,7 @@ export async function importFromContent(
   // silently fabricated a duplicate at (default, slug) — causing later
   // bare-slug subqueries (getTags, deleteChunks, etc.) to crash with 21000.
   const sourceId = opts.sourceId;
+  await assertUnenrolledImport(engine, sourceId ?? 'default', slug);
   // Reject oversized payloads before any parsing, chunking, or embedding happens.
   // Uses Buffer.byteLength to count UTF-8 bytes the same way disk size would,
   // so the network path behaves identically to the file path.
@@ -920,6 +952,8 @@ export async function importFromFile(
   opts: {
     noEmbed?: boolean;
     inferFrontmatter?: boolean;
+    /** Trusted server/CLI configuration, NEVER request/frontmatter input. */
+    config?: GBrainConfig;
     sourceId?: string;
     forceRechunk?: boolean;
     /**
@@ -930,6 +964,52 @@ export async function importFromFile(
     activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> };
   } = {},
 ): Promise<ImportResult> {
+  // Capture authoritative bytes before inference, parsing, hashing or no-op.
+  // This server-owned factory remains integration-only; production is closed.
+  const source = opts.sourceId ?? 'default';
+  if (opts.config?.page_file_runtime && opts.config.page_file_runtime.mode !== 'disabled') {
+    const [binding] = await engine.executeRaw<{ slug: string; canonical_root: string; relative_path: string }>(
+      'SELECT slug,canonical_root,relative_path FROM page_file_bindings WHERE source_id=$1 AND relative_path=$2', [source, relativePath]);
+    if (binding) {
+      if (resolve(filePath) !== join(binding.canonical_root, binding.relative_path)
+        || await realpath(filePath) !== join(binding.canonical_root, binding.relative_path))
+        throw new PageFileSyncConflict('binding_changed');
+      if (opts.forceRechunk || opts.inferFrontmatter === true || isCodeFilePath(relativePath))
+        throw new PageFileSyncConflict('unsupported_sync_projection');
+      const runtime = await resolvePageFileRuntime({ engine, config: opts.config }, source, binding.slug);
+      if (!runtime) throw new PageFileSyncConflict('unsupported_import_file_baseline');
+      const baseline = await runtime.sync.capture(source, binding.slug);
+      // The MVP projector has no pack-dependent writes. Accept the normal
+      // command's pack only when it produces exactly the same validated parse
+      // from the captured bytes; never silently discard custom semantics.
+      // JSONB cannot preserve recursive YAML aliases. Validate before either
+      // comparison or commit, including callers without an active pack. Reject
+      // only known unsupported values; do not hide unrelated programming errors.
+      const projectionJSON = (value: unknown): string => {
+        const ancestors: object[] = [];
+        return JSON.stringify(value, function (_key, child) {
+          if (typeof child === 'bigint') throw new PageFileSyncConflict('unsupported_sync_projection');
+          if (child === null || typeof child !== 'object') return child;
+          while (ancestors.length && ancestors[ancestors.length - 1] !== this) ancestors.pop();
+          if (ancestors.includes(child)) throw new PageFileSyncConflict('unsupported_sync_projection');
+          ancestors.push(child);
+          return child;
+        });
+      };
+      const parseOpts = { validate: true, expectedSlug: binding.slug };
+      const canonical = projectionJSON(parseMarkdown(baseline.raw, binding.slug + '.md', parseOpts));
+      if (opts.activePack) {
+        const configured = projectionJSON(parseMarkdown(baseline.raw, binding.slug + '.md', { ...parseOpts, activePack: opts.activePack }));
+        if (canonical !== configured) throw new PageFileSyncConflict('unsupported_sync_projection');
+      }
+      const result = await runtime.sync.commit(baseline);
+      return { slug: binding.slug, status: result.status === 'unchanged' ? 'skipped' : 'imported',
+        chunks: result.status === 'unchanged' ? 0 : (await engine.getChunks(binding.slug, { sourceId: source })).length };
+    }
+  }
+  // Binding identity comes from the server DB, not frontmatter or caller bytes.
+  // Includes physical-path aliases before any read, inference or successful skip.
+  await assertUnenrolledImport(engine, opts.sourceId ?? 'default', slugifyPath(relativePath), filePath);
   // Defense-in-depth: reject symlinks before reading content.
   const lstat = lstatSync(filePath);
   if (lstat.isSymbolicLink()) {

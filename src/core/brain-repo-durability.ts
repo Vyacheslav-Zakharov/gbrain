@@ -38,6 +38,10 @@ import {
 } from './git-remote.ts';
 import { findResolverFile, RESOLVER_FILENAMES } from './resolver-filenames.ts';
 import { redactSecretsInText } from './minions/handlers/shell-redact.ts';
+import type { BrainEngine } from './engine.ts';
+import { loadConfigFileOnly } from './config.ts';
+import { resolvePageFileRootHost } from './page-file-runtime.ts';
+import { withLegacyPageFileRootMutation, PageFileRootGateError } from './page-file-root-gate.ts';
 // Static import → bundled into the --compile binary so the taxonomy never drifts
 // and needs no runtime skills/ directory.
 import filingRulesDoc from '../../skills/_brain-filing-rules.json';
@@ -66,6 +70,8 @@ export interface DurabilityReport {
 }
 
 export interface HardenOpts {
+  /** Authoritative enrollment DB for this root; absence never proves safety. */
+  engine?: Pick<BrainEngine, 'executeRaw'> & Partial<Pick<BrainEngine, 'kind'>>;
   repoPath: string;
   sourceId: string;
   branch?: string;          // default: detectDefaultBranch
@@ -623,7 +629,13 @@ export async function hardenBrainRepo(opts: HardenOpts): Promise<DurabilityRepor
     push('pull', { status: 'needs_attention', detail: 'detached HEAD — checkout a branch before hardening' });
   } else {
     // 1. pull current state
-    try { push('pull', pullDetail(divergenceSafePull(repoPath, branch))); }
+    try {
+      if (!opts.engine) throw new PageFileRootGateError('page_file_root_gate_unavailable');
+      const outcome = await withLegacyPageFileRootMutation(opts.engine, repoPath,
+        rootPermit => divergenceSafePull(repoPath, branch, { rootPermit }),
+        await resolvePageFileRootHost({ engine: opts.engine, config: loadConfigFileOnly() }, repoPath));
+      push('pull', pullDetail(outcome));
+    }
     catch (e) { push('pull', { status: 'needs_attention', detail: `fetch/pull failed: ${(e as Error).message.slice(0, 140)}` }); }
   }
 

@@ -12,12 +12,15 @@
  * single-writer lock.
  */
 
+import { loadConfigFileOnly } from '../core/config.ts';
+import { resolvePageFileRootHost } from '../core/page-file-runtime.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import {
   hardenBrainRepo, unhardenBrainRepo, acceptPat,
   type DurabilityReport,
 } from '../core/brain-repo-durability.ts';
 import { divergenceSafePull, detectDefaultBranch } from '../core/git-remote.ts';
+import { withLegacyPageFileRootMutation, PageFileRootGateError } from '../core/page-file-root-gate.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { existsSync } from 'fs';
 import { join } from 'path';
@@ -86,6 +89,7 @@ export async function runHarden(engine: BrainEngine, args: string[]): Promise<vo
       continue;
     }
     const report = await hardenBrainRepo({
+      engine,
       repoPath: row.local_path, sourceId: row.id, branch,
       pat: pat?.token, installCron, verify, dryRun,
       logger: json ? undefined : (l) => console.error(`  ${l}`),
@@ -143,7 +147,22 @@ export async function runPull(engine: BrainEngine | null, args: string[]): Promi
     process.exit(1);
   }
   const branch = branchFlag || detectDefaultBranch(repoPath);
-  const outcome = divergenceSafePull(repoPath, branch);
+  // The DB-free cron cannot prove enrollment absence. Do not open a competing
+  // PGLite engine or mint a filesystem-only bypass; use the connected source path.
+  if (!engine) throw new PageFileRootGateError('page_file_root_gate_unavailable');
+  const host = await resolvePageFileRootHost({ engine, config: loadConfigFileOnly() }, repoPath);
+  // Local CLI-only explicit recovery: observe current files, never rerun Git.
+  if (args.includes('--recover-root')) {
+    if (!args.includes('--yes')) throw new Error('root_recovery_approval_required');
+    if (!host) throw new Error('file_runtime_unavailable');
+    const { reconcilePageFileRootTransition } = await import('../core/page-file-root-transition.ts');
+    await reconcilePageFileRootTransition(engine, host);
+    console.log('root transition reconciled; no Git rerun; run sync to index current files');
+    return;
+  }
+  const outcome = await withLegacyPageFileRootMutation(engine, repoPath,
+    rootPermit => divergenceSafePull(repoPath, branch, { rootPermit }),
+    host);
   switch (outcome.status) {
     case 'up_to_date': console.log(`up to date (${branch})`); break;
     case 'advanced': console.log(`advanced ${outcome.from.slice(0, 7)}→${outcome.to.slice(0, 7)} (${branch})`); break;

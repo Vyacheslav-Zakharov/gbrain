@@ -484,6 +484,8 @@ export class PGLiteEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='last_retrieved_at') AS pages_last_retrieved_at_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='pages' AND column_name='write_revision') AS pages_write_revision_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='ingested_via') AS pages_ingested_via_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public' AND table_name='pages' AND column_name='ingested_at') AS pages_ingested_at_exists,
@@ -622,6 +624,7 @@ export class PGLiteEngine implements BrainEngine {
     // v0.37.0 (v79): pages_last_retrieved_at_idx in PGLITE_SCHEMA_SQL
     // references last_retrieved_at. Pre-v79 brains crash without the column.
     const needsPagesLastRetrievedAt = probe.pages_exists && !probe.pages_last_retrieved_at_exists;
+    const needsPagesWriteRevision = probe.pages_exists && !(probe as { pages_write_revision_exists?: boolean }).pages_write_revision_exists;
     // v0.38.0 (v80): provenance columns on pages. Not referenced by any
     // SCHEMA_SQL index or FK today, but added defense-in-depth so future
     // schema work that references them doesn't wedge pre-v80 brains.
@@ -672,7 +675,7 @@ export class PGLiteEngine implements BrainEngine {
         && !needsMcpLogBootstrap && !needsSubagentProviderId
         && !needsPagesRecency && !needsIngestLogSourceId
         && !needsFilesBootstrap && !needsOauthClientsBootstrap
-        && !needsSourcesArchive && !needsPagesLastRetrievedAt
+        && !needsSourcesArchive && !needsPagesLastRetrievedAt && !needsPagesWriteRevision
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
@@ -859,6 +862,10 @@ export class PGLiteEngine implements BrainEngine {
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archive_expires_at TIMESTAMPTZ;
       `);
+    }
+
+    if (needsPagesWriteRevision) {
+      await this.db.exec(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS write_revision UUID NOT NULL DEFAULT gen_random_uuid()`);
     }
 
     if (needsPagesLastRetrievedAt) {

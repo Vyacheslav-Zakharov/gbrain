@@ -200,6 +200,7 @@ async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
       } else {
         console.error('[gbrain] Hardening brain repo for durability…');
         const report = await hardenBrainRepo({
+          engine,
           repoPath: created.local_path, sourceId: id, pat: pat.token,
           logger: (l) => console.error(`  ${l}`),
         });

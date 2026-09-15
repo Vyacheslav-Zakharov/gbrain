@@ -15,6 +15,7 @@
  * stderr warning at use site is the operator's signal.
  */
 import { execFileSync } from 'child_process';
+import { assertPageFileRootPermit, type PageFileRootPermit } from './page-file-root-gate.ts';
 import { lstatSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { isInternalUrl } from './url-safety.ts';
@@ -215,7 +216,8 @@ export function cloneRepo(url: string, destDir: string, opts: CloneOpts = {}): v
 }
 
 /** Pull a repo with --ff-only and the same SSRF-defensive flags as cloneRepo. */
-export function pullRepo(repoPath: string, opts: { timeoutMs?: number } = {}): void {
+export function pullRepo(repoPath: string, opts: { timeoutMs?: number; rootPermit?: PageFileRootPermit } = {}): void {
+  assertPageFileRootPermit(repoPath, opts.rootPermit);
   const args: string[] = ['-C', repoPath, ...GIT_SSRF_FLAGS, 'pull', ...GIT_SSRF_SUBCOMMAND_FLAGS, '--ff-only'];
   try {
     execFileSync('git', args, {
@@ -433,8 +435,9 @@ export type PullOutcome =
 export function divergenceSafePull(
   repoPath: string,
   branch: string,
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; rootPermit?: PageFileRootPermit } = {},
 ): PullOutcome {
+  assertPageFileRootPermit(repoPath, opts.rootPermit);
   const timeoutMs = opts.timeoutMs ?? 300_000;
 
   if (isWorkingTreeDirty(repoPath)) return { status: 'skipped_dirty' };

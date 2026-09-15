@@ -34,6 +34,7 @@ import { normalizeModelId } from '../model-id.ts';
 import { hasAnthropicKey } from '../ai/anthropic-key.ts';
 import { join, dirname, isAbsolute, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
+import { assertLegacyPageFileWriteAllowed } from '../page-file-writer-gate.ts';
 import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { MinionQueue } from '../minions/queue.ts';
 import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.ts';
@@ -1082,6 +1083,11 @@ async function reverseWriteRefs(
     const page = await engine.getPage(slug, { sourceId: source_id });
     if (!page) continue;
     const tags = await engine.getTags(slug, { sourceId: source_id });
+    const targetPath = source_id === 'default'
+      ? join(brainDir, `${slug}.md`)
+      : join(brainDir, '.sources', source_id, `${slug}.md`);
+    // Outside best-effort catch: safety refusals must abort the phase.
+    await assertLegacyPageFileWriteAllowed(engine, source_id, slug, targetPath);
     try {
       const md = renderPageToMarkdown(page, tags);
       // v0.32.8 F6: non-default sources land at brainDir/.sources/<id>/<slug>.md
@@ -1171,6 +1177,7 @@ async function writeSummaryPage(
   // unnecessarily; we go straight to the engine.
   const { parseMarkdown } = await import('../markdown.ts');
   const parsed = parseMarkdown(fullMarkdown);
+  await assertLegacyPageFileWriteAllowed(engine, 'default', summarySlug, join(brainDir, `${summarySlug}.md`));
   await engine.putPage(summarySlug, {
     type: parsed.type,
     title: parsed.title,
@@ -1241,5 +1248,7 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
 // behavior at function granularity (e.g., #745 collectChildPutPageSlugs
 // double-encoded jsonb regression). Not part of the runtime contract.
 export const __testing = {
+  reverseWriteRefs,
+  writeSummaryPage,
   collectChildPutPageSlugs,
 };

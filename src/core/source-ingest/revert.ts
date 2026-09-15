@@ -5,6 +5,7 @@ import { safeDump as yamlSafeDump } from 'js-yaml';
 import type { BrainEngine } from '../engine.ts';
 import { importFromContent } from '../import-file.ts';
 import { writePageThrough } from '../write-through.ts';
+import { assertLegacyPageFileWriteAllowed } from '../page-file-writer-gate.ts';
 
 export interface SourceRevertReportRow {
   connector_id: string;
@@ -135,6 +136,18 @@ export async function buildSourceRevertReport(engine: BrainEngine, runId: string
     if (localPath) commonLocalPath = commonLocalPath ?? localPath;
     const relPath = `${r.slug}.md`;
     const absPath = localPath ? join(localPath, relPath) : null;
+
+    // A revert is a new write, never authority to restore/delete an enrolled
+    // page. Refuse before either DB mutation or canonical unlink/import.
+    if (apply) {
+      try {
+        if (!absPath) throw new Error('page_file_gate_unavailable');
+        await assertLegacyPageFileWriteAllowed(engine, r.approved_source_id, r.slug, absPath);
+      } catch (error) {
+        pages.push({ ...base, revert_action: 'blocked', reason: error instanceof Error ? error.message : String(error) });
+        continue;
+      }
+    }
 
     if (r.action === 'created') {
       if (!apply) {

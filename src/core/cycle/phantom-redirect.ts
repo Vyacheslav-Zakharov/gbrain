@@ -40,6 +40,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 
 import type { BrainEngine } from '../engine.ts';
+import { assertLegacyPageFileWriteAllowed } from '../page-file-writer-gate.ts';
 import type { Page } from '../types.ts';
 import {
   resolvePhantomCanonical,
@@ -439,6 +440,16 @@ export async function tryRedirectPhantom(
 
   // ─── Commit phase (codex #3/#4/#6/#7) ─────────────────────────────
   const canonicalPath = path.join(brainDir, `${canonical}.md`);
+  // Preflight BOTH endpoints before any materialization, fence temp/rename,
+  // DB migration or phantom unlink. This is not enrollment serialization.
+  try {
+    await assertLegacyPageFileWriteAllowed(engine, sourceId, page.slug, path.join(brainDir, `${page.slug}.md`));
+    await assertLegacyPageFileWriteAllowed(engine, sourceId, canonical, canonicalPath);
+  } catch (cause) {
+    const code = cause instanceof Error && cause.message === 'page_file_unsupported_writer'
+      ? 'page_file_unsupported_writer' : 'page_file_gate_unavailable';
+    throw Object.assign(new Error(code, { cause }), { code });
+  }
   await materializeCanonicalToDisk(engine, canonical, sourceId, canonicalPath);
 
   // Disk-side first: parse phantom's fence and append to canonical's
@@ -571,6 +582,7 @@ export async function runPhantomRedirectPass(
       try {
         redirectResult = await tryRedirectPhantom(engine, page, sourceId, brainDir, dryRun);
       } catch (err) {
+        if ((err as { code?: string })?.code?.startsWith('page_file_')) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[gbrain] phantom-redirect: ${slug} failed (${msg}); skipping\n`);
         logPhantomEvent({

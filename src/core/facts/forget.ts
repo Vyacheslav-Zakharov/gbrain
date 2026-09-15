@@ -37,6 +37,7 @@ import { join } from 'node:path';
 
 import type { BrainEngine } from '../engine.ts';
 import { withPageLock } from '../page-lock.ts';
+import { assertLegacyPageFileWriteAllowed } from '../page-file-writer-gate.ts';
 import { parseFactsFence, renderFactsTable, type ParsedFact } from '../facts-fence.ts';
 
 export interface ForgetFactResult {
@@ -138,6 +139,7 @@ export async function forgetFactInFence(
   }
 
   return withPageLock(slug, async () => {
+    await assertLegacyPageFileWriteAllowed(engine, row.source_id, slug, filePath);
     const body = readFileSync(filePath, 'utf-8');
     const parsed = parseFactsFence(body);
 

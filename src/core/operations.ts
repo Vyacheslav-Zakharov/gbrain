@@ -65,6 +65,8 @@ import {
 } from './source-ingest/connector-config.ts';
 import { runSourceIngestExecutor } from './source-ingest/executor.ts';
 import { createAttachmentOperations } from './attachments.ts';
+import { createPageCheckedOperations } from './page-checked.ts';
+import { resolvePageFileRuntime, withRuntimeLegacyPageWrite } from './page-file-runtime.ts';
 import { buildSourceRevertReport } from './source-ingest/revert.ts';
 import { enqueueDueSourceRefreshJobs, listDueSourceRefreshes } from './source-ingest/freshness.ts';
 import {
@@ -947,6 +949,7 @@ const put_page: Operation = {
 
     const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
     if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug, source_id: targetSourceId };
+    return withRuntimeLegacyPageWrite(ctx, targetSourceId, slug, async () => {
     // Skip embedding when the AI gateway has no embedding provider configured.
     // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
     // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).
@@ -1208,6 +1211,7 @@ const put_page: Operation = {
       ...(factsQueued ? { facts_backstop: factsQueued } : {}),
       ...(writeThrough ? { write_through: writeThrough } : {}),
     };
+    });
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
 };
@@ -6680,6 +6684,7 @@ const run_skillopt: Operation = {
 const attachmentOperations = createAttachmentOperations({ OperationError, validatePageSlug });
 
 export const operations: Operation[] = [
+  ...createPageCheckedOperations({ OperationError, validatePageSlug, resolveFederatedWriteSourceId, resolveRequestedScope, resolveFileRuntime: resolvePageFileRuntime }),
   // Page CRUD
   get_page, put_page, delete_page, list_pages,
   // v0.26.5 destructive-guard ops (page-level soft-delete + recovery + admin purge)

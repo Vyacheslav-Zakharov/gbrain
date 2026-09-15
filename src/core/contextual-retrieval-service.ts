@@ -40,6 +40,7 @@
  */
 
 import { createHash } from 'crypto';
+import { readEmbeddingBaseline, withEmbeddingBaseline } from './embedding-checked-write.ts';
 import * as fs from 'node:fs';
 import { embedBatch } from './embedding.ts';
 import { resolveContextualRetrievalMode } from './contextual-retrieval-resolver.ts';
@@ -210,7 +211,8 @@ export async function reembedPageWithContextualRetrieval(
   args: ReembedPageArgs,
 ): Promise<ReembedPageResult> {
   // ── Load page + source + chunks ────────────────────────────────────
-  const page = await args.engine.getPage(args.pageSlug, { sourceId: args.sourceId });
+  const baseline = await readEmbeddingBaseline(args.engine, args.pageSlug, args.sourceId);
+  const page = baseline?.page;
   if (!page) {
     return { kind: 'skipped', reason: 'page_missing' };
   }
@@ -236,25 +238,27 @@ export async function reembedPageWithContextualRetrieval(
   // the page is up-to-date relative to current global state — prevents
   // the reindex sweep from re-walking pages that are already aligned.
   if (resolution.mode === 'none') {
-    await args.engine.updatePageContextualRetrievalState(
+    const committed = await withEmbeddingBaseline(args.engine, baseline!, async tx => { await tx.updatePageContextualRetrievalState(
       args.pageSlug,
       args.sourceId,
       'none',
       null,
-    );
+    ); });
+    if (!committed) return { kind: 'transient_error', cause: 'db', detail: 'Page or chunks changed before contextual state stamp; retry.' };
     return { kind: 'skipped', reason: 'mode_none' };
   }
 
-  const chunks = await args.engine.getChunks(args.pageSlug, { sourceId: args.sourceId });
+  const chunks = baseline!.chunks;
   if (chunks.length === 0) {
     // No chunks but page exists (frontmatter-only or empty). Stamp the
     // column anyway so subsequent reindex sweeps don't keep visiting.
-    await args.engine.updatePageContextualRetrievalState(
+    const committed = await withEmbeddingBaseline(args.engine, baseline!, async tx => { await tx.updatePageContextualRetrievalState(
       args.pageSlug,
       args.sourceId,
       resolution.mode,
       computeCorpusGeneration({ crMode: resolution.mode, haikuModel: args.haikuModel ?? DEFAULT_HAIKU_MODEL }),
-    );
+    ); });
+    if (!committed) return { kind: 'transient_error', cause: 'db', detail: 'Page or chunks changed before contextual state stamp; retry.' };
     return { kind: 'skipped', reason: 'no_chunks' };
   }
 
@@ -286,7 +290,7 @@ export async function reembedPageWithContextualRetrieval(
 
       // ── PHASE 2: single DB transaction ───────────────────────────
       try {
-        await args.engine.transaction(async (tx) => {
+        const committed = await withEmbeddingBaseline(args.engine, baseline!, async (tx) => {
           await tx.upsertChunks(args.pageSlug, phase1.embeddedChunks, {
             sourceId: args.sourceId,
           });
@@ -297,6 +301,7 @@ export async function reembedPageWithContextualRetrieval(
             corpus_generation,
           );
         });
+        if (!committed) return { kind: 'transient_error', cause: 'db', detail: 'Page or chunks changed during contextual embedding; retry with fresh inputs.' };
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         return { kind: 'transient_error', cause: 'db', detail };

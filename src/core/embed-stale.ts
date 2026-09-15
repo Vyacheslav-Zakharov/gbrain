@@ -18,7 +18,7 @@
  */
 
 import type { BrainEngine } from './engine.ts';
-import type { ChunkInput } from './types.ts';
+import { commitCheckedEmbeddings } from './embedding-checked-write.ts';
 import { embedBatchWithBackoff } from '../commands/embed.ts';
 import { type DbPacer, createNoopPacer, observed } from './db-pacer.ts';
 import { AbortError } from './abort-check.ts';
@@ -189,34 +189,17 @@ export async function embedStaleForSource(
       const keySourceId = stale[0]?.source_id ?? sourceId;
       const slug = stale[0].slug;
       try {
+        const existing = await observed(pacer, () => engine.getChunks(slug, { sourceId: keySourceId }));
+        const snapshot = stale.map(row => existing.find(c => c.page_id === row.page_id && c.chunk_index === row.chunk_index && c.chunk_text === row.chunk_text));
+        if (snapshot.some(c => !c)) return;
         const embeddings = await embedFn(
           stale.map((c) => c.chunk_text),
           { abortSignal: signal },
         );
-        const existing = await observed(pacer, () =>
-          engine.getChunks(slug, { sourceId: keySourceId }),
-        );
-        const staleIdxToEmbedding = new Map<number, Float32Array>();
-        for (let j = 0; j < stale.length; j++) {
-          staleIdxToEmbedding.set(stale[j].chunk_index, embeddings[j]);
-        }
-        const merged: ChunkInput[] = existing.map((c) => ({
-          chunk_index: c.chunk_index,
-          chunk_text: c.chunk_text,
-          chunk_source: c.chunk_source,
-          embedding: staleIdxToEmbedding.get(c.chunk_index) ?? undefined,
-          token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
+        const committed = await observed(pacer, () => commitCheckedEmbeddings(engine, {
+          slug, sourceId: keySourceId, chunks: snapshot.filter(c => c !== undefined), embeddings, signature,
         }));
-        await observed(pacer, () => engine.upsertChunks(slug, merged, { sourceId: keySourceId }));
-        // v0.41.31: stamp provenance only when EVERY chunk was stale (fully
-        // re-embedded this pass) — a partially-stale page keeps preserved
-        // chunks of unknown provenance, so don't claim current. After the
-        // invalidate pass above, signature-drifted pages ARE fully stale.
-        if (signature && stale.length === existing.length) {
-          await observed(pacer, () =>
-            engine.setPageEmbeddingSignature(slug, { sourceId: keySourceId, signature }),
-          );
-        }
+        if (!committed) return;
         result.embedded += stale.length;
         result.pagesProcessed += 1;
       } catch (e: unknown) {

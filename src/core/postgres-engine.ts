@@ -494,6 +494,8 @@ export class PostgresEngine implements BrainEngine {
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'last_retrieved_at') AS pages_last_retrieved_at_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'write_revision') AS pages_write_revision_exists,
+        EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'ingested_via') AS pages_ingested_via_exists,
         EXISTS (SELECT 1 FROM information_schema.columns
                 WHERE table_schema = current_schema() AND table_name = 'pages' AND column_name = 'ingested_at') AS pages_ingested_at_exists,
@@ -587,6 +589,7 @@ export class PostgresEngine implements BrainEngine {
     // adds it before SCHEMA_SQL replay creates the index. v79 runs later
     // via runMigrations and is idempotent.
     const needsPagesLastRetrievedAt = probe.pages_exists && !(probe as { pages_last_retrieved_at_exists?: boolean }).pages_last_retrieved_at_exists;
+    const needsPagesWriteRevision = probe.pages_exists && !(probe as { pages_write_revision_exists?: boolean }).pages_write_revision_exists;
     // v0.38.0 (v80): provenance columns. Not referenced by any SCHEMA_SQL
     // index/FK today; bootstrap exists for the column-only forward-
     // reference class defense-in-depth.
@@ -648,7 +651,7 @@ export class PostgresEngine implements BrainEngine {
         && !needsChunksEmbeddingImage && !needsPagesRecency
         && !needsIngestLogSourceId && !needsFilesBootstrap
         && !needsOauthClientsBootstrap && !needsSourcesArchive
-        && !needsPagesLastRetrievedAt
+        && !needsPagesLastRetrievedAt && !needsPagesWriteRevision
         && !needsPagesProvenance
         && !needsContextualRetrievalColumns && !needsPagesGeneration
         && !needsPagesEmbeddingSignature
@@ -835,6 +838,10 @@ export class PostgresEngine implements BrainEngine {
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ;
         ALTER TABLE sources ADD COLUMN IF NOT EXISTS archive_expires_at TIMESTAMPTZ;
       `);
+    }
+
+    if (needsPagesWriteRevision) {
+      await this.sql.unsafe(`ALTER TABLE pages ADD COLUMN IF NOT EXISTS write_revision UUID NOT NULL DEFAULT gen_random_uuid()`);
     }
 
     if (needsPagesLastRetrievedAt) {

@@ -1,6 +1,8 @@
 import { readdirSync, lstatSync, existsSync } from 'fs';
 import { execFileSync } from 'child_process';
-import { join, relative } from 'path';
+import { join, relative, resolve, sep } from 'path';
+import { realpathSync } from 'node:fs';
+import { resolvePageFileRuntime } from '../core/page-file-runtime.ts';
 import { cpus, totalmem } from 'os';
 import type { BrainEngine } from '../core/engine.ts';
 import { importFile, importImageFile, isImageFilePath } from '../core/import-file.ts';
@@ -15,6 +17,8 @@ import {
   type SyncStrategy,
 } from '../core/sync.ts';
 import { sortNewestFirst } from '../core/sort-newest-first.ts';
+import { withLegacyPageFileRootMutation } from '../core/page-file-root-gate.ts';
+import { PageFileSyncConflict } from '../core/page-file-sync.ts';
 import {
   loadCheckpoint,
   saveCheckpoint,
@@ -169,6 +173,35 @@ export async function runImport(
   }
   const dir: string = dirArg;  // narrowed; survives closure capture
 
+  // A root gate remains fail-closed on schema errors. Its enrolled-root refusal
+  // may be replaced ONLY by the trusted, integration-only per-file runtime.
+  const importConfig = loadConfig();
+  const enrolledPaths = new Set<string>();
+  try {
+    await withLegacyPageFileRootMutation(engine, dir, () => undefined);
+  } catch (error) {
+    if (!(error && typeof error === 'object' && 'code' in error
+      && error.code === 'page_file_unsupported_root_writer') || !importConfig?.page_file_runtime) {
+      if (error && typeof error === 'object' && 'acknowledgeable' in error && error.acknowledgeable === false) throw error;
+      throw new PageFileSyncConflict('unsupported_import_file_baseline');
+    }
+    const root = realpathSync(dir);
+    const bindings = await engine.executeRaw<{ source_id: string; slug: string; canonical_root: string; relative_path: string; pending_op_id: string | null }>(
+      'SELECT source_id,slug,canonical_root,relative_path,pending_op_id FROM page_file_bindings');
+    for (const binding of bindings) {
+      const path = join(binding.canonical_root, binding.relative_path);
+      if (![resolve(dir), root].some(r => path === r || path.startsWith(r + sep))) continue;
+      // Nested roots, aliases and cross-source imports cannot adopt bindings.
+      if (binding.canonical_root !== root || resolve(dir) !== root || binding.source_id !== (sourceId ?? 'default'))
+        throw new PageFileSyncConflict('unsupported_import_file_baseline');
+      if (binding.pending_op_id) throw new PageFileSyncConflict('pending_recovery');
+      const runtime = await resolvePageFileRuntime({ engine, config: importConfig }, binding.source_id, binding.slug);
+      if (!runtime) throw new PageFileSyncConflict('unsupported_import_file_baseline');
+      enrolledPaths.add(binding.relative_path);
+    }
+    if (!enrolledPaths.size) throw new PageFileSyncConflict('unsupported_import_file_baseline');
+  }
+
   // v0.31.2: collect under the right strategy. Pre-fix this called
   // collectMarkdownFiles unconditionally — code-strategy first sync
   // silently no-op'd because no code file ever made it through walker
@@ -199,6 +232,13 @@ export async function runImport(
       for (const p of cp.completedPaths) completed.add(p);
       console.log(`Resuming from checkpoint: skipping ${completed.size} already-processed files`);
     }
+  }
+  // Missing, ignored or strategy-excluded enrolled files cannot disappear into
+  // a clean full-import bookmark. Deletion needs its own checked protocol.
+  const enumeratedPaths = new Set(allFiles.map(file => relative(dir, file)));
+  for (const path of enrolledPaths) {
+    if (!enumeratedPaths.has(path)) throw new PageFileSyncConflict('unsupported_import_file_baseline');
+    completed.delete(path); // path-only checkpoints never acknowledge bound bytes
   }
   const files = resumeFilter(allFiles, dir, completed);
 
@@ -239,7 +279,8 @@ export async function runImport(
       // unreachable when the gate is off; defense-in-depth check anyway.
       const result = isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
         ? await importImageFile(eng, filePath, relativePath, { noEmbed, sourceId })
-        : await importFile(eng, filePath, relativePath, { noEmbed, sourceId, activePack: importActivePack });
+        : await importFile(eng, filePath, relativePath, { noEmbed, sourceId, config: importConfig ?? undefined,
+          activePack: enrolledPaths.has(relativePath) ? undefined : importActivePack });
       const _fileMs = Date.now() - _fileT0;
       if (_fileMs > 5000) {
         console.error(`[gbrain phase] import.process_file slow ${_fileMs}ms ${relativePath}`);
@@ -263,6 +304,8 @@ export async function runImport(
         }
       }
     } catch (e: unknown) {
+      // Safety refusals must never become ageable/skip-failed ledger entries.
+      if (e && typeof e === 'object' && 'acknowledgeable' in e && e.acknowledgeable === false) throw e;
       const msg = e instanceof Error ? e.message : String(e);
       const errorKey = msg.replace(/"[^"]*"/g, '""');
       errorCounts[errorKey] = (errorCounts[errorKey] || 0) + 1;
@@ -327,13 +370,22 @@ export async function runImport(
         // Thread-safe queue: atomic index counter (JS is single-threaded; the
         // read-then-increment happens between awaits so no lock is needed).
         let queueIndex = 0;
+        let stopped = false;
+        let workerFailure: unknown;
         await Promise.all(workerEngines.map(async (eng) => {
-          while (true) {
+          while (!stopped) {
             const idx = queueIndex++;
             if (idx >= files.length) break;
-            await processFile(eng, files[idx]);
+            try {
+              await processFile(eng, files[idx]);
+            } catch (error) {
+              if (!stopped) workerFailure = error;
+              stopped = true;
+            }
           }
         }));
+        // Drain already-started work before finally disconnects its engines.
+        if (stopped) throw workerFailure;
       } finally {
         // v0.22.13 (PR #490 A2): try/finally guarantees cleanup even when the
         // worker loop throws. Each disconnect is best-effort — one failing
@@ -461,7 +513,11 @@ export async function runImport(
       );
     }
     await engine.setConfig('sync.last_run', new Date().toISOString());
-    await engine.setConfig('sync.repo_path', dir);
+    // A source-local import must not retarget the global root (or trip its
+    // enrollment fence) after successfully indexing the source's own files.
+    const [sourceRoot] = await engine.executeRaw<{local_path:string|null}>(
+      'SELECT local_path FROM sources WHERE id=$1', [sourceId ?? 'default']);
+    if (!sourceRoot?.local_path) await engine.setConfig('sync.repo_path', dir);
   }
 
   return { imported, skipped, errors, chunksCreated, failures };
