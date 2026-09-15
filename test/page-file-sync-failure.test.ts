@@ -80,6 +80,8 @@ function scheduler(error?: Error) {
     join: (...p: string[]) => p.join('/'), syncRepoPath: '/offline', existsSync: () => true,
     markCompleted: async (p: string) => { completed.push(p); }, succeededPaths: successes,
     progressAt: { last: 0 }, progress: { tick() {} }, serr() {}, opts: {}, noEmbed: true,
+    // Enclosing sync scope supplies undefined when no local runtime config exists.
+    syncRuntimeConfig: undefined,
     syncActivePack: undefined, failedFiles: failures, pagesAffected: [], chunksCreated: 0, filesImported: 0,
     pacer: { acquire: async () => ({ release() { released++; } }), pace: async () => {} },
     observed: async (_: unknown, f: () => Promise<unknown>) => f(),

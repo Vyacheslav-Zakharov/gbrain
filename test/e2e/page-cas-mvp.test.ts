@@ -300,9 +300,18 @@ suite('page CAS MVP — real PostgreSQL acceptance', () => {
 
   test('JSONB frontmatter stays an object with nested values over the PostgreSQL wire', async () => {
     const slug = 'cas/jsonb';
-    const before = await seed(slug);
-    const value = { ...page('Unicode λ, quotes " and \\ paths'),
-      frontmatter: { nested: { array: [1, true, null, { text: '"quoted" \\ λ' }] }, empty: {}, status: 'approved' } };
+    const frontmatter = { nested: { array: [1, true, null, { text: '"quoted" \\ λ' }] }, empty: {}, status: 'approved' };
+    // Checked writes preserve frontmatter; seed nested JSON through the legacy
+    // writer, then exercise the checked store's real JSONB round-trip unchanged.
+    await a.putPage(slug, { ...page('Original'), frontmatter, page_kind: 'markdown' }, { sourceId: sourceA });
+    const before = await read(a, slug);
+    expect(before.page.frontmatter).toEqual(frontmatter);
+    const baseline = await derivatives(a, slug);
+    await expect(put(a, slug, before.revision, { ...before.page, frontmatter: { status: 'changed' } }))
+      .rejects.toMatchObject({ code: 'invalid_params' });
+    expect(await read(b, slug)).toEqual(before);
+    expect(await derivatives(b, slug)).toEqual(baseline);
+    const value = { ...before.page, compiled_truth: 'Unicode λ, quotes " and \\ paths', frontmatter };
     const receipt = await put(a, slug, before.revision, value);
     expect(receipt.page).toEqual(value);
     expect((await read(b, slug)).page).toEqual(value);
@@ -342,8 +351,13 @@ suite('page CAS MVP — real PostgreSQL acceptance', () => {
     await a.addTimelineEntry(slug, { date: '2026-01-01', summary: 'Existing event' }, { sourceId: sourceA });
     const before = await read(a, slug);
     const baseline = await derivatives(a, slug);
-    const value = { ...page('[[cas/linked-example]] [[cas/new-edge]] `src/example.ts`\n2026-02-02: Example event'),
-      timeline: '- 2026-02-02: New event which must remain page text only' };
+    await expect(put(a, slug, before.revision, { ...before.page,
+      timeline: '- 2026-02-02: Forbidden timeline edit' }))
+      .rejects.toMatchObject({ code: 'invalid_params' });
+    expect(await read(b, slug)).toEqual(before);
+    expect(await derivatives(b, slug)).toEqual(baseline);
+    const value = { ...before.page,
+      compiled_truth: '[[cas/linked-example]] [[cas/new-edge]] `src/example.ts`\n2026-02-02: Example event' };
     await put(a, slug, before.revision, value);
     expect((await read(b, slug)).page).toEqual(value);
     const after = await derivatives(b, slug);

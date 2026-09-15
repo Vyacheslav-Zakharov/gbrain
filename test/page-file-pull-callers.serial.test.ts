@@ -23,10 +23,12 @@ function syncPullBlock() {
   if (!block) throw new Error('sync pull block missing');
   const code = ts.transpile(block.replaceAll("import('../core/git-remote.ts')", 'offlineGit').replaceAll("import('../core/page-file-root-gate.ts')", 'offlineGate'), { target: ts.ScriptTarget.ES2022 });
   let calls = 0;
-  const run = new Function('engine', 'repoPath', 'offlineGit', 'offlineGate', 'withLegacyPageFileRootMutation', 'serr', '_t0', `return (async () => { ${code} })();`);
+  const run = new Function('engine', 'repoPath', 'offlineGit', 'offlineGate', 'withLegacyPageFileRootMutation', 'serr', '_t0', 'runtimeRootHost', `return (async () => { ${code} })();`);
+  // The enclosing sync scope resolves no host in disabled mode; keep the real
+  // legacy gate so enrolled roots still refuse and unenrolled permits stay live.
   return { calls: () => calls, run: () => run(engine, root, { pullRepo: (path: string, opts?: any) => {
     rootGate.assertPageFileRootPermit(path, opts?.rootPermit); calls++;
-  } }, rootGate, rootGate.withLegacyPageFileRootMutation, () => {}, Date.now()) };
+  } }, rootGate, rootGate.withLegacyPageFileRootMutation, () => {}, Date.now(), undefined) };
 }
 let db: PGlite;
 let root: string;

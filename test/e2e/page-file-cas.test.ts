@@ -32,6 +32,8 @@ const adapterRole = `file_adapter_${id}`;
 const legacyRole = `file_legacy_${id}`;
 const engines: PostgresEngine[] = [];
 const createdRoles: string[] = [];
+const policyName = `file_fixture_${id}`;
+const policyTables: string[] = [];
 let admin: PostgresEngine, a: PostgresEngine, b: PostgresEngine, legacy: PostgresEngine;
 let directory: string, root: string;
 let schemaReady = false;
@@ -116,6 +118,32 @@ suite('file-backed CAS — real PostgreSQL + real temporary filesystem', () => {
       if (role === legacyRole) await admin.executeRaw(`REVOKE ALL ON page_file_bindings,page_file_operations,page_file_write_authorizations FROM ${role}`);
       const url = new URL(databaseUrl!); url.username = role; url.password = password; urls.push(url.toString());
     }
+    // Canonical PostgreSQL bootstrap deliberately enables RLS with no policies
+    // (schema.sql): table GRANTs alone do not authorize these real logins.
+    // Disposable fixture grants only, not a production role topology. Keep RLS
+    // enabled and all canonical fences intact; authorize this run's source only.
+    // All interpolated identifiers/literals below are fixed names or generated hex.
+    const ownPage = `page_id IN (SELECT id FROM public.pages WHERE source_id='${source}')`;
+    const ownBinding = `binding_id IN (SELECT binding_id FROM public.page_file_bindings WHERE source_id='${source}')`;
+    const policies: [string, string, string, 'ALL' | 'SELECT'][] = [
+      ['sources', `id='${source}'`, `${adapterRole},${legacyRole}`, 'ALL'],
+      ['pages', `source_id='${source}'`, `${adapterRole},${legacyRole}`, 'ALL'],
+      ...['tags', 'content_chunks', 'page_versions', 'timeline_entries'].map(table =>
+        [table, ownPage, `${adapterRole},${legacyRole}`, 'ALL'] as [string, string, string, 'ALL']),
+      ['page_file_bindings', `source_id='${source}' AND ${ownPage}`, adapterRole, 'ALL'],
+      ['page_file_operations', ownBinding, adapterRole, 'ALL'],
+      ['page_file_write_authorizations', ownPage, adapterRole, 'ALL'],
+      ['config', "key='sync.repo_path'", adapterRole, 'SELECT'],
+      // The checked store's code-edge exclusion must see fixture-linked edges,
+      // including cross-source incoming edges; don't mask that safety query.
+      ['code_edges_chunk', `from_chunk_id IN (SELECT id FROM public.content_chunks) OR to_chunk_id IN (SELECT id FROM public.content_chunks)`, adapterRole, 'SELECT'],
+      ['code_edges_symbol', `from_chunk_id IN (SELECT id FROM public.content_chunks)`, adapterRole, 'SELECT'],
+    ];
+    for (const [table, predicate, roles, command] of policies) {
+      await admin.executeRaw(`CREATE POLICY ${policyName} ON public.${table} FOR ${command} TO ${roles}
+        USING (${predicate})${command === 'ALL' ? ` WITH CHECK (${predicate})` : ''}`);
+      policyTables.push(table);
+    }
     a = await connect(urls[0]); b = await connect(urls[0]); legacy = await connect(urls[1]);
     const pids = [];
     for (const [engine, role] of [[a, adapterRole], [b, adapterRole], [legacy, legacyRole]] as const) {
@@ -123,7 +151,17 @@ suite('file-backed CAS — real PostgreSQL + real temporary filesystem', () => {
         'SELECT session_user AS session,current_user AS current,rolsuper AS super,rolbypassrls AS bypass,pg_backend_pid() AS pid FROM pg_roles WHERE rolname=current_user');
       expect(r).toMatchObject({ session: role, current: role, super: false, bypass: false }); pids.push(r.pid);
       await expect(engine.executeRaw(`SET ROLE ${role === legacyRole ? adapterRole : legacyRole}`)).rejects.toMatchObject({ code: '42501' });
+      for (const table of policyTables) {
+        const [rls] = await engine.executeRaw<{ active: boolean }>('SELECT row_security_active($1::regclass) AS active', ['public.' + table]);
+        expect(rls.active).toBe(true); // catches ownership/bypass/RLS-disable shortcuts
+      }
+      expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [source])).toEqual([{ id: source }]);
+      expect(await engine.executeRaw("SELECT id FROM sources WHERE id='default'")).toEqual([]);
+      await expect(engine.putPage(`rls-denied-${id}`, fields('Forbidden', 'denied'), { sourceId: 'default' }))
+        .rejects.toMatchObject({ code: '42501' });
     }
+    expect(await admin.executeRaw("SELECT id FROM sources WHERE id='default'")).toEqual([{ id: 'default' }]);
+    expect(await admin.executeRaw('SELECT id FROM pages WHERE source_id=$1 AND slug=$2', ['default', `rls-denied-${id}`])).toEqual([]);
     expect(new Set(pids).size).toBe(3);
     console.log('PG_FILE_CAS_IDENTITY: independent non-superuser adapter/legacy logins; migrated disposable gbrain_test');
   }, 120_000);
@@ -141,6 +179,8 @@ suite('file-backed CAS — real PostgreSQL + real temporary filesystem', () => {
     } finally {
       try {
         await Promise.all(engines.filter(e => e !== admin).map(e => e.disconnect()));
+        for (const table of policyTables) await admin.executeRaw(`DROP POLICY ${policyName} ON public.${table}`);
+        if (admin) expect(await admin.executeRaw('SELECT policyname FROM pg_policies WHERE schemaname=$1 AND policyname=$2', ['public', policyName])).toEqual([]);
         for (const role of createdRoles) {
           await admin.executeRaw(`DROP OWNED BY ${role}`);
           await admin.executeRaw(`DROP ROLE ${role}`);
