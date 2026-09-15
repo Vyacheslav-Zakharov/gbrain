@@ -1693,7 +1693,7 @@ const readLatestAclAudit = async (filters: { subjectEmail?: string; requestId?: 
       if (transaction.prompt === 'none' && transaction.existingSessionToken) {
         if (!portalSessions.revalidate(transaction.existingSessionToken, identity)) {
           clearPortalSessionCookies(req, res);
-          return res.redirect('/login');
+          return res.redirect(`/login?return_to=${encodeURIComponent(normalizePortalReturnTo(transaction.returnTo))}`);
         }
       } else {
         issuePortalSession(req, res, identity);
@@ -1847,7 +1847,7 @@ const setPortalDocumentHeaders = (res: Response): void => {
 
 const requirePortalPage = (req: Request, res: Response, next: NextFunction) => {
   const userEmail = resolvePortalUser(req, res);
-  if (!userEmail) return res.redirect('/login');
+  if (!userEmail) return res.redirect(`/login?return_to=${encodeURIComponent(normalizePortalReturnTo(req.originalUrl))}`);
   if (!hasSeenPortalOnboarding(String(userEmail))) return res.redirect('/portal/welcome');
   next();
 };

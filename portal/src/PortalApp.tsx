@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { portalApi } from './api';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { portalApi, ReviewApiError } from './api';
+import { portalLoginHref, redirectToPortalLogin, rememberPortalReadingPosition, restorePortalReadingPosition } from './auth-navigation';
 import { fallbackTitle, renderMarkdown, type OutlineItem } from './markdown';
 import { buildPortalHref, isPreviewable, parentPath, parsePortalLocation } from './navigation';
 import { isGlobalSearchShortcut } from './keyboard';
@@ -116,11 +117,14 @@ export function PortalApp() {
   const [favorites, setFavorites] = useState<RecentDocument[]>([]);
   const [copied, setCopied] = useState(false);
   const [reviewPending, setReviewPending] = useState<number | null>(null);
+  const [authRequired, setAuthRequired] = useState(false);
+  const reviewPendingInFlight = useRef(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchTriggerRef = useRef<HTMLButtonElement>(null);
   const searchDialogRef = useRef<HTMLDivElement>(null);
   const searchWasOpen = useRef(false);
   const articleRef = useRef<HTMLElement>(null);
+  const lastRenderedDocument = useRef<FileResponse | null>(null);
   const storageKeys = useMemo(() => session ? {
     lastSource: scopedStorageKey(LAST_SOURCE_KEY, session.email),
     recents: scopedStorageKey(RECENTS_KEY, session.email),
@@ -132,12 +136,18 @@ export function PortalApp() {
   const isFavorite = useMemo(() => document ? favorites.some((item) => item.source === document.source && item.path === document.path) : false, [document, favorites]);
 
   const refreshReviewPending = useCallback(async () => {
+    if (reviewPendingInFlight.current) return;
+    reviewPendingInFlight.current = true;
     try {
       const summary = await portalApi.reviewSummary();
       setReviewPending(summary.pending);
-    } catch {
-      // The link remains available; a transient count failure must not block Portal navigation.
+      setAuthRequired(false);
+    } catch (caught) {
+      // Background expiry must not replace the document or move the reader.
+      if (caught instanceof ReviewApiError && caught.status === 401) setAuthRequired(true);
       setReviewPending(null);
+    } finally {
+      reviewPendingInFlight.current = false;
     }
   }, []);
 
@@ -193,6 +203,7 @@ export function PortalApp() {
       if (push) writeLocation(nextSource, path, '');
       return;
     }
+    rememberPortalReadingPosition();
     setLoadingDocument(true);
     setError('');
     try {
@@ -214,7 +225,6 @@ export function PortalApp() {
       if (storageKeys) localStorage.setItem(storageKeys.lastSource, nextSource);
       rememberDocument(file);
       if (push) writeLocation(nextSource, path, '');
-      requestAnimationFrame(() => articleRef.current?.scrollTo({ top: 0 }));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Не удалось открыть документ');
     } finally {
@@ -268,6 +278,7 @@ export function PortalApp() {
       setReviewPending(null);
       return;
     }
+    if (authRequired) return;
     void refreshReviewPending();
     const timer = window.setInterval(() => void refreshReviewPending(), 60_000);
     const onFocus = () => void refreshReviewPending();
@@ -276,7 +287,15 @@ export function PortalApp() {
       window.clearInterval(timer);
       window.removeEventListener('focus', onFocus);
     };
-  }, [refreshReviewPending, session?.canReview]);
+  }, [refreshReviewPending, session?.canReview, authRequired]);
+
+  useLayoutEffect(() => {
+    const article = articleRef.current;
+    if (!article || loadingDocument || !document || lastRenderedDocument.current === document) return;
+    lastRenderedDocument.current = document;
+    if (!restorePortalReadingPosition(article)) article.scrollTop = 0;
+    rememberPortalReadingPosition();
+  }, [document, loadingDocument]);
 
   useEffect(() => { if (sources.length && storageKeys) void hydrateLocation(true); }, [sources, storageKeys, hydrateLocation]);
   useEffect(() => {
@@ -508,9 +527,14 @@ export function PortalApp() {
           </div>
         </div>
 
+        {authRequired && <div className="auth-notice" role="status">
+          <span>Для обновления данных нужно подтвердить вход. Документ остаётся открыт.</span>
+          <a href={portalLoginHref()} onClick={(event) => { event.preventDefault(); redirectToPortalLogin(); }}>Войти и вернуться к документу</a>
+        </div>}
+
         {error && <div className="error-banner" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="Закрыть"><Icon name="close" size={16} /></button></div>}
 
-        <article className="document-scroll" ref={articleRef} onClick={onArticleClick}>
+        <article className="document-scroll" ref={articleRef} onScroll={() => { if (!loadingDocument) rememberPortalReadingPosition(); }} onClick={onArticleClick}>
           {loadingDocument && <div className="document-skeleton"><span /><span /><span /><span /><span /></div>}
           {!loadingDocument && document && <div className="document-card">
             <header className="document-header">

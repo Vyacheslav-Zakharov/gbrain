@@ -1,3 +1,4 @@
+import { redirectToPortalLogin } from './auth-navigation';
 import type {
   ContextResponse,
   FileResponse,
@@ -22,15 +23,15 @@ export class ReviewApiError extends Error {
   }
 }
 
-async function requestJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+async function requestJson<T>(url: string, signal?: AbortSignal, redirectOnAuth = true): Promise<T> {
   const response = await fetch(url, {
     credentials: 'same-origin',
     headers: { Accept: 'application/json' },
     signal,
   });
   if (response.status === 401) {
-    window.location.assign('/login');
-    throw new Error('Требуется вход');
+    if (redirectOnAuth) redirectToPortalLogin();
+    throw new ReviewApiError('Требуется вход', 'unauthenticated', 401);
   }
   if (!response.ok) {
     const body = await response.text();
@@ -73,7 +74,7 @@ export const portalApi = {
   context: (source: string, path: string, signal?: AbortSignal) =>
     requestJson<ContextResponse>(`/portal/api/context?${qs({ source, path })}`, signal),
   downloadUrl: (source: string, path: string) => `/portal/download?${qs({ source, path })}`,
-  reviewSummary: () => requestJson<ReviewSummary>('/portal/api/review/summary'),
+  reviewSummary: () => requestJson<ReviewSummary>('/portal/api/review/summary', undefined, false),
   reviewDeck: (limit = 10, signal?: AbortSignal) =>
     requestJson<{ cards: ReviewDeckCard[]; total: number }>(`/portal/api/review/deck?${qs({ limit: String(limit) })}`, signal),
   reviewItem: (assignmentId: number, signal?: AbortSignal) =>
