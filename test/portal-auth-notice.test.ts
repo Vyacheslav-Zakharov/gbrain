@@ -38,6 +38,8 @@ test('a failed document fetch does not reset the already rendered document', () 
   const callback = runInNewContext('(function () {' + effect + '\n})', {
     articleRef: { current: article }, loadingDocument: false, document,
     lastRenderedDocument: { current: document },
+    pendingHistoryScroll: { current: false },
+    readingBeforeLoad: { current: null },
     restorePortalReadingPosition: () => false, rememberPortalReadingPosition: () => {},
   });
   callback();

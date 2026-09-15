@@ -118,6 +118,30 @@ function sanitizeHtml(html: string, documentTitle = ''): RenderedMarkdown {
       outline.push({ id, text, level: Number(node.tagName.slice(1)) });
     }
   }
+  // Allocate deeper headings after H1–H3 so their addition cannot renumber
+  // existing canonical IDs. The sidebar intentionally remains H1–H3 only.
+  for (const heading of template.content.querySelectorAll('h4, h5, h6')) {
+    heading.id = safeSlug(heading.textContent?.trim() || 'Раздел', usedIds);
+  }
+  // GitHub-style fragments remove punctuation rather than collapsing it into
+  // separators, and preserve accents (including й/ё). Keep Portal IDs stable.
+  const githubIds = new Set<string>();
+  const aliases = new Map<string, Element[]>();
+  for (const heading of template.content.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+    const base = (heading.textContent || '').trim().toLowerCase()
+      .replace(/[^\p{L}\p{N}\p{M}_\- ]/gu, '').replace(/ /g, '-');
+    let alias = base;
+    let suffix = 1;
+    while (githubIds.has(alias)) alias = `${base}-${suffix++}`;
+    githubIds.add(alias);
+    if (alias) aliases.set(alias, [...(aliases.get(alias) || []), heading]);
+  }
+  for (const [alias, targets] of aliases) {
+    // A compatibility spelling must never shadow an existing canonical ID.
+    if (targets.length === 1 && !usedIds.has(alias)) {
+      targets[0].setAttribute('data-heading-aliases', JSON.stringify([alias]));
+    }
+  }
   return { html: template.innerHTML, outline };
 }
 

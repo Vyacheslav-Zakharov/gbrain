@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { portalApi, ReviewApiError } from './api';
 import { portalLoginHref, redirectToPortalLogin, rememberPortalReadingPosition, restorePortalReadingPosition } from './auth-navigation';
+import { scrollArticleAnchor } from './anchors';
 import { fallbackTitle, renderMarkdown, type OutlineItem } from './markdown';
 import { buildPortalHref, isPreviewable, parentPath, parsePortalLocation } from './navigation';
 import { isGlobalSearchShortcut } from './keyboard';
@@ -125,6 +126,16 @@ export function PortalApp() {
   const searchWasOpen = useRef(false);
   const articleRef = useRef<HTMLElement>(null);
   const lastRenderedDocument = useRef<FileResponse | null>(null);
+  const readingBeforeLoad = useRef<{ document: FileResponse | null; top: number; left: number } | null>(null);
+  const pendingHistoryScroll = useRef(false);
+  const navigationGeneration = useRef(0);
+  const beginNavigation = useCallback(() => {
+    pendingHistoryScroll.current = false;
+    setLoadingTree(false);
+    setLoadingDocument(false);
+    setError('');
+    return ++navigationGeneration.current;
+  }, []);
   const storageKeys = useMemo(() => session ? {
     lastSource: scopedStorageKey(LAST_SOURCE_KEY, session.email),
     recents: scopedStorageKey(RECENTS_KEY, session.email),
@@ -153,10 +164,12 @@ export function PortalApp() {
 
   const loadFolder = useCallback(async (nextSource: string, nextFolder: string, push = true) => {
     if (!nextSource) return;
+    const generation = beginNavigation();
     setLoadingTree(true);
     setError('');
     try {
       const data = await portalApi.tree(nextSource, nextFolder);
+      if (generation !== navigationGeneration.current) return;
       setSourceId(nextSource);
       setFolder(nextFolder);
       setEntries(data.entries);
@@ -168,12 +181,15 @@ export function PortalApp() {
       if (storageKeys) localStorage.setItem(storageKeys.lastSource, nextSource);
       if (push) writeLocation(nextSource, '', nextFolder);
     } catch (caught) {
+      if (generation !== navigationGeneration.current) return;
       setError(caught instanceof Error ? caught.message : 'Не удалось открыть папку');
     } finally {
-      setLoadingTree(false);
-      if (!keepExplorerOpenAfterFolderNavigation(mobile)) setExplorerOpen(false);
+      if (generation === navigationGeneration.current) {
+        setLoadingTree(false);
+        if (!keepExplorerOpenAfterFolderNavigation(mobile)) setExplorerOpen(false);
+      }
     }
-  }, [mobile, storageKeys]);
+  }, [beginNavigation, mobile, storageKeys]);
 
   const rememberDocument = useCallback((file: FileResponse) => {
     setRecents((current) => {
@@ -185,13 +201,16 @@ export function PortalApp() {
 
   const openDocument = useCallback(async (nextSource: string, path: string, push = true) => {
     if (!nextSource || !path) return;
+    const generation = beginNavigation();
     if (!isPreviewable(path)) {
       const name = path.split('/').pop() || path;
       portalApi.tree(nextSource, parentPath(path)).then((data) => {
+        if (generation !== navigationGeneration.current) return;
         setEntries(data.entries);
         setTreeSummary(data.summary);
         setSourceSummary(data.sourceSummary);
       }).catch(() => {
+        if (generation !== navigationGeneration.current) return;
         setEntries([]);
         setTreeSummary({ sections: 0, documents: 0, complete: true });
       });
@@ -204,6 +223,10 @@ export function PortalApp() {
       return;
     }
     rememberPortalReadingPosition();
+    const article = articleRef.current;
+    if (article?.querySelector('.markdown-body')) {
+      readingBeforeLoad.current = { document: lastRenderedDocument.current, top: article.scrollTop, left: article.scrollLeft };
+    }
     setLoadingDocument(true);
     setError('');
     try {
@@ -212,6 +235,7 @@ export function PortalApp() {
         portalApi.context(nextSource, path).catch(() => null),
         portalApi.tree(nextSource, parentPath(path)).catch(() => null),
       ]);
+      if (generation !== navigationGeneration.current) return;
       setSourceId(nextSource);
       setFolder(parentPath(path));
       setDocument(file);
@@ -225,13 +249,17 @@ export function PortalApp() {
       if (storageKeys) localStorage.setItem(storageKeys.lastSource, nextSource);
       rememberDocument(file);
       if (push) writeLocation(nextSource, path, '');
+
     } catch (caught) {
+      if (generation !== navigationGeneration.current) return;
       setError(caught instanceof Error ? caught.message : 'Не удалось открыть документ');
     } finally {
-      setLoadingDocument(false);
-      setExplorerOpen(false);
+      if (generation === navigationGeneration.current) {
+        setLoadingDocument(false);
+        setExplorerOpen(false);
+      }
     }
-  }, [rememberDocument, storageKeys]);
+  }, [beginNavigation, rememberDocument, storageKeys]);
 
   const hydrateLocation = useCallback(async (replace = false) => {
     if (!sources.length || !storageKeys) return;
@@ -240,12 +268,13 @@ export function PortalApp() {
     const nextSource = sources.some((item) => item.id === location.source)
       ? location.source
       : sources.some((item) => item.id === remembered) ? remembered : sources[0].id;
-    if (location.path) {
-      await openDocument(nextSource, location.path, false);
-      if (replace && nextSource !== location.source) writeLocation(nextSource, location.path, '', true);
-    } else {
-      await loadFolder(nextSource, location.folder, false);
-      if (replace && nextSource !== location.source) writeLocation(nextSource, '', location.folder, true);
+    const pending = location.path
+      ? openDocument(nextSource, location.path, false)
+      : loadFolder(nextSource, location.folder, false);
+    const generation = navigationGeneration.current;
+    await pending;
+    if (generation === navigationGeneration.current && replace && nextSource !== location.source) {
+      writeLocation(nextSource, location.path, location.path ? '' : location.folder, true);
     }
   }, [loadFolder, openDocument, sources, storageKeys]);
 
@@ -291,18 +320,55 @@ export function PortalApp() {
 
   useLayoutEffect(() => {
     const article = articleRef.current;
-    if (!article || loadingDocument || !document || lastRenderedDocument.current === document) return;
+    if (!article || loadingDocument || !document) return;
+    const restoreHistory = pendingHistoryScroll.current;
+    const previousReading = readingBeforeLoad.current;
+    readingBeforeLoad.current = null;
+    if (lastRenderedDocument.current === document && !restoreHistory) {
+      // A failed fetch remounts the old body after the skeleton collapsed its
+      // scroll range. Restore the captured offset, not the URL's old heading.
+      if (previousReading?.document === document) {
+        article.scrollTop = previousReading.top;
+        article.scrollLeft = previousReading.left;
+        rememberPortalReadingPosition();
+      }
+      return;
+    }
+    pendingHistoryScroll.current = false;
     lastRenderedDocument.current = document;
-    if (!restorePortalReadingPosition(article)) article.scrollTop = 0;
+    // An exact auth return restores the reader's position, even when its URL
+    // contains a heading fragment. Only a fresh document falls back to the hash.
+    // One commit-scoped effect prevents loading cancellation/failure from
+    // overwriting either restored reading position or a newer local anchor.
+    if (restoreHistory || !restorePortalReadingPosition(article)) {
+      article.scrollTop = 0;
+      if (window.location.hash) scrollArticleAnchor(article, window.location.hash);
+    }
     rememberPortalReadingPosition();
   }, [document, loadingDocument]);
 
   useEffect(() => { if (sources.length && storageKeys) void hydrateLocation(true); }, [sources, storageKeys, hydrateLocation]);
+
   useEffect(() => {
-    const onPopState = () => void hydrateLocation(false);
+    const onPopState = () => {
+      const location = readLocation();
+      // Native hash navigation can emit popstate even for a repeated hash.
+      // Only a document/source transition should fetch and remount the article.
+      if (document && location.path === document.path && location.source === document.source) {
+        // Accepting the committed article also supersedes any in-flight load.
+        beginNavigation();
+        // A loading skeleton has no headings. Defer this accepted history
+        // intent until the committed article has been remounted by React.
+        if (loadingDocument) pendingHistoryScroll.current = true;
+        else if (window.location.hash) scrollArticleAnchor(articleRef.current, window.location.hash);
+        else articleRef.current?.scrollTo({ top: 0, behavior: 'instant' });
+        return;
+      }
+      void hydrateLocation(false);
+    };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
-  }, [hydrateLocation]);
+  }, [beginNavigation, document, hydrateLocation, loadingDocument]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -352,6 +418,7 @@ export function PortalApp() {
     if (entry.type === 'dir') void loadFolder(sourceId, entry.path, true);
     else if (entry.markdown) void openDocument(sourceId, entry.path, true);
     else {
+      beginNavigation();
       setDocument(null);
       setContext(null);
       setBinary(entry);
@@ -407,8 +474,21 @@ export function PortalApp() {
   };
 
   const onArticleClick = (event: React.MouseEvent<HTMLElement>) => {
-    const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[data-wiki-target]');
+    const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href]');
     if (!anchor) return;
+    if (!anchor.dataset.wikiTarget) {
+      const hash = anchor.getAttribute('href') || '';
+      if (!hash.startsWith('#') || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      // Unknown fragments are inert: no top reset, history entry, or fuzzy jump.
+      if (scrollArticleAnchor(articleRef.current, hash)) {
+        beginNavigation();
+        if (window.location.hash !== new URL(hash, window.location.href).hash) {
+          window.history.pushState({}, '', hash);
+        }
+      }
+      return;
+    }
     event.preventDefault();
     void resolveWiki(anchor.dataset.wikiTarget || '');
   };
@@ -563,7 +643,7 @@ export function PortalApp() {
       <aside className={`context-panel ${contextOpen ? 'drawer-open' : ''}`} aria-label="Контекст документа" aria-hidden={mobile && !contextOpen} inert={mobile && !contextOpen ? true : undefined}>
         <div className="panel-mobile-head mobile-only"><strong>Контекст</strong><button className="icon-button" onClick={() => setContextOpen(false)} aria-label="Закрыть"><Icon name="close" /></button></div>
         {document ? <>
-          <section><h2>На этой странице</h2>{rendered.outline.length ? <nav className="outline">{rendered.outline.map((item) => <button key={item.id} className={`level-${item.level}`} onClick={() => window.document.getElementById(item.id)?.scrollIntoView({ behavior: 'smooth' })}>{item.text}</button>)}</nav> : <p className="context-muted">В документе нет заголовков.</p>}</section>
+          <section><h2>На этой странице</h2>{rendered.outline.length ? <nav className="outline">{rendered.outline.map((item) => <button key={item.id} className={`level-${item.level}`} onClick={() => { if (scrollArticleAnchor(articleRef.current, `#${encodeURIComponent(item.id)}`)) beginNavigation(); }}>{item.text}</button>)}</nav> : <p className="context-muted">В документе нет заголовков.</p>}</section>
           <section><h2>О документе</h2><dl className="metadata-list"><div><dt>Источник</dt><dd>{document.sourceName}</dd></div><div><dt>Путь</dt><dd title={document.path}>{document.path}</dd></div>{document.slug && <div><dt>Slug</dt><dd>{document.slug}</dd></div>}<div><dt>Размер</dt><dd>{humanBytes(document.size)}</dd></div></dl></section>
           <section><h2>Встречи <span className="section-count">{meetings.length}</span></h2>{meetings.length ? <div className="backlink-list">{meetings.slice(0, 12).map((link) => <button key={`${link.source}:${link.slug}:${link.type}`} onClick={() => void openBacklink(link)}><span>{link.title || link.slug}</span><small>{link.source} · {link.type === 'attended' ? 'участие' : link.type === 'mentions' ? 'упоминание' : link.type}</small></button>)}</div> : <p className="context-muted">Связанные встречи пока не найдены.</p>}</section>
           <section><h2>Обратные ссылки <span className="section-count">{nonMeetingBacklinks.length}</span></h2>{nonMeetingBacklinks.length ? <div className="backlink-list">{nonMeetingBacklinks.slice(0, 12).map((link) => <button key={`${link.source}:${link.slug}:${link.type}`} onClick={() => void openBacklink(link)}><span>{link.title || link.slug}</span><small>{link.source} · {link.type}</small></button>)}</div> : <p className="context-muted">Другие страницы пока не ссылаются на этот документ.</p>}</section>
