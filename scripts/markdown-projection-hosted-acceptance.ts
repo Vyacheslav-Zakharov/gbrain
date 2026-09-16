@@ -44,8 +44,73 @@ let failed = false;
 let a: ReturnType<typeof postgres> | undefined;
 let b: ReturnType<typeof postgres> | undefined;
 let ordinary: ReturnType<typeof postgres> | undefined;
-async function denied(work: () => PromiseLike<unknown>, code: string) {
-  await assert.rejects(async () => { await work(); }, (e: any) => e.code === code);
+let activeStage = 'bootstrap';
+function diagnostic(error: any) {
+  return Object.fromEntries(['code','message','detail','hint','where','schema_name','table_name','column_name','constraint_name','routine','file'].map(key => [key, error?.[key]]));
+}
+async function stage<T>(name: string, work: () => PromiseLike<T>): Promise<T> {
+  activeStage = name;
+  console.log(JSON.stringify({stage: name, status: 'started'}));
+  return await work();
+}
+async function denied(work: () => PromiseLike<unknown>, code: string, seam?: RegExp) {
+  assert(code !== '42501' || seam, '42501 requires a specific denial seam');
+  await assert.rejects(async () => { await work(); }, (e: any) => {
+    console.log(JSON.stringify({stage: activeStage, expectedDenial: code, error: diagnostic(e)}));
+    return e.code === code && (!seam || seam.test(e.message));
+  });
+}
+const timelinePolicy = () => a!.unsafe(`CREATE POLICY mp_fixture_timeline ON timeline_entries FOR SELECT TO ${role}
+  USING (EXISTS (SELECT 1 FROM public.pages p WHERE p.id=timeline_entries.page_id AND p.source_id='mp-a'))`);
+// Identical page/tag/search contract before and after installation; no shared natural
+// keys with the concurrency schedules. Compare semantics, not nontransactional clocks.
+async function baselineMutations(phase: 'baseline' | 'candidate') {
+  const run = <T>(name: string, work: () => PromiseLike<T>) => stage(`${phase}.ordinary.${name}`, work);
+  const [seed] = await run('seed.allowed', () => a!`INSERT INTO pages(source_id,slug,type,title) VALUES ('mp-a','role-seed','note','Seed') RETURNING id`);
+  const [foreign] = await run('seed.forbidden', () => a!`INSERT INTO pages(source_id,slug,type,title) VALUES ('mp-b','role-foreign','note','Foreign') RETURNING id`);
+  await run('seed.timeline', () => a!`INSERT INTO timeline_entries(page_id,date,summary,detail) VALUES (${seed.id},'2026-01-01','amberquartz','cobaltfern'),(${foreign.id},'2026-01-01','forbiddenviolet','hiddenorchid')`);
+  const vector = async () => (await a!`SELECT search_vector @@ to_tsquery('english','amberquartz & cobaltfern') AS allowed, search_vector @@ to_tsquery('english','forbiddenviolet | hiddenorchid') AS forbidden FROM pages WHERE id=${seed.id}`)[0];
+  if (phase === 'baseline') {
+    await stage('baseline.negative.missing-select.revoke', () => a!.unsafe(`REVOKE SELECT(page_id,summary,detail) ON timeline_entries FROM ${role}`));
+    try {
+      await stage('baseline.negative.missing-select', () => denied(() => ordinary!`UPDATE pages SET title='Must rollback' WHERE id=${seed.id}`, '42501', /^permission denied for table timeline_entries$/));
+      assert.equal((await a!`SELECT title FROM pages WHERE id=${seed.id}`)[0].title, 'Seed');
+    } finally {
+      await a!.unsafe(`GRANT SELECT(page_id,summary,detail) ON timeline_entries TO ${role}`);
+    }
+    await run('prime-vector', () => ordinary!`UPDATE pages SET title='Primed' WHERE id=${seed.id}`);
+    assert.deepEqual(await vector(), {allowed:true, forbidden:false});
+    await a!.unsafe('DROP POLICY mp_fixture_timeline ON timeline_entries');
+    try {
+      await stage('baseline.negative.no-policy', () => ordinary!`UPDATE pages SET last_retrieved_at=now() WHERE id=${seed.id}`);
+      assert.equal((await ordinary!`SELECT page_id,summary,detail FROM timeline_entries`).length, 0);
+      assert.deepEqual(await vector(), {allowed:false, forbidden:false}, 'grant alone must demonstrate silent vector loss');
+    } finally { await timelinePolicy(); }
+  }
+  const visible = await run('timeline.visibility', () => ordinary!`SELECT page_id,summary,detail FROM timeline_entries ORDER BY page_id`);
+  assert.deepEqual(Array.from(visible), [{page_id:seed.id,summary:'amberquartz',detail:'cobaltfern'}]);
+  const [own] = await run('insert', () => ordinary!`INSERT INTO pages(source_id,slug,type,title) VALUES ('mp-a','role-insert','note','Ordinary') RETURNING id`);
+  await run('update', () => ordinary!`UPDATE pages SET title='Authorized' WHERE id=${seed.id}`);
+  assert.deepEqual(await vector(), {allowed:true, forbidden:false});
+  await run('retrieval-only', () => ordinary!`UPDATE pages SET last_retrieved_at=now() WHERE id=${seed.id}`);
+  const semantics = await vector();
+  assert.deepEqual(semantics, {allowed:true, forbidden:false});
+  const [tag] = await run('tag.insert', () => ordinary!`INSERT INTO tags(page_id,tag) VALUES (${seed.id},'role-tag') RETURNING id`);
+  await run('tag.update', () => ordinary!`UPDATE tags SET tag='role-edited' WHERE id=${tag.id}`);
+  await run('tag.reparent', () => ordinary!`UPDATE tags SET page_id=${own.id} WHERE id=${tag.id}`);
+  assert.equal((await ordinary!`SELECT tag FROM tags WHERE page_id=${own.id}`)[0].tag,'role-edited');
+  await run('tag.delete', () => ordinary!`DELETE FROM tags WHERE id=${tag.id}`);
+  assert.equal((await ordinary!`SELECT id FROM tags WHERE id=${tag.id}`).length,0);
+  await run('rename', () => ordinary!`UPDATE pages SET slug='role-renamed' WHERE id=${own.id}`);
+  await run('soft-delete', () => ordinary!`UPDATE pages SET deleted_at=now() WHERE id=${own.id}`);
+  assert((await ordinary!`SELECT deleted_at FROM pages WHERE id=${own.id}`)[0].deleted_at);
+  await run('restore', () => ordinary!`UPDATE pages SET deleted_at=NULL WHERE id=${own.id}`);
+  assert.equal((await ordinary!`SELECT deleted_at FROM pages WHERE id=${own.id}`)[0].deleted_at,null);
+  await run('delete', () => ordinary!`DELETE FROM pages WHERE id IN (${own.id},${seed.id})`);
+  assert.equal((await a!`SELECT id FROM pages WHERE id IN (${own.id},${seed.id})`).length,0);
+  await run('cleanup.foreign', () => a!`DELETE FROM pages WHERE id=${foreign.id}`);
+  console.log(JSON.stringify({stage:`${phase}.ordinary.complete`, semantics}));
+  return semantics;
 }
 try {
   await verifyTarget(admin, url.pathname.slice(1), url.username);
@@ -57,13 +122,44 @@ try {
   // Reuse the repository's actual PostgreSQL schema, not an invented minimal model.
   await a.unsafe(await readFile(new URL('../src/schema.sql', import.meta.url), 'utf8'));
   await a.unsafe('REVOKE CREATE ON SCHEMA public FROM PUBLIC');
-  if (process.env.MARKDOWN_PROJECTION_PHASE !== 'red') {
-    await a.unsafe(await readFile(new URL('../docs/architecture/sql/markdown-projection-candidate.sql', import.meta.url), 'utf8'));
+  // Separate expected missing-table RED contract: not a baseline role proof.
+  if (process.env.MARKDOWN_PROJECTION_PHASE === 'red') {
+    activeStage = 'red.missing-table';
+    assert.equal((await a`SELECT to_regclass('public.markdown_projection_obligations')::text AS name`)[0].name,
+      'markdown_projection_obligations', 'atomic obligation table missing');
+    assert.fail('RED unexpectedly found candidate table');
   }
-  // RED phase intentionally fails here without the candidate, before fixture setup.
+  await a`INSERT INTO sources(id,name) VALUES ('mp-a','mp-a'),('mp-b','mp-b')`;
+  // MP-B2: disposable, non-owner source-scoped LOGIN, never a production grant.
+  await admin.unsafe(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD '${password}'`);
+  roleCreated = true;
+  await a.unsafe(`GRANT USAGE ON SCHEMA public TO ${role};
+    GRANT SELECT,INSERT,UPDATE,DELETE ON pages,tags TO ${role};
+    GRANT SELECT(page_id,summary,detail) ON timeline_entries TO ${role};
+    ALTER TABLE timeline_entries ENABLE ROW LEVEL SECURITY;
+    GRANT USAGE ON SEQUENCE pages_id_seq,tags_id_seq TO ${role};
+    GRANT USAGE ON SEQUENCE public.page_generation_clock_seq TO ${role};
+    ALTER TABLE pages ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tags ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY mp_fixture_pages ON pages TO ${role} USING (source_id='mp-a') WITH CHECK (source_id='mp-a');
+    CREATE POLICY mp_fixture_tags ON tags TO ${role}
+      USING (EXISTS (SELECT 1 FROM pages WHERE id=page_id AND source_id='mp-a'))
+      WITH CHECK (EXISTS (SELECT 1 FROM pages WHERE id=page_id AND source_id='mp-a'));`);
+  ordinary=postgres(connectionArgs(name, role, password));
+  await verifyTarget(ordinary, name, role);
+  const [identity] = await ordinary`SELECT current_user AS u, session_user AS s, rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user`;
+  assert.equal(identity.u, role); assert.equal(identity.s, role);
+  assert.equal(identity.rolsuper, false); assert.equal(identity.rolbypassrls, false);
+  const roleEvidence = await ordinary`SELECT relname,relrowsecurity,pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid IN ('pages'::regclass,'tags'::regclass)`;
+  for (const table of roleEvidence) { assert.equal(table.relrowsecurity,true); assert.notEqual(table.owner,role); }
+  await timelinePolicy();
+  console.log(JSON.stringify({stage:'baseline.role.receipt', ordinaryIdentity:identity, rls:roleEvidence}));
+  const baselineSemantics = await baselineMutations('baseline');
+  console.log(JSON.stringify({stage:'baseline.gate',status:'passed'}));
+  await stage('candidate.install', async () => a!.unsafe(await readFile(new URL('../docs/architecture/sql/markdown-projection-candidate.sql', import.meta.url), 'utf8')));
   assert.equal((await a`SELECT to_regclass('public.markdown_projection_obligations')::text AS name`)[0].name,
     'markdown_projection_obligations', 'atomic obligation table missing');
-  await a`INSERT INTO sources(id,name) VALUES ('mp-a','mp-a'),('mp-b','mp-b')`;
+  activeStage = 'candidate.concurrency';
   const [p] = await a`INSERT INTO pages(source_id,slug,type,title) VALUES ('mp-a','old','note','Old') RETURNING id`;
   const count = async () => Number((await a!`SELECT count(*) AS n FROM markdown_projection_obligations`)[0].n);
   assert.equal(await count(), 0, 'absent policy must not enqueue');
@@ -241,26 +337,7 @@ try {
   assert.equal(Number((await a`SELECT count(*) AS n FROM markdown_projection_obligations WHERE source_id='mp-b' AND status<>'blocked_policy'`)[0].n), 0);
   await a`INSERT INTO pages(id,source_id,slug,type,title) VALUES (${recreated.id},'mp-b','recreated-renamed','note','Fresh identity')`;
   assert.notEqual((await row(recreated.id,'mp-b')).incarnation, retainedAfter.find(x => x.page_id === recreated.id)!.incarnation);
-  // MP-B2: disposable, non-owner source-scoped LOGIN, never a production grant.
-  await admin.unsafe(`CREATE ROLE ${role} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE PASSWORD '${password}'`);
-  roleCreated = true;
-  await a.unsafe(`GRANT USAGE ON SCHEMA public TO ${role};
-    GRANT SELECT,INSERT,UPDATE,DELETE ON pages,tags TO ${role};
-    GRANT USAGE,SELECT ON SEQUENCE pages_id_seq,tags_id_seq TO ${role};
-    GRANT USAGE ON SEQUENCE public.page_generation_clock_seq TO ${role};
-    ALTER TABLE pages ENABLE ROW LEVEL SECURITY;
-    ALTER TABLE tags ENABLE ROW LEVEL SECURITY;
-    CREATE POLICY mp_fixture_pages ON pages TO ${role} USING (source_id='mp-a') WITH CHECK (source_id='mp-a');
-    CREATE POLICY mp_fixture_tags ON tags TO ${role}
-      USING (EXISTS (SELECT 1 FROM pages WHERE id=page_id AND source_id='mp-a'))
-      WITH CHECK (EXISTS (SELECT 1 FROM pages WHERE id=page_id AND source_id='mp-a'));`);
-  ordinary=postgres(connectionArgs(name, role, password));
-  await verifyTarget(ordinary, name, role);
-  const [identity] = await ordinary`SELECT current_user AS u, session_user AS s, rolsuper, rolbypassrls FROM pg_roles WHERE rolname=current_user`;
-  assert.equal(identity.u, role); assert.equal(identity.s, role);
-  assert.equal(identity.rolsuper, false); assert.equal(identity.rolbypassrls, false);
-  const roleEvidence = await ordinary`SELECT relname,relrowsecurity,pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid IN ('pages'::regclass,'tags'::regclass)`;
-  for (const table of roleEvidence) { assert.equal(table.relrowsecurity,true); assert.notEqual(table.owner,role); }
+  activeStage = 'candidate.ordinary.legacy-insert';
   const [own] = await ordinary`INSERT INTO pages(source_id,slug,type,title) VALUES ('mp-a','ordinary','note','Ordinary') RETURNING id`;
   assert.equal((await row(own.id)).operation, 'upsert');
   await ordinary`UPDATE pages SET title='Authorized',slug='ordinary-renamed' WHERE id=${own.id}`;
@@ -274,19 +351,21 @@ try {
   const crossBefore = await row(recreated.id,'mp-b');
   assert.equal((await ordinary`SELECT * FROM pages WHERE source_id='mp-b'`).length,0);
   assert.equal((await ordinary`UPDATE pages SET title='denied' WHERE id=${recreated.id} RETURNING id`).length,0);
-  await denied(() => ordinary!`UPDATE pages SET source_id='mp-b' WHERE id=${own.id}`, '42501');
-  await denied(() => ordinary!`UPDATE tags SET page_id=${recreated.id} WHERE page_id=${own.id}`, '42501');
+  await stage('candidate.denial.pages.source-move', () => denied(() => ordinary!`UPDATE pages SET source_id='mp-b' WHERE id=${own.id}`, '42501', /^new row violates row-level security policy for table "pages"$/));
+  await stage('candidate.denial.tags.reparent', () => denied(() => ordinary!`UPDATE tags SET page_id=${recreated.id} WHERE page_id=${own.id}`, '42501', /^new row violates row-level security policy for table "tags"$/));
   assert.deepEqual(await row(recreated.id,'mp-b'),crossBefore);
   assert.equal((await ordinary`SELECT source_id FROM pages WHERE id=${own.id}`)[0].source_id,'mp-a');
   await ordinary`DELETE FROM pages WHERE id=${own.id}`;
   assert.equal((await row(own.id)).operation,'tombstone');
-  await denied(() => ordinary!`SELECT * FROM markdown_projection_policy`, '42501');
-  await denied(() => ordinary!`INSERT INTO markdown_projection_policy(source_id,enabled,policy_generation,activation_watermark) VALUES ('mp-a',true,1,1)`, '42501');
+  await stage('candidate.denial.policy.read', () => denied(() => ordinary!`SELECT * FROM markdown_projection_policy`, '42501', /^permission denied for table markdown_projection_policy$/));
+  await stage('candidate.denial.policy.write', () => denied(() => ordinary!`INSERT INTO markdown_projection_policy(source_id,enabled,policy_generation,activation_watermark) VALUES ('mp-a',true,1,1)`, '42501', /^permission denied for table markdown_projection_policy$/));
   console.log(JSON.stringify({ordinaryIdentity:identity, rls:roleEvidence}));
-  await denied(() => ordinary!`SELECT markdown_projection_set_policy('mp-a',true)`, '42501');
-  await denied(() => ordinary!`SELECT * FROM markdown_projection_obligations`, '42501');
-  await denied(() => ordinary!`SELECT markdown_projection_publish_lock('mp-a')`, '42501');
+  await stage('candidate.denial.helper.set-policy', () => denied(() => ordinary!`SELECT markdown_projection_set_policy('mp-a',true)`, '42501', /^permission denied for function markdown_projection_set_policy$/));
+  await stage('candidate.denial.obligations.read', () => denied(() => ordinary!`SELECT * FROM markdown_projection_obligations`, '42501', /^permission denied for table markdown_projection_obligations$/));
+  await stage('candidate.denial.helper.publish-lock', () => denied(() => ordinary!`SELECT markdown_projection_publish_lock('mp-a')`, '42501', /^permission denied for function markdown_projection_publish_lock$/));
+  assert.deepEqual(await baselineMutations('candidate'), baselineSemantics, 'baseline/candidate search semantics differ');
 } catch (error) {
+  console.error(JSON.stringify({stage:activeStage, unexpectedError:diagnostic(error)}));
   failed = true;
   primaryError = error;
 } finally {

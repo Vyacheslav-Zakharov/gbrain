@@ -31,6 +31,32 @@ env -u DATABASE_URL MARKDOWN_PROJECTION_DISPOSABLE=CREATE_AND_DROP_DATABASE MARK
 
 Capture exact SQL/fixture/schema hashes, PostgreSQL version, command/exit, final receipt and role/RLS evidence. Fixture reports only its own coverage, never full acceptance.
 
+## Synthetic baseline gate (development revision; database execution pending)
+
+The candidate phase now provisions its nonowner role **before** installing candidate SQL.
+The fixture grants only SELECT(page_id, summary, detail) on timeline_entries and installs
+an explicit source-scoped SELECT policy via the parent page. Nonempty mp-a/mp-b timeline
+fixtures assert allowed summary/detail lexemes survive ordinary and retrieval-only updates,
+while forbidden-source rows and lexemes remain invisible. A missing-SELECT negative control
+requires the exact timeline table ACL denial; a SELECT-without-policy control must demonstrate
+silent vector loss. Privileges/policy are restored before the positive baseline gate.
+
+The same page/tag mutation routine runs after candidate installation, with distinct natural
+keys and cleanup isolated from the retained concurrency fixtures. Its page/tag assertions and
+search semantics must agree; sequence/generation values are deliberately not compared.
+The missing-table RED remains a separate early phase, not evidence of baseline role health.
+Expected 42501 failures require exact relation/function/RLS message seams, and stage/error
+receipts preserve unexpected failures through cleanup. Offline guards and compilation do
+not execute PostgreSQL or prove any of these semantic assertions.
+
+**Separate real-initializer/engine lane still pending.** This lane bootstraps schema.sql only;
+it does not execute PostgresEngine initialization/migrations, verify the migrated auto-RLS
+event trigger, or exercise service-role engine/application authorization. Synthetic RLS
+success must never be represented as deployed writer or engine compatibility proof.
+Full catalog/trigger/FK inventory, every callable-helper/internal-table denial, full owner
+snapshots for every refusal, UPSERT/zero-row differential coverage and per-mutation ordinary
+obligation/rollback comparison remain review/implementation gates beyond this bounded slice.
+
 ## Remaining gates — explicit, not silently covered
 
 SQL parsing/bootstrap and all authored schedules are unexecuted. Still add/prove: barrier-observed waiter resume after activation commit/rollback; stale target-source move (existing stale move covers old source); pre-install/new-source fixed snapshots; concurrent delete/enroll and stale recreate; both-source-authorized nonowner move; ordinary disabled RR/SERIALIZABLE overlap; deadlock injection with complete rollback; SET CONSTRAINTS IMMEDIATE deletion behavior; actual engine/import transactions, protected CAS denial and production-equivalent before/after grants. No immutable-root revisions, lease/current-pointer/ack implementation, full serializer, filesystem session-loss tests, retry integration, schema parity or scheduler exists. Source incarnation is in guard; obligation epoch plus page incarnation currently fences history, and explicit source-incarnation/root-revision payload fields must be added before FS publication.

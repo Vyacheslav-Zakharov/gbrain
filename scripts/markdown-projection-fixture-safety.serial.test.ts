@@ -9,6 +9,46 @@ afterAll(() => {
   }
   mock.restore();
 });
+test('candidate installation is gated by completed baseline mutations', async () => {
+  const text = await Bun.file(new URL('./markdown-projection-hosted-acceptance.ts', import.meta.url)).text();
+  const baseline = text.indexOf("await baselineMutations('baseline')");
+  const install = text.indexOf("await stage('candidate.install'");
+  expect(baseline).toBeGreaterThan(0);
+  expect(install).toBeGreaterThan(baseline);
+  expect(text).toContain("await baselineMutations('candidate')");
+  expect(text).toContain('GRANT SELECT(page_id,summary,detail) ON timeline_entries');
+  expect(text).toContain('CREATE POLICY mp_fixture_timeline');
+  expect(text).toContain('baseline.negative.missing-select');
+  expect(text).toContain('baseline.negative.no-policy');
+});
+test('baseline failure prevents candidate SQL and still drops database and role', async () => {
+  process.env.GITHUB_ACTIONS = 'true';
+  process.env.MARKDOWN_PROJECTION_DISPOSABLE = 'CREATE_AND_DROP_DATABASE';
+  process.env.MARKDOWN_PROJECTION_ADMIN_URL = base;
+  process.env.MARKDOWN_PROJECTION_PHASE = 'candidate';
+  process.env.MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP = '172.18.0.2';
+  delete process.env.DATABASE_URL;
+  const statements: string[] = [];
+  factory = (args: any) => {
+    const client: any = async (sql: TemplateStringsArray) => {
+      const text = sql.join(''); statements.push(text);
+      if (text.includes('current_database()')) return [{database:args.database,username:args.username,address:'172.18.0.2',port:5432}];
+      if (text.includes('FROM pg_roles')) return [{u:args.username,s:args.username,rolsuper:false,rolbypassrls:false}];
+      if (text.includes('FROM pg_class')) return [{relrowsecurity:true,owner:'postgres'}];
+      if (text.includes("'role-seed'")) throw new Error('BASELINE_MUTATION_SENTINEL');
+      return [];
+    };
+    client.unsafe = async (text: string) => { statements.push(text); };
+    client.end = async () => {};
+    return client;
+  };
+  let error: any;
+  try { await import('./markdown-projection-hosted-acceptance.ts?baseline=blocked'); } catch (e) { error=e; }
+  expect(error?.message).toBe('BASELINE_MUTATION_SENTINEL');
+  expect(statements.some(x => x.includes('CREATE TABLE public.markdown_projection_policy'))).toBe(false);
+  expect(statements.some(x => x.startsWith('DROP DATABASE'))).toBe(true);
+  expect(statements.some(x => x.startsWith('DROP ROLE'))).toBe(true);
+});
 let attempts = 0;
 let factory: (args: any) => any = () => { throw new Error('OFFLINE_CLIENT_SENTINEL'); };
 mock.module('postgres', () => ({ default: (args: any) => { attempts++; return factory(args); } }));
