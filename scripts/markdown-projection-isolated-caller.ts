@@ -1,5 +1,5 @@
 // Shared by the hosted caller and offline OS/filesystem regression. No database.
-import {execFileSync} from 'node:child_process';
+import {execFileSync,execFile} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {rm} from 'node:fs/promises';
 import {accessSync,constants,realpathSync,statSync} from 'node:fs';
@@ -36,10 +36,13 @@ export function runIsolated(config:object, command=['python3','-B',new URL('./ma
   if(!isAbsolute(bunExecutable) || !statSync(bunExecutable).isFile() || realpathSync(bunExecutable)!==realpathSync(process.execPath))throw new Error();
   accessSync(bunExecutable,constants.X_OK);
  }catch{throw new Error('trusted current Bun executable required');}
- const runId=randomUUID(); let output='',primary:unknown,receipt:unknown,validationError:unknown;
- let verified=false;
+ const runId=randomUUID(); let output='',primary:unknown;
  try {output=execFileSync(command[0],[...command.slice(1),'--bun',bunExecutable],{input:JSON.stringify({...config,supervisionRunId:runId}),encoding:'utf8',timeout:27000,maxBuffer:65536});}
  catch(e){primary=e;output=String((e as any)?.stdout??'');}
+ return finishIsolated(output,runId,primary);
+}
+function finishIsolated(output:string,runId:string,primary:unknown):Receipt {
+ let receipt:unknown,validationError:unknown,verified=false;
  try{
   receipt=JSON.parse(output.trim()) as unknown;
   if(!validReceipt(receipt,runId,primary))throw new Error('invalid or inconsistent reaping receipt');
@@ -51,6 +54,20 @@ export function runIsolated(config:object, command=['python3','-B',new URL('./ma
  throw Object.assign(new Error('isolated worker failed',{cause:primary??validationError}),{
   unsafeFilesystemCleanup:!verified,receipt,primaryError:primary,validationError,
   cleanupErrors:verified?[]:['process stop unverified'],
+ });
+}
+// Async transport uses the identical executable, supervisor and receipt validator.
+export async function runIsolatedAsync(config:object):Promise<Receipt> {
+ const runId=randomUUID();
+ return new Promise((resolve,reject)=>{
+  const child=execFile('python3',['-B',new URL('./markdown-projection-isolated-supervisor.py',import.meta.url).pathname,'--bun',process.execPath],
+   {encoding:'utf8',timeout:27000,maxBuffer:65536},(error,stdout)=>{
+    try{
+     const primary=error?Object.assign(error,{status:typeof error.code==='number'?error.code:undefined}):undefined;
+     resolve(finishIsolated(stdout,runId,primary));
+    }catch(e){reject(e);}
+   });
+  child.stdin!.end(JSON.stringify({...config,supervisionRunId:runId}));
  });
 }
 export async function removeHostedHome(home:string,failure:unknown){

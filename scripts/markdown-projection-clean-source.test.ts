@@ -9,7 +9,7 @@ test('actual stripped-env caller refuses and reaps without writing source artifa
  const root=mkdtempSync(join(tmpdir(),'mp-clean-source-'));
  try {
   mkdirSync(join(root,'scripts'));
-  for(const name of ['markdown-projection-isolated-caller.ts','markdown-projection-isolated-supervisor.py','markdown-projection-isolated-worker.ts','markdown-projection-engine-supervisor.py'])copyFileSync(join(repo,'scripts',name),join(root,'scripts',name));
+  for(const name of ['markdown-projection-isolated-caller.ts','markdown-projection-isolated-supervisor.py','markdown-projection-isolated-worker.ts','markdown-projection-fixture-fault.ts','markdown-projection-engine-supervisor.py'])copyFileSync(join(repo,'scripts',name),join(root,'scripts',name));
   for(const name of ['node_modules','src'])symlinkSync(join(repo,name),join(root,name),'dir');
   const git=(args:string[])=>execFileSync('git',args,{cwd:root,encoding:'utf8'});
   git(['init','-q']);git(['add','.']);

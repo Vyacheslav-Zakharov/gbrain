@@ -180,10 +180,11 @@ try {
   // This authored lane is NOT real connection-loss recovery acceptance yet.
   enter('worker.isolated');
   await engine.putPage('worker-lane',{...input,title:'Isolated worker'},opts);
-  const isolated=runIsolated({admission:'HOSTED_DISPOSABLE_ONLY',
+  const isolatedConfig={admission:'HOSTED_DISPOSABLE_ONLY',
     connection:{host:'127.0.0.1',port:Number(url.port),database:name,username:url.username,
       password:decodeURIComponent(url.password),expectedServerAddress:expectedServiceIP,expectedServerPort:5432},
-    worker:config});
+    worker:config};
+  const isolated=runIsolated(isolatedConfig);
   assert.equal(isolated.status,'passed');assert.equal(isolated.copyStatus,'materialized');
   assert(isolated.attempts.every((a:any)=>a.reaped && a.exitCode===0));
   const [isolatedCurrent]=await observer`SELECT * FROM markdown_projection_current WHERE source_id='default'`;
@@ -196,7 +197,10 @@ try {
     enter('worker.races');
     const {workerRaces}=await import('./markdown-projection-worker-races');
     await workerRaces(engine,observer,target.href,config,emit);
-  } else emit({stage:'worker.isolated.acceptance',status:'healthy-only',legacyRaces:'excluded-not-passed',backendLoss:'pending'});
+  } else {
+    const {isolatedRecovery}=await import('./markdown-projection-isolated-recovery');
+    await isolatedRecovery(engine,observer,isolatedConfig,emit);
+  }
 } catch(e) { failed=true; failure=e; emit({stage,status:'failed',message:String(e),code:(e as any)?.code}); }
 finally {
   const errors:unknown[]=[];
@@ -212,4 +216,4 @@ finally {
   if(failed && errors.length)throw Object.assign(new AggregateError([failure,...errors],'hosted failure with cleanup failures'),{primaryError:failure,cleanupErrors:errors,unsafeFilesystemCleanup:(failure as any)?.unsafeFilesystemCleanup});
   if(failed)throw failure; assert.equal(errors.length,0);
 }
-emit({status:'passed',phase:'engine',workerMode,isolatedHealthyCompletion:true,isolatedBackendLoss:'pending',legacyRaces:workerMode==='legacy'?'passed':'excluded-not-passed',filesystemWorkerConnected:true,applicationAuthProven:false});
+emit({status:'passed',phase:'engine',workerMode,isolatedHealthyCompletion:true,isolatedBackendLoss:workerMode==='isolated'?'passed':'excluded-not-passed',legacyRaces:workerMode==='legacy'?'passed':'excluded-not-passed',filesystemWorkerConnected:true,applicationAuthProven:false});
