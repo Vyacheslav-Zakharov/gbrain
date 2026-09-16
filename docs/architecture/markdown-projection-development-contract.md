@@ -1,6 +1,50 @@
 # Markdown projection: development contract and finite acceptance ledger
 
-Status: **Development only; first actual filesystem worker hosted run VERIFIED; new backend-race/process-crash schedules authored, hosted-unexecuted.** Current preparation base `b5f1ba3561bf85df1511945fdcb9820325b11ad6`. No activation authorization.
+Status: **Development only; owner-approved process-isolated copy-worker pivot.** Preparation base `4b33e3a9709b2d7acff37443d4718bd12d1a372c`. Prior ordinary hosted filesystem proof remains historical; real hosted connection-loss recovery for the isolated caller is PENDING. No activation authorization.
+
+## Approved isolated-worker pivot (current architecture)
+
+The copy caller is `python3 scripts/markdown-projection-isolated-supervisor.py`,
+with an explicit JSON document on stdin. It launches the actual Bun executable
+`markdown-projection-isolated-worker.ts`; no Portal engine, shared connection pool,
+engine-facade dependency, driver patch, HOME discovery or inherited DB environment.
+The development admission is intentionally HOSTED_DISPOSABLE_ONLY with an
+`mp_accept_` database and independently supplied server identity. This is not a
+production admission package or authorization to enable a source.
+
+Worker owns one postgres.js connection. Connection close, uncaught exception and
+unhandled rejection are terminal nonzero process failures, never ignored errors.
+A new process can retry the durable pending obligation only after the prior child
+and its tracked group/session are reaped. Supervisor's full child-lifetime deadline
+is 20 seconds by default, plus bounded TERM/KILL cleanup (two seconds each).
+Library retries are bounded to three; CLI executes one attempt. Earlier attempt
+errors remain in the returned receipt even if a later attempt succeeds. Driver
+messages/config/SQL are suppressed in favor of stable failure codes; no credentials
+are passed in argv or forwarded output. No raw private diagnostics are persisted.
+Success requires unique completion, zero exit and reaping; marker-then-hang fails.
+No claim is made about deliberately escaped descendant sessions.
+
+Existing worker immutable-file creation, protected root, fsync/readback and exact
+conditional generation/current-pointer acknowledgement are unchanged. Process
+isolation contains dead-driver callbacks; it does not make PostgreSQL and files an
+atomic transaction. A kill around COMMIT can have an unknown outcome: reread the
+ledger on retry, never infer unacknowledged state solely from a nonzero exit.
+No new mutable pathname, weakened safety assertion or acknowledgement-on-error.
+
+Finite pivot additions (supersede stale implementation-state prose below):
+
+| ID | Entrypoint / acceptance | Evidence / remaining gate |
+|---|---|---|
+| A7-isolated | Actual private child admission/fail-stop; no Portal pool | Offline subprocess checks, including actual executable with simulated driver; real hosted backend termination/recovery PENDING |
+| A8-isolated | Full-lifetime deadline; versioned final receipt binds caller run UUID, attempt and PID; reaping before retry/removal; primary plus cleanup errors retained | Actual supervisor CLI and shared hosted caller regression: TERM-resistant child with injected inventory failure remains alive, failed evidence retained, no retry, root/manual sentinel preserved; fixture then SIGKILLs and reaps. Missing/malformed receipt also refuses cleanup. Real PG crash/ambiguous-COMMIT recovery remains PENDING |
+| A11-isolated | Explicit MARKDOWN_PROJECTION_WORKER_MODE=isolated or legacy required; isolated mode requires healthy executable completion and independent canonical bytes/current-pointer assertions, never executes or claims legacy races | Offline caller/process/filesystem proof only. Legacy races explicitly excluded-not-passed in isolated mode; real isolated backend-loss PENDING. Fresh immutable source, hosted inventory/workflow and provider-bound run proof still PENDING |
+
+General driver patch development is stopped. The committed `4b33e3a97` generic
+engine facade change is not needed by this caller. It is deliberately preserved
+for review, not silently reverted: final worker branch should omit/revert its
+feature-specific broad changes only after a scoped dependency and unrelated-caller
+review. Existing rollback diagnosis script remains untouched. Scheduler, durable
+error/lag status, nonowner grants and production deployment remain open gates.
 
 ## Blocking delta review disposition
 

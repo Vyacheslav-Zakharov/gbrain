@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
+import {runIsolated,removeHostedHome,hostedWorkerMode} from './markdown-projection-isolated-caller';
+const workerMode=hostedWorkerMode(process.env.MARKDOWN_PROJECTION_WORKER_MODE);
 
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'hosted Actions only');
 assert.equal(process.env.MARKDOWN_PROJECTION_DISPOSABLE, 'CREATE_AND_DROP_DATABASE');
@@ -174,9 +176,27 @@ try {
   assert.equal(bytes,serializePageToMarkdown((await engine.getPage('worker-lane',opts))!,['worker-tag']));
   assert.equal((await drainMarkdownProjectionOnce(config,engine)).status,'idle');
   emit({stage:'worker.complete',status:'passed',filesystemWorkerConnected:true,applicationAuthProven:false});
-  enter('worker.races');
-  const {workerRaces}=await import('./markdown-projection-worker-races');
-  await workerRaces(engine,observer,target.href,config,emit);
+  // Independent parent invokes the actual process-isolated caller while fixture lives.
+  // This authored lane is NOT real connection-loss recovery acceptance yet.
+  enter('worker.isolated');
+  await engine.putPage('worker-lane',{...input,title:'Isolated worker'},opts);
+  const isolated=runIsolated({admission:'HOSTED_DISPOSABLE_ONLY',
+    connection:{host:'127.0.0.1',port:Number(url.port),database:name,username:url.username,
+      password:decodeURIComponent(url.password),expectedServerAddress:expectedServiceIP,expectedServerPort:5432},
+    worker:config});
+  assert.equal(isolated.status,'passed');assert.equal(isolated.copyStatus,'materialized');
+  assert(isolated.attempts.every((a:any)=>a.reaped && a.exitCode===0));
+  const [isolatedCurrent]=await observer`SELECT * FROM markdown_projection_current WHERE source_id='default'`;
+  assert(isolatedCurrent);
+  const isolatedBytes=await readFile(`${root}/${isolatedCurrent.current_path}`,'utf8');
+  assert.equal(createHash('sha256').update(isolatedBytes).digest('hex'),isolatedCurrent.current_hash);
+  assert.equal(isolatedBytes,serializePageToMarkdown((await engine.getPage('worker-lane',opts))!,['worker-tag']));
+  emit({stage:'worker.isolated',status:'passed',receipt:isolated,connectionLossRecoveryProven:false});
+  if(workerMode==='legacy') {
+    enter('worker.races');
+    const {workerRaces}=await import('./markdown-projection-worker-races');
+    await workerRaces(engine,observer,target.href,config,emit);
+  } else emit({stage:'worker.isolated.acceptance',status:'healthy-only',legacyRaces:'excluded-not-passed',backendLoss:'pending'});
 } catch(e) { failed=true; failure=e; emit({stage,status:'failed',message:String(e),code:(e as any)?.code}); }
 finally {
   const errors:unknown[]=[];
@@ -187,9 +207,9 @@ finally {
   await attempt('catalog.residue',async()=>assert.equal((await admin`SELECT datname FROM pg_database WHERE datname=${name}`).length,0));
   await attempt('admin.close',()=>admin.end({timeout:2}));
   // A timed-out JS callback can still write: retain its root for supervisor teardown.
-  if(!(failure as any)?.unsafeFilesystemCleanup)await attempt('home.remove',()=>rm(home,{recursive:true,force:true}));
-  else errors.push({label:'home.retained',error:'worker callback did not finish; filesystem cleanup refused'});
+  await attempt('home.remove',()=>removeHostedHome(home,failure));
   emit({cleanup:errors.length?'failed':'passed',errors,wholeServiceTeardownRequired:true});
+  if(failed && errors.length)throw Object.assign(new AggregateError([failure,...errors],'hosted failure with cleanup failures'),{primaryError:failure,cleanupErrors:errors,unsafeFilesystemCleanup:(failure as any)?.unsafeFilesystemCleanup});
   if(failed)throw failure; assert.equal(errors.length,0);
 }
-emit({status:'passed',phase:'engine',filesystemWorkerConnected:true,applicationAuthProven:false});
+emit({status:'passed',phase:'engine',workerMode,isolatedHealthyCompletion:true,isolatedBackendLoss:'pending',legacyRaces:workerMode==='legacy'?'passed':'excluded-not-passed',filesystemWorkerConnected:true,applicationAuthProven:false});
