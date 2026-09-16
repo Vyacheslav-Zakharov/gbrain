@@ -950,9 +950,11 @@ const put_page: Operation = {
     const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
     if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug, source_id: targetSourceId };
     const fileRuntime = await resolvePageFileRuntime(ctx, targetSourceId, slug);
-    // Narrow remote ordinary path only; trusted timeline/page-mutating hooks and
-    // sandbox DB-only writes must not silently acquire file authority.
-    if (fileRuntime && (ctx.remote === false || ctx.viaSubagent === true))
+    // Local capture reuses the prepared private adapter without admitting other
+    // local/subagent writers. Provenance is not authority: the local branch
+    // requires explicit trusted context, never caller-controlled remote stamps.
+    const localCapture = ctx.remote === false && provenanceKind === 'capture-cli' && provenanceVia === 'capture-cli';
+    if (fileRuntime && ((ctx.remote === false && !localCapture) || ctx.viaSubagent === true))
       throw new Error('unsupported_ordinary_file_writer');
     const perform = async () => {
     const baseline = fileRuntime ? await fileRuntime.pages.get(targetSourceId, slug, () => {}) : undefined;
@@ -1013,7 +1015,7 @@ const put_page: Operation = {
       // substitute an ordinary engine, unchecked callback or legacy fallback.
       if (!('putOrdinary' in fileRuntime.pages) || typeof fileRuntime.pages.putOrdinary !== 'function')
         throw new Error('page_file_ordinary_authority_unavailable');
-      const { prepareContentImport, projectContentImportAliases } = await import('./import-file.ts');
+      const { prepareContentImport, projectContentImportCodeRefs, projectContentImportAliases } = await import('./import-file.ts');
       const prepared = await prepareContentImport(ctx.engine, slug, p.content as string, importOptions);
       if (!('pageInput' in prepared)) {
         if (prepared.slug !== slug || !prepared.parsedPage) throw new Error('unsupported_ordinary_skipped_projection');
@@ -1028,6 +1030,9 @@ const put_page: Operation = {
           .putOrdinary(targetSourceId, slug, prepared, baseline!, () => {});
         result = saved.result;
         ordinaryWriteThrough = saved.writeThrough;
+        // Ordinary best-effort graph follow-up, outside private page CAS.
+        // Keep importer ordering: code references, aliases, then auto-link.
+        await projectContentImportCodeRefs(ctx.engine, slug, targetSourceId, prepared.parsed);
         await projectContentImportAliases(ctx.engine, slug, targetSourceId, prepared.parsed.frontmatter);
       }
     } else result = await importFromContent(ctx.engine, slug, p.content as string, importOptions);

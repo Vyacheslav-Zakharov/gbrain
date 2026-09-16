@@ -117,7 +117,7 @@ jobs:
             test/page-file-fixture-cleanup.test.ts test/page-file-tag-fence.test.ts \
             test/page-file-source-operator.serial.test.ts test/page-file-source-runtime-enrollment.serial.test.ts \
             test/page-file-ordinary-preparation.serial.test.ts test/page-file-ordinary-put-compat.serial.test.ts \
-            test/page-file-ordinary-writer-vertical.serial.test.ts test/page-file-created-enrollment.serial.test.ts \
+            test/page-file-ordinary-writer-vertical.serial.test.ts test/page-file-capture-compat.serial.test.ts test/page-file-created-enrollment.serial.test.ts \
             test/postgres-engine-singleton-ownership.test.ts test/postgres-engine.test.ts \
             test/postgres-engine-getter-selfheal.test.ts test/postgres-disconnect-bounded.test.ts \
             test/page-file-runtime-authority.serial.test.ts test/page-file-runtime-enrollment.serial.test.ts \
@@ -256,6 +256,7 @@ jobs:
           for marker in (
               'executable paginated inventory and enrollment; two existing pages; separate login; idempotent readback',
               'registered ordinary enrolled put preserves tags metadata file and DB; stale checked baseline refuses without mutation',
+              'executable capture --file --slug --source updates enrolled page with file DB tags and capture provenance; stale token unchanged refusal; subsequent executable ingest link remains ordinary',
               'ordinary-created future page enrolled by fresh paginated sweep without repinning; cross-source inventory and reconcile denied',
           ):
               assert sql_log.count(f'PG_CONNECTED_SOURCE_V2: {marker}') == 1, ('missing/duplicate source-v2 completion', marker)

@@ -1,7 +1,6 @@
 import { parseMarkdown, serializePageToMarkdown } from './markdown.ts';
 import { randomUUID } from 'node:crypto';
 import type { PreparedContentImport } from './import-file.ts';
-import { extractCodeRefs } from './link-extraction.ts';
 import type { Page } from './types.ts';
 import type { BrainEngine } from './engine.ts';
 import { isDeepStrictEqual } from 'node:util';
@@ -200,15 +199,19 @@ export class PageFileDatabase {
   async putOrdinary(source: string, slug: string, prepared: PreparedContentImport, baseline: Row, validate: (row: Row) => void) {
     prepared = structuredClone(prepared); baseline = structuredClone(baseline);
     if (!prepared.existing || prepared.result.slug !== slug) throw new Error('ineligible_page');
-    if (extractCodeRefs(prepared.parsed.compiled_truth + '\n' + prepared.parsed.timeline).length)
-      throw new Error('unsupported_ordinary_code_links');
     const current = await this.binding(source, slug);
     validate(current.row);
     const tags = [...new Set([...(await this.engine.getTags(slug, { sourceId: source })), ...prepared.parsed.tags])];
     // Canonical write-through adds provenance to the file. Persist that same
     // projection to JSONB, otherwise checked reads would require a sync at once.
     const raw = serializePageToMarkdown({ ...current.row, ...prepared.pageInput } as Page, tags, {
-      frontmatterOverrides: { ingested_via: 'mcp:put_page', source_kind: 'mcp:put_page', ingested_at: new Date().toISOString() },
+      // Preparation has already applied the operation's fail-closed trust stamp.
+      // Do not relabel local capture as MCP at the private persistence seam.
+      frontmatterOverrides: {
+        ingested_via: prepared.pageInput.frontmatter?.ingested_via ?? 'mcp:put_page',
+        source_kind: prepared.pageInput.frontmatter?.source_kind ?? 'mcp:put_page',
+        ingested_at: prepared.pageInput.frontmatter?.ingested_at ?? new Date().toISOString(),
+      },
     });
     const page = this.projection(raw, slug).page;
     prepared.pageInput.frontmatter = page.frontmatter;

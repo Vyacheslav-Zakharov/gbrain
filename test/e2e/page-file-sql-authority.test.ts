@@ -95,6 +95,17 @@ async function drift(apply: string, restore: string, role: string) {
   await allAccepted();
 }
 
+test('offline fixture ordinary graph grants and endpoint/origin policy stay narrow', () => {
+  const fixture = readFileSync(import.meta.path, 'utf8').split(/\n  beforeAll\(async \(\) => \{/)[1].split(/\n  afterAll\(async \(\) => \{/)[0];
+  expect(fixture).toContain('GRANT SELECT,INSERT,DELETE,UPDATE(context,origin_field) ON public.links TO ${role}');
+  expect(fixture).toContain("pg_get_serial_sequence('public.links','id')");
+  expect(fixture).toContain('GRANT USAGE ON SEQUENCE ${linkSequence.name} TO ${role}');
+  expect(fixture).toContain("['links', ownLink, roles.ordinary, 'ALL']");
+  expect(fixture).toContain("from_page_id IN (${ownPages}) AND to_page_id IN (${ownPages}) AND (origin_page_id IS NULL OR origin_page_id IN (${ownPages}))");
+  const adapter = fixture.split('if (role === roles.adapter)')[1].split('if (role === roles.adapter)')[0];
+  expect(adapter).not.toContain('public.links');
+});
+
 suite('SQL authority — real PostgreSQL with external fixture pins', () => {
   beforeAll(async () => {
     pinDirectory = process.env.PAGE_FILE_SQL_EVIDENCE_DIR || mkdtempSync(join(tmpdir(), 'sql-authority-'));
@@ -115,6 +126,11 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       await admin.executeRaw(`GRANT USAGE ON SCHEMA public TO ${role}`);
       await admin.executeRaw(`GRANT SELECT ON sources,pages,page_file_bindings,config TO ${role}`);
       if (role === roles.ordinary) {
+        // Existing ordinary graph reconciliation, NOT adapter/page-CAS authority.
+        await admin.executeRaw(`GRANT SELECT,INSERT,DELETE,UPDATE(context,origin_field) ON public.links TO ${role}`);
+        const [linkSequence] = await admin.executeRaw<{ name: string }>("SELECT pg_get_serial_sequence('public.links','id') AS name");
+        expect(linkSequence.name).toBeString();
+        await admin.executeRaw(`GRANT USAGE ON SEQUENCE ${linkSequence.name} TO ${role}`);
         await admin.executeRaw(`GRANT SELECT,INSERT,UPDATE,DELETE ON sources,pages,config,tags,timeline_entries,content_chunks,page_versions,code_edges_chunk,code_edges_symbol TO ${role}`);
         await admin.executeRaw(`GRANT USAGE ON SEQUENCE page_generation_clock_seq TO ${role}`);
         for (const table of ['pages','tags','content_chunks','page_versions','timeline_entries','code_edges_chunk','code_edges_symbol']) {
@@ -151,11 +167,14 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       const login = new URL(url!); login.username = role; login.password = password; loginUrls.set(role, login.toString());
     }
     const all = Object.values(roles).join(','), ownPage = `page_id IN (SELECT id FROM public.pages WHERE source_id='${source}')`;
+    const ownPages = `SELECT id FROM public.pages WHERE source_id='${source}'`;
+    const ownLink = `from_page_id IN (${ownPages}) AND to_page_id IN (${ownPages}) AND (origin_page_id IS NULL OR origin_page_id IN (${ownPages}))`;
     const ownBinding = `binding_id IN (SELECT binding_id FROM public.page_file_bindings WHERE source_id='${source}')`;
     const policies: [string, string, string, string][] = [
       ['sources', `id='${source}'`, all, 'ALL'], ['pages', `source_id='${source}'`, all, 'ALL'],
       ['page_file_bindings', `source_id='${source}' AND ${ownPage}`, all, 'ALL'],
       ['tags', ownPage, roles.ordinary, 'ALL'],
+      ['links', ownLink, roles.ordinary, 'ALL'],
       ...['content_chunks', 'page_versions', 'timeline_entries'].map(t => [t, ownPage, `${roles.ordinary},${roles.adapter}`, 'ALL'] as [string,string,string,string]),
       ['page_file_operations', ownBinding, roles.adapter, 'ALL'], ['page_file_write_authorizations', ownPage, roles.adapter, 'ALL'],
       ['config', "key='sync.repo_path'", all, 'ALL'],
@@ -279,6 +298,106 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
     expect(await snapshot()).toEqual(before);
     await allAccepted();
     console.log('PG_SQL_AUTHORITY: mixed ordinary DML accepted; enrolled page chunk root and capability fences preserved');
+  }, 60_000);
+  test('ordinary ingest graph uses actual login; endpoint/origin RLS and private-role denials preserve state', async () => {
+    const { projectContentImportCodeRefs } = await import('../../src/core/import-file.ts');
+    const { slugifyCodePath } = await import('../../src/core/sync.ts');
+    const ordinary = pools.get(roles.ordinary)!;
+    const engine = new PostgresEngine();
+    const foreignSource = source + '-graph-foreign';
+    const guideSlug = 'graph-guide', codeSlug = slugifyCodePath('src/fixture.ts');
+    const scope = { fromSourceId: source, toSourceId: source, originSourceId: source };
+    const snapshot = async () => {
+      const rows: unknown[] = [];
+      // Includes authored/private authority state: graph work must not mutate it.
+      for (const table of ['links', 'pages', 'tags', 'content_chunks', 'page_file_bindings', 'page_file_operations', 'page_file_write_authorizations']) {
+        rows.push(await admin.executeRaw(`SELECT to_jsonb(t)::text AS row FROM public.${table} t ORDER BY to_jsonb(t)::text`));
+      }
+      return rows;
+    };
+    try {
+      await engine.connect({ database_url: loginUrls.get(roles.ordinary)!, poolSize: 1 });
+      const [identity] = await engine.executeRaw('SELECT session_user,current_user');
+      expect(identity).toEqual({ session_user: roles.ordinary, current_user: roles.ordinary });
+      const own = await ordinary.unsafe("INSERT INTO pages(source_id,slug,type,title,compiled_truth) VALUES($1,$2,'note','Guide','Before'),($1,$3,'code','Code','Before') RETURNING id,slug", [source, guideSlug, codeSlug]);
+      const guide = own.find(p => p.slug === guideSlug)!, code = own.find(p => p.slug === codeSlug)!;
+      await admin.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [foreignSource]);
+      // Same slugs in another source expose accidental bare-slug fan-out.
+      const foreign = await admin.executeRaw<{ id: number; slug: string }>("INSERT INTO pages(source_id,slug,type,title,compiled_truth) VALUES($1,$2,'note','Foreign','Before'),($1,$3,'code','Foreign code','Before') RETURNING id,slug", [foreignSource, guideSlug, codeSlug]);
+      const foreignGuide = foreign.find(p => p.slug === guideSlug)!;
+      const [sequence] = await admin.executeRaw<{ name: string }>("SELECT pg_get_serial_sequence('public.links','id') AS name");
+      for (const role of Object.values(roles)) {
+        const [rights] = await pools.get(role)!.unsafe<Record<string, boolean>[]>(`SELECT has_table_privilege(current_user,'public.links','SELECT') AS read,
+          has_table_privilege(current_user,'public.links','INSERT') AS add,
+          has_table_privilege(current_user,'public.links','DELETE') AS remove,
+          has_table_privilege(current_user,'public.links','UPDATE') AS wide_update,
+          has_column_privilege(current_user,'public.links','context','UPDATE') AS context_update,
+          has_column_privilege(current_user,'public.links','origin_field','UPDATE') AS field_update,
+          has_sequence_privilege(current_user,$1,'USAGE') AS sequence_usage,
+          has_sequence_privilege(current_user,$1,'SELECT') AS sequence_read,
+          has_sequence_privilege(current_user,$1,'UPDATE') AS sequence_update,
+          row_security_active('public.links') AS rls`, [sequence.name]);
+        const allowed = role === roles.ordinary;
+        expect({ ...rights }).toEqual({ read: allowed, add: allowed, remove: allowed, wide_update: false,
+          context_update: allowed, field_update: allowed, sequence_usage: allowed, sequence_read: false, sequence_update: false, rls: true });
+      }
+      const authoredBefore = (await snapshot()).slice(1);
+      // Real ingestion projection calls real PostgresEngine.addLink, not a mock.
+      // Its best-effort catches must not hide privilege failures: assert both rows.
+      await projectContentImportCodeRefs(engine, guideSlug, source, { compiled_truth: 'See src/fixture.ts:42', timeline: '' });
+      type GraphRow = { from_page_id: number; to_page_id: number; origin_page_id: number; link_type: string };
+      const links = await ordinary.unsafe<GraphRow[]>('SELECT from_page_id,to_page_id,origin_page_id,link_type FROM links WHERE origin_page_id=$1 ORDER BY link_type', [guide.id]);
+      expect([...links]).toEqual([
+        { from_page_id: code.id, to_page_id: guide.id, origin_page_id: guide.id, link_type: 'documented_by' },
+        { from_page_id: guide.id, to_page_id: code.id, origin_page_id: guide.id, link_type: 'documents' },
+      ]);
+      expect(await admin.executeRaw<GraphRow>(`SELECT from_page_id,to_page_id,origin_page_id,link_type FROM links
+        WHERE from_page_id IN (SELECT id FROM pages WHERE source_id IN ($1,$2)) ORDER BY link_type`, [source, foreignSource])).toEqual([...links]);
+      await engine.addLink(guideSlug, codeSlug, 'Updated', 'documents', 'markdown', guideSlug, 'timeline', scope);
+      expect([...await ordinary.unsafe<{ context: string; origin_field: string }[]>("SELECT context,origin_field FROM links WHERE from_page_id=$1 AND link_type='documents'", [guide.id])]).toEqual([{ context: 'Updated', origin_field: 'timeline' }]);
+      // Null origin remains valid for existing manual/markdown callers.
+      await engine.addLink(guideSlug, codeSlug, 'Manual', 'mentions', 'manual', undefined, undefined, scope);
+      expect(await ordinary.unsafe('SELECT id FROM links WHERE from_page_id=$1 AND origin_page_id IS NULL', [guide.id])).toHaveLength(1);
+      expect((await snapshot()).slice(1)).toEqual(authoredBefore);
+      const before = await snapshot();
+      for (const ids of [[foreignGuide.id, code.id, guide.id], [guide.id, foreignGuide.id, guide.id], [guide.id, code.id, foreignGuide.id]]) {
+        await expect(ordinary.unsafe("INSERT INTO links(from_page_id,to_page_id,origin_page_id,link_type,link_source) VALUES($1,$2,$3,'denied','manual')", ids).execute()).rejects.toMatchObject({ code: '42501' });
+        expect(await snapshot()).toEqual(before);
+      }
+      await expect(engine.addLink(guideSlug, codeSlug, 'Denied', 'documents', 'markdown', guideSlug, 'compiled_truth', { ...scope, toSourceId: foreignSource })).rejects.toThrow('not found');
+      expect(await snapshot()).toEqual(before);
+      for (const column of ['from_page_id', 'to_page_id', 'origin_page_id', 'link_type', 'link_source', 'id', 'link_kind', 'resolution_type', 'created_at']) {
+        await expect(ordinary.unsafe(`UPDATE links SET ${column}=${column} WHERE from_page_id=$1`, [guide.id]).execute()).rejects.toMatchObject({ code: '42501' });
+        expect(await snapshot()).toEqual(before);
+      }
+      for (const role of [roles.adapter, roles.enrollment]) {
+        for (const sql of ['SELECT * FROM links', "INSERT INTO links(from_page_id,to_page_id) SELECT id,id FROM pages LIMIT 1", "UPDATE links SET context='Denied'", 'DELETE FROM links']) {
+          await expect(pools.get(role)!.unsafe(sql).execute()).rejects.toMatchObject({ code: '42501' });
+          expect(await snapshot()).toEqual(before);
+        }
+      }
+      // Owner seeds each distinct foreign boundary; RLS hides it for SELECT,
+      // UPDATE and DELETE even when the endpoint IDs are already known.
+      for (const ids of [[foreignGuide.id, code.id, guide.id], [guide.id, foreignGuide.id, guide.id], [guide.id, code.id, foreignGuide.id]]) {
+        const [hidden] = await admin.executeRaw<{ id: number }>("INSERT INTO links(from_page_id,to_page_id,origin_page_id,link_type,link_source) VALUES($1,$2,$3,'hidden','manual') RETURNING id", ids);
+        const hiddenBefore = await snapshot();
+        expect(await ordinary.unsafe('SELECT id FROM links WHERE id=$1', [hidden.id])).toHaveLength(0);
+        expect(await ordinary.unsafe("UPDATE links SET context='Denied',origin_field='Denied' WHERE id=$1 RETURNING id", [hidden.id])).toHaveLength(0);
+        expect(await snapshot()).toEqual(hiddenBefore);
+        expect(await ordinary.unsafe('DELETE FROM links WHERE id=$1 RETURNING id', [hidden.id])).toHaveLength(0);
+        expect(await snapshot()).toEqual(hiddenBefore);
+        await admin.executeRaw('DELETE FROM links WHERE id=$1', [hidden.id]);
+      }
+      expect(await ordinary.unsafe('DELETE FROM links WHERE from_page_id IN ($1,$2) RETURNING id', [guide.id, code.id])).toHaveLength(3);
+      expect(await ordinary.unsafe('SELECT id FROM links WHERE from_page_id IN ($1,$2)', [guide.id, code.id])).toHaveLength(0);
+      expect((await snapshot()).slice(1)).toEqual(authoredBefore);
+      await allAccepted();
+      console.log('PG_SQL_AUTHORITY: ordinary ingest addLink/upsert/delete; exact graph grants; endpoint/origin and private-role denials preserve state');
+    } finally {
+      await engine.disconnect();
+      await admin.executeRaw('DELETE FROM sources WHERE id=$1', [foreignSource]);
+      await ordinary.unsafe('DELETE FROM pages WHERE source_id=$1 AND slug IN ($2,$3)', [source, guideSlug, codeSlug]);
+    }
   }, 60_000);
   test('candidate adapter add-only tags retain RLS, exact grants and per-statement revision fence', async () => {
     const adapter = pools.get(roles.adapter)!;

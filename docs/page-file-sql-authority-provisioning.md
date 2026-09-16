@@ -35,7 +35,7 @@ PostgreSQL 15+; older or restricted catalogs fail closed, not silently skip.
 
 ## Candidate mixed ordinary-writer allowlist (finite inventory)
 
-The add-only adapter tag delta below is a **candidate contract proposal requiring
+The add-only adapter tag and ordinary graph fixture deltas below are **candidate contract proposals requiring
 independent review**, not approved production provisioning. The baseline hosted
 run above does not verify these new bytes. No broad source enrollment is enabled.
 
@@ -70,10 +70,52 @@ its inventory. Their provisioning remains separately reviewed. Migration credent
 are release-only; ordinary startup must not automatically apply migrations.
 Architecture approval is not permission for live deployment or provisioning.
 
+## Candidate ordinary graph fixture compatibility (not graph CAS)
+
+Existing ordinary ingestion/capture/reconciliation must continue before CAS
+activation and outside page CAS. The disposable hosted fixture therefore adds only
+`SELECT, INSERT, DELETE, UPDATE(context,origin_field)` on `public.links` to its
+ordinary login, plus **USAGE only** on the exact sequence returned by
+`pg_get_serial_sequence('public.links','id')`. The column UPDATE grant supports
+the existing `addLink` conflict update; DELETE supports existing reconciliation.
+No table-wide UPDATE, sequence SELECT/UPDATE, ALL SEQUENCES, grant option,
+TRUNCATE, ownership, adapter or enrollment graph authority is added.
+
+The fixture's ordinary-only `FOR ALL` RLS policy uses the same predicate for
+`USING` and `WITH CHECK`: both `from_page_id` and `to_page_id` must resolve to
+pages in the explicitly approved fixture source, and `origin_page_id` must be
+NULL (existing manual/markdown semantics) or resolve to a page in that source.
+An endpoint-OR policy is insufficient; checking only the outgoing endpoint or
+omitting non-NULL origin checks permits cross-source reads/writes. Existing
+source-scoped page visibility remains in force. This is a row-level contract:
+the existing addLink LEFT JOIN can resolve an invisible/missing origin slug to
+NULL; this fixture does not claim to validate caller-supplied origin strings.
+
+The new hosted case uses the existing separate ordinary login and real
+`projectContentImportCodeRefs` ingestion helper / `PostgresEngine.addLink`, with
+owner readback proving both directional edges despite best-effort error catches.
+It tests same-slug foreign-source isolation, conflict updates of both permitted
+columns, NULL origin and deletion, exact sequence privileges, forbidden column
+updates, each foreign endpoint/origin INSERT rejection, hidden foreign rows for
+SELECT/UPDATE/DELETE, and adapter/enrollment graph denial. Each negative mutation
+has unchanged-row-state assertions; sequence counters are deliberately excluded
+because PostgreSQL nextval is nontransactional even when INSERT fails. Authored
+pages, chunks, tags, bindings, operations and authorizations remain unchanged by
+the graph probe; the existing enrolled-page/private-authority fence probes remain.
+
+**Evidence status: hosted unexecuted for this candidate.** The offline fixture
+shape regression is not SQL/RLS proof. This change extends only the disposable
+fixture provisioning contract, not the runtime validator's twelve-table/eight-
+sequence inventory or its twelve pins. `links` and its ID sequence remain outside
+that finite CAS audit: the new actual-login tests supply separate fixture evidence,
+not runtime graph attestation or a new graph pin. No live grant, production pin,
+adapter graph write, graph CAS, migration or enrollment activation is authorized.
+
 ## Candidate add-only tag delta and writer handoff
 
 The only new adapter privileges are `INSERT ON public.tags` and `USAGE ON` its
-exact ID sequence. Ordinary and enrollment privileges remain unchanged. Retain
+exact ID sequence. That tag delta leaves ordinary and enrollment privileges unchanged;
+the separate ordinary graph fixture delta is specified above. Retain
 all owner, membership, BYPASSRLS, trigger, column and grant-option denials.
 Disposable fixtures use a separate adapter `FOR INSERT ... WITH CHECK` policy
 whose page-ID predicate selects only pages in the fixture source, alongside the
@@ -173,12 +215,14 @@ or production access is required or authorized by this documentation update.
 
 ## Finite scope and exclusions
 
-The inventory is exactly twelve tables and eight sequences used by the mixed-writer
-hosted role fixture plus their policies/constraints/triggers/functions, database and
+The validator inventory is exactly twelve tables and eight sequences from the
+mixed-writer contract, plus their policies/constraints/triggers/functions, database and
 public schema. This is not a whole-database privilege audit. Unrelated callable
 SECURITY DEFINER functions, extensions, foreign servers, other schemas, server
 configuration and external DBA powers remain the deployment's separate trust
-boundary; success does not claim their safety. No provisioning DDL is included:
+boundary; success does not claim their safety. The disposable fixture additionally
+provisions ordinary `links` and its ID sequence as described above; these are not
+added to the validator inventory. No production provisioning DDL is included:
 actual installation/revocation and independent pin approval require operator review.
 
 ## Finite installation, rollback and owner approval template (preparation only)

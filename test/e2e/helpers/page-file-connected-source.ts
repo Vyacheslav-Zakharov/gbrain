@@ -61,11 +61,12 @@ export async function exerciseConnectedSource(f: {
   const contractPath = join(f.directory, 'source-operator.json');
   writeFileSync(contractPath, contract, { flag: 'wx', mode: 0o400 });
   let ownsAnchor = false;
-  const invoke = async (action: 'inventory' | 'reconcile', cursor?: string, source = f.source, denied = false): Promise<Batch> => {
-    // No owner/adapter URL, inherited HOME, direct URL override or API key.
-    const proc = Bun.spawn([process.execPath, join(import.meta.dir, '../../../src/commands/page-file-operator.ts'),
-      action, source, '1', ...(cursor ? [cursor] : [])], {
-      cwd: home, env: { PATH: process.env.PATH, HOME: home, GBRAIN_HOME: home, GBRAIN_DATABASE_URL: f.ordinaryUrl },
+  const run = async (entrypoint: string, args: string[], denied = false) => {
+    // Same ordinary-only process configuration for operator, capture and links.
+    // No owner/adapter/enrollment URL, inherited HOME or API key.
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, entrypoint), ...args], {
+      cwd: home, env: { PATH: process.env.PATH, HOME: home, GBRAIN_HOME: home, GBRAIN_DATABASE_URL: f.ordinaryUrl,
+        GBRAIN_SKIP_STARTUP_HOOKS: '1' },
       stdout: 'pipe', stderr: 'pipe',
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -77,15 +78,20 @@ export async function exerciseConnectedSource(f: {
       expect(out + err).not.toContain(f.enrollmentUrl);
       expect(out + err).not.toContain(f.ordinaryUrl);
       expect(code).toBe(denied ? 1 : 0);
-      if (denied) {
-        expect(out).toBe(''); expect(err.trim()).toBe('page_file_operator_failed');
-        return { status: 'denied', source, items: [], nextCursor: null };
-      }
-      const batch = JSON.parse(out) as Batch;
-      expect(batch.status).toBe('complete'); expect(batch.source).toBe(source);
-      expect(batch.items.length).toBe(1);
-      return batch;
+      return { out, err };
     } finally { clearTimeout(timer); if (proc.exitCode === null) proc.kill('SIGKILL'); await proc.exited; }
+  };
+  const invoke = async (action: 'inventory' | 'reconcile', cursor?: string, source = f.source, denied = false): Promise<Batch> => {
+    const { out, err } = await run('../../../src/commands/page-file-operator.ts',
+      [action, source, '1', ...(cursor ? [cursor] : [])], denied);
+    if (denied) {
+      expect(out).toBe(''); expect(err.trim()).toBe('page_file_operator_failed');
+      return { status: 'denied', source, items: [], nextCursor: null };
+    }
+    const batch = JSON.parse(out) as Batch;
+    expect(batch.status).toBe('complete'); expect(batch.source).toBe(source);
+    expect(batch.items.length).toBe(1);
+    return batch;
   };
   const sweep = async (action: 'inventory' | 'reconcile', slugs: string[], statuses: string[]) => {
     let cursor: string | undefined;
@@ -161,6 +167,72 @@ export async function exerciseConnectedSource(f: {
     expect(await state()).toEqual(stable);
     expect(await f.admin.executeRaw('SELECT * FROM page_file_write_authorizations WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1)', [f.source])).toEqual([]);
     console.log('PG_CONNECTED_SOURCE_V2: registered ordinary enrolled put preserves tags metadata file and DB; stale checked baseline refuses without mutation');
+
+    // sibling was created through registered ordinary put and enrolled above.
+    // Exercise the real ingest executable, not runCapture with an injected engine.
+    const captureBefore = await call('get_page_checked', 'sibling');
+    const capturePolicy = readFileSync(contractPath, 'utf8');
+    const captureAnchor = readFileSync(operatorAnchor, 'utf8');
+    const captureInput = join(f.directory, 'capture-publication.md');
+    writeFileSync(captureInput, '---\ntitle: Captured\ntype: concept\ntags: [captured]\nowner: capture-fixture\ndate: "2026-01-03"\n---\n\nCaptured publication with [[connected]].\n', { flag: 'wx', mode: 0o600 });
+    const capture = await run('../../../src/cli.ts', ['capture', '--file', captureInput,
+      '--slug', 'sibling', '--source', f.source, '--json']);
+    const receipt = JSON.parse(capture.out);
+    expect(receipt).toMatchObject({ slug: 'sibling', status: 'created_or_updated', written: true, source_kind: 'capture-cli' });
+    expect(receipt.chunks).toBeGreaterThan(0);
+    const captured = await call('get_page_checked', 'sibling');
+    expect(captured.persistence).toBe('file_and_database');
+    expect(captured.revision).not.toBe(captureBefore.revision);
+    expect(captured.file.baseline.generation).not.toBe(captureBefore.file.baseline.generation);
+    const capturedPage = (await f.engine.getPage('sibling', { sourceId: f.source }))!;
+    const capturedRaw = readFileSync(join(f.root, 'sibling.md'), 'utf8');
+    const capturedParsed = parseMarkdown(capturedRaw, 'sibling.md');
+    expect(captured.file.raw_markdown).toBe(capturedRaw);
+    expect(capturedPage.title).toBe('Captured');
+    expect(capturedPage.compiled_truth).toContain('Captured publication with [[connected]].');
+    expect(capturedParsed.title).toBe(capturedPage.title);
+    expect(capturedParsed.type).toBe(capturedPage.type);
+    expect(capturedParsed.compiled_truth).toBe(capturedPage.compiled_truth);
+    expect(capturedParsed.timeline).toBe(capturedPage.timeline);
+    expect(JSON.parse(JSON.stringify(capturedParsed.frontmatter))).toEqual(capturedPage.frontmatter);
+    const captureTags = ['authored-before', 'captured'];
+    expect((await f.engine.getTags('sibling', { sourceId: f.source })).sort()).toEqual(captureTags);
+    expect(capturedParsed.tags.sort()).toEqual(captureTags);
+    // File/JSON metadata records the trusted local writer; dedicated columns
+    // retain capture's channel and URI (not the remote mcp:put_page provenance).
+    for (const fm of [capturedPage.frontmatter, capturedParsed.frontmatter]) {
+      expect(fm.owner).toBe('capture-fixture');
+      expect(fm.source_kind).toBe('put_page'); expect(fm.ingested_via).toBe('put_page');
+    }
+    const [captureMetadata] = await f.admin.executeRaw(
+      'SELECT source_kind,source_uri,ingested_via,effective_date_source FROM pages WHERE source_id=$1 AND slug=$2', [f.source, 'sibling']);
+    expect(captureMetadata).toMatchObject({ source_kind: 'capture-cli', source_uri: `file://${captureInput}`, ingested_via: 'capture-cli' });
+    expect(captureMetadata.effective_date_source).not.toBeNull();
+    expect(await f.engine.getPage('sibling', { sourceId: 'default' })).toBeNull();
+    expect(readFileSync(contractPath, 'utf8')).toBe(capturePolicy);
+    expect(readFileSync(operatorAnchor, 'utf8')).toBe(captureAnchor);
+    const captureStable = await state();
+    const captureLinks = await f.engine.getLinks('sibling', { sourceId: f.source });
+    expect(captureLinks.some(link => link.to_slug === 'connected' && link.link_source === 'markdown')).toBe(true);
+    await expect(call('put_page_checked', 'sibling', { operation_id: randomUUID(), expected_revision: captureBefore.revision,
+      file_baseline: captureBefore.file.baseline, page: captured.page, raw_markdown: capturedRaw })).rejects.toThrow('precondition_failed');
+    expect(await call('get_page_checked', 'sibling')).toEqual(captured);
+    expect(await state()).toEqual(captureStable);
+    expect(await f.engine.getLinks('sibling', { sourceId: f.source })).toEqual(captureLinks);
+    expect(await f.admin.executeRaw('SELECT * FROM page_file_write_authorizations WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1)', [f.source])).toEqual([]);
+
+    // Ingest publishes explicit links AFTER capture. This remains ordinary graph
+    // DML through the real CLI; no new linkCAS or page revision is introduced.
+    const linked = await run('../../../src/cli.ts', ['link', 'sibling', 'connected', '--source', f.source,
+      '--from-source-id', f.source, '--to-source-id', f.source, '--link-type', 'related',
+      '--link-source', 'gbrain-ingest', '--context', 'capture fixture publication', '--json']);
+    expect(JSON.parse(linked.out)).toMatchObject({ status: 'ok' });
+    expect((await f.engine.getLinks('sibling', { sourceId: f.source })).some(link =>
+      link.to_slug === 'connected' && link.link_type === 'related' && link.link_source === 'gbrain-ingest'
+      && link.context === 'capture fixture publication')).toBe(true);
+    expect(await call('get_page_checked', 'sibling')).toEqual(captured);
+    expect(await state()).toEqual(captureStable); // state excludes graph edges by design
+    console.log('PG_CONNECTED_SOURCE_V2: executable capture --file --slug --source updates enrolled page with file DB tags and capture provenance; stale token unchanged refusal; subsequent executable ingest link remains ordinary');
 
     // Earlier-sorting future page: same startup engine and exact protected policy.
     const policyBefore = readFileSync(operatorAnchor, 'utf8');

@@ -901,47 +901,56 @@ export async function importFromContent(engine: BrainEngine, slug: string, conte
       await tx.deleteChunks(slug, txOpts);
     }
 
-    // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
-    // (e.g. 'src/core/sync.ts:42'), create bidirectional edges to the code
-    // page. addLink throws when either endpoint is missing (master tightened
-    // this in v0.18.x), so we wrap each pair in try/catch — guides imported
-    // before their code repo syncs are common, and the missing edges land
-    // later via `gbrain reconcile-links` (Layer 8 D3, v0.21.0).
-    const codeRefs = extractCodeRefs(parsed.compiled_truth + '\n' + (parsed.timeline || ''));
-    // For doc↔impl edges, both endpoints are within the same source as the
-    // markdown page being imported. Cross-source edges (markdown in one
-    // source, code in another) currently fail with "page not found" — a
-    // faster failure mode than the pre-fix cross-product fan-out, which
-    // silently wired edges to whichever same-slug page Postgres returned
-    // first across sources.
-    const linkOpts = sourceId
-      ? { fromSourceId: sourceId, toSourceId: sourceId, originSourceId: sourceId }
-      : undefined;
-    for (const ref of codeRefs) {
-      const codeSlug = slugifyCodePath(ref.path);
-      // Forward: markdown guide → code page (this guide documents that code)
-      try {
-        await tx.addLink(
-          slug, codeSlug,
-          ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
-          'documents', 'markdown', slug, 'compiled_truth',
-          linkOpts,
-        );
-      } catch { /* code page not yet imported — reconcile-links will catch it */ }
-      // Reverse: code page → markdown guide (this code is documented by the guide)
-      try {
-        await tx.addLink(
-          codeSlug, slug,
-          ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
-          linkOpts,
-        );
-      } catch { /* same reason — silent skip */ }
-    }
+    await projectContentImportCodeRefs(tx, slug, sourceId, parsed);
   });
 
   await projectContentImportAliases(engine, slug, sourceId ?? 'default', parsed.frontmatter);
 
   return prepared.result;
+}
+
+/** Shared best-effort doc↔impl links. Enrolled callers run this on the ordinary
+ * engine after page commit; graph writes are not part of page CAS or recovery. */
+export async function projectContentImportCodeRefs(
+  engine: BrainEngine, slug: string, sourceId: string | undefined,
+  parsed: Pick<PreparedContentImport['parsed'], 'compiled_truth' | 'timeline'>,
+) {
+  // v0.19.0 E1 — doc↔impl linking: if this markdown page cites code paths
+  // (e.g. 'src/core/sync.ts:42'), create bidirectional edges to the code
+  // page. addLink throws when either endpoint is missing (master tightened
+  // this in v0.18.x), so we wrap each pair in try/catch — guides imported
+  // before their code repo syncs are common, and the missing edges land
+  // later via `gbrain reconcile-links` (Layer 8 D3, v0.21.0).
+  const codeRefs = extractCodeRefs(parsed.compiled_truth + '\n' + (parsed.timeline || ''));
+  // For doc↔impl edges, both endpoints are within the same source as the
+  // markdown page being imported. Cross-source edges (markdown in one
+  // source, code in another) currently fail with "page not found" — a
+  // faster failure mode than the pre-fix cross-product fan-out, which
+  // silently wired edges to whichever same-slug page Postgres returned
+  // first across sources.
+  const linkOpts = sourceId
+    ? { fromSourceId: sourceId, toSourceId: sourceId, originSourceId: sourceId }
+    : undefined;
+  for (const ref of codeRefs) {
+    const codeSlug = slugifyCodePath(ref.path);
+    // Forward: markdown guide → code page (this guide documents that code)
+    try {
+      await engine.addLink(
+        slug, codeSlug,
+        ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
+        'documents', 'markdown', slug, 'compiled_truth',
+        linkOpts,
+      );
+    } catch { /* code page not yet imported — reconcile-links will catch it */ }
+    // Reverse: code page → markdown guide (this code is documented by the guide)
+    try {
+      await engine.addLink(
+        codeSlug, slug,
+        ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
+        linkOpts,
+      );
+    } catch { /* same reason — silent skip */ }
+  }
 }
 
 /** Ordinary post-commit hook: never runs on the private adapter connection. */
