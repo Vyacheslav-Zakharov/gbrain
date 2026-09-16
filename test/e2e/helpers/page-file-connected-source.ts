@@ -170,11 +170,15 @@ export async function exerciseConnectedSource(f: {
 
     // sibling was created through registered ordinary put and enrolled above.
     // Exercise the real ingest executable, not runCapture with an injected engine.
+    // Auto-link's default markdown grammar requires a canonical directory slug.
+    // Bare [[connected]] is opt-in basename resolution (wikilink-resolved), not
+    // a markdown edge. Keep a real same-source target for the persisted assertion.
+    await put('concepts/capture-target', original);
     const captureBefore = await call('get_page_checked', 'sibling');
     const capturePolicy = readFileSync(contractPath, 'utf8');
     const captureAnchor = readFileSync(operatorAnchor, 'utf8');
     const captureInput = join(f.directory, 'capture-publication.md');
-    writeFileSync(captureInput, '---\ntitle: Captured\ntype: concept\ntags: [captured]\nowner: capture-fixture\ndate: "2026-01-03"\n---\n\nCaptured publication with [[connected]].\n', { flag: 'wx', mode: 0o600 });
+    writeFileSync(captureInput, '---\ntitle: Captured\ntype: concept\ntags: [captured]\nowner: capture-fixture\ndate: "2026-01-03"\n---\n\nCaptured publication with [[concepts/capture-target]].\n', { flag: 'wx', mode: 0o600 });
     const capture = await run('../../../src/cli.ts', ['capture', '--file', captureInput,
       '--slug', 'sibling', '--source', f.source, '--json']);
     const receipt = JSON.parse(capture.out);
@@ -189,7 +193,7 @@ export async function exerciseConnectedSource(f: {
     const capturedParsed = parseMarkdown(capturedRaw, 'sibling.md');
     expect(captured.file.raw_markdown).toBe(capturedRaw);
     expect(capturedPage.title).toBe('Captured');
-    expect(capturedPage.compiled_truth).toContain('Captured publication with [[connected]].');
+    expect(capturedPage.compiled_truth).toContain('Captured publication with [[concepts/capture-target]].');
     expect(capturedParsed.title).toBe(capturedPage.title);
     expect(capturedParsed.type).toBe(capturedPage.type);
     expect(capturedParsed.compiled_truth).toBe(capturedPage.compiled_truth);
@@ -213,7 +217,7 @@ export async function exerciseConnectedSource(f: {
     expect(readFileSync(operatorAnchor, 'utf8')).toBe(captureAnchor);
     const captureStable = await state();
     const captureLinks = await f.engine.getLinks('sibling', { sourceId: f.source });
-    expect(captureLinks.some(link => link.to_slug === 'connected' && link.link_source === 'markdown')).toBe(true);
+    expect(captureLinks.some(link => link.to_slug === 'concepts/capture-target' && link.link_source === 'markdown')).toBe(true);
     await expect(call('put_page_checked', 'sibling', { operation_id: randomUUID(), expected_revision: captureBefore.revision,
       file_baseline: captureBefore.file.baseline, page: captured.page, raw_markdown: capturedRaw })).rejects.toThrow('precondition_failed');
     expect(await call('get_page_checked', 'sibling')).toEqual(captured);
@@ -239,16 +243,16 @@ export async function exerciseConnectedSource(f: {
     await put('aaa-future', original);
     expect(await f.admin.executeRaw("SELECT slug FROM page_file_bindings WHERE source_id=$1 AND slug='aaa-future'", [f.source])).toEqual([]);
     const futureBefore = await state();
-    await sweep('inventory', ['aaa-future', 'connected', 'sibling'], ['pending_enrollment', 'verified', 'verified']);
+    await sweep('inventory', ['aaa-future', 'concepts/capture-target', 'connected', 'sibling'], ['pending_enrollment', 'pending_enrollment', 'verified', 'verified']);
     expect(await state()).toEqual(futureBefore);
-    await sweep('reconcile', ['aaa-future', 'connected', 'sibling'], ['enrolled', 'verified', 'verified']);
+    await sweep('reconcile', ['aaa-future', 'concepts/capture-target', 'connected', 'sibling'], ['enrolled', 'enrolled', 'verified', 'verified']);
     const futureAfter = await state();
     expect(futureAfter.rows.filter((_, i) => i !== 1)).toEqual(futureBefore.rows.filter((_, i) => i !== 1));
     expect(futureAfter.root).toEqual(futureBefore.root); expect(futureAfter.journal).toEqual(futureBefore.journal);
     expect((await call('get_page_checked', 'aaa-future')).persistence).toBe('file_and_database');
     expect(readFileSync(operatorAnchor, 'utf8')).toBe(policyBefore);
     expect(await f.admin.executeRaw('SELECT slug FROM page_file_bindings WHERE source_id=$1 ORDER BY slug', [f.source]))
-      .toEqual([{ slug: 'aaa-future' }, { slug: 'connected' }, { slug: 'sibling' }]);
+      .toEqual([{ slug: 'aaa-future' }, { slug: 'concepts/capture-target' }, { slug: 'connected' }, { slug: 'sibling' }]);
     const final = await state();
     const foreignState = () => f.admin.executeRaw(`SELECT to_jsonb(p)::text AS row FROM pages p
       WHERE source_id <> $1 ORDER BY source_id,slug`, [f.source]);
