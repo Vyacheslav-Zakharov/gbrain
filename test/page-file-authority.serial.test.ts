@@ -49,11 +49,13 @@ beforeEach(() => {
 // Probe only the private transaction seam; the normal enrollment test below
 // still executes the real PageFileDatabase implementation.
 async function probeTransactions(fn: (tx: BrainEngine, parent: BrainEngine) => Promise<void>,
-  check: (run: () => Promise<void>) => Promise<void>) {
+  check: (run: () => Promise<unknown>) => Promise<void>) {
   const { PageFileDatabase } = await import('../src/core/page-file-db.ts');
   const method = spyOn(PageFileDatabase.prototype, 'enroll').mockImplementation(async function(this: { engine?: unknown }) {
     const parent = (this as unknown as { engine: BrainEngine }).engine;
-    return parent.transaction(tx => fn(tx, parent));
+    await parent.transaction(tx => fn(tx, parent));
+    // Transaction-only fixture; the runtime suite checks real enrollment receipts.
+    return { status: 'enrolled', binding_id: 'fixture', generation: '0', raw_sha256: 'fixture' };
   });
   const authority = await (await load()).createPageFileEnrollmentAuthority({ ...options(), adapterRole: 'other_adapter' });
   const service = authority.forPage({ source: 'fixture', slug: 'page',

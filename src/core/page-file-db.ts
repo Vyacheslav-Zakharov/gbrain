@@ -49,14 +49,40 @@ export class PageFileDatabase {
       if (parsed.tags.some(tag => !tags.includes(tag))) throw new Error('tags_mismatch');
     } catch { throw new Error('sync_required'); }
   }
-  async enroll(source: string, slug: string) {
+  async enroll(source: string, slug: string, reviewed?: {
+    pageId: string; revision: string; canonicalRoot: string; relativePath: string; rawSha256: string;
+  }, revalidate?: () => Promise<void>) {
     return this.host.withLockedBinding(() => this.engine.transaction(async tx => {
       await tx.executeRaw('SELECT id FROM sources WHERE id=$1 FOR SHARE', [source]);
       await tx.executeRaw('SELECT id FROM pages WHERE source_id=$1 AND slug=$2 FOR UPDATE', [source, slug]);
       const { row, binding } = await this.observe(source, slug, tx);
+      await revalidate?.();
+      if (reviewed && (reviewed.pageId !== String(row.id) || reviewed.revision !== row.write_revision
+        || reviewed.canonicalRoot !== binding.canonicalRoot || reviewed.relativePath !== binding.relativePath
+        || reviewed.rawSha256 !== binding.rawSha256)) throw new Error('page_file_enrollment_stale');
       await this.prove(binding.rawBytes.toString('utf8'), row, source, slug, tx);
+      if (reviewed) {
+        // Enrollment already owns the exclusive root gate through COMMIT and
+        // the parent page row lock above. Supported binding writers (put/recovery,
+        // sync, root transitions and enrollment) all take that same root gate;
+        // ordinary page/tag writers are fenced by the parent row. A binding row
+        // lock adds no exclusion here, but requires UPDATE denied to enrollment.
+        // Keep mutation-path binding locks: this is a read-only repeat check.
+        const [existing] = await tx.executeRaw<Row>('SELECT * FROM page_file_bindings WHERE source_id=$1 AND slug=$2', [source, slug]);
+        if (existing) {
+          if (existing.pending_op_id || String(existing.page_id) !== reviewed.pageId
+            || existing.binding_key !== binding.bindingKey || existing.canonical_root !== reviewed.canonicalRoot
+            || existing.relative_path !== reviewed.relativePath || existing.indexed_raw_sha256 !== reviewed.rawSha256
+            || String(existing.file_generation) !== '0') throw new Error('page_file_enrollment_stale');
+          await revalidate?.();
+          return { status: 'already_enrolled', binding_id: existing.binding_id, generation: String(existing.file_generation), raw_sha256: existing.indexed_raw_sha256 };
+        }
+      }
       await tx.executeRaw(`INSERT INTO page_file_bindings(source_id,slug,page_id,binding_key,canonical_root,relative_path,indexed_raw_sha256)
         VALUES($1,$2,$3,$4,$5,$6,$7)`, [source,slug,row.id,binding.bindingKey,binding.canonicalRoot,binding.relativePath,binding.rawSha256]);
+      const [enrolled] = await tx.executeRaw<Row>('SELECT * FROM page_file_bindings WHERE source_id=$1 AND slug=$2', [source, slug]);
+      await revalidate?.();
+      return { status: 'enrolled', binding_id: enrolled.binding_id, generation: String(enrolled.file_generation), raw_sha256: enrolled.indexed_raw_sha256 };
     }));
   }
   private async binding(source: string, slug: string, tx = this.engine, lock = false) {

@@ -127,7 +127,8 @@ async function openAuthority(options: PageFileAuthorityOptions) {
 export interface PageFileEnrollmentTarget {
   source: string;
   slug: string;
-  host: { brainId: string; journalDirectory: string; withExclusiveRoot<T>(fn: () => Promise<T>): Promise<T> };
+  reviewed?: Parameters<PageFileDatabase['enroll']>[2];
+  host: { brainId: string; journalDirectory: string; revalidate?(): Promise<void>; withExclusiveRoot<T>(fn: () => Promise<T>): Promise<T> };
 }
 
 /** Separate offline lifecycle bootstrap; never registered in request context.
@@ -146,7 +147,11 @@ export async function createPageFileEnrollmentAuthority(options: PageFileAuthori
     // reacquisition, and no engine passed to host/operator code.
     const pages = new PageFileDatabase(engine, { brainId: host.brainId, journalDirectory: host.journalDirectory,
       withLockedBinding: fn => fn() });
-    return Object.freeze({ enroll: () => host.withExclusiveRoot(() => run(() => pages.enroll(source, slug))) });
+    const reviewed = target.reviewed && structuredClone(target.reviewed);
+    return Object.freeze({ enroll: () => host.withExclusiveRoot(() => run(async () => {
+      await host.revalidate?.();
+      return pages.enroll(source, slug, reviewed, host.revalidate);
+    })) });
   } });
 }
 

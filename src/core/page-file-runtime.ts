@@ -9,12 +9,13 @@ import { resolvePageFilePath } from './markdown.ts';
 import { tmpdir } from 'node:os';
 import { realpath } from 'node:fs/promises';
 
-import { createPageFileAuthority, type PageFileAuthorityOptions } from './page-file-authority.ts';
+import { createPageFileAuthority, createPageFileEnrollmentAuthority, type PageFileAuthorityOptions } from './page-file-authority.ts';
 import { validatePageFileHostManifest, type PageFileHostManifestOptions } from './page-file-host.ts';
 import type { BrainEngine } from './engine.ts';
 
 type Candidate = {
   ready: Promise<{ host: ReturnType<typeof validatePageFileHostManifest>; authority: Awaited<ReturnType<typeof createPageFileAuthority>> }>;
+  ordinaryRole: string;
   closed: boolean;
 };
 // Trusted bootstrap association, never a config/operation field. Tombstones stay
@@ -44,7 +45,7 @@ export async function createPageFileRuntimeCandidate(options: {
   if (options.mode !== 'offline-verification' || options.authority.mode !== 'offline-verification')
     throw new PageFileSyncConflict('file_runtime_prerequisites_pending');
   if (candidates.has(options.engine)) throw new PageFileSyncConflict('page_file_runtime_already_registered');
-  const candidate: Candidate = { closed: false, ready: Promise.resolve().then(async () => {
+  const candidate: Candidate = { ordinaryRole: options.authority.expected.ordinaryRole, closed: false, ready: Promise.resolve().then(async () => {
     const host = validatePageFileHostManifest(options.host);
     if (options.engine.kind !== 'postgres' || host.manifest.database !== options.authority.expected.database
       || host.manifest.adapterRole !== options.authority.expected.role)
@@ -238,10 +239,54 @@ export async function resolvePageFileRootHost(ctx: { engine: Partial<Pick<BrainE
   return { root, lockDirectory: config.lockDirectory, topology: config.topology, timeoutMs: 1000 };
 }
 
-/** Explicit trusted local lifecycle, never implicit enrollment on read/write. */
-export async function enrollPageFileRuntime(ctx: Pick<OperationContext, 'engine' | 'config' | 'remote'>, source: string, slug: string) {
+/** Explicit trusted local lifecycle, never implicit enrollment on read/write.
+ * Candidate request is a trusted local bootstrap capability, never operation data. */
+export interface PageFileRuntimeEnrollment {
+  reviewed: NonNullable<Parameters<PageFileDatabase['enroll']>[2]> & { hostManifestSha256: string; source: string; slug: string };
+  authority: PageFileAuthorityOptions & { adapterRole: string };
+}
+export async function enrollPageFileRuntime(ctx: Pick<OperationContext, 'engine' | 'config' | 'remote'>, source: string, slug: string, request?: PageFileRuntimeEnrollment) {
   if (ctx.remote !== false) throw new PageFileSyncConflict('permission_denied');
-  if (candidates.has(ctx.engine)) throw new PageFileSyncConflict('page_file_candidate_lifecycle_unavailable');
+  if (ctx.config.page_file_runtime?.mode === 'production') throw new PageFileSyncConflict('file_runtime_prerequisites_pending');
+  const candidate = candidates.get(ctx.engine);
+  if (candidate) {
+    if (!request) throw new PageFileSyncConflict('page_file_candidate_lifecycle_unavailable');
+    const reviewed = structuredClone(request.reviewed);
+    const options = { ...request.authority, expected: { ...request.authority.expected } };
+    if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
+    const { host } = await candidate.ready;
+    const root = host.manifest.roots.find(r => r.sourceId === source);
+    if (!root || !reviewed || reviewed.source !== source || reviewed.slug !== slug
+      || reviewed.hostManifestSha256 !== host.manifestSha256 || reviewed.canonicalRoot !== root.directory.path)
+      throw new PageFileSyncConflict('page_file_enrollment_stale');
+    if (options.expected.ordinaryRole !== candidate.ordinaryRole || options.expected.database !== host.manifest.database || options.adapterRole !== host.manifest.adapterRole)
+      throw new PageFileSyncConflict('page_file_runtime_identity_mismatch');
+    const coordination = { root: root.directory.path, lockDirectory: host.manifest.lock.path, topology: host.manifest.topology, timeoutMs: 1000 };
+    const revalidate = async () => {
+      if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
+      host.revalidate();
+      assertPageFileRootClean(coordination);
+      const [src] = await ctx.engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1', [source]);
+      if (src?.local_path !== root.directory.path) throw new PageFileSyncConflict('binding_changed');
+      const pending = await ctx.engine.executeRaw('SELECT binding_id FROM page_file_bindings WHERE canonical_root=$1 AND pending_op_id IS NOT NULL', [root.directory.path]);
+      if (pending.length) throw new PageFileSyncConflict('pending_recovery');
+      host.revalidate();
+    };
+    await revalidate();
+    const enrollment = await createPageFileEnrollmentAuthority(options);
+    try {
+      return await enrollment.forPage({ source, slug, reviewed, host: {
+        brainId: host.manifest.brainId, journalDirectory: root.journal.path, revalidate,
+        async withExclusiveRoot<T>(fn: () => Promise<T>): Promise<T> {
+          await revalidate();
+          const lock = await acquirePageFileLock({ ...coordination, rootMode: 'exclusive', paths: [] });
+          if (!lock) throw new PageFileSyncConflict('page_file_root_gate_unavailable');
+          try { await revalidate(); const result = await fn(); await revalidate(); return result; }
+          finally { await lock.release(); }
+        },
+      } }).enroll();
+    } finally { await enrollment.close(); }
+  }
   const configured = ctx.config.page_file_runtime;
   if (!configured || configured.mode === 'disabled') throw new PageFileSyncConflict('file_runtime_unavailable');
   const config = structuredClone(configured);

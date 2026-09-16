@@ -102,7 +102,7 @@ jobs:
             test/page-file-import-command.serial.test.ts test/page-file-pull-callers.serial.test.ts \
             test/page-file-direct-writers.test.ts test/page-file-cycle-gates.test.ts \
             test/page-file-authority.serial.test.ts test/page-file-host.test.ts \
-            test/page-file-runtime-authority.serial.test.ts \
+            test/page-file-runtime-authority.serial.test.ts test/page-file-runtime-enrollment.serial.test.ts \
             test/import-file-runtime-authority.serial.test.ts
           do
             set +e
@@ -171,6 +171,7 @@ jobs:
               assert pathlib.Path(f'cas-evidence/{name}-exit.txt').read_text().strip() == '0', name
           runtime_log = pathlib.Path('cas-evidence/postgres-runtime-authority.log').read_text()
           assert 'PG_RUNTIME_AUTHORITY: registered get/put' in runtime_log
+          assert 'PG_RUNTIME_AUTHORITY: explicit candidate enrollment, enrollment-only login' in runtime_log
           assert 'PG_RUNTIME_AUTHORITY: actual login mismatch denied' in runtime_log
           PY
       - name: Bind final evidence

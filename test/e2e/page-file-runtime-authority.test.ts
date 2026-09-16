@@ -5,9 +5,8 @@ import { withEnv } from '../helpers/with-env.ts';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
-import { PageFileDatabase } from '../../src/core/page-file-db.ts';
 import { parseMarkdown } from '../../src/core/markdown.ts';
-import { createPageFileRuntimeCandidate } from '../../src/core/page-file-runtime.ts';
+import { createPageFileRuntimeCandidate, enrollPageFileRuntime, resolvePageFileRuntime } from '../../src/core/page-file-runtime.ts';
 import { operationsByName, type OperationContext } from '../../src/core/operations.ts';
 import type { PageFileHostManifestOptions } from '../../src/core/page-file-host.ts';
 
@@ -40,7 +39,7 @@ const policyTables: string[] = [];
 const lifecycles: Awaited<ReturnType<typeof createPageFileRuntimeCandidate>>[] = [];
 let admin: PostgresEngine, ordinary: PostgresEngine;
 let directory: string, root: string, host: PageFileHostManifestOptions;
-let adapterUrl: string, ordinaryUrl: string;
+let adapterUrl: string, ordinaryUrl: string, enrollmentUrl: string;
 let schemaReady = false;
 const page = (body: string) => {
   const parsed = parseMarkdown(body, 'example.md');
@@ -68,6 +67,7 @@ async function install(engine = ordinary) {
 }
 async function snapshot() {
   const state: Record<string, unknown> = {};
+  state.sources = await admin.executeRaw('SELECT to_jsonb(t)::text AS row FROM sources t WHERE id=$1', [source]);
   for (const table of ['pages', 'page_file_bindings']) state[table] = await admin.executeRaw(
     `SELECT to_jsonb(t)::text AS row FROM ${table} t WHERE source_id=$1 ORDER BY to_jsonb(t)::text`, [source]);
   for (const table of ['tags', 'content_chunks', 'page_versions', 'timeline_entries', 'page_file_write_authorizations']) state[table] = await admin.executeRaw(
@@ -101,7 +101,7 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
       manifestSha256: createHash('sha256').update(manifestJson).digest('hex'), deploymentId: manifest.deploymentId,
       brainId: manifest.brainId, database: manifest.database, adapterRole, generation: '1' } };
     await admin.executeRaw("INSERT INTO sources(id,name,local_path,config,archived) VALUES($1,$1,$2,'{}'::jsonb,false)", [source, root]);
-    // Enrollment is fixture preparation, not a request-path authority shortcut.
+    // Seed only the business baseline; the explicit runtime helper must enroll it.
     await admin.putPage('example', { ...page('Before'), page_kind: 'markdown' }, { sourceId: source });
     await admin.addTag('example', 'overlay', { sourceId: source });
     writeFileSync(join(root, 'example.md'), 'Before');
@@ -142,7 +142,7 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
       }
       const url = new URL(databaseUrl!); url.username = role; url.password = password; urls.push(url.toString());
     }
-    [ordinaryUrl, adapterUrl] = urls;
+    [ordinaryUrl, adapterUrl, enrollmentUrl] = urls;
     for (const role of roles) {
       const [clock] = await admin.executeRaw<{ usage: boolean }>(
         "SELECT has_sequence_privilege($1, 'public.page_generation_clock_seq', 'USAGE') AS usage", [role]);
@@ -165,13 +165,6 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
       await admin.executeRaw(`CREATE POLICY ${policy} ON public.${table} FOR ${command} TO ${role} USING (${predicate})${command === 'ALL' ? ` WITH CHECK (${predicate})` : ''}`);
       policyTables.push(table);
     }
-    // Separate fixture enrollment identity has the same source/config visibility
-    // as the runtime, so legacy config-generation hashing is not masked by owner
-    // visibility of unrelated sources. It has no capability/operation privileges.
-    const enrollment = await connect(urls[2]);
-    await new PageFileDatabase(enrollment, { brainId: manifest.brainId, journalDirectory: manifest.roots[0].journal.path,
-      withLockedBinding: fn => fn() }).enroll(source, 'example');
-    await enrollment.disconnect();
     ordinary = await connect(ordinaryUrl);
     const [identity] = await ordinary.executeRaw('SELECT session_user,current_user,current_database() AS database,rolsuper,rolcreatedb,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname=current_user');
     expect(identity).toEqual({ session_user: ordinaryRole, current_user: ordinaryRole, database: 'gbrain_test', rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolbypassrls: false });
@@ -208,6 +201,77 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
       } finally { if (admin) await admin.disconnect(); if (directory) rmSync(directory, { recursive: true, force: true }); }
     }
   }, 30_000);
+
+  test('explicit candidate enrollment uses reviewed baseline and enrollment-only login without business writes', async () => {
+    // Closing this candidate must not tombstone the engine used by later tests.
+    const engine = await connect(ordinaryUrl);
+    const lifecycle = await install(engine);
+    const ctx = context(engine);
+    const enrollmentSessions = () => admin.executeRaw('SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND usename=$1 ORDER BY pid', [enrollmentRole]);
+    try {
+      const before = await snapshot();
+      expect(before.page_file_bindings).toEqual([]);
+      expect(before.operations).toEqual([]);
+      expect(before.page_file_write_authorizations).toEqual([]);
+      const [baseline] = await admin.executeRaw<{ id: string; write_revision: string }>(
+        'SELECT id::text,write_revision FROM pages WHERE source_id=$1 AND slug=$2', [source, 'example']);
+      const reviewed = { hostManifestSha256: host.expected.manifestSha256, source, slug: 'example',
+        pageId: baseline.id, revision: baseline.write_revision, canonicalRoot: root, relativePath: 'example.md',
+        rawSha256: createHash('sha256').update(readFileSync(join(root, 'example.md'))).digest('hex') };
+      const request = { reviewed, authority: { ...authority(enrollmentUrl), adapterRole,
+        credentialReference: 'disposable-enrollment-only-fixture',
+        expected: { role: enrollmentRole, database: 'gbrain_test', ordinaryRole } } };
+      // Probe the actual separate login, not SET ROLE or an owner-backed facade.
+      const enrollment = await connect(enrollmentUrl);
+      try {
+        const [identity] = await enrollment.executeRaw('SELECT session_user,current_user,current_database() AS database,rolsuper,rolcreatedb,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname=current_user');
+        expect(identity).toEqual({ session_user: enrollmentRole, current_user: enrollmentRole, database: 'gbrain_test', rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolbypassrls: false });
+        for (const table of ['sources', 'pages', 'page_file_bindings']) {
+          expect((await enrollment.executeRaw<{ active: boolean }>('SELECT row_security_active($1::regclass) AS active', ['public.' + table]))[0].active).toBe(true);
+        }
+        await expect(enrollment.executeRaw(`SET ROLE ${adapterRole}`)).rejects.toMatchObject({ code: '42501' });
+        await expect(enrollment.executeRaw('INSERT INTO page_file_write_authorizations(transaction_id,page_id,operation_id,expected_revision) SELECT txid_current(),id,$1,write_revision FROM pages WHERE source_id=$2', [randomUUID(), source])).rejects.toMatchObject({ code: '42501' });
+        await expect(enrollment.executeRaw('UPDATE pages SET compiled_truth=$1 WHERE source_id=$2', ['Forbidden', source])).rejects.toMatchObject({ code: '42501' });
+        await expect(enrollment.executeRaw('UPDATE page_file_bindings SET file_generation=file_generation+1 WHERE source_id=$1', [source])).rejects.toMatchObject({ code: '42501' });
+      } finally { await enrollment.disconnect(); }
+      expect(await enrollmentSessions()).toEqual([]);
+      expect(await resolvePageFileRuntime(ctx, source, 'example')).toBeUndefined();
+      await expect(enrollPageFileRuntime(ctx, source, 'example')).rejects.toThrow('page_file_candidate_lifecycle_unavailable');
+      expect(await snapshot()).toEqual(before);
+
+      // No fixture shortcut or grant widening: a real PG permission failure here
+      // is a production implementation defect, not an excuse to weaken this role.
+      const result = await enrollPageFileRuntime(ctx, source, 'example', request);
+      expect(result).toMatchObject({ status: 'enrolled', generation: '0', raw_sha256: reviewed.rawSha256 });
+      expect(result.binding_id).toBeString();
+      expect(await enrollmentSessions()).toEqual([]);
+      const enrolled = await snapshot();
+      expect(enrolled.page_file_bindings).toHaveLength(1);
+      for (const key of Object.keys(before).filter(k => k !== 'page_file_bindings')) expect(enrolled[key]).toEqual(before[key]);
+      const [binding] = await admin.executeRaw('SELECT binding_id,page_id::text,canonical_root,relative_path,indexed_raw_sha256,file_generation::text,pending_op_id FROM page_file_bindings WHERE source_id=$1 AND slug=$2', [source, 'example']);
+      expect(binding).toEqual({ binding_id: result.binding_id, page_id: reviewed.pageId, canonical_root: root,
+        relative_path: 'example.md', indexed_raw_sha256: reviewed.rawSha256, file_generation: '0', pending_op_id: null });
+      expect(await enrollPageFileRuntime(ctx, source, 'example', request)).toEqual({ ...result, status: 'already_enrolled' });
+      expect(await enrollmentSessions()).toEqual([]);
+      expect(await snapshot()).toEqual(enrolled);
+      for (const field of ['hostManifestSha256', 'source', 'slug', 'pageId', 'revision', 'canonicalRoot', 'relativePath', 'rawSha256']) {
+        await expect(enrollPageFileRuntime(ctx, source, 'example', { ...request, reviewed: { ...reviewed, [field]: 'stale' } })).rejects.toThrow('page_file_enrollment_stale');
+        expect(await enrollmentSessions()).toEqual([]);
+        expect(await snapshot()).toEqual(enrolled);
+      }
+      // Original reviewed receipt must also reject a changed actual file.
+      const bytes = readFileSync(join(root, 'example.md'));
+      try {
+        writeFileSync(join(root, 'example.md'), 'Unreviewed bytes');
+        const drifted = await snapshot();
+        await expect(enrollPageFileRuntime(ctx, source, 'example', request)).rejects.toThrow('page_file_enrollment_stale');
+        expect(await enrollmentSessions()).toEqual([]);
+        expect(await snapshot()).toEqual(drifted);
+      } finally { writeFileSync(join(root, 'example.md'), bytes); }
+      expect(await snapshot()).toEqual(enrolled);
+      console.log('PG_RUNTIME_AUTHORITY: explicit candidate enrollment, enrollment-only login, capability SQLSTATE 42501, reviewed baseline, no business mutation, exact repeat and stale rejection verified');
+    } finally { await lifecycle.close(); await engine.disconnect(); }
+  }, 60_000);
 
   test('registered get/put use independent private adapter pool; ordinary cannot mint capability; close tombstones shared contexts', async () => {
     const lifecycle = await install();
