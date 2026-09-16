@@ -1,6 +1,6 @@
 # Markdown projection: development contract and finite acceptance ledger
 
-Status: **Development only; synthetic hosted SQL passed; real-engine lane prepared, not executed.** Current preparation base `8108cc95ee29c9e5caadcb8c3f2e2cf5dda42850`. No activation authorization.
+Status: **Development only; prior real-engine hosted lane passed; new filesystem worker is offline-tested and hosted-unexecuted.** Current preparation base `8108cc95ee29c9e5caadcb8c3f2e2cf5dda42850`. No activation authorization.
 
 ## Blocking delta review disposition
 
@@ -78,8 +78,32 @@ Proposed protected local CLI `markdown-projection status|drain` is bounded by so
 | A9 | Accurate API/CLI/status, protected job and scheduler, portal/reverse-sync isolation | Pending production-call-path implementation and tests |
 | A10 | Measured <=1min healthy latency, >5min alert; stopped worker | Pending controlled acceptance measurements |
 | A11 | Independent exact-artifact review + hosted DB acceptance | First reviewed synthetic hosted run passed; new engine-lane bytes require fresh review then separately authorized exact-SHA run. No local DB execution |
-| A4-engine | Real initializer/migrations + service-owner page/tag engine differential | Executable scripts/markdown-projection-engine-hosted.{ts,sh} prepared; offline compilation only. Hosted result pending; application-auth excluded |
+| A4-engine | Real initializer/migrations + service-owner page/tag engine differential | VERIFIED prior source f8498893e34185feeff530e457a1dcc26712863a, workflow 2004a0d7bc4e5b078b80f0ea5d66894f583e6a8e, run 35102301457 attempt 1: engine exit 0, baseline/candidate complete, cleanup passed. Filesystem disconnected in that run; application-auth excluded |
 | A12 | Separate activation/rollout and any historical backfill approval | Not authorized; gates remain closed |
+
+## First actual worker (supersedes pending adapter descriptions)
+
+`drainMarkdownProjectionOnce` uses the real Engine transaction/executeRaw contract,
+explicit READ COMMITTED, source guard UPDATE lock, one-query page/tags snapshot,
+canonical serializer with recursively sorted metadata, protected Linux descriptor-root
+create-only payloads, fsync/readback and conditional DB completion. The unregistered
+worker SQL delta supplies root binding, completion columns and the authoritative
+`markdown_projection_current` view; raw retained pointer columns are NOT current.
+No mutable alias exists. Production callers/scheduler remain disconnected.
+
+Offline real-temp-FS tests and project typecheck pass. Tests inject exceptions at
+write/ack seams, not SIGKILL or a real PostgreSQL backend death. The first missing
+module was observed RED, followed by caller GREEN; adversarial cases were added
+subsequently (not individually observed RED). Prior engine artifact identity and
+completion/cleanup receipts were independently reread; that proof predates these
+worker bytes. Hosted lane now invokes the worker and checks rollback/retry, exact
+canonical bytes, hash, current view and idle repeat, but has NOT been dispatched.
+
+Remaining seams: separate nonowner worker authorization/enrollment and complete root
+inventory/admission, scheduler/CLI/status, tombstone handling, stale two-worker real
+backend-death concurrency and process/power-loss tests, error/lag persistence and GC.
+Roots must be trusted precreated mode 0700; same-UID malicious writers are outside
+this protection. No archive/import/backfill/attachments/manual-file mutation.
 
 ## Executed proof and exact next task
 

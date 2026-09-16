@@ -150,6 +150,30 @@ try {
   await observer`SELECT markdown_projection_set_policy('default',true)`;
   assert.equal((await ledger()).length,0,'activation backfilled');
   assert.deepEqual(await scenario('candidate'),baseline);
+  enter('worker.install');
+  await observer.unsafe(await readFile(new URL('../docs/architecture/sql/markdown-projection-worker-candidate.sql',import.meta.url),'utf8'));
+  const {drainMarkdownProjectionOnce}=await import('../src/core/markdown-projection-worker.ts');
+  const root=await mkdtemp(`${home}/projection-`);
+  await observer`SELECT markdown_projection_set_policy('default',false)`;
+  await observer`UPDATE markdown_projection_policy SET root_path=${root} WHERE source_id='default'`;
+  await observer`SELECT markdown_projection_set_policy('default',true)`;
+  const page=await engine.putPage('worker-lane',input,opts);
+  await engine.addTag('worker-lane','worker-tag',opts);
+  const config={enabled:true,sourceId:'default',root,inputRoots:[]};
+  await assert.rejects(()=>drainMarkdownProjectionOnce(config,engine,async p=>{if(p==='after_write')throw Error('WORKER_CRASH');}),/WORKER_CRASH/);
+  assert.equal((await observer`SELECT status FROM markdown_projection_obligations WHERE page_id=${page.id}`)[0].status,'pending');
+  assert.equal((await observer`SELECT * FROM markdown_projection_current`).length,0);
+  const result=await drainMarkdownProjectionOnce(config,engine);
+  assert.equal(result.status,'materialized');
+  const [current]=await observer`SELECT * FROM markdown_projection_current WHERE source_id='default'`;
+  assert(current);assert.equal(current.current_path,result.path);
+  const bytes=await readFile(`${root}/${current.current_path}`,'utf8');
+  const {createHash}=await import('node:crypto');
+  assert.equal(createHash('sha256').update(bytes).digest('hex'),current.current_hash);
+  const {serializePageToMarkdown}=await import('../src/core/markdown.ts');
+  assert.equal(bytes,serializePageToMarkdown((await engine.getPage('worker-lane',opts))!,['worker-tag']));
+  assert.equal((await drainMarkdownProjectionOnce(config,engine)).status,'idle');
+  emit({stage:'worker.complete',status:'passed',filesystemWorkerConnected:true,applicationAuthProven:false});
 } catch(e) { failed=true; failure=e; emit({stage,status:'failed',message:String(e),code:(e as any)?.code}); }
 finally {
   const errors:unknown[]=[];
@@ -163,4 +187,4 @@ finally {
   emit({cleanup:errors.length?'failed':'passed',errors,wholeServiceTeardownRequired:true});
   if(failed)throw failure; assert.equal(errors.length,0);
 }
-emit({status:'passed',phase:'engine',filesystemWorkerConnected:false,applicationAuthProven:false});
+emit({status:'passed',phase:'engine',filesystemWorkerConnected:true,applicationAuthProven:false});
