@@ -280,7 +280,7 @@ export async function runImport(
       const result = isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
         ? await importImageFile(eng, filePath, relativePath, { noEmbed, sourceId })
         : await importFile(eng, filePath, relativePath, { noEmbed, sourceId, config: importConfig ?? undefined,
-          activePack: enrolledPaths.has(relativePath) ? undefined : importActivePack });
+          activePack: importActivePack });
       const _fileMs = Date.now() - _fileT0;
       if (_fileMs > 5000) {
         console.error(`[gbrain phase] import.process_file slow ${_fileMs}ms ${relativePath}`);

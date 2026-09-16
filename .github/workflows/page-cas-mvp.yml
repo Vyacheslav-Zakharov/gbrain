@@ -100,7 +100,9 @@ jobs:
             test/page-file-sync.test.ts test/page-file-sync-failure.test.ts \
             test/page-file-import.test.ts test/page-file-import-failure.test.ts \
             test/page-file-import-command.serial.test.ts test/page-file-pull-callers.serial.test.ts \
-            test/page-file-direct-writers.test.ts test/page-file-cycle-gates.test.ts
+            test/page-file-direct-writers.test.ts test/page-file-cycle-gates.test.ts \
+            test/page-file-authority.serial.test.ts test/page-file-host.test.ts \
+            test/page-file-runtime-authority.serial.test.ts
           do
             set +e
             env -u DATABASE_URL timeout --signal=TERM --kill-after=10s 180s bun test --timeout 60000 "$file" 2>&1 | tee "cas-evidence/$(basename "$file").log"
@@ -137,6 +139,20 @@ jobs:
           set -e
           printf '%s\n' "$rc" > cas-evidence/postgres-file-exit.txt
           exit "$rc"
+      - name: Real PostgreSQL registered runtime authority (offline factory only)
+        if: ${{ !cancelled() }}
+        env:
+          DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
+          REQUIRE_PAGE_FILE_RUNTIME_AUTHORITY_POSTGRES: '1'
+          PAGE_FILE_CAS_DISPOSABLE: '1'
+        run: |
+          set -o pipefail
+          set +e
+          env -u GBRAIN_DIRECT_DATABASE_URL timeout --signal=TERM --kill-after=10s 240s bun test --timeout 120000 test/e2e/page-file-runtime-authority.test.ts 2>&1 | tee cas-evidence/postgres-runtime-authority.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" > cas-evidence/postgres-runtime-authority-exit.txt
+          exit "$rc"
       - name: Verify tracked source and complete explicit file inventory
         if: always()
         run: |
@@ -150,6 +166,11 @@ jobs:
           assert len(observed) == len(set(observed)), 'duplicate suite'
           assert expected <= set(observed), ('missing file suites', expected - set(observed))
           assert all(r[1] == '0' for r in rows), 'offline suite failures'
+          for name in ('postgres-db', 'postgres-file', 'postgres-runtime-authority'):
+              assert pathlib.Path(f'cas-evidence/{name}-exit.txt').read_text().strip() == '0', name
+          runtime_log = pathlib.Path('cas-evidence/postgres-runtime-authority.log').read_text()
+          assert 'PG_RUNTIME_AUTHORITY: registered get/put' in runtime_log
+          assert 'PG_RUNTIME_AUTHORITY: actual login mismatch denied' in runtime_log
           PY
       - name: Bind final evidence
         if: always()
@@ -158,7 +179,7 @@ jobs:
         run: |
           mkdir -p cas-evidence
           printf '%s\n' "$JOB_STATUS" > cas-evidence/job-status.txt
-          printf '%s\n' 'Hosted adapter proof only; production runtime remains disabled.' > cas-evidence/scope.txt
+          printf '%s\n' 'Hosted adapter and registered offline-factory runtime proof only; production runtime remains disabled.' > cas-evidence/scope.txt
           python3 - <<'PY'
           import hashlib, pathlib
           root = pathlib.Path('cas-evidence')
