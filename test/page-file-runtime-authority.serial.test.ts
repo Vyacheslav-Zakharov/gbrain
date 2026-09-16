@@ -182,7 +182,8 @@ test('registered checked operations use the private shared candidate and close w
   try {
     expect(typeof (f.runtime as any).createPageFileRuntimeCandidate).toBe('function');
     lifecycle = await (f.runtime as any).createPageFileRuntimeCandidate({ mode: 'offline-verification', engine: f.ctx.engine, host: f.host, authority: f.authority });
-    expect(Object.keys(lifecycle)).toEqual(['close']);
+    // Connected lifecycle exposes revalidation, never the private authority or pool.
+    expect(Object.keys(lifecycle).sort()).toEqual(['close', 'revalidate']);
     expect(Object.keys(f.ctx.engine).sort()).toEqual(['executeRaw', 'kind']);
     const target = { source_id: 'default', slug: 'example' };
     const before = await f.call('get_page_checked', target);

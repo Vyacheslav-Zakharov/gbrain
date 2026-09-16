@@ -213,6 +213,9 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
     await ordinary.unsafe('DELETE FROM pages WHERE id=$1', [legacy.id]);
     expect(await ordinary.unsafe('SELECT id FROM pages WHERE id=$1', [legacy.id])).toHaveLength(0);
     const before = await snapshot();
+    // postgres.js Query is a lazy Promise subclass. Bun's rejects matcher can
+    // observe it without invoking .then(), so explicitly start every denied
+    // statement; otherwise the matcher waits forever on an unexecuted query.
     for (const sql of [
       "UPDATE pages SET compiled_truth='Forbidden' WHERE id=$1",
       "UPDATE pages SET slug='moved' WHERE id=$1",
@@ -223,14 +226,14 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       "UPDATE content_chunks SET chunk_text='Forbidden' WHERE page_id=$1",
       'DELETE FROM content_chunks WHERE page_id=$1',
     ]) {
-      await expect(ordinary.unsafe(sql, [protectedPage.id])).rejects.toMatchObject({ code: 'P0001' });
+      await expect(ordinary.unsafe(sql, [protectedPage.id]).execute()).rejects.toMatchObject({ code: 'P0001' });
       expect(await snapshot()).toEqual(before);
     }
     for (const sql of ["UPDATE sources SET local_path='/forbidden' WHERE id=$1", 'DELETE FROM sources WHERE id=$1']) {
-      await expect(ordinary.unsafe(sql, [source])).rejects.toMatchObject({ code: 'P0001' });
+      await expect(ordinary.unsafe(sql, [source]).execute()).rejects.toMatchObject({ code: 'P0001' });
       expect(await snapshot()).toEqual(before);
     }
-    await expect(ordinary.unsafe("INSERT INTO config(key,value) VALUES('sync.repo_path','\"/forbidden\"') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value")).rejects.toMatchObject({ code: 'P0001' });
+    await expect(ordinary.unsafe("INSERT INTO config(key,value) VALUES('sync.repo_path','\"/forbidden\"') ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value").execute()).rejects.toMatchObject({ code: 'P0001' });
     for (const sql of [
       'UPDATE page_file_bindings SET file_generation=file_generation+1',
       'DELETE FROM page_file_bindings',
@@ -239,7 +242,7 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       'INSERT INTO page_file_write_authorizations(transaction_id) VALUES(1)',
       'TRUNCATE pages', `SET ROLE ${roles.adapter}`, `SET ROLE ${roles.enrollment}`,
       'ALTER TABLE pages DISABLE TRIGGER aa_file_page_write_fence',
-    ]) await expect(ordinary.unsafe(sql)).rejects.toMatchObject({ code: '42501' });
+    ]) await expect(ordinary.unsafe(sql).execute()).rejects.toMatchObject({ code: '42501' });
     expect(await snapshot()).toEqual(before);
     await allAccepted();
     console.log('PG_SQL_AUTHORITY: mixed ordinary DML accepted; enrolled page chunk root and capability fences preserved');
