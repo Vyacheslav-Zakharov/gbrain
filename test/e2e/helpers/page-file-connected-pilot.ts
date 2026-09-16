@@ -4,7 +4,7 @@ import { existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from
 import { execFileSync } from 'node:child_process';
 import postgres from 'postgres';
 import { join } from 'node:path';
-import type { PostgresEngine } from '../../../src/core/postgres-engine.ts';
+import { PostgresEngine } from '../../../src/core/postgres-engine.ts';
 import { operationsByName, type OperationContext } from '../../../src/core/operations.ts';
 import { resolvePageFileRootHost, resolvePageFileRuntime } from '../../../src/core/page-file-runtime.ts';
 import { snapshotCrashJournal } from './page-file-connected-crash.ts';
@@ -15,7 +15,7 @@ import { snapshotCrashJournal } from './page-file-connected-crash.ts';
 export async function exerciseConnectedPilot(f: {
   admin: PostgresEngine; engine: PostgresEngine; source: string; root: string;
   journal: string; approvalPath: string; lock: string;
-  enrollmentUrl: string; enrollmentRole: string;
+  enrollmentUrl: string; enrollmentRole: string; ordinaryUrl: string; ordinaryRole: string;
 }) {
   if (process.env.GITHUB_ACTIONS !== 'true' || process.env.PAGE_FILE_CAS_DISPOSABLE !== '1'
     || process.env.REQUIRE_PAGE_FILE_CONNECTED_POSTGRES !== '1'
@@ -150,13 +150,25 @@ export async function exerciseConnectedPilot(f: {
     // unlike operation resolution above. Exact API error, not a loose refusal.
     await expect(retainedGet()).rejects.toMatchObject({ message: 'page_file_authority_unavailable' });
     expect(await state()).toEqual(stable);
-    // A-B-A control: restore the SAME approval inode and prove the SAME service
-    // works again. This rules out a dead pool/dirty root/unrelated generic error.
+    // Restoring the same inode changes ctime, part of the protected fingerprint.
+    // Retained admission must stay invalid; only fresh pinned startup can admit it.
     renameSync(f.approvalPath + '.revoked', f.approvalPath);
+    const fresh = new PostgresEngine();
     try {
-      expect(await retainedGet()).toEqual(retainedBefore);
+      await expect(retainedGet()).rejects.toMatchObject({ message: 'page_file_authority_unavailable' });
+      await fresh.connect({ database_url: f.ordinaryUrl, poolSize: 1 });
+      await fresh.initSchema();
+      const [identity] = await fresh.executeRaw('SELECT session_user,current_user');
+      expect(identity.session_user).toBe(f.ordinaryRole);
+      expect(identity.current_user).toBe(f.ordinaryRole);
+      const freshRuntime = (await resolvePageFileRuntime({ ...ctx, engine: fresh }, f.source, 'connected'))!;
+      expect(await freshRuntime.pages.get(f.source, 'connected', () => {})).toEqual(retainedBefore);
+      await expect(retainedGet()).rejects.toMatchObject({ message: 'page_file_authority_unavailable' });
       expect(await state()).toEqual(stable);
-    } finally { renameSync(f.approvalPath, f.approvalPath + '.revoked'); }
+    } finally {
+      try { await fresh.disconnect(); }
+      finally { renameSync(f.approvalPath, f.approvalPath + '.revoked'); }
+    }
     await expect(f.engine.reconnect()).rejects.toThrow('page_file_bootstrap_invalid');
     expect(await state()).toEqual(stable);
     console.log('PG_CONNECTED_PILOT: revoked approval denies checked read write retained service and reconnect without mutation');

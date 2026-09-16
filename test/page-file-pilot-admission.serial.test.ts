@@ -1,5 +1,5 @@
 import { afterEach, expect, mock, test } from 'bun:test';
-import { mkdtempSync, mkdirSync, lstatSync, realpathSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, lstatSync, realpathSync, writeFileSync, rmSync, chmodSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 // Offline connected-boundary proof. Real bootstrap/files/host, PostgresEngine,
@@ -105,6 +105,41 @@ test('connected explicit protected pilot admits only the pinned page and retains
     expect(await runtime.resolvePageFileRuntime(ctx, 'source-example', 'unenrolled-page')).toBeUndefined();
   } finally { await engine.disconnect(); }
   await expect(runtime.hasPageFileRuntimeCandidate(engine)).rejects.toThrow('page_file_runtime_closed');
+});
+
+test('restored approval requires fresh admission rather than reviving retained authority', async () => {
+  fixture();
+  const loaded = load(anchor) as any;
+  const { createPageFileAuthority } = await import('../src/core/page-file-authority.ts');
+  const options = { mode: 'production-pilot' as const, admission: loaded.admission,
+    revalidate: async () => loaded.revalidate(), credentialReference: 'fixture',
+    resolveCredential: async () => 'postgres://adapter-example@example.invalid/db-example',
+    expected: { role: 'adapter-example', database: 'db-example', ordinaryRole: 'ordinary-example' } };
+  const authority = await createPageFileAuthority(options);
+  const original = lstatSync(anchor.approvalPath, { bigint: true });
+  const closedBefore = ended;
+  try {
+    await authority.revalidate();
+    renameSync(anchor.approvalPath, anchor.approvalPath + '.revoked');
+    await expect(authority.revalidate()).rejects.toMatchObject({ message: 'page_file_authority_unavailable' });
+    renameSync(anchor.approvalPath + '.revoked', anchor.approvalPath);
+    const restored = lstatSync(anchor.approvalPath, { bigint: true });
+    expect(restored.ino).toBe(original.ino);
+    expect(restored.ctimeNs).not.toBe(original.ctimeNs);
+    expect(ended).toBe(closedBefore); // failed revalidation does not close the pool
+    await expect(authority.revalidate()).rejects.toMatchObject({ message: 'page_file_authority_unavailable' });
+    // Fresh connected startup independently reloads the unchanged digest pins;
+    // never replace the retained authority's captured fingerprint.
+    const openedBefore = opened;
+    const fresh = new PostgresEngine();
+    try {
+      await fresh.connect(config);
+      expect(opened).toBeGreaterThan(openedBefore);
+      expect(await runtime.hasPageFileRuntimeCandidate(fresh)).toBe(true);
+      await fresh.initSchema();
+      await expect(authority.revalidate()).rejects.toMatchObject({ message: 'page_file_authority_unavailable' });
+    } finally { await fresh.disconnect(); }
+  } finally { await authority.close(); }
 });
 
 test('production operator reuses exact approval and separate reviewed enrollment contract', async () => {

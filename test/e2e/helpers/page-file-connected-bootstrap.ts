@@ -109,7 +109,8 @@ export async function exerciseConnectedBootstrap(f: {
       const { exerciseConnectedPilot } = await import('./page-file-connected-pilot.ts');
       await exerciseConnectedPilot({ admin: f.admin, engine, source: f.source, root,
         journal: manifest.roots[0].journal.path, approvalPath: approvalPath!, lock: manifest.lock.path,
-        enrollmentUrl: f.loginUrls.get(f.roles.enrollment)!, enrollmentRole: f.roles.enrollment });
+        enrollmentUrl: f.loginUrls.get(f.roles.enrollment)!, enrollmentRole: f.roles.enrollment,
+        ordinaryUrl: config.database_url, ordinaryRole: f.roles.ordinary });
       return; // Separate fixture invocation: offline crash/upgrade proofs stay unchanged.
     }
     const stable = await snapshot();
