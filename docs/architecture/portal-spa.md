@@ -69,6 +69,38 @@ Every content route resolves the user first and derives allowed sources server-s
 
 The client never expands ACLs. Search and backlinks receive the allowed source IDs. A source-qualified wikilink to an inaccessible source returns the same not-found shape as an unknown target.
 
+## Article read model
+
+The database is authoritative for articles. Article identity is `(source_id, slug)`;
+its Portal locator is exactly `slug + ".md"`, including a second `.md` when the
+slug itself ends in `.md`. Preview and download serialize the current database
+page and tags; context uses that same scoped identity. No local Markdown mirror
+or source `local_path` is required to read an article.
+
+The tree derives virtual folders and document counts from fresh, paginated live
+page identities, without the former 50,000-page cap. The existing governance and
+template exclusions still apply to article counts; database-backed README pages
+remain visible as support rows and read fresh database content. Allowed filesystem files
+are merged separately: support text documents and attachments do not contribute
+to article counts and are labeled separately in the reader. A file and virtual
+folder with the same locator remain distinct rows.
+
+Search and link resolution return canonical database article locators. Filesystem
+fallback is limited to allowed support files and attachments beneath the source
+root. Existing article identities, including soft-deleted tombstones, suppress
+legacy `.md`, `.markdown`, and `.txt` mirrors, plus exact stored `source_path`
+paths with those text extensions even when their basename differs from the slug.
+Imported PDF/image/binary originals remain filesystem attachments beside their
+canonical database articles; their stored paths are not Markdown aliases.
+After source ACL filtering,
+canonical `slug.md` takes precedence; otherwise a parameterized source-and-path
+lookup includes tombstones and checks up to two matches. A unique live stored path
+opens fresh database content and resolves to the canonical link. Tombstones and
+ambiguous stored paths fail closed without filesystem fallback in tree, search,
+preview, context, link resolution, and download. Stored paths are exact and
+case-sensitive, never fuzzy aliases. Unrelated support documents remain usable.
+These reads do not materialize files or modify source content.
+
 ## Filesystem boundary
 
 User locators are processed by `src/core/portal-security.ts`:

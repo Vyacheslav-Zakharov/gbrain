@@ -39,6 +39,7 @@ import { buildError, serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
 import { sqlQueryForEngine, executeRawJsonb } from '../core/sql-query.ts';
+import { serializePageToMarkdown } from '../core/markdown.ts';
 import { MinionQueue } from '../core/minions/queue.ts';
 import { validateShellJobParams } from '../core/minions/handlers/shell-validate.ts';
 import {
@@ -80,6 +81,7 @@ import {
 import {
   PortalSessionStore,
   isPortalFileAllowed,
+  isSafePortalRelativePath,
   portalSessionCookieName,
   resolvePortalPathSecure,
   type PortalSessionInspection,
@@ -1085,7 +1087,7 @@ const getSourceRowsForUser = async (email: string): Promise<PortalSourceRow[]> =
     for (const id of allowed) {
       try {
         const found = await sql`SELECT id, name, local_path FROM sources WHERE id = ${id} LIMIT 1`;
-        if (found[0]?.local_path)
+        if (found[0])
           rows.push(found[0] as unknown as PortalSourceRow);
       } catch (e3) {
         console.error(`[Portal] Failed to read source ${id}:`, e3);
@@ -2131,28 +2133,51 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const sources = await getSourceRowsForUser(userEmail);
     res.json({ sources: sources.map((source) => ({ id: source.id, name: source.name })) });
   });
+  // Canonical article locator is exactly slug + ".md" (even for a slug ending in .md).
+  // Call only after source ACL filtering. Include tombstones and detect ambiguity;
+  // source_path is a storage column, not a field exposed by rowToPage.
+  const portalStoredPaths = async (sourceId: string, requestedPath: string) => {
+    // Imported binary originals remain attachments, not Markdown aliases.
+    if (!/\.(md|markdown|txt)$/i.test(requestedPath)) return [];
+    return engine.executeRaw<{ slug: string }>(
+      'SELECT slug FROM pages WHERE source_id = $1 AND source_path = $2 LIMIT 2',
+      [sourceId, requestedPath],
+    );
+  };
+  const portalArticle = async (sourceId: string, requestedPath: string) => {
+    if (!isPortalFileAllowed(requestedPath)) return null;
+    if (requestedPath.endsWith('.md')) {
+      const canonical = await engine.getPage(requestedPath.slice(0, -3), { sourceId, includeDeleted: true });
+      if (canonical) return canonical;
+    }
+    const matches = await portalStoredPaths(sourceId, requestedPath);
+    if (!matches.length) return null;
+    if (matches.length !== 1 || !isPortalFileAllowed(`${matches[0].slug}.md`)) return 'blocked' as const;
+    return (await engine.getPage(matches[0].slug, { sourceId, includeDeleted: true })) || 'blocked' as const;
+  };
+  // Suppress known mirrors, including ambiguous stored paths, without filesystem fallback.
+  const portalMirror = async (sourceId: string, requestedPath: string) => {
+    if (!isPortalFileAllowed(requestedPath)) return false;
+    if (/\.(md|markdown|txt)$/i.test(requestedPath) &&
+      await engine.getPage(requestedPath.replace(/\.(md|markdown|txt)$/i, ''), { sourceId, includeDeleted: true })) return true;
+    return (await portalStoredPaths(sourceId, requestedPath)).length > 0;
+  };
   type PortalCachedPage = { slug: string; title: string };
-  const portalPageCache = new Map<string, { expiresAt: number; pages: PortalCachedPage[]; complete: boolean }>();
   const getPortalPages = async (sourceId: string): Promise<{ pages: PortalCachedPage[]; complete: boolean }> => {
-    const cached = portalPageCache.get(sourceId);
-    if (cached && cached.expiresAt > Date.now()) return cached;
+    // Read fresh page identities: a deleted article must not remain browsable.
     const pages: PortalCachedPage[] = [];
     const pageSize = 500;
     let offset = 0;
-    let complete = true;
-    while (pages.length < 50_000) {
+    while (true) {
       const batch = await engine.listPages({ sourceId, limit: pageSize, offset, sort: 'slug' });
       for (const page of batch) {
-        const slug = String(page.slug || '').replace(/^\/+|\/+$/g, '');
-        if (slug) pages.push({ slug, title: String(page.title || slug) });
+        const slug = String(page.slug || '');
+        if (!page.deleted_at && isPortalFileAllowed(`${slug}.md`)) pages.push({ slug, title: String(page.title || slug) });
       }
       if (batch.length < pageSize) break;
       offset += batch.length;
     }
-    if (pages.length >= 50_000) complete = false;
-    const next = { expiresAt: Date.now() + 30_000, pages, complete };
-    portalPageCache.set(sourceId, next);
-    return next;
+    return { pages, complete: true };
   };
   const getPortalCountedSlugs = async (sourceId: string): Promise<{ slugs: string[]; complete: boolean }> => {
     const cached = await getPortalPages(sourceId);
@@ -2173,49 +2198,47 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const source = sources.find((source) => source.id === sourceId);
     if (!source)
       return res.status(404).json({ error: "Not found" });
-    const requestedFolder = String(req.query.path || '').replace(/^\/+|\/+$/g, '');
-    const target = resolvePortalPath(source.local_path, requestedFolder, true);
-    if (!target)
-      return res.status(404).json({ error: "Not found" });
-    let stat;
-    try {
-      stat = fs.statSync(target);
-    } catch {
-      return res.status(404).json({ error: "Path not found" });
-    }
-    if (!stat.isDirectory())
-      return res.status(400).json({ error: "Path is not a directory" });
-
-    const counted = await getPortalCountedSlugs(source.id);
+    const requestedFolder = String(req.query.path || '');
+    if (!isSafePortalRelativePath(requestedFolder, true)) return res.status(404).json({ error: 'Not found' });
+    const visible = await getPortalPages(source.id);
+    const counted = { slugs: visible.pages.map((page) => page.slug).filter((slug) => isPortalCountedDocument(`${slug}.md`)), complete: visible.complete };
     const folderPrefix = requestedFolder ? `${requestedFolder}/` : '';
-    const entries = fs.readdirSync(target, { withFileTypes: true }).filter((entry: any) =>
-      entry.name !== ".git" &&
-      !entry.name.startsWith(".") &&
-      !entry.isSymbolicLink() &&
-      ((entry.isDirectory() && isPortalVisibleDirectory(entry.name)) || (entry.isFile() && isPortalFileAllowed(entry.name)))
-    ).map((entry: any) => {
-      const full = path.join(target, entry.name);
-      const rel = path.relative(source.local_path, full).split(path.sep).join("/");
-      const st = fs.statSync(full);
-      const childPrefix = `${rel}/`;
-      return {
-        name: entry.name,
-        path: rel,
-        type: entry.isDirectory() ? "dir" : "file",
-        markdown: entry.isFile() && /\.(md|markdown|txt)$/i.test(entry.name),
-        size: st.size,
-        updatedAt: st.mtime.toISOString(),
-        documentCount: entry.isDirectory()
-          ? counted.slugs.filter((slug) => slug.startsWith(childPrefix)).length
-          : undefined,
-      };
-    }).sort((a: any, b: any) => a.type === b.type ? a.name.localeCompare(b.name, "ru") : a.type === "dir" ? -1 : 1);
+    const byPath = new Map<string, any>();
+    for (const { slug } of visible.pages) {
+      const articlePath = `${slug}.md`;
+      if (!articlePath.startsWith(folderPrefix)) continue;
+      const rest = articlePath.slice(folderPrefix.length);
+      const name = rest.split('/')[0];
+      const rel = folderPrefix + name;
+      const directory = rest.includes('/');
+      const key = `${directory ? 'dir' : 'file'}:${rel}`;
+      byPath.set(key, directory
+        ? { name, path: rel, type: 'dir', documentCount: (byPath.get(key)?.documentCount || 0) + (isPortalCountedDocument(articlePath) ? 1 : 0) }
+        : { name, path: rel, type: 'file', markdown: true, kind: isPortalCountedDocument(articlePath) ? 'article' : 'support', storage: 'database' });
+    }
+    const target = resolvePortalPath(source.local_path, requestedFolder, true);
+    if (target && fs.statSync(target).isDirectory()) {
+      for (const entry of fs.readdirSync(target, { withFileTypes: true })) {
+        const rel = folderPrefix + entry.name;
+        const key = `${entry.isDirectory() ? 'dir' : 'file'}:${rel}`;
+        if (byPath.has(key) || entry.isSymbolicLink() || entry.name.startsWith('.')) continue;
+        if (!(entry.isDirectory() ? isPortalVisibleDirectory(entry.name) : entry.isFile() && isPortalFileAllowed(rel))) continue;
+        const full = resolvePortalPath(source.local_path, rel);
+        if (!full || (entry.isFile() && await portalMirror(source.id, rel))) continue;
+        const st = fs.statSync(full);
+        byPath.set(key, { name: entry.name, path: rel, type: entry.isDirectory() ? 'dir' : 'file',
+          markdown: entry.isFile() && /\.(md|markdown|txt)$/i.test(entry.name),
+          kind: entry.isDirectory() ? undefined : /\.(md|markdown|txt)$/i.test(entry.name) ? 'support' : 'attachment', storage: 'filesystem',
+          size: st.size, updatedAt: st.mtime.toISOString(), documentCount: entry.isDirectory() ? 0 : undefined });
+      }
+    }
+    if (requestedFolder && !byPath.size && !target) return res.status(404).json({ error: 'Not found' });
+    const entries = [...byPath.values()].sort((a, b) => a.type === b.type ? a.name.localeCompare(b.name, 'ru') : a.type === 'dir' ? -1 : 1);
 
     const sourceSections = new Set(
       counted.slugs
         .filter((slug) => slug.includes('/'))
-        .map((slug) => slug.split('/')[0])
-        .filter((section) => isPortalVisibleDirectory(section)),
+        .map((slug) => slug.split('/')[0]),
     );
     const summary = {
       sections: entries.filter((entry: any) => entry.type === 'dir').length,
@@ -2241,6 +2264,20 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       return res.status(404).json({ error: "Not found" });
     if (!isPortalFileAllowed(req.query.path))
       return res.status(404).json({ error: "Not found" });
+    const article = await portalArticle(source.id, String(req.query.path || ''));
+    if (article === 'blocked') return res.status(404).json({ error: 'Not found' });
+    if (article) {
+      if (article.deleted_at) return res.status(404).json({ error: 'Not found' });
+      const tags = await engine.getTags(article.slug, { sourceId: source.id });
+      const content = serializePageToMarkdown(article, tags);
+      const size = Buffer.byteLength(content);
+      if (size > 1024 * 1024) return res.status(413).json({ error: 'File is too large for preview; download it instead' });
+      return res.json({ source: source.id, sourceName: source.name, path: String(req.query.path),
+        name: path.basename(String(req.query.path)), content, size, updatedAt: article.updated_at,
+        slug: article.slug, title: article.title, type: article.type, status: article.frontmatter?.status || '', tags,
+        kind: isPortalCountedDocument(String(req.query.path)) ? 'article' : 'support', storage: 'database' });
+    }
+    if (await portalMirror(source.id, String(req.query.path || ''))) return res.status(404).json({ error: 'Not found' });
     const target = resolvePortalPath(source.local_path, req.query.path);
     if (!target)
       return res.status(404).json({ error: "Not found" });
@@ -2277,6 +2314,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       path: requestedPath,
       name: path.basename(requestedPath),
       content,
+      kind: 'support', storage: 'filesystem',
       size: stat.size,
       updatedAt: stat.mtime.toISOString(),
       slug,
@@ -2296,19 +2334,17 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const source = sources.find((candidate) => candidate.id === sourceId);
     if (!source) return res.status(404).json({ error: 'Not found' });
     if (!isPortalFileAllowed(req.query.path)) return res.status(404).json({ error: 'Not found' });
-    const target = resolvePortalPath(source.local_path, req.query.path);
-    if (!target) return res.status(404).json({ error: 'Not found' });
-    let content = '';
-    try {
-      const stat = fs.statSync(target);
-      if (!stat.isFile()) return res.status(400).json({ error: 'Path is not a file' });
-      content = fs.readFileSync(target, 'utf8');
-    } catch {
-      return res.status(404).json({ error: 'File not found' });
+    const article = await portalArticle(source.id, String(req.query.path || ''));
+    if (article === 'blocked') return res.status(404).json({ error: 'Not found' });
+    if (article?.deleted_at) return res.status(404).json({ error: 'Not found' });
+    let slug = article?.slug;
+    if (!article) {
+      if (await portalMirror(source.id, String(req.query.path || ''))) return res.status(404).json({ error: 'Not found' });
+      const target = resolvePortalPath(source.local_path, req.query.path);
+      if (!target) return res.status(404).json({ error: 'Not found' });
+      // Filesystem support documents are not article identities.
+      return res.json({ source: source.id, slug: null, backlinks: [], meetings: [] });
     }
-    const frontmatter = content.match(/^---\s*\n([\s\S]*?)\n---(?:\s*\n|$)/)?.[1] || '';
-    const slug = frontmatter.match(/^slug:\s*(.+)$/mi)?.[1]?.trim().replace(/^['"]|['"]$/g, '')
-      || String(req.query.path || '').replace(/\.(md|markdown|txt)$/i, '');
     let backlinks: Array<{ source: string; slug: string; title: string; type: string; context: string }> = [];
     let meetings: Array<{ source: string; slug: string; title: string; type: string; context: string }> = [];
     try {
@@ -2392,16 +2428,8 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const results: Array<Record<string, any> & PortalSearchRank> = [];
     const seenResults = new Set<string>();
     const maxResults = 50;
-    const candidatePathForSlug = (source: PortalSourceRow, slug: string): string | null => {
-      for (const candidate of [`${slug}.md`, `${slug}.markdown`, `${slug}.txt`]) {
-        if (!isPortalFileAllowed(candidate)) continue;
-        const resolved = resolvePortalPath(source.local_path, candidate);
-        try {
-          if (resolved && fs.statSync(resolved).isFile()) return candidate;
-        } catch {}
-      }
-      return null;
-    };
+    const candidatePathForSlug = (_source: PortalSourceRow, slug: string): string | null =>
+      isPortalFileAllowed(`${slug}.md`) ? `${slug}.md` : null;
 
     // Title/slug/alias candidates are retrieved separately from body chunks so
     // an exact title cannot disappear merely because its body does not repeat it.
@@ -2431,7 +2459,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
           if (seenResults.has(key)) continue;
           const indexedPage = pagesBySlug.get(slug);
           const storedPage = await engine.getPage(slug, { sourceId: source.id });
-          if (!indexedPage && !storedPage) continue;
+          if (!storedPage || storedPage.deleted_at) continue;
           const title = indexedPage?.title || storedPage?.title || slug;
           const candidateText = String(storedPage?.compiled_truth || '');
           const classification = classifyPortalSearchMatch({
@@ -2447,7 +2475,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
             sourceName: source.name,
             name: path.basename(candidatePath),
             path: candidatePath,
-            markdown: true,
+            markdown: true, kind: 'article', storage: 'database',
             size: 0,
             match: classification.match,
             title,
@@ -2471,12 +2499,8 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       for (const hit of indexed) {
         const source = sources.find((candidate) => candidate.id === (hit.source_id || 'default'));
         if (!source) continue;
-        const fsCandidates = [`${hit.slug}.md`, `${hit.slug}.markdown`, `${hit.slug}.txt`];
-        const candidatePath = fsCandidates.find((candidate) => {
-          const resolved = resolvePortalPath(source.local_path, candidate);
-          try { return Boolean(resolved && fs.statSync(resolved).isFile()); } catch { return false; }
-        });
-        if (!candidatePath) continue;
+        const candidatePath = candidatePathForSlug(source, hit.slug);
+        if (!candidatePath || !await engine.getPage(hit.slug, { sourceId: source.id })) continue;
         const key = `${source.id}:${candidatePath}`;
         if (seenResults.has(key)) continue;
         seenResults.add(key);
@@ -2493,7 +2517,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
           sourceName: source.name,
           name: path.basename(candidatePath),
           path: candidatePath,
-          markdown: true,
+          markdown: true, kind: 'article', storage: 'database',
           size: 0,
           match: classification.match,
           title: hit.title || hit.slug,
@@ -2509,7 +2533,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
 
     // Bounded filename fallback also finds attachments that are not indexed pages.
     let scannedEntries = 0;
-    const walk = (source: PortalSourceRow, dir: string): void => {
+    const walk = async (source: PortalSourceRow, dir: string): Promise<void> => {
       if (scannedEntries >= 10_000)
         return;
       let entries: any[] = [];
@@ -2527,14 +2551,15 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
         const full = path.join(dir, entry.name);
         const rel = path.relative(source.local_path, full).split(path.sep).join("/");
         if (entry.isDirectory()) {
-          walk(source, full);
+          // Attachment lookup is independent of the tree's display exclusions.
+          if (entry.name.toLowerCase() === '_attachments' || isPortalVisibleDirectory(entry.name)) await walk(source, full);
           continue;
         }
         if (!entry.isFile())
           continue;
-        if (!isPortalFileAllowed(rel))
-          continue;
         const nameMatch = entry.name.toLowerCase().includes(q) || rel.toLowerCase().includes(q);
+        if (!nameMatch || !isPortalFileAllowed(rel) || !resolvePortalPath(source.local_path, rel) || await portalMirror(source.id, rel))
+          continue;
         const markdown = /\.(md|markdown|txt)$/i.test(entry.name);
         const key = `${source.id}:${rel}`;
         if (nameMatch && !seenResults.has(key)) {
@@ -2549,7 +2574,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
             sourceName: source.name,
             name: entry.name,
             path: rel,
-            markdown,
+            markdown, kind: markdown ? 'support' : 'attachment', storage: 'filesystem',
             size,
             match: "name",
             title: entry.name,
@@ -2559,7 +2584,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       }
     };
     for (const source of sources)
-      walk(source, source.local_path);
+      if (source.local_path) await walk(source, source.local_path);
     const ordered = results
       .sort(comparePortalSearchResults)
       .slice(0, maxResults)
@@ -2572,7 +2597,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       return;
     const fs = require("fs");
     const path = require("path");
-    const link = String(req.query.link || "").trim().replace(/\\/g, "/");
+    const link = String(req.query.link || "").trim();
     const currentSourceId = String(req.query.currentSource || "");
     if (!link)
       return res.status(400).json({ error: "Link is required" });
@@ -2587,6 +2612,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
         return res.json({ found: false });
       }
     }
+    if (!isSafePortalRelativePath(targetLink)) return res.json({ found: false });
     const orderedSources = requestedSourceId ? sources.filter((source) => source.id === requestedSourceId) : [...sources].sort((a, b) => {
       if (a.id === currentSourceId)
         return -1;
@@ -2599,11 +2625,12 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       return 0;
     });
     const extensions = [".md", ".markdown", ".txt", ""];
-    const findFile = (localPath: string, targetLink: string): string | null => {
+    const findFile = async (source: PortalSourceRow, targetLink: string): Promise<string | null> => {
+      const localPath = source.local_path;
       const linkParts = targetLink.split("/");
       const basename = linkParts[linkParts.length - 1].toLowerCase();
       let scanned = 0;
-      const walk = (dir: string): string | null => {
+      const walk = async (dir: string): Promise<string | null> => {
         if (scanned >= 5_000) return null;
         let entries: any[];
         try {
@@ -2619,7 +2646,8 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
           const fullPath = path.join(dir, entry.name);
           const relPath = path.relative(localPath, fullPath).split(path.sep).join("/");
           if (entry.isDirectory()) {
-            const found: string | null = walk(fullPath);
+            if (entry.name.toLowerCase() !== '_attachments' && !isPortalVisibleDirectory(entry.name)) continue;
+            const found = await walk(fullPath);
             if (found)
               return found;
           } else if (entry.isFile()) {
@@ -2629,6 +2657,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
               const targetWithExt = targetLink.toLowerCase() + ext;
               const basenameWithExt = basename + ext;
               if (isPortalFileAllowed(relPath) && (relLower === targetWithExt || relLower.endsWith("/" + targetWithExt) || nameLower === basenameWithExt)) {
+                if (!resolvePortalPath(localPath, relPath) || await portalMirror(source.id, relPath)) break;
                 return relPath;
               }
             }
@@ -2639,36 +2668,36 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       return walk(localPath);
     };
     for (const source of orderedSources) {
-      const normalizedTarget = targetLink.replace(/\.(md|markdown|txt)$/i, '');
-      const candidateSlugs = new Set([normalizedTarget]);
-      try {
-        candidateSlugs.add(await engine.resolveSlugWithAlias(normalizedTarget, source.id));
-        const aliasNorm = normalizeAlias(normalizedTarget);
-        if (aliasNorm) {
+      // Use the reader's canonical/stored-path precedence before literal slugs.
+      // A claimed explicit path (including tombstones/ambiguity) is authoritative.
+      const stored = await portalArticle(source.id, targetLink);
+      if (stored === 'blocked' || stored?.deleted_at) return res.json({ found: false });
+      if (stored) return res.json({ found: true, source: source.id, sourceName: source.name, path: `${stored.slug}.md`, kind: 'article', storage: 'database' });
+      const candidateSlugs = new Set(targetLink.endsWith('.md') ? [targetLink.slice(0, -3), targetLink] : [targetLink]);
+      // Aliases apply only to extensionless wiki targets; never fabricate an article
+      // merely because a resolver echoes a non-existent slug back.
+      if (!/\.(md|markdown|txt)$/i.test(targetLink)) {
+        try {
+          candidateSlugs.add(await engine.resolveSlugWithAlias(targetLink, source.id));
+          const aliasNorm = normalizeAlias(targetLink);
           const aliases = await engine.resolveAliases([aliasNorm], { sourceId: source.id });
-          for (const ref of aliases.get(aliasNorm) || []) candidateSlugs.add(ref.slug);
-        }
-      } catch (error) {
-        console.warn('[portal] indexed alias resolution unavailable:', error instanceof Error ? error.message : error);
-      }
-      for (const candidateSlug of candidateSlugs) {
-        for (const ext of extensions) {
-          const testPath = candidateSlug + ext;
-          if (!isPortalFileAllowed(testPath)) continue;
-          const target = resolvePortalPath(source.local_path, testPath);
-          if (target) {
-            try {
-              const st = fs.statSync(target);
-              if (st.isFile()) {
-                return res.json({ found: true, source: source.id, sourceName: source.name, path: testPath });
-              }
-            } catch {}
+          for (const ref of aliases.get(aliasNorm) || []) {
+            if (ref.source_id === source.id) candidateSlugs.add(ref.slug);
           }
+        } catch (error) {
+          console.warn('[portal] indexed alias resolution unavailable:', error instanceof Error ? error.message : error);
         }
       }
-      const relPath = findFile(source.local_path, targetLink);
+      for (const slug of candidateSlugs) {
+        const testPath = `${slug}.md`;
+        if (!isPortalFileAllowed(testPath)) continue;
+        const page = await engine.getPage(slug, { sourceId: source.id, includeDeleted: true });
+        if (page?.deleted_at) return res.json({ found: false });
+        if (page) return res.json({ found: true, source: source.id, sourceName: source.name, path: testPath, kind: 'article', storage: 'database' });
+      }
+      const relPath = source.local_path ? await findFile(source, targetLink) : null;
       if (relPath) {
-        return res.json({ found: true, source: source.id, sourceName: source.name, path: relPath });
+        return res.json({ found: true, source: source.id, sourceName: source.name, path: relPath, kind: /\.(md|markdown|txt)$/i.test(relPath) ? 'support' : 'attachment', storage: 'filesystem' });
       }
     }
     res.json({ found: false });
@@ -2687,6 +2716,14 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const requestedPath = String(req.query.path || '');
     if (!isPortalFileAllowed(requestedPath))
       return res.status(404).send("Not found");
+    const article = await portalArticle(source.id, requestedPath);
+    if (article === 'blocked') return res.status(404).send('Not found');
+    if (article) {
+      if (article.deleted_at) return res.status(404).send('Not found');
+      const tags = await engine.getTags(article.slug, { sourceId: source.id });
+      return res.attachment(path.basename(requestedPath)).type('text/markdown; charset=utf-8').send(serializePageToMarkdown(article, tags));
+    }
+    if (await portalMirror(source.id, requestedPath)) return res.status(404).send('Not found');
     const target = resolvePortalPath(source.local_path, requestedPath);
     if (!target)
       return res.status(404).send("Not found");

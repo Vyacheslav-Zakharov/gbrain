@@ -22,6 +22,8 @@ export interface TreeEntry {
   size: number;
   updatedAt?: string;
   documentCount?: number;
+  kind?: 'article' | 'support' | 'attachment';
+  storage?: 'database' | 'filesystem';
 }
 
 export interface TreeSummary {

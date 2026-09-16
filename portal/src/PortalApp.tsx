@@ -577,10 +577,10 @@ export function PortalApp() {
           {folder && <button className="tree-row parent-row" onClick={() => void loadFolder(sourceId, parentPath(folder), true)}><Icon name="back" /><span>На уровень выше</span></button>}
           {loadingTree && <div className="skeleton-list">{[1, 2, 3, 4, 5].map((item) => <span key={item} />)}</div>}
           {!loadingTree && entries.map((entry) => {
-            const active = document?.path === entry.path || binary?.path === entry.path;
-            return <button key={entry.path} role="treeitem" aria-selected={active} className={`tree-row ${active ? 'active' : ''}`} onClick={() => chooseEntry(entry)} title={entry.path}>
+            const active = entry.type === 'file' && (document?.path === entry.path || binary?.path === entry.path);
+            return <button key={`${entry.type}:${entry.path}`} role="treeitem" aria-selected={active} className={`tree-row ${active ? 'active' : ''}`} onClick={() => chooseEntry(entry)} title={entry.path}>
               <span className={`file-icon ${fileKind(entry)}`}><Icon name={fileKind(entry)} /></span>
-              <span className="tree-row-label"><strong>{entry.name}</strong>{entry.type === 'file' && <small>{humanBytes(entry.size)}</small>}</span>
+              <span className="tree-row-label"><strong>{entry.name}</strong>{entry.type === 'file' && <small>{entry.kind === 'article' ? 'Статья · БД' : entry.kind === 'support' ? 'Служебный документ' : entry.kind === 'attachment' ? 'Вложение' : humanBytes(entry.size)}</small>}</span>
               {entry.type === 'dir' && <><span className="tree-count" aria-label={`${entry.documentCount || 0} документов`}>{entry.documentCount || 0}</span><Icon name="chevron" size={15} /></>}
             </button>;
           })}
