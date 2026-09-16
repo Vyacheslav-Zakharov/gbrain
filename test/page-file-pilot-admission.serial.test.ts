@@ -21,15 +21,18 @@ const runtime = await import('../src/core/page-file-runtime.ts');
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 const config = { database_url: 'postgres://ordinary-example@example.invalid/db-example' };
 afterEach(() => { anchor = undefined; catalogValid = true; for (const p of cleanup.splice(0)) rmSync(p, { recursive: true, force: true }); });
-function fixture() {
+function fixture(sourceSet = false) {
   const base = mkdtempSync(join(realpathSync(import.meta.dir), 'pilot-test-')); cleanup.push(base);
   const put = (name: string, value: unknown) => { const p = join(base, name); writeFileSync(p, typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o400 }); return p; };
   const pin = (name: string) => { const path = join(base, name); mkdirSync(path, { mode: 0o700 }); const s = lstatSync(path, { bigint: true }); return { path, dev: String(s.dev), ino: String(s.ino), uid: Number(s.uid), gid: Number(s.gid), mode: 0o700 }; };
   const manifest = { version: 1, deploymentId: 'pilot-example', brainId: '11111111-1111-4111-8111-111111111111', database: 'db-example', adapterRole: 'adapter-example', generation: '1', topology: 'single-host-local', serviceUid: process.getuid!(), roots: [{ sourceId: 'source-example', mappingGeneration: '1', directory: pin('root'), journal: pin('journal') }], lock: pin('lock'), indexedRoots: [] };
+  if (sourceSet) manifest.roots.push({ sourceId: 'second-source', mappingGeneration: '2', directory: pin('second-root'), journal: pin('second-journal') });
   const secret = 'postgres://adapter-example:***@example.invalid/db-example';
   const contract = { version: 1, manifestPath: put('host', manifest), credentialPath: put('credential', secret), credentialSha256: hash(secret), ordinaryRole: 'ordinary-example', sqlAuthority: { roles: { ordinary: 'ordinary-example', adapter: 'adapter-example', enrollment: 'enrollment-example' }, catalogPins: {} }, expected: { manifestSha256: hash(JSON.stringify(manifest)), deploymentId: manifest.deploymentId, brainId: manifest.brainId, database: manifest.database, adapterRole: manifest.adapterRole, generation: manifest.generation } };
   const bootstrapSha256 = hash(JSON.stringify(contract));
-  const approval = { version: 1, mode: 'production-pilot', bootstrapSha256, source: 'source-example', slug: 'page-example' };
+  const approval: any = sourceSet
+    ? { version: 2, mode: 'production-pilot', bootstrapSha256, sources: ['source-example', 'second-source'] }
+    : { version: 1, mode: 'production-pilot', bootstrapSha256, source: 'source-example', slug: 'page-example' };
   anchor = { mode: 'production-pilot', bootstrapPath: put('bootstrap', contract), bootstrapSha256, approvalPath: put('approval', approval), approvalSha256: hash(JSON.stringify(approval)) };
   return { put, approval, manifest, contract };
 }
@@ -107,6 +110,63 @@ test('connected explicit protected pilot admits only the pinned page and retains
   await expect(runtime.hasPageFileRuntimeCandidate(engine)).rejects.toThrow('page_file_runtime_closed');
 });
 
+// Explicit v2 source admission; the v1 single-page tests remain unchanged.
+// Real file binding eligibility; enrollment catalog/SQL transport remain simulated.
+test('source-wide admission resolves a second eligible enrolled page in the approved source', async () => {
+  const f = fixture(true);
+  const root = f.manifest.roots[0].directory.path;
+  const slugs = ['page-example', 'second-page-example'];
+  const sources = [{ id: 'source-example', local_path: root }];
+  const paths = slugs.map((slug, i) => ({ pageId: String(i + 1), sourceId: 'source-example', sourcePath: `${slug}.md` }));
+  const { resolveExistingPageFileBinding } = await import('../src/core/page-file-binding.ts');
+  const bindings = new Map<string, { canonical_root: string; relative_path: string; binding_id: string }>();
+  for (const [i, slug] of slugs.entries()) {
+    writeFileSync(join(root, `${slug}.md`), `---\ntitle: ${slug}\ntype: note\n---\n\nFixture body.\n`);
+    const observed = await resolveExistingPageFileBinding({ brainId: f.manifest.brainId,
+      sourceId: 'source-example', slug, pageId: String(i + 1), sourcePath: `${slug}.md`,
+      sources, otherPagePaths: paths, globalRepoPath: null, configGeneration: '1' });
+    expect(observed.relativePath).toBe(`${slug}.md`);
+    bindings.set(slug, { canonical_root: observed.canonicalRoot, relative_path: observed.relativePath, binding_id: `binding-${i + 1}` });
+  }
+  const engine = new PostgresEngine(); await engine.connect(config);
+  try {
+    engine.executeRaw = (async (sql: string, params: unknown[]) => {
+      if (sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY') return [];
+      expect(sql).toBe('SELECT canonical_root,relative_path,binding_id FROM page_file_bindings WHERE source_id=$1 AND slug=$2');
+      expect(params[0]).toBe('source-example');
+      const binding = bindings.get(params[1] as string);
+      return binding ? [binding] : [];
+    }) as any;
+    const ctx = { engine, config: { engine: 'postgres' as const } };
+    expect(await runtime.resolvePageFileRuntime(ctx, 'source-example', slugs[0]!)).toBeDefined();
+    // A second eligible binding needs no new deployment approval.
+    expect(await runtime.resolvePageFileRuntime(ctx, 'source-example', slugs[1]!)).toBeDefined();
+    expect(await runtime.resolvePageFileRuntime(ctx, 'source-example', 'future-page')).toBeUndefined();
+    writeFileSync(join(root, 'future-page.md'), '# Future page\n');
+    paths.push({ pageId: '3', sourceId: 'source-example', sourcePath: 'future-page.md' });
+    const future = await resolveExistingPageFileBinding({ brainId: f.manifest.brainId, sourceId: 'source-example',
+      slug: 'future-page', pageId: '3', sourcePath: 'future-page.md', sources, otherPagePaths: paths, globalRepoPath: null, configGeneration: '1' });
+    // Simulate separate enrollment after startup; resolution never enrolls.
+    bindings.set('future-page', { canonical_root: future.canonicalRoot, relative_path: future.relativePath, binding_id: 'binding-3' });
+    expect(await runtime.resolvePageFileRuntime(ctx, 'source-example', 'future-page')).toBeDefined();
+  } finally { await engine.disconnect(); }
+});
+
+test('source-wide admission still denies an enrolled same-slug page in an unapproved source', async () => {
+  const f = fixture(true); const engine = new PostgresEngine(); await engine.connect(config);
+  try {
+    engine.executeRaw = (async (sql: string, params: unknown[]) => {
+      if (sql === 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY') return [];
+      expect(sql).toBe('SELECT canonical_root,relative_path,binding_id FROM page_file_bindings WHERE source_id=$1 AND slug=$2');
+      expect(params).toEqual(['unapproved-source', 'page-example']);
+      // Even a colliding catalog row must not borrow the approved source's root.
+      return [{ canonical_root: f.manifest.roots[0].directory.path, relative_path: 'page-example.md', binding_id: 'foreign-binding' }];
+    }) as any;
+    await expect(runtime.resolvePageFileRuntime({ engine, config: { engine: 'postgres' as const } },
+      'unapproved-source', 'page-example')).rejects.toThrow('page_file_pilot_target_unapproved');
+  } finally { await engine.disconnect(); }
+});
+
 test('restored approval requires fresh admission rather than reviving retained authority', async () => {
   fixture();
   const loaded = load(anchor) as any;
@@ -140,6 +200,67 @@ test('restored approval requires fresh admission rather than reviving retained a
       await expect(authority.revalidate()).rejects.toMatchObject({ message: 'page_file_authority_unavailable' });
     } finally { await fresh.disconnect(); }
   } finally { await authority.close(); }
+});
+
+for (const defect of ['empty', 'duplicate', 'unknown', 'legacy-fields', 'wrong-version', 'wrong-bootstrap'] as const) {
+  test(`v2 rejects ${defect} source approval before credential access`, async () => {
+    const f = fixture(true); const before = opened; const value = { ...f.approval };
+    if (defect === 'empty') value.sources = [];
+    if (defect === 'duplicate') value.sources = ['source-example', 'source-example'];
+    if (defect === 'unknown') value.sources = ['source-example', 'missing-source'];
+    if (defect === 'legacy-fields') value.slug = 'page-example';
+    if (defect === 'wrong-version') value.version = 1;
+    if (defect === 'wrong-bootstrap') value.bootstrapSha256 = '0'.repeat(64);
+    anchor.approvalPath = f.put('invalid-v2', value); anchor.approvalSha256 = hash(JSON.stringify(value));
+    await expect(new PostgresEngine().connect(config)).rejects.toThrow('page_file_bootstrap_invalid');
+    expect(opened).toBe(before);
+  });
+}
+
+for (const defect of ['revoked', 'tampered', 'catalog'] as const) {
+  test(`v2 retained runtime rejects ${defect} without ordinary fallback`, async () => {
+    const f = fixture(true); const engine = new PostgresEngine(); await engine.connect(config);
+    engine.executeRaw = (async () => { return [{ canonical_root: f.manifest.roots[0].directory.path, relative_path: 'page-example.md', binding_id: 'a' }]; }) as any;
+    try {
+      const ctx = { engine, config: { engine: 'postgres' as const } };
+      const retained = (await runtime.resolvePageFileRuntime(ctx, 'source-example', 'page-example'))!;
+      if (defect === 'revoked') rmSync(anchor.approvalPath);
+      if (defect === 'tampered') { chmodSync(anchor.approvalPath, 0o600); writeFileSync(anchor.approvalPath, JSON.stringify({ ...f.approval, sources: ['second-source'] })); chmodSync(anchor.approvalPath, 0o400); }
+      if (defect === 'catalog') catalogValid = false;
+      await expect(runtime.resolvePageFileRuntime(ctx, 'source-example', 'page-example')).rejects.toThrow();
+      await expect(Promise.resolve().then(() => retained.pages.get('source-example', 'page-example', () => {}))).rejects.toThrow();
+      expect(await runtime.resolvePageFileRuntime(ctx, 'source-example', 'new-page').then(() => true, () => false)).toBe(false);
+    } finally { await engine.disconnect(); }
+  });
+}
+
+test('v2 capabilities cannot be serialized or interchanged even for identical bootstrap pins', async () => {
+  fixture(true); const first = load(anchor) as any; const second = load(anchor) as any;
+  expect(() => bootstrap.requirePageFilePilotAdmission(JSON.parse(JSON.stringify(first.admission)))).toThrow('page_file_pilot_approval_required');
+  const scope = bootstrap.requirePageFilePilotAdmission(first.admission);
+  expect(Object.isFrozen(scope)).toBe(true);
+  expect(Object.isFrozen(scope.sources)).toBe(true);
+  const before = opened;
+  await expect(runtime.createPageFileRuntimeCandidate({ mode: 'production-pilot', engine: new PostgresEngine(), admission: first.admission,
+    authority: { mode: 'production-pilot', admission: second.admission }, host: {} } as any)).rejects.toThrow('file_runtime_prerequisites_pending');
+  expect(opened).toBe(before);
+});
+
+test('v2 resolves same slug independently across selected sources and rejects wrong root', async () => {
+  const f = fixture(true); const engine = new PostgresEngine(); await engine.connect(config);
+  let wrongRoot = false;
+  engine.executeRaw = (async (sql: string, params: unknown[]) => {
+    if (sql.startsWith('SET TRANSACTION')) return [];
+    const root = f.manifest.roots.find(r => r.sourceId === params[0])!;
+    return [{ canonical_root: wrongRoot ? f.manifest.roots[0].directory.path : root.directory.path, relative_path: 'same.md', binding_id: String(params[0]) }];
+  }) as any;
+  try {
+    const ctx = { engine, config: { engine: 'postgres' as const } };
+    for (const source of f.approval.sources) expect(await runtime.resolvePageFileRuntime(ctx, source, 'same')).toBeDefined();
+    wrongRoot = true;
+    await expect(runtime.resolvePageFileRuntime(ctx, 'second-source', 'same')).rejects.toThrow('binding_changed');
+  } finally { await engine.disconnect(); }
+  await expect(runtime.resolvePageFileRuntime({ engine, config: { engine: 'postgres' } }, 'second-source', 'same')).rejects.toThrow('page_file_runtime_closed');
 });
 
 test('production operator reuses exact approval and separate reviewed enrollment contract', async () => {

@@ -1,4 +1,8 @@
-import { parseMarkdown } from './markdown.ts';
+import { parseMarkdown, serializePageToMarkdown } from './markdown.ts';
+import { randomUUID } from 'node:crypto';
+import type { PreparedContentImport } from './import-file.ts';
+import { extractCodeRefs } from './link-extraction.ts';
+import type { Page } from './types.ts';
 import type { BrainEngine } from './engine.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { resolveExistingPageFileBinding, pageFileMappingIdentity } from './page-file-binding.ts';
@@ -8,6 +12,35 @@ import { recoverPageFile, type PageFileRecoveryAdapter } from './page-file-recov
 import { updateCheckedPage, type CheckedPageFields } from './page-checked-store.ts';
 
 type Row = Record<string, any>;
+
+// Keep the existing durable bytes (dense numeric-key objects), including their
+// request-digest semantics. Never migrate/rewrite pending operation records.
+// Only the in-memory application value is reconstructed as a Float32Array.
+function decodeOrdinaryPayload(payload: string): PreparedContentImport {
+  const prepared = JSON.parse(payload);
+  if (!prepared || !Array.isArray(prepared.chunks)) throw new Error('invalid_ordinary_payload');
+  for (const chunk of prepared.chunks) {
+    if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) throw new Error('invalid_ordinary_payload');
+    for (const field of ['embedding', 'embedding_image']) {
+      const value = chunk[field];
+      if (value === undefined || value === null) continue;
+      if (typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_ordinary_payload');
+      const keys = Object.keys(value);
+      if (!keys.length || keys.some((key, i) => key !== String(i)
+        || typeof value[key] !== 'number' || !Number.isFinite(value[key])
+        || Math.fround(value[key]) !== value[key])) throw new Error('invalid_ordinary_payload');
+      chunk[field] = Float32Array.from(keys.map(key => value[key]));
+    }
+  }
+  // Reject noncanonical/coercive encodings rather than silently changing intent.
+  if (JSON.stringify(prepared) !== payload) throw new Error('invalid_ordinary_payload');
+  return prepared;
+}
+function encodeOrdinaryPayload(prepared: PreparedContentImport): string {
+  const payload = JSON.stringify(prepared);
+  decodeOrdinaryPayload(payload);
+  return payload;
+}
 /** INTERNAL adapter only. Not registered in operations.ts. Production enrollment must
  * remain disabled until ALL source/root/path writers are gated. The callback is a
  * required host capability, not evidence that such a capability exists in production.
@@ -19,6 +52,47 @@ export class PageFileDatabase {
     brainId: string; journalDirectory: string; mappingGeneration?: string;
     withLockedBinding<T>(fn: () => Promise<T>): Promise<T>;
   }) {}
+  private async applyOrdinary(tx: BrainEngine, source: string, slug: string, original: Row, operationId: string, prepared: PreparedContentImport) {
+    const opts = { sourceId: source }, page = prepared.pageInput;
+    await tx.createVersion(slug, opts);
+    const [updated] = await tx.executeRaw<Row>(`UPDATE pages SET type=$4,title=$5,compiled_truth=$6,timeline=$7,
+      frontmatter=$8::text::jsonb,content_hash=$9,updated_at=now(),
+      effective_date=COALESCE($10::timestamptz,effective_date),effective_date_source=COALESCE($11,effective_date_source),
+      import_filename=COALESCE($12,import_filename),chunker_version=COALESCE($13::smallint,chunker_version),
+      source_path=COALESCE($14,source_path),source_kind=COALESCE($15,source_kind),source_uri=COALESCE($16,source_uri),
+      ingested_via=COALESCE($17,ingested_via),
+      ingested_at=CASE WHEN $15::text IS NOT NULL OR $16::text IS NOT NULL OR $17::text IS NOT NULL THEN now() ELSE ingested_at END
+      WHERE source_id=$1 AND slug=$2 AND write_revision=$3::uuid AND deleted_at IS NULL RETURNING *`,
+      [source,slug,original.write_revision,page.type,page.title,page.compiled_truth,page.timeline || '',JSON.stringify(page.frontmatter),
+        page.content_hash,page.effective_date,page.effective_date_source,page.import_filename,page.chunker_version,page.source_path,
+        page.source_kind,page.source_uri,page.ingested_via]);
+    if (!updated) throw new Error('precondition_failed');
+    if (!prepared.noEmbed) {
+      await this.refreshOrdinaryAuthorization(tx, original.id, operationId);
+      await tx.updatePageContextualRetrievalState(slug, source, prepared.effectiveCRMode, prepared.corpusGeneration);
+    }
+    for (const tag of prepared.parsed.tags) {
+      // BEFORE INSERT tag trigger updates the parent even ON CONFLICT. Refresh
+      // against the locked current revision before EVERY statement, never relax
+      // the transaction/page/op/revision fence or grant authorization UPDATE.
+      await this.refreshOrdinaryAuthorization(tx, original.id, operationId);
+      await tx.addTag(slug, tag, opts);
+    }
+    if (prepared.chunks.length) {
+      await tx.upsertChunks(slug, prepared.chunks, opts);
+      if (prepared.embeddingSignature) {
+        await this.refreshOrdinaryAuthorization(tx, original.id, operationId);
+        await tx.setPageEmbeddingSignature(slug, { ...opts, signature: prepared.embeddingSignature });
+      }
+    } else await tx.deleteChunks(slug, opts);
+    const [row] = await tx.executeRaw<Row>('SELECT * FROM pages WHERE id=$1', [original.id]);
+    return row;
+  }
+  private async refreshOrdinaryAuthorization(tx: BrainEngine, pageId: number, operationId: string) {
+    await tx.executeRaw('DELETE FROM page_file_write_authorizations WHERE transaction_id=txid_current() AND page_id=$1', [pageId]);
+    await tx.executeRaw(`INSERT INTO page_file_write_authorizations(transaction_id,page_id,operation_id,expected_revision)
+      SELECT txid_current(),id,$2,write_revision FROM pages WHERE id=$1`, [pageId,operationId]);
+  }
   private async observe(source: string, slug: string, tx = this.engine) {
     const [row] = await tx.executeRaw<Row>('SELECT * FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL', [source, slug]);
     if (!row || row.page_kind !== 'markdown') throw new Error('ineligible_page');
@@ -113,27 +187,59 @@ export class PageFileDatabase {
   }
   async recover(source: string, slug: string, p: Row, validate: (row: Row) => void) {
     if (p.action !== 'resume-exact' && p.action !== 'abort') throw new Error('invalid_recovery_intent');
-    return this.put(source, slug, p, validate, p.action);
+    p = structuredClone(p);
+    const evidence = await new PageFileJournal(this.host.journalDirectory).read(p.operation_id);
+    const payload = (evidence.record as FileJournalRecord & { ordinaryPayload?: string }).ordinaryPayload;
+    // Recovery consumes only the original durable prepared data, never reruns
+    // parsing/providers/import hooks to invent a new approval after a crash.
+    const ordinary: PreparedContentImport | undefined = payload === undefined ? undefined : decodeOrdinaryPayload(payload);
+    return this.replace(source, slug, p, validate, p.action, ordinary);
+  }
+  /** Internal data-only ordinary service. Preparation/providers run on the ordinary
+   * engine before entry; no importer or operation callback receives authority. */
+  async putOrdinary(source: string, slug: string, prepared: PreparedContentImport, baseline: Row, validate: (row: Row) => void) {
+    prepared = structuredClone(prepared); baseline = structuredClone(baseline);
+    if (!prepared.existing || prepared.result.slug !== slug) throw new Error('ineligible_page');
+    if (extractCodeRefs(prepared.parsed.compiled_truth + '\n' + prepared.parsed.timeline).length)
+      throw new Error('unsupported_ordinary_code_links');
+    const current = await this.binding(source, slug);
+    validate(current.row);
+    const tags = [...new Set([...(await this.engine.getTags(slug, { sourceId: source })), ...prepared.parsed.tags])];
+    // Canonical write-through adds provenance to the file. Persist that same
+    // projection to JSONB, otherwise checked reads would require a sync at once.
+    const raw = serializePageToMarkdown({ ...current.row, ...prepared.pageInput } as Page, tags, {
+      frontmatterOverrides: { ingested_via: 'mcp:put_page', source_kind: 'mcp:put_page', ingested_at: new Date().toISOString() },
+    });
+    const page = this.projection(raw, slug).page;
+    prepared.pageInput.frontmatter = page.frontmatter;
+    const result = await this.replace(source, slug, { operation_id: randomUUID(), expected_revision: baseline.revision,
+      file_baseline: baseline.file.baseline, raw_markdown: raw, page }, validate, undefined, prepared);
+    if (result.status !== 'committed') throw new Error('pending_recovery');
+    return { result: prepared.result, writeThrough: { written: true, path: current.binding.absolutePath } };
   }
   async put(source: string, slug: string, p: Row, validate: (row: Row) => void, recovery?: 'resume-exact' | 'abort') {
+    return this.replace(source, slug, p, validate, recovery);
+  }
+  private async replace(source: string, slug: string, p: Row, validate: (row: Row) => void, recovery?: 'resume-exact' | 'abort', ordinary?: PreparedContentImport) {
     // Capture all nested caller-owned values before the first async boundary.
     p = structuredClone(p);
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.operation_id ?? '')
       || typeof p.raw_markdown !== 'string' || !p.file_baseline) throw new Error('invalid_file_request');
     const page = p.page as CheckedPageFields;
-    const requestDigest = rawDigest(Buffer.from(JSON.stringify([source,slug,p.expected_revision,p.file_baseline,page,p.raw_markdown])));
+    const requestDigest = rawDigest(Buffer.from(JSON.stringify([source,slug,p.expected_revision,p.file_baseline,page,p.raw_markdown, ...(ordinary ? [ordinary] : [])])));
     const initial = await this.binding(source, slug);
     validate(initial.row);
     const proposed = this.projection(p.raw_markdown, slug);
     const journal = new PageFileJournal(this.host.journalDirectory);
     const evidence = recovery ? await journal.read(p.operation_id) : undefined;
     const original = this.projection((evidence?.before ?? initial.binding.rawBytes).toString('utf8'), slug);
-    if (!isDeepStrictEqual(proposed.page, page) || !isDeepStrictEqual(proposed.tags, original.tags)
+    if (!isDeepStrictEqual(proposed.page, page) || (!ordinary && (!isDeepStrictEqual(proposed.tags, original.tags)
       || !isDeepStrictEqual(page.frontmatter, initial.row.frontmatter) || page.timeline !== initial.row.timeline
-      || page.type !== initial.row.type || page.title !== initial.row.title || Buffer.byteLength(p.raw_markdown) > 8 * 1024 * 1024) throw new Error('unsupported_file_edit');
-    const record: FileJournalRecord = { operationId: p.operation_id, requestDigest, target: initial.binding.absolutePath,
+      || page.type !== initial.row.type || page.title !== initial.row.title)) || Buffer.byteLength(p.raw_markdown) > 8 * 1024 * 1024) throw new Error('unsupported_file_edit');
+    const record: FileJournalRecord & { ordinaryPayload?: string } = { operationId: p.operation_id, requestDigest, target: initial.binding.absolutePath,
       bindingId: p.file_baseline.binding_id, expectedRevision: p.expected_revision,
-      beforeDigest: p.file_baseline.raw_sha256, afterDigest: rawDigest(Buffer.from(p.raw_markdown)) };
+      beforeDigest: p.file_baseline.raw_sha256, afterDigest: rawDigest(Buffer.from(p.raw_markdown)),
+      ...(ordinary ? { ordinaryPayload: encodeOrdinaryPayload(ordinary) } : {}) };
     const check = async (tx: BrainEngine, pending: boolean) => {
       const state = await this.binding(source, slug, tx, true); validate(state.row);
       if (state.b.binding_id !== record.bindingId || state.row.write_revision !== record.expectedRevision
@@ -193,7 +299,9 @@ export class PageFileDatabase {
         // runs while it exists. It is page-, operation-, revision- and tx-bound.
         await tx.executeRaw(`INSERT INTO page_file_write_authorizations(transaction_id,page_id,operation_id,expected_revision)
           VALUES(txid_current(),$1,$2,$3)`, [state.row.id, record.operationId, record.expectedRevision]);
-        const row = await updateCheckedPage(tx, { source,slug,expectedRevision: record.expectedRevision,page }, async () => {}, true);
+        const row = ordinary
+          ? await this.applyOrdinary(tx, source, slug, state.row, record.operationId, ordinary)
+          : await updateCheckedPage(tx, { source,slug,expectedRevision: record.expectedRevision,page }, async () => {}, true);
         await tx.executeRaw('DELETE FROM page_file_write_authorizations WHERE transaction_id=txid_current() AND page_id=$1', [state.row.id]);
         if (!row) throw new Error('precondition_failed');
         await tx.executeRaw('UPDATE page_file_bindings SET pending_op_id=NULL, indexed_raw_sha256=$2, file_generation=file_generation+1 WHERE binding_id=$1', [record.bindingId,record.afterDigest]);

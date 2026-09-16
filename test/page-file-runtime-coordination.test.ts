@@ -52,7 +52,10 @@ test('explicit runtime enrollment owns exclusive root through commit; registry c
   expect(await engine.getPage('unrelated')).toBeNull();
  } finally {release(); spy.mockRestore(); await enrollment;}
  expect((await operationsByName.get_page_checked.handler(ctx(),{source_id:'default',slug:'example'}) as any).file.raw_markdown).toBe('Before');
- await expect(offline(async()=>operationsByName.put_page.handler(ctx(),{source_id:'default',slug:'example',content:'Rejected'}))).rejects.toThrow('page_file_unsupported_writer');
+ const enrolledResult:any=await offline(async()=>operationsByName.put_page.handler(ctx(),{source_id:'default',slug:'example',content:'Accepted ordinary update'}));
+ expect(enrolledResult.write_through.written).toBe(true);
+ expect((await engine.getPage('example'))!.compiled_truth).toBe('Accepted ordinary update');
+ expect(await readFile(join(root,'example.md'),'utf8')).toContain('Accepted ordinary update');
  const result:any=await offline(async()=>operationsByName.put_page.handler(ctx(),{source_id:'default',slug:'unrelated',content:'Other'}));
  expect(result.write_through.written).toBe(true);
  expect((await engine.getPage('unrelated'))!.compiled_truth).toBe('Other');
@@ -63,9 +66,11 @@ const offline = <T>(fn:()=>Promise<T>) => withEnv({GBRAIN_HOME:dir,OPENAI_API_KE
 test('registered legacy put refuses the enrollment root barrier before DB mutation',async()=>{
  const lock=await acquirePageFileLock({root,...config.page_file_runtime,rootMode:'exclusive',paths:[]});
  expect(lock).not.toBeNull();
+ const beforePage=await engine.getPage('example');
+ const beforeFile=await readFile(join(root,'example.md'),'utf8');
  try {
-  await expect(offline(async()=>operationsByName.put_page.handler(ctx(),{source_id:'default',slug:'example',content:'After',lockDirectory:join(dir,'attacker')}))).rejects.toThrow('page_file_gate_busy');
-  expect((await engine.getPage('example'))!.compiled_truth).toBe('Before');
-  expect(await readFile(join(root,'example.md'),'utf8')).toBe('Before');
+  await expect(offline(async()=>operationsByName.put_page.handler(ctx(),{source_id:'default',slug:'example',content:'After',lockDirectory:join(dir,'attacker')}))).rejects.toThrow('file_lock_unavailable');
+  expect(await engine.getPage('example')).toEqual(beforePage);
+  expect(await readFile(join(root,'example.md'),'utf8')).toBe(beforeFile);
  } finally {await lock?.release();}
 });

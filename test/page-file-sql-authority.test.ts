@@ -91,6 +91,27 @@ test('mixed ordinary writer retains finite legacy DML without capability or bind
   expect(sql('content_chunks')).toContain('aa_file_chunk_write_fence');
 });
 
+test('candidate adapter tags are add-only with exact serial USAGE and unchanged fences', () => {
+  const { queries } = fixture('adapter');
+  const tags = queries.find(q => q.id === 'table:tags')!.sql;
+  for (const p of ['SELECT', 'INSERT']) expect(tags).toContain(`has_table_privilege($1,c.oid,'${p}')=true`);
+  for (const p of ['UPDATE', 'DELETE', 'TRUNCATE', 'REFERENCES', 'TRIGGER']) expect(tags).toContain(`has_table_privilege($1,c.oid,'${p}')=false`);
+  expect(tags).toContain('tag_page_write_revision_trg');
+  const sequence = queries.find(q => q.id === 'sequence:tags')!.sql;
+  expect(sequence).toContain("pg_get_serial_sequence('public.tags','id')");
+  expect(sequence).toContain("has_sequence_privilege($1,c.oid,'USAGE')=true");
+  for (const p of ['SELECT', 'UPDATE']) expect(sequence).toContain(`has_sequence_privilege($1,c.oid,'${p}')=false`);
+  for (const p of ['USAGE', 'SELECT', 'UPDATE']) expect(sequence).toContain(`NOT has_sequence_privilege($1,c.oid,'${p} WITH GRANT OPTION')`);
+  for (const table of ['pages', 'code_edges_chunk', 'code_edges_symbol']) {
+    expect(queries.find(q => q.id === `table:${table}`)!.sql).toContain("has_table_privilege($1,c.oid,'INSERT')=false");
+    expect(queries.find(q => q.id === `sequence:${table}`)!.sql).toContain("has_sequence_privilege($1,c.oid,'USAGE')=false");
+  }
+  const enrollment = fixture('enrollment').queries;
+  expect(enrollment.find(q => q.id === 'table:tags')!.sql).toContain("has_table_privilege($1,c.oid,'INSERT')=false");
+  expect(enrollment.find(q => q.id === 'sequence:tags')!.sql).toContain("has_sequence_privilege($1,c.oid,'USAGE')=false");
+  expect(queries.find(q => q.id === 'table:page_file_write_authorizations')!.sql).toContain("has_table_privilege($1,c.oid,'UPDATE')=false");
+});
+
 test('role matrix preserves hosted table versus column-only grants', () => {
   const sql = (role: string, table: string) => fixture(role).queries.find(q => q.id === `table:${table}`)!.sql;
   expect(sql('ordinary', 'page_file_write_authorizations')).toContain("has_table_privilege($1,c.oid,'INSERT')=false");

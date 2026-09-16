@@ -248,11 +248,7 @@ const MAX_FILE_SIZE = 5_000_000; // 5MB
  * so the guard has to live on this function — otherwise an authenticated caller
  * can spend the owner's OpenAI budget at will by shipping a megabyte-sized page.
  */
-export async function importFromContent(
-  engine: BrainEngine,
-  slug: string,
-  content: string,
-  opts: {
+export type ContentImportOptions = {
     noEmbed?: boolean;
     sourceId?: string;
     /**
@@ -313,15 +309,23 @@ export async function importFromContent(
      * leave it unset → markers preserved (the gate + CLI own them).
      */
     remote?: boolean;
-  } = {},
-): Promise<ImportResult> {
+  };
+
+export interface PreparedContentImport {
+  pageInput: PageInput; parsed: ReturnType<typeof parseMarkdown>;
+  existing: Awaited<ReturnType<BrainEngine["getPage"]>>; chunks: ChunkInput[];
+  effectiveCRMode: "none" | "title" | "per_chunk_synopsis"; corpusGeneration: string | null;
+  result: ImportResult; noEmbed: boolean; embeddingSignature: string | null;
+}
+
+/** Capture parser, gates, metadata and provider outputs before any private mutation. */
+export async function prepareContentImport(engine: BrainEngine, slug: string, content: string, opts: ContentImportOptions = {}): Promise<PreparedContentImport | ImportResult> {
   // v0.18.0+ multi-source: when caller is syncing under a non-default source,
   // every per-page tx call must carry `sourceId` so writes target the right
   // (source_id, slug) row. Pre-fix, putPage relied on the schema DEFAULT and
   // silently fabricated a duplicate at (default, slug) — causing later
   // bare-slug subqueries (getTags, deleteChunks, etc.) to crash with 21000.
   const sourceId = opts.sourceId;
-  await assertUnenrolledImport(engine, sourceId ?? 'default', slug);
   // Reject oversized payloads before any parsing, chunking, or embedding happens.
   // Uses Buffer.byteLength to count UTF-8 bytes the same way disk size would,
   // so the network path behaves identically to the file path.
@@ -766,14 +770,6 @@ export async function importFromContent(
           haikuModel: 'anthropic:claude-haiku-4-5-20251001',
         });
 
-  // Transaction wraps all DB writes. Every per-page tx call carries the
-  // caller's sourceId so writes target (sourceId, slug) rather than the
-  // schema DEFAULT — required for multi-source brains; harmless ('default')
-  // for single-source callers.
-  const txOpts = sourceId ? { sourceId } : undefined;
-  await engine.transaction(async (tx) => {
-    if (existing) await tx.createVersion(slug, txOpts);
-
     // v0.29.1 — compute effective_date from frontmatter precedence chain.
     // Filename comes from importFromFile path (basename) or the slug tail
     // (put_page MCP op fallback). updatedAt/createdAt use the existing
@@ -791,7 +787,7 @@ export async function importFromContent(
       createdAt: existing?.created_at ?? nowDate,
     });
 
-    await tx.putPage(slug, {
+  const pageInput: PageInput = {
       type: parsed.type,
       title: parsed.title,
       compiled_truth: parsed.compiled_truth,
@@ -815,7 +811,34 @@ export async function importFromContent(
       ingested_via: opts.ingested_via ?? null,
       // ingested_at is server-stamped at the engine layer when any
       // provenance write fires; never client-controlled.
-    }, txOpts);
+    };
+  const result: ImportResult = {
+    slug,
+    status: 'imported',
+    chunks: chunks.length,
+    parsedPage,
+    ...(pageQuarantined ? { quarantined: true } : {}),
+    ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}),
+  };
+  return { pageInput, parsed, existing, chunks, effectiveCRMode, corpusGeneration, result, noEmbed: !!opts.noEmbed,
+    embeddingSignature: !opts.noEmbed && chunks.length ? currentEmbeddingSignature() : null };
+}
+
+export async function importFromContent(engine: BrainEngine, slug: string, content: string, opts: ContentImportOptions = {}): Promise<ImportResult> {
+  const sourceId = opts.sourceId;
+  await assertUnenrolledImport(engine, sourceId ?? "default", slug);
+  const prepared = await prepareContentImport(engine, slug, content, opts);
+  if (!("pageInput" in prepared)) return prepared;
+  const { existing, parsed, chunks, effectiveCRMode, corpusGeneration, pageInput } = prepared;
+  // Transaction wraps all DB writes. Every per-page tx call carries the
+  // caller's sourceId so writes target (sourceId, slug) rather than the
+  // schema DEFAULT — required for multi-source brains; harmless ('default')
+  // for single-source callers.
+  const txOpts = sourceId ? { sourceId } : undefined;
+  await engine.transaction(async (tx) => {
+    if (existing) await tx.createVersion(slug, txOpts);
+
+    await tx.putPage(slug, pageInput, txOpts);
 
     // v0.40.3.0: stamp the contextual retrieval state columns alongside
     // the page write. updatePageContextualRetrievalState is a narrow
@@ -906,6 +929,13 @@ export async function importFromContent(
     }
   });
 
+  await projectContentImportAliases(engine, slug, sourceId ?? 'default', parsed.frontmatter);
+
+  return prepared.result;
+}
+
+/** Ordinary post-commit hook: never runs on the private adapter connection. */
+export async function projectContentImportAliases(engine: BrainEngine, slug: string, sourceId: string, frontmatter: Record<string, unknown>) {
   // T3 — project frontmatter `aliases:` into page_aliases (free-text alias
   // resolution for search). Runs AFTER the page write commits so the slug
   // exists. Fail-soft: a pre-v110 brain has no page_aliases table yet (the
@@ -914,7 +944,7 @@ export async function importFromContent(
   // clears its row — the content_hash includes non-timestamp frontmatter, so
   // an alias edit changes the hash and reaches this path (not the skip branch).
   try {
-    const aliasNorms = normalizeAliasList((parsed.frontmatter as Record<string, unknown>).aliases);
+    const aliasNorms = normalizeAliasList(frontmatter.aliases);
     await engine.setPageAliases(slug, sourceId ?? 'default', aliasNorms);
   } catch (e) {
     if (!isUndefinedTableError(e)) {
@@ -925,14 +955,6 @@ export async function importFromContent(
     }
   }
 
-  return {
-    slug,
-    status: 'imported',
-    chunks: chunks.length,
-    parsedPage,
-    ...(pageQuarantined ? { quarantined: true } : {}),
-    ...(pageFlagged ? { flagged: true, flag_reason: pageFlagReason } : {}),
-  };
 }
 
 /**

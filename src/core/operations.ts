@@ -949,7 +949,14 @@ const put_page: Operation = {
 
     const targetSourceId = resolveFederatedWriteSourceId(ctx, p.source_id);
     if (ctx.dryRun) return { dry_run: true, action: 'put_page', slug: p.slug, source_id: targetSourceId };
-    return withRuntimeLegacyPageWrite(ctx, targetSourceId, slug, async () => {
+    const fileRuntime = await resolvePageFileRuntime(ctx, targetSourceId, slug);
+    // Narrow remote ordinary path only; trusted timeline/page-mutating hooks and
+    // sandbox DB-only writes must not silently acquire file authority.
+    if (fileRuntime && (ctx.remote === false || ctx.viaSubagent === true))
+      throw new Error('unsupported_ordinary_file_writer');
+    const perform = async () => {
+    const baseline = fileRuntime ? await fileRuntime.pages.get(targetSourceId, slug, () => {}) : undefined;
+    let ordinaryWriteThrough: { written: boolean; path?: string } | undefined;
     // Skip embedding when the AI gateway has no embedding provider configured.
     // Checks all auth env vars for the resolved provider, not just OPENAI_API_KEY,
     // so Gemini / Ollama / Voyage brains don't silently drop embeddings (Codex C2).
@@ -978,7 +985,7 @@ const put_page: Operation = {
       // Pack load failed; fall through to legacy inferType behavior.
       activePack = undefined;
     }
-    const result = await importFromContent(ctx.engine, slug, p.content as string, {
+    const importOptions = {
       noEmbed,
       // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
       // markers (quarantine/content_flag/embed_skip). Fail-closed — anything
@@ -996,7 +1003,31 @@ const put_page: Operation = {
       source_kind: provenanceKind,
       source_uri: provenanceUri,
       ingested_via: provenanceVia,
-    });
+    };
+    let result: import('./import-file.ts').ImportResult;
+    if (fileRuntime) {
+      // Candidate services must expose the source-bound data-only seam. Never
+      // substitute an ordinary engine, unchecked callback or legacy fallback.
+      if (!('putOrdinary' in fileRuntime.pages) || typeof fileRuntime.pages.putOrdinary !== 'function')
+        throw new Error('page_file_ordinary_authority_unavailable');
+      const { prepareContentImport, projectContentImportAliases } = await import('./import-file.ts');
+      const prepared = await prepareContentImport(ctx.engine, slug, p.content as string, importOptions);
+      if (!('pageInput' in prepared)) {
+        if (prepared.slug !== slug || !prepared.parsedPage) throw new Error('unsupported_ordinary_skipped_projection');
+        // Hash-equal import is read-only. Revalidate the exact pre-preparation
+        // snapshot; never acknowledge a concurrent edit or dirty file as a skip.
+        const current = await fileRuntime.pages.get(targetSourceId, slug, () => {});
+        if (JSON.stringify(current) !== JSON.stringify(baseline)) throw new Error('precondition_failed');
+        result = prepared;
+        ordinaryWriteThrough = { written: true };
+      } else {
+        const saved = await (fileRuntime.pages as Pick<import('./page-file-db.ts').PageFileDatabase, 'putOrdinary'>)
+          .putOrdinary(targetSourceId, slug, prepared, baseline!, () => {});
+        result = saved.result;
+        ordinaryWriteThrough = saved.writeThrough;
+        await projectContentImportAliases(ctx.engine, slug, targetSourceId, prepared.parsed.frontmatter);
+      }
+    } else result = await importFromContent(ctx.engine, slug, p.content as string, importOptions);
 
     // v0.39 T13 — auto-prompt on first unknown-type write.
     //
@@ -1046,7 +1077,9 @@ const put_page: Operation = {
     let writeThrough: { written: boolean; path?: string; skipped?: string; error?: string } | undefined;
     const isSandboxSubagent = ctx.viaSubagent === true
       && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
-    if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
+    if (ordinaryWriteThrough) {
+      writeThrough = ordinaryWriteThrough;
+    } else if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
       const sourceId = targetSourceId;
       const provenanceVia = ctx.remote === false ? 'put_page' : 'mcp:put_page';
       // Shared canonical write-through (also used by `gbrain brainstorm/lsd
@@ -1211,7 +1244,8 @@ const put_page: Operation = {
       ...(factsQueued ? { facts_backstop: factsQueued } : {}),
       ...(writeThrough ? { write_through: writeThrough } : {}),
     };
-    });
+    };
+    return fileRuntime ? perform() : withRuntimeLegacyPageWrite(ctx, targetSourceId, slug, perform);
   },
   cliHints: { name: 'put', positional: ['slug'], stdin: 'content' },
 };

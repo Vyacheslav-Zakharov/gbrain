@@ -78,6 +78,46 @@ async function fixture(allowDatabaseOnly = false, allowLegacy = false) {
     cleanup: async () => { borrowHook = undefined; await backing.disconnect(); rmSync(base, { recursive: true, force: true }); } };
 }
 
+test('registered ordinary put uses the real candidate authority facade and retains its guards', async () => {
+  const f = await fixture(false, true); let lifecycle: any;
+  try {
+    lifecycle = await f.runtime.createPageFileRuntimeCandidate({ mode: 'offline-verification', engine: f.ctx.engine, host: f.host, authority: f.authority });
+    const result = await withEnv({ GBRAIN_HOME: f.base, OPENAI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined, GEMINI_API_KEY: undefined, GOOGLE_API_KEY: undefined, VOYAGE_API_KEY: undefined }, () =>
+      f.call('put_page', { source_id: 'default', slug: 'example', content: 'After ordinary facade' }, { ...f.ctx, remote: true }));
+    expect(result.write_through.written).toBe(true);
+    expect((await f.backing.getPage('example'))!.compiled_truth).toBe('After ordinary facade');
+    const file = join(f.manifest.roots[0].directory.path, 'example.md');
+    expect(readFileSync(file, 'utf8')).toContain('After ordinary facade');
+    expect(statements.some(q => q.includes('INSERT INTO page_file_write_authorizations'))).toBe(true);
+    const services = await f.runtime.resolvePageFileRuntime(f.ctx, 'default', 'example');
+    const { prepareContentImport } = await import('../src/core/import-file.ts');
+    const prepared = await prepareContentImport(f.backing, 'example', 'Retained ordinary facade', { sourceId: 'default', noEmbed: true });
+    if (!('pageInput' in prepared)) throw new Error('expected prepared import');
+    const baseline = await services!.pages.get('default', 'example', () => {});
+    const put = (source = 'default', validate = (_row: Record<string, any>) => {}) =>
+      Promise.resolve().then(() => (services!.pages as Pick<PageFileDatabase, 'putOrdinary'>).putOrdinary(source, 'example', prepared, baseline, validate));
+    let before = statements.length;
+    await expect(put('other-source')).rejects.toThrow('binding_changed');
+    expect(statements).toHaveLength(before);
+    await expect(put('default', () => { throw new Error('fixture_privacy_denied'); })).rejects.toThrow('fixture_privacy_denied');
+    identity.current_user = 'ordinary-example';
+    before = statements.length;
+    await expect(put()).rejects.toThrow('page_file_authority_identity_mismatch');
+    expect(statements.slice(before).every(q => q.includes('session_user'))).toBe(true);
+    identity.current_user = 'adapter-example';
+    chmodSync(f.manifest.roots[0].journal.path, 0o755);
+    await expect(put()).rejects.toThrow('page_file_host_directory_drift');
+    chmodSync(f.manifest.roots[0].journal.path, 0o700);
+    await lifecycle.close();
+    before = statements.length;
+    await expect(put()).rejects.toThrow('page_file_runtime_closed');
+    expect(statements).toHaveLength(before);
+    expect((await f.backing.getPage('example'))!.compiled_truth).toBe('After ordinary facade');
+    expect(readFileSync(file, 'utf8')).toContain('After ordinary facade');
+    expect(ended).toBe(1);
+  } finally { identity.current_user = 'adapter-example'; await lifecycle?.close(); await f.cleanup(); }
+}, 60000);
+
 test('registered candidate legacy put holds manifest root and path across ordinary DB and file tail', async () => {
   const f = await fixture(false, true); let lifecycle: any;
   let release = () => {}; let spy: any;
@@ -108,7 +148,7 @@ test('registered candidate legacy put holds manifest root and path across ordina
     expect(result.write_through.written).toBe(true);
     expect(readFileSync(join(root, 'ordinary.md'), 'utf8')).toContain('After');
     expect(statements.length).toBe(privateBefore);
-    await expect(f.call('put_page', { source_id: 'default', slug: 'example', content: 'Rejected' })).rejects.toThrow('page_file_unsupported_writer');
+    await expect(f.call('put_page', { source_id: 'default', slug: 'example', content: 'Rejected' })).rejects.toThrow('unsupported_ordinary_file_writer');
     expect((await f.backing.getPage('example'))!.compiled_truth).toBe('Before');
     expect(readFileSync(join(root, 'example.md'), 'utf8')).toBe('Before');
   } finally { release(); spy?.mockRestore(); await lifecycle?.close(); await f.cleanup(); }

@@ -12,14 +12,14 @@ import { realpath } from 'node:fs/promises';
 import { createPageFileAuthority, createPageFileEnrollmentAuthority, type PageFileAuthorityOptions } from './page-file-authority.ts';
 import { validatePageFileHostManifest, type PageFileHostManifestOptions } from './page-file-host.ts';
 import type { BrainEngine } from './engine.ts';
-import { requirePageFilePilotAdmission } from './page-file-bootstrap.ts';
+import { requirePageFilePilotAdmission, pageFileAdmissionAllows } from './page-file-bootstrap.ts';
 
 type Candidate = {
   ready: Promise<{ host: ReturnType<typeof validatePageFileHostManifest>; authority: Awaited<ReturnType<typeof createPageFileAuthority>> }>;
   ordinaryRole: string;
   closed: boolean;
   restartable?: boolean;
-  pilot?: { source: string; slug: string };
+  pilot?: ReturnType<typeof requirePageFilePilotAdmission>;
   revalidate(): Promise<void>;
 };
 // Trusted bootstrap association, never a config/operation field. Tombstones stay
@@ -105,7 +105,7 @@ async function resolveCandidate(candidate: Candidate, engine: BrainEngine, sourc
   // Absence permits only the checked operation's existing DB-only eligibility
   // and privacy checks, never implicit enrollment or an enrolled-page fallback.
   if (!binding) return undefined;
-  if (candidate.pilot && (candidate.pilot.source !== source || candidate.pilot.slug !== slug)) throw new PageFileSyncConflict('page_file_pilot_target_unapproved');
+  if (candidate.pilot && !pageFileAdmissionAllows(candidate.pilot, source, slug)) throw new PageFileSyncConflict('page_file_pilot_target_unapproved');
   const root = host.manifest.roots.find(r => r.sourceId === source);
   if (!root) throw new PageFileSyncConflict('page_file_runtime_source_unavailable');
   if (binding.canonical_root !== root.directory.path) throw new PageFileSyncConflict('binding_changed');
@@ -134,9 +134,10 @@ async function resolveCandidate(candidate: Candidate, engine: BrainEngine, sourc
     if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
     if (s !== source || p !== slug) throw new PageFileSyncConflict('binding_changed');
   };
-  const pages: Pick<PageFileDatabase, 'get' | 'put' | 'recover'> = Object.freeze({
+  const pages: Pick<PageFileDatabase, 'get' | 'put' | 'putOrdinary' | 'recover'> = Object.freeze({
     get: (s, p, validate) => { checkTarget(s, p); return bound(validate).pages.get(); },
     put: (s, p, request, validate) => { checkTarget(s, p); return bound(validate).pages.put(request as import('./page-file-authority.ts').PageFileAuthorityWrite); },
+    putOrdinary: (s, p, prepared, baseline, validate) => { checkTarget(s, p); return bound(validate).pages.putOrdinary(prepared, baseline); },
     recover: (s, p, request, validate) => { checkTarget(s, p); return bound(validate).pages.recover(request as import('./page-file-authority.ts').PageFileAuthorityWrite & { action: 'resume-exact' | 'abort' }); },
   });
   const service = bound(() => {});
@@ -241,7 +242,7 @@ export async function resolvePageFileRootHost(ctx: { engine: Partial<Pick<BrainE
     const coordination = { root: canonical, lockDirectory: host.manifest.lock.path, topology: host.manifest.topology, timeoutMs: 1000 };
     const validateTarget = async () => {
       validate();
-      if (candidate.pilot && candidate.pilot.source !== root.sourceId)
+      if (candidate.pilot && !pageFileAdmissionAllows(candidate.pilot, root.sourceId))
         throw new PageFileSyncConflict('page_file_pilot_target_unapproved');
       if (await realpath(sourceRoot) !== canonical) throw new PageFileSyncConflict('binding_changed');
       if (!ctx.engine.executeRaw) throw new PageFileSyncConflict('page_file_root_gate_unavailable');
@@ -257,7 +258,7 @@ export async function resolvePageFileRootHost(ctx: { engine: Partial<Pick<BrainE
       try { await validateTarget(); const result = await fn(); await validateTarget(); return result; }
       finally { await lock.release(); }
     };
-    const services = authority.forRoot({ ...coordination, withExclusiveRoot, revalidate: validateTarget });
+    const services = authority.forRoot({ ...coordination, source: root.sourceId, withExclusiveRoot, revalidate: validateTarget });
     return Object.freeze({ ...coordination, transition: services.transition,
       reconcile: async () => { await validateTarget(); await services.reconcile(); await validateTarget(); } });
   }
@@ -288,10 +289,10 @@ export async function enrollPageFileRuntime(ctx: Pick<OperationContext, 'engine'
   const candidate = candidates.get(ctx.engine);
   if (candidate) {
     if (!request) throw new PageFileSyncConflict('page_file_candidate_lifecycle_unavailable');
-    if (candidate.pilot && (candidate.pilot.source !== source || candidate.pilot.slug !== slug)) throw new PageFileSyncConflict('page_file_pilot_target_unapproved');
+    if (candidate.pilot && !pageFileAdmissionAllows(candidate.pilot, source, slug)) throw new PageFileSyncConflict('page_file_pilot_target_unapproved');
     if (candidate.pilot) {
       const approved = requirePageFilePilotAdmission(request.authority.admission);
-      if (request.authority.mode !== 'production-pilot' || approved.source !== source || approved.slug !== slug) throw new PageFileSyncConflict('page_file_pilot_target_unapproved');
+      if (request.authority.mode !== 'production-pilot' || !pageFileAdmissionAllows(approved, source, slug)) throw new PageFileSyncConflict('page_file_pilot_target_unapproved');
     }
     const reviewed = structuredClone(request.reviewed);
     const options = { ...request.authority, expected: { ...request.authority.expected } };

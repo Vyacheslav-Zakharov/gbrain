@@ -13,12 +13,21 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 /** Hosted-only caller of the actual fixed-path connected bootstrap. No module
  * mocks, injected startup loader or direct candidate construction. Provisioning
  * reuses the SQL-authority suite's frozen catalog and least-privilege logins. */
-export async function exerciseConnectedBootstrap(f: {
+export async function exerciseConnectedBootstrap(f: Parameters<typeof exerciseConnectedBootstrapFixture>[0]) {
+  await exerciseConnectedBootstrapFixture(f);
+}
+
+export async function exerciseConnectedSourceBootstrap(f: Parameters<typeof exerciseConnectedBootstrapFixture>[0]) {
+  // A fresh fixture after v1 cleanup: never widen a retained v1 capability.
+  await exerciseConnectedBootstrapFixture({ ...f, mode: 'production-pilot' }, true);
+}
+
+async function exerciseConnectedBootstrapFixture(f: {
   admin: PostgresEngine; source: string;
   roles: { ordinary: string; adapter: string; enrollment: string };
   loginUrls: Map<string, string>; pins: Record<string, string>;
   mode?: 'production-pilot';
-}) {
+}, sourceWide = false) {
   if (process.env.REQUIRE_PAGE_FILE_CONNECTED_POSTGRES !== '1' || process.env.GITHUB_ACTIONS !== 'true'
     || process.env.PAGE_FILE_CAS_DISPOSABLE !== '1') throw new Error('connected bootstrap requires explicit disposable hosted acceptance');
   if (f.mode && process.env.REQUIRE_PAGE_FILE_PILOT_POSTGRES !== '1') throw new Error('pilot requires explicit hosted acceptance');
@@ -51,7 +60,9 @@ export async function exerciseConnectedBootstrap(f: {
       database: manifest.database, adapterRole: manifest.adapterRole, generation: '1' } };
   const bootstrap = JSON.stringify(contract);
   const bootstrapPath = protectedFile('bootstrap.json', bootstrap);
-  const approval = JSON.stringify({ version: 1, mode: 'production-pilot', bootstrapSha256: hash(bootstrap), source: f.source, slug: 'connected' });
+  const approval = JSON.stringify(sourceWide
+    ? { version: 2, mode: 'production-pilot', bootstrapSha256: hash(bootstrap), sources: [f.source] }
+    : { version: 1, mode: 'production-pilot', bootstrapSha256: hash(bootstrap), source: f.source, slug: 'connected' });
   const approvalPath = f.mode ? protectedFile('pilot-approval.json', approval) : undefined;
   const anchor = JSON.stringify(f.mode
     ? { mode: f.mode, bootstrapPath, bootstrapSha256: hash(bootstrap), approvalPath, approvalSha256: hash(approval) }
@@ -93,6 +104,15 @@ export async function exerciseConnectedBootstrap(f: {
     expect(await snapshot()).toEqual(pristine);
     if (!f.mode) console.log('PG_CONNECTED_BOOTSTRAP: actual ordinary and adapter admission; initSchema no migration or enrollment');
 
+    if (sourceWide) {
+      phase = 'production-source-v2';
+      const { exerciseConnectedSource } = await import('./page-file-connected-source.ts');
+      await exerciseConnectedSource({ admin: f.admin, engine, source: f.source, root, directory,
+        journal: manifest.roots[0].journal.path, bootstrap: JSON.parse(anchor),
+        ordinaryUrl: config.database_url, enrollmentUrl: f.loginUrls.get(f.roles.enrollment)!,
+        enrollmentRole: f.roles.enrollment });
+      return;
+    }
     const [page] = await engine.executeRaw<{ id: string; write_revision: string }>('SELECT id::text,write_revision FROM pages WHERE source_id=$1', [f.source]);
     await expect(enrollPageFileRuntime(ctx, f.source, 'connected')).rejects.toThrow('page_file_candidate_lifecycle_unavailable');
     const { exerciseConnectedOperator } = await import('./page-file-connected-operator.ts');

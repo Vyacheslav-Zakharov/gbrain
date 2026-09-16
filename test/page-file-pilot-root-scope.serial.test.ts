@@ -26,7 +26,7 @@ const runtime = await import('../src/core/page-file-runtime.ts');
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 const config = { database_url: 'postgres://ordinary-example@example.invalid/db-example' };
 afterEach(() => { anchor = undefined; catalogValid = true; for (const p of cleanup.splice(0)) rmSync(p, { recursive: true, force: true }); });
-function fixture() {
+function fixture(sourceSet = false) {
   const base = mkdtempSync(join(realpathSync(import.meta.dir), 'pilot-test-')); cleanup.push(base);
   const put = (name: string, value: unknown) => { const p = join(base, name); writeFileSync(p, typeof value === 'string' ? value : JSON.stringify(value), { mode: 0o400 }); return p; };
   const pin = (name: string) => { const path = join(base, name); mkdirSync(path, { mode: 0o700 }); const s = lstatSync(path, { bigint: true }); return { path, dev: String(s.dev), ino: String(s.ino), uid: Number(s.uid), gid: Number(s.gid), mode: 0o700 }; };
@@ -35,7 +35,9 @@ function fixture() {
   const secret = 'postgres://adapter-example:***@example.invalid/db-example';
   const contract = { version: 1, manifestPath: put('host', manifest), credentialPath: put('credential', secret), credentialSha256: hash(secret), ordinaryRole: 'ordinary-example', sqlAuthority: { roles: { ordinary: 'ordinary-example', adapter: 'adapter-example', enrollment: 'enrollment-example' }, catalogPins: {} }, expected: { manifestSha256: hash(JSON.stringify(manifest)), deploymentId: manifest.deploymentId, brainId: manifest.brainId, database: manifest.database, adapterRole: manifest.adapterRole, generation: manifest.generation } };
   const bootstrapSha256 = hash(JSON.stringify(contract));
-  const approval = { version: 1, mode: 'production-pilot', bootstrapSha256, source: 'source-example', slug: 'page-example' };
+  const approval = sourceSet
+    ? { version: 2, mode: 'production-pilot', bootstrapSha256, sources: ['source-example', 'other-source'] }
+    : { version: 1, mode: 'production-pilot', bootstrapSha256, source: 'source-example', slug: 'page-example' };
   anchor = { mode: 'production-pilot', bootstrapPath: put('bootstrap', contract), bootstrapSha256, approvalPath: put('approval', approval), approvalSha256: hash(JSON.stringify(approval)) };
   return { put, approval, manifest, contract };
 }
@@ -48,9 +50,9 @@ test('pilot does not grant private root service for another manifest source', as
   await expect(runtime.resolvePageFileRootHost({ engine, config: { engine: 'postgres' } }, root)).rejects.toThrow('page_file_pilot_target_unapproved');
  } finally { await engine.disconnect(); }
 });
-for (const operation of ['transition', 'reconcile'] as const) {
- test(`pilot root ${operation} refuses late mixed cohort without mutation`, async () => {
-  const f = fixture(); const root = f.manifest.roots[0].directory.path;
+for (const sourceSet of [false, true]) for (const operation of ['transition', 'reconcile'] as const) {
+ test(`v${sourceSet ? 2 : 1} root ${operation} refuses late mixed cohort without mutation`, async () => {
+  const f = fixture(sourceSet); const root = f.manifest.roots[0].directory.path;
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' });
   writeFileSync(join(root, 'page-example.md'), 'approved');
   writeFileSync(join(root, 'other.md'), 'unapproved');
@@ -61,7 +63,7 @@ for (const operation of ['transition', 'reconcile'] as const) {
   try {
    const host = (await runtime.resolvePageFileRootHost({ engine, config: { engine: 'postgres' } }, root))!;
    // Enrollment changes after resolution must be observed inside the root lock.
-   rows.push({ ...rows[0], binding_id: 'b', slug: 'other', relative_path: 'other.md' });
+   rows.push({ ...rows[0], binding_id: 'b', source_id: sourceSet ? 'other-source' : 'source-example', slug: 'other', relative_path: 'other.md' });
    const marker = join(f.manifest.lock.path, hash(root + '\0ROOT') + '.dirty');
    if (operation === 'reconcile') writeFileSync(marker, 'original dirty marker');
    const snapshot = () => ({ rows: JSON.stringify(rows), files: ['page-example.md', 'other.md'].map(p => readFileSync(join(root, p), 'utf8')), git: git('rev-parse', 'HEAD') + git('status', '--porcelain'), journal: readdirSync(f.manifest.roots[0].journal.path), markers: readdirSync(f.manifest.lock.path).filter(p => p.includes('.dirty')).map(p => [p, readFileSync(join(f.manifest.lock.path, p), 'utf8')]) });
@@ -74,12 +76,41 @@ for (const operation of ['transition', 'reconcile'] as const) {
   } finally { await engine.disconnect(); }
  });
 }
-test('approved-only pilot root retains transition and dirty reconciliation', async () => {
- const f = fixture(); const root = f.manifest.roots[0].directory.path;
+test('v2 final cohort rejects another approved source and preserves dirty evidence', async () => {
+ const f = fixture(true); const root = f.manifest.roots[0].directory.path;
  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' });
  writeFileSync(join(root, 'page-example.md'), 'approved');
  git('init', '-b', 'main'); git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'fixture');
  rows = [{ binding_id: 'a', source_id: 'source-example', slug: 'page-example', canonical_root: root, relative_path: 'page-example.md', pending_op_id: null, file_generation: 1 }];
+ const engine = new PostgresEngine(); await engine.connect(config);
+ engine.executeRaw = (async () => [{ local_path: root }]) as any;
+ try {
+  const host = (await runtime.resolvePageFileRootHost({ engine, config: { engine: 'postgres' } }, root))!;
+  let called = false;
+  await expect(host.transition!(async () => {
+   called = true;
+   rows.push({ ...rows[0], binding_id: 'b', source_id: 'other-source' });
+  })).rejects.toThrow('page_file_pilot_target_unapproved');
+  expect(called).toBe(true);
+  const marker = join(f.manifest.lock.path, hash(root + '\0ROOT') + '.dirty');
+  const evidence = readFileSync(marker, 'utf8');
+  await expect(host.reconcile!()).rejects.toThrow('page_file_pilot_target_unapproved');
+  expect(readFileSync(marker, 'utf8')).toBe(evidence);
+  expect(readFileSync(join(root, 'page-example.md'), 'utf8')).toBe('approved');
+ } finally { await engine.disconnect(); }
+});
+
+for (const sourceSet of [false, true]) test(`v${sourceSet ? 2 : 1} approved root retains transition and dirty reconciliation`, async () => {
+ const f = fixture(sourceSet); const root = f.manifest.roots[0].directory.path;
+ const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+ writeFileSync(join(root, 'page-example.md'), 'approved');
+ git('init', '-b', 'main'); git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'fixture');
+ rows = [{ binding_id: 'a', source_id: 'source-example', slug: 'page-example', canonical_root: root, relative_path: 'page-example.md', pending_op_id: null, file_generation: 1 }];
+ if (sourceSet) {
+  writeFileSync(join(root, 'second.md'), 'second');
+  git('add', '.'); git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'second');
+  rows.push({ ...rows[0], binding_id: 'b', slug: 'second', relative_path: 'second.md' });
+ }
  const engine = new PostgresEngine(); await engine.connect(config);
  engine.executeRaw = (async () => [{ local_path: root }]) as any;
  try {

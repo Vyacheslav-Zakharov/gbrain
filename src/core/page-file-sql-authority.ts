@@ -70,6 +70,8 @@ export function pageFileSqlAuthorityQueries(expected: PageFileSqlAuthorityExpect
     if (adapter) {
       if (table === 'pages') grants.add('UPDATE');
       const extras: Record<string,string[]> = {
+        // Candidate ordinary import is add-only; never admit tag UPDATE/DELETE.
+        tags: ['INSERT'],
         content_chunks: ['SELECT','INSERT','UPDATE','DELETE'], page_versions: ['SELECT','INSERT'],
         page_file_operations: ['SELECT','INSERT','UPDATE'], page_file_write_authorizations: ['SELECT','INSERT','DELETE'],
       };
@@ -128,7 +130,7 @@ export function pageFileSqlAuthorityQueries(expected: PageFileSqlAuthorityExpect
     'pages','tags','code_edges_chunk','code_edges_symbol']) {
     const oid = sequence.endsWith('_seq') ? `to_regclass('public.${sequence}')` : `to_regclass(pg_get_serial_sequence('public.${sequence}','id'))`;
     const privileges = ['USAGE','SELECT','UPDATE'].flatMap(p => [
-      `has_sequence_privilege($1,c.oid,'${p}')=${(principal === 'ordinary' || (adapter && !['pages','tags','code_edges_chunk','code_edges_symbol'].includes(sequence))) && (p === 'USAGE' || (p === 'SELECT' && !sequence.endsWith('_seq')))}`,
+      `has_sequence_privilege($1,c.oid,'${p}')=${(adapter && sequence === 'tags' && p === 'USAGE') || ((principal === 'ordinary' || (adapter && !['pages','tags','code_edges_chunk','code_edges_symbol'].includes(sequence))) && (p === 'USAGE' || (p === 'SELECT' && !sequence.endsWith('_seq'))))}`,
       `NOT has_sequence_privilege($1,c.oid,'${p} WITH GRANT OPTION')`,
     ]);
     add(`sequence:${sequence}`, `c.relkind='S' AND c.relowner<>r.oid AND ${privileges.join(' AND ')}`,

@@ -7,9 +7,11 @@ import { PageFileSync, type FileReadBaseline } from './page-file-sync.ts';
 import type { CheckedPageFields } from './page-checked-store.ts';
 import { transitionPageFileRoot, reconcilePageFileRootTransition } from './page-file-root-transition.ts';
 import type { PageFileCoordinationHost } from './page-file-writer-gate.ts';
-import { requirePageFilePilotAdmission } from './page-file-bootstrap.ts';
+import { requirePageFilePilotAdmission, pageFileAdmissionAllows } from './page-file-bootstrap.ts';
 
 export interface PageFileAuthorityRoot extends PageFileCoordinationHost {
+  /** Exact protected manifest source owning this root (required for v2). */
+  source?: string;
   revalidate?(): Promise<void>;
   withExclusiveRoot<T>(fn: () => Promise<T>): Promise<T>;
 }
@@ -191,6 +193,11 @@ export async function createPageFileAuthority(options: PageFileAuthorityOptions)
           const captured = structuredClone(request);
           return run(() => pages.put(source, slug, captured, validate));
         },
+        putOrdinary: (prepared: Parameters<PageFileDatabase['putOrdinary']>[2], baseline: Parameters<PageFileDatabase['putOrdinary']>[3]) => {
+          const captured = structuredClone(prepared);
+          const capturedBaseline = structuredClone(baseline);
+          return run(() => pages.putOrdinary(source, slug, captured, capturedBaseline, validate));
+        },
         recover: (request: PageFileAuthorityWrite & { action: 'resume-exact' | 'abort' }) => {
           const captured = structuredClone(request);
           return run(() => pages.recover(source, slug, captured, validate));
@@ -204,7 +211,9 @@ export async function createPageFileAuthority(options: PageFileAuthorityOptions)
   }, forRoot(target: PageFileAuthorityRoot) {
     const host = Object.freeze({ ...target, authorizeBindings: pilotAdmission ? (rows: readonly { source_id: string; slug: string }[]) => {
       const approved = requirePageFilePilotAdmission(pilotAdmission);
-      if (rows.some(row => row.source_id !== approved.source || row.slug !== approved.slug))
+      if ((approved.version === 2 && (!target.source || !pageFileAdmissionAllows(approved, target.source)))
+        || rows.some(row => !pageFileAdmissionAllows(approved, row.source_id, row.slug)
+          || (approved.version === 2 && row.source_id !== target.source)))
         throw new Error('page_file_pilot_target_unapproved');
     } : undefined });
     return Object.freeze({

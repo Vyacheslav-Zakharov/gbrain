@@ -12,16 +12,26 @@ export const pageFileBootstrapAnchorSchema = z.discriminatedUnion('mode', [
   z.strictObject({ mode: z.literal('production-pilot'), bootstrapPath: text, bootstrapSha256: digest, approvalPath: text, approvalSha256: digest }),
 ]);
 const anchorSchema = pageFileBootstrapAnchorSchema;
-// One explicit business target. Its independent protected pin binds the complete
-// existing bootstrap contract (host, roles, catalog and credential pins).
-const approvalSchema = z.strictObject({ version: z.literal(1), mode: z.literal('production-pilot'), bootstrapSha256: digest, source: text, slug: text });
-const pilotAdmissions = new WeakMap<object, { revalidate(): void; source: string; slug: string }>();
+// Deployment admission only, not source ACL or business-content approval.
+// v1 stays page-pinned; only explicit v2 admits a finite protected source set.
+const approvalSchema = z.discriminatedUnion('version', [
+  z.strictObject({ version: z.literal(1), mode: z.literal('production-pilot'), bootstrapSha256: digest, source: text, slug: text }),
+  z.strictObject({ version: z.literal(2), mode: z.literal('production-pilot'), bootstrapSha256: digest, sources: z.array(text).min(1).refine(ids => new Set(ids).size === ids.length) }),
+]);
+type AdmissionScope =
+  | { version: 1; source: string; slug: string; sources?: never }
+  | { version: 2; sources: readonly string[]; source?: never; slug?: never };
+const pilotAdmissions = new WeakMap<object, { revalidate(): void; scope: AdmissionScope }>();
+export function pageFileAdmissionAllows(scope: AdmissionScope, source: string, slug?: string): boolean {
+  return scope.version === 2 ? scope.sources.includes(source)
+    : scope.source === source && (slug === undefined || scope.slug === slug);
+}
 /** Opaque in-process capability; serialized config/requests cannot recreate it. */
 export function requirePageFilePilotAdmission(admission: unknown) {
   const approved = admission && typeof admission === 'object' ? pilotAdmissions.get(admission) : undefined;
   if (!approved) throw new Error('page_file_pilot_approval_required');
   approved.revalidate();
-  return { source: approved.source, slug: approved.slug };
+  return approved.scope;
 }
 const contractSchema = z.strictObject({
   version: z.literal(1), manifestPath: text, credentialPath: text, credentialSha256: digest, ordinaryRole: text,
@@ -113,7 +123,8 @@ export function loadPageFileBootstrap(input?: PageFileBootstrapAnchor, revalidat
     const hostOptions = Object.freeze({ mode: anchor.mode, manifestJson: manifest.bytes.toString('utf8'), expected: contract.expected });
     const host = validatePageFileHostManifest(hostOptions);
     if (host.manifest.serviceUid !== process.getuid?.()) throw invalid();
-    if (approval && !host.manifest.roots.some(root => root.sourceId === approval.source)) throw invalid();
+    if (approval && (approval.version === 1 ? [approval.source] : approval.sources)
+      .some(source => !host.manifest.roots.some(root => root.sourceId === source))) throw invalid();
     const indexed = [...host.manifest.indexedRoots, ...host.manifest.roots.map(root => root.directory)];
     for (const path of [anchor.bootstrapPath, contract.manifestPath, contract.credentialPath, ...(anchor.mode === 'production-pilot' ? [anchor.approvalPath] : [])]) {
       if (indexed.some(root => path === root.path || path.startsWith(root.path === '/' ? '/' : root.path + '/'))) throw invalid();
@@ -134,7 +145,9 @@ export function loadPageFileBootstrap(input?: PageFileBootstrapAnchor, revalidat
       } catch { throw invalid(); }
     };
     const admission = approval ? Object.freeze({}) : undefined;
-    if (admission && approval) pilotAdmissions.set(admission, { ...approval, revalidate });
+    if (admission && approval) pilotAdmissions.set(admission, { revalidate, scope: approval.version === 1
+      ? Object.freeze({ version: 1, source: approval.source, slug: approval.slug })
+      : Object.freeze({ version: 2, sources: Object.freeze([...approval.sources]) }) });
     return Object.freeze({ status: anchor.mode, contract, revalidate, admission,
       async start(engine: BrainEngine) {
         revalidate();

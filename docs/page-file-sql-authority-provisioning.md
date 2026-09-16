@@ -33,7 +33,11 @@ critical tables, columns and sequences, CREATE on the database/public schema, an
 SET/ALTER SYSTEM privilege on session_replication_role. The latter probe requires
 PostgreSQL 15+; older or restricted catalogs fail closed, not silently skip.
 
-## Approved mixed ordinary-writer allowlist (finite inventory)
+## Candidate mixed ordinary-writer allowlist (finite inventory)
+
+The add-only adapter tag delta below is a **candidate contract proposal requiring
+independent review**, not approved production provisioning. The baseline hosted
+run above does not verify these new bytes. No broad source enrollment is enabled.
 
 All principals: CONNECT, public USAGE; SELECT sources, pages, page_file_bindings,
 config. No table privileges outside the following additions on the finite list.
@@ -41,13 +45,16 @@ config. No table privileges outside the following additions on the finite list.
 | Principal | Additions |
 |---|---|
 | ordinary | SELECT/INSERT/UPDATE/DELETE sources, pages, config, tags, timeline_entries, content_chunks, page_versions, code_edges_chunk, code_edges_symbol; SELECT-only page_file_bindings; no page_file_operations or page_file_write_authorizations privileges |
-| adapter | UPDATE pages; SELECT tags, timeline_entries, code_edges_chunk, code_edges_symbol; SELECT/INSERT/UPDATE/DELETE content_chunks; SELECT/INSERT page_versions; SELECT/INSERT/UPDATE page_file_operations; SELECT/INSERT/DELETE page_file_write_authorizations; UPDATE sources(id); UPDATE page_file_bindings(pending_op_id,indexed_raw_sha256,file_generation) |
+| adapter | UPDATE pages; SELECT/INSERT tags (no UPDATE/DELETE); SELECT timeline_entries, code_edges_chunk, code_edges_symbol; SELECT/INSERT/UPDATE/DELETE content_chunks; SELECT/INSERT page_versions; SELECT/INSERT/UPDATE page_file_operations; SELECT/INSERT/DELETE page_file_write_authorizations; UPDATE sources(id); UPDATE page_file_bindings(pending_op_id,indexed_raw_sha256,file_generation) |
 | enrollment | UPDATE sources(id), pages(id); INSERT page_file_bindings; SELECT tags |
 
 Ordinary and adapter have USAGE on page_generation_clock_seq. Both have
 USAGE/SELECT on serial id sequences for content_chunks, page_versions and
 timeline_entries. Ordinary additionally has USAGE/SELECT on serial id sequences
-for pages, tags, code_edges_chunk and code_edges_symbol (adapter has none).
+for pages, tags, code_edges_chunk and code_edges_symbol. The candidate adapter
+adds **USAGE only** on the exact sequence returned by
+`pg_get_serial_sequence('public.tags','id')`; no SELECT, UPDATE, grant option,
+ALL SEQUENCES, or page/code-edge sequence authority is added.
 Enrollment has no sequence privileges. No sequence UPDATE or grant options. Column-only UPDATE must
 not become table UPDATE. Every actual column of the finite relation list is
 checked for SELECT/INSERT/UPDATE/REFERENCES, preventing hidden column ACL widening.
@@ -62,6 +69,40 @@ This finite audit does not prohibit necessary unrelated application tables outsi
 its inventory. Their provisioning remains separately reviewed. Migration credentials
 are release-only; ordinary startup must not automatically apply migrations.
 Architecture approval is not permission for live deployment or provisioning.
+
+## Candidate add-only tag delta and writer handoff
+
+The only new adapter privileges are `INSERT ON public.tags` and `USAGE ON` its
+exact ID sequence. Ordinary and enrollment privileges remain unchanged. Retain
+all owner, membership, BYPASSRLS, trigger, column and grant-option denials.
+Disposable fixtures use a separate adapter `FOR INSERT ... WITH CHECK` policy
+whose page-ID predicate selects only pages in the fixture source, alongside the
+existing SELECT policy. Never substitute `FOR ALL` or `WITH CHECK (true)`.
+The changed tags policy catalog requires a newly independently reviewed external
+`catalog:tags` pin; **do not refresh a runtime pin from the database being admitted**.
+No production pin, credential, provisioning execution or migration is supplied.
+
+Migration 141's BEFORE tag trigger and migration 142's page fence are unchanged.
+Each INSERT updates its parent revision, **including an INSERT ... ON CONFLICT DO
+NOTHING that finds an existing tag**. After the existing-page UPDATE and before
+each subsequent tag INSERT, the writer must read the current locked page revision
+and refresh its private transaction authorization using DELETE + INSERT, bound to
+the same transaction ID, page, prepared operation and pending binding. Never grant
+UPDATE on authorizations, remove `expected_revision`, use an ordinary connection,
+or batch multiple tag rows under one stale token. Preserve old authored/enrichment
+tags; return the final revision only after all trigger-visible statements complete.
+
+`test/page-file-tag-fence.test.ts` executes the shared SQL fence probe in isolated
+PGLite: missing/stale authorization denied, page UPDATE and tag INSERT rotate
+revision, duplicate conflict rotates revision, refreshed token permits add-only
+writes, non-prepared operation denied, transaction rollback preserves baseline.
+This is trigger/transaction evidence, **not actual login/RLS attestation**.
+`test/e2e/page-file-sql-authority.test.ts` runs the same probe through the real
+adapter login and adds ordinary denial, UPDATE/DELETE denial, cross-source RLS,
+missing/excess privileges, policy drift and disabled-trigger probes. These hosted
+probes must run on the exact reviewed candidate in a disposable fixture before
+any release approval; offline GREEN does not certify them or full ordinary-put
+compatibility. This change alone supplies no writer, file commit, or broad sweep.
 
 ## Required catalog and RLS evidence
 

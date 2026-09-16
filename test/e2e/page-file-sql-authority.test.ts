@@ -1,11 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import postgres from 'postgres';
+import { exerciseTagRevisionFence } from '../helpers/page-file-tag-fence.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
-import { exerciseConnectedBootstrap } from './helpers/page-file-connected-bootstrap.ts';
+import { exerciseConnectedBootstrap, exerciseConnectedSourceBootstrap } from './helpers/page-file-connected-bootstrap.ts';
 import { pageFileSqlAuthorityQueries, verifyPageFileSqlAuthority, type PageFileSqlAuthorityExpectation } from '../../src/core/page-file-sql-authority.ts';
 
 const url = process.env.DATABASE_URL;
@@ -125,7 +126,7 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       if (role === roles.adapter) {
         for (const grant of [
           'UPDATE ON pages', 'USAGE ON SEQUENCE page_generation_clock_seq',
-          'SELECT ON tags,timeline_entries,code_edges_chunk,code_edges_symbol',
+          'SELECT ON tags,timeline_entries,code_edges_chunk,code_edges_symbol', 'INSERT ON tags',
           'SELECT,INSERT,UPDATE,DELETE ON content_chunks', 'SELECT,INSERT ON page_versions',
           'UPDATE(pending_op_id,indexed_raw_sha256,file_generation) ON page_file_bindings',
           'SELECT,INSERT,UPDATE ON page_file_operations', 'SELECT,INSERT,DELETE ON page_file_write_authorizations',
@@ -136,6 +137,11 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
           expect(sequence.name).toBeString();
           await admin.executeRaw(`GRANT USAGE,SELECT ON SEQUENCE ${sequence.name} TO ${role}`);
         }
+      }
+      if (role === roles.adapter) {
+        const [sequence] = await admin.executeRaw<{ name: string }>("SELECT pg_get_serial_sequence('public.tags','id') AS name");
+        expect(sequence.name).toBeString();
+        await admin.executeRaw(`GRANT USAGE ON SEQUENCE ${sequence.name} TO ${role}`);
       }
       if (role === roles.enrollment) {
         await admin.executeRaw(`GRANT UPDATE(id) ON sources,pages TO ${role}`);
@@ -149,7 +155,7 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
     const policies: [string, string, string, string][] = [
       ['sources', `id='${source}'`, all, 'ALL'], ['pages', `source_id='${source}'`, all, 'ALL'],
       ['page_file_bindings', `source_id='${source}' AND ${ownPage}`, all, 'ALL'],
-      ['tags', ownPage, all, 'ALL'],
+      ['tags', ownPage, roles.ordinary, 'ALL'],
       ...['content_chunks', 'page_versions', 'timeline_entries'].map(t => [t, ownPage, `${roles.ordinary},${roles.adapter}`, 'ALL'] as [string,string,string,string]),
       ['page_file_operations', ownBinding, roles.adapter, 'ALL'], ['page_file_write_authorizations', ownPage, roles.adapter, 'ALL'],
       ['config', "key='sync.repo_path'", all, 'ALL'],
@@ -160,6 +166,9 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       await admin.executeRaw(`CREATE POLICY ${policy} ON public.${table} FOR ${command} TO ${principal} USING (${predicate})${command === 'ALL' ? ` WITH CHECK (${predicate})` : ''}`);
       policyTables.push(table);
     }
+    // Separate adapter INSERT WITH CHECK; no adapter UPDATE/DELETE policy.
+    await admin.executeRaw(`CREATE POLICY ${policy}_tags_read ON public.tags FOR SELECT TO ${roles.adapter},${roles.enrollment} USING (${ownPage})`);
+    await admin.executeRaw(`CREATE POLICY ${policy}_tags_add ON public.tags FOR INSERT TO ${roles.adapter} WITH CHECK (${ownPage})`);
     await captureFixturePins();
     for (const [role, login] of loginUrls) pools.set(role, postgres(login, { max: 1, prepare: false, connect_timeout: 10, onnotice: () => {} }));
   }, 120_000);
@@ -171,6 +180,8 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       await admin.executeRaw('DELETE FROM page_file_operations WHERE binding_id IN (SELECT binding_id FROM page_file_bindings WHERE source_id=$1)', [source]);
       await admin.executeRaw('DELETE FROM page_file_bindings WHERE source_id=$1', [source]);
       await admin.executeRaw('DELETE FROM sources WHERE id=$1', [source]);
+      await admin.executeRaw(`DROP POLICY IF EXISTS ${policy}_tags_read ON public.tags`);
+      await admin.executeRaw(`DROP POLICY IF EXISTS ${policy}_tags_add ON public.tags`);
       for (const table of policyTables) await admin.executeRaw(`DROP POLICY ${policy} ON public.${table}`);
       for (const role of createdRoles) { await admin.executeRaw(`DROP OWNED BY ${role}`); await admin.executeRaw(`DROP ROLE ${role}`); }
       if (admin) {
@@ -192,6 +203,10 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
   }, 120_000);
   (process.env.REQUIRE_PAGE_FILE_PILOT_POSTGRES === '1' ? test : test.skip)('actual production-pilot admission binds explicit page approval and revocation on disposable PostgreSQL', async () => {
     await exerciseConnectedBootstrap({ admin, source, roles, loginUrls, pins, mode: 'production-pilot' });
+    await allAccepted();
+  }, 120_000);
+  (process.env.REQUIRE_PAGE_FILE_PILOT_POSTGRES === '1' ? test : test.skip)('actual production-source v2 executable enrollment preserves ordinary writer compatibility on disposable PostgreSQL', async () => {
+    await exerciseConnectedSourceBootstrap({ admin, source, roles, loginUrls, pins });
     await allAccepted();
   }, 120_000);
   test('mixed writer executes legacy DML but enrolled authored state and authority stay fenced', async () => {
@@ -265,6 +280,45 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
     await allAccepted();
     console.log('PG_SQL_AUTHORITY: mixed ordinary DML accepted; enrolled page chunk root and capability fences preserved');
   }, 60_000);
+  test('candidate adapter add-only tags retain RLS, exact grants and per-statement revision fence', async () => {
+    const adapter = pools.get(roles.adapter)!;
+    const [page] = await adapter.unsafe("SELECT id FROM pages WHERE source_id=$1 AND slug='protected'", [source]);
+    expect(page).toBeDefined();
+    const before = await admin.executeRaw('SELECT to_jsonb(p)::text AS row FROM pages p WHERE id=$1', [page.id]);
+    const session = await adapter.reserve();
+    try {
+      await session.unsafe('BEGIN');
+      await exerciseTagRevisionFence(async (sql, params = []) => [...await session.unsafe(sql, params)], page.id);
+    } finally { try { await session.unsafe('ROLLBACK'); } finally { session.release(); } }
+    expect(await admin.executeRaw('SELECT to_jsonb(p)::text AS row FROM pages p WHERE id=$1', [page.id])).toEqual(before);
+    expect(await adapter.unsafe('SELECT tag FROM tags WHERE page_id=$1', [page.id])).toHaveLength(0);
+    expect(await adapter.unsafe('SELECT * FROM page_file_write_authorizations WHERE page_id=$1', [page.id])).toHaveLength(0);
+    for (const sql of ["UPDATE tags SET tag='denied' WHERE page_id=$1", 'DELETE FROM tags WHERE page_id=$1']) {
+      await expect(adapter.unsafe(sql, [page.id]).execute()).rejects.toMatchObject({ code: '42501' });
+    }
+    await expect(pools.get(roles.ordinary)!.unsafe("INSERT INTO tags(page_id,tag) VALUES($1,'ordinary-denied')", [page.id]).execute()).rejects.toMatchObject({ code: 'P0001' });
+    const foreignSource = source + '-foreign';
+    try {
+      await admin.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [foreignSource]);
+      const [foreign] = await admin.executeRaw<{ id: number }>("INSERT INTO pages(source_id,slug,type,title,compiled_truth) VALUES($1,'foreign','note','Foreign','Before') RETURNING id", [foreignSource]);
+      const foreignBefore = await admin.executeRaw('SELECT to_jsonb(p)::text AS row FROM pages p WHERE id=$1', [foreign.id]);
+      expect(await adapter.unsafe('SELECT id FROM pages WHERE id=$1', [foreign.id])).toHaveLength(0);
+      await expect(adapter.unsafe("INSERT INTO tags(page_id,tag) VALUES($1,'cross-source-denied')", [foreign.id]).execute()).rejects.toMatchObject({ code: '42501' });
+      expect(await admin.executeRaw('SELECT tag FROM tags WHERE page_id=$1', [foreign.id])).toEqual([]);
+      expect(await admin.executeRaw('SELECT to_jsonb(p)::text AS row FROM pages p WHERE id=$1', [foreign.id])).toEqual(foreignBefore);
+    } finally { await admin.executeRaw('DELETE FROM sources WHERE id=$1', [foreignSource]); }
+    await allAccepted();
+    console.log('PG_SQL_AUTHORITY: candidate add-only tags; missing/stale/conflict token, UPDATE/DELETE denial and cross-source RLS verified');
+  }, 60_000);
+  test('candidate tag privilege and INSERT policy drift fail closed against frozen pins', async () => {
+    const [sequence] = await admin.executeRaw<{ name: string }>("SELECT pg_get_serial_sequence('public.tags','id') AS name");
+    await drift(`REVOKE INSERT ON tags FROM ${roles.adapter}`, `GRANT INSERT ON tags TO ${roles.adapter}`, roles.adapter);
+    await drift(`REVOKE USAGE ON SEQUENCE ${sequence.name} FROM ${roles.adapter}`, `GRANT USAGE ON SEQUENCE ${sequence.name} TO ${roles.adapter}`, roles.adapter);
+    for (const privilege of ['UPDATE', 'DELETE']) await drift(`GRANT ${privilege} ON tags TO ${roles.adapter}`, `REVOKE ${privilege} ON tags FROM ${roles.adapter}`, roles.adapter);
+    for (const privilege of ['SELECT', 'UPDATE']) await drift(`GRANT ${privilege} ON SEQUENCE ${sequence.name} TO ${roles.adapter}`, `REVOKE ${privilege} ON SEQUENCE ${sequence.name} FROM ${roles.adapter}`, roles.adapter);
+    await drift(`ALTER POLICY ${policy}_tags_add ON tags WITH CHECK (true)`, `ALTER POLICY ${policy}_tags_add ON tags WITH CHECK (page_id IN (SELECT id FROM public.pages WHERE source_id='${source}'))`, roles.adapter);
+    await drift('ALTER TABLE tags DISABLE TRIGGER tag_page_write_revision_trg', 'ALTER TABLE tags ENABLE TRIGGER tag_page_write_revision_trg', roles.adapter);
+  }, 120_000);
   test('wrong actual login fails closed without changing pins', async () => {
     expect(await verify(roles.ordinary, roles.adapter)).toEqual(denied);
     await allAccepted(); console.log('PG_SQL_AUTHORITY: wrong login rejected and baseline preserved');

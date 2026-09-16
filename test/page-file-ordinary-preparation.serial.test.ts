@@ -1,0 +1,31 @@
+import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import * as importer from '../src/core/import-file.ts';
+import { withEnv } from './helpers/with-env.ts';
+let engine: PGLiteEngine, home: string;
+beforeAll(async () => {
+  home = await mkdtemp(join(tmpdir(), 'ordinary-preparation-'));
+  engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema();
+}, 30000);
+afterAll(async () => { await engine?.disconnect(); if (home) await rm(home, { recursive: true, force: true }); });
+test('actual importer exposes captured preparation without a page mutation', () => withEnv({ GBRAIN_HOME: home, DATABASE_URL: undefined }, async () => {
+  expect(typeof importer.prepareContentImport).toBe('function');
+  const raw = '---\ntitle: Prepared title\ntype: concept\ntags: [new-tag]\nowner: revised\ndate: "2026-01-02"\n---\n\nA prepared ordinary article.\n';
+  const opts = { noEmbed: true, remote: true, sourceId: 'default', source_kind: 'mcp:put_page', ingested_via: 'mcp:put_page' };
+  const prepared = await importer.prepareContentImport(engine, 'prepared', raw, opts);
+  expect('pageInput' in prepared).toBe(true);
+  if (!('pageInput' in prepared)) throw new Error('expected captured projection');
+  expect(await engine.getPage('prepared', { sourceId: 'default' })).toBeNull();
+  const result = await importer.importFromContent(engine, 'prepared', raw, opts);
+  const page = (await engine.getPage('prepared', { sourceId: 'default' }))!;
+  expect(prepared.pageInput.content_hash).toBe(page.content_hash);
+  expect(prepared.pageInput.frontmatter).toEqual(page.frontmatter);
+  expect(prepared.pageInput.title).toBe(page.title);
+  const [metadata] = await engine.executeRaw<{ effective_date_source: string }>("SELECT effective_date_source FROM pages WHERE source_id=$1 AND slug=$2", ['default', 'prepared']);
+  expect(String(prepared.pageInput.effective_date_source)).toBe(metadata.effective_date_source);
+  expect(prepared.result).toEqual(result);
+  expect(prepared.chunks.map(c => [c.chunk_source, c.chunk_text])).toEqual((await engine.getChunks('prepared', { sourceId: 'default' })).map(c => [c.chunk_source, c.chunk_text]));
+}));

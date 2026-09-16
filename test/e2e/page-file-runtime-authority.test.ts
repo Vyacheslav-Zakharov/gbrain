@@ -122,6 +122,10 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
         // Do not broaden this to ALL SEQUENCES or change trigger ownership.
         await admin.executeRaw(`GRANT USAGE ON SEQUENCE page_generation_clock_seq TO ${role}`);
         await admin.executeRaw(`GRANT SELECT ON tags,timeline_entries TO ${role}`);
+        await admin.executeRaw(`GRANT INSERT ON tags TO ${role}`);
+        const [tagSequence] = await admin.executeRaw<{ name: string }>("SELECT pg_get_serial_sequence('public.tags','id') AS name");
+        expect(tagSequence.name).toBeString();
+        await admin.executeRaw(`GRANT USAGE ON SEQUENCE ${tagSequence.name} TO ${role}`);
         await admin.executeRaw(`GRANT SELECT,INSERT,UPDATE,DELETE ON content_chunks TO ${role}`);
         await admin.executeRaw(`GRANT SELECT,INSERT ON page_versions TO ${role}`);
         await admin.executeRaw(`GRANT UPDATE(pending_op_id,indexed_raw_sha256,file_generation) ON page_file_bindings TO ${role}`);
@@ -165,6 +169,7 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
       await admin.executeRaw(`CREATE POLICY ${policy} ON public.${table} FOR ${command} TO ${role} USING (${predicate})${command === 'ALL' ? ` WITH CHECK (${predicate})` : ''}`);
       policyTables.push(table);
     }
+    await admin.executeRaw(`CREATE POLICY ${policy}_tags_add ON public.tags FOR INSERT TO ${adapterRole} WITH CHECK (${ownPage})`);
     ordinary = await connect(ordinaryUrl);
     const [identity] = await ordinary.executeRaw('SELECT session_user,current_user,current_database() AS database,rolsuper,rolcreatedb,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname=current_user');
     expect(identity).toEqual({ session_user: ordinaryRole, current_user: ordinaryRole, database: 'gbrain_test', rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolbypassrls: false });
@@ -192,6 +197,7 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
     } finally {
       try {
         await Promise.all(engines.filter(e => e !== admin).map(e => e.disconnect()));
+        await admin.executeRaw(`DROP POLICY IF EXISTS ${policy}_tags_add ON public.tags`);
         for (const table of policyTables) await admin.executeRaw(`DROP POLICY ${policy} ON public.${table}`);
         for (const role of roles) { await admin.executeRaw(`DROP OWNED BY ${role}`); await admin.executeRaw(`DROP ROLE ${role}`); }
         if (admin) {

@@ -168,7 +168,7 @@ describe('private page-file authority', () => {
       validate: () => {},
     });
     expect(Object.keys(service).sort()).toEqual(['pages', 'sync']);
-    expect(Object.keys(service.pages).sort()).toEqual(['get', 'put', 'recover']);
+    expect(Object.keys(service.pages).sort()).toEqual(['get', 'put', 'putOrdinary', 'recover']);
     expect(Object.keys(service.sync).sort()).toEqual(['capture', 'commit']);
     expect(Object.isFrozen(service.pages)).toBe(true);
     // Real PageFileDatabase observes no binding on the scripted transport.
