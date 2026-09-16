@@ -1,6 +1,6 @@
 # Markdown projection: development contract and finite acceptance ledger
 
-Status: **BLOCKED development candidate**, not ready for hosted acceptance dispatch; baseline `8dd43c870a314d902cb293c5940ea73ae9445a51`.
+Status: **Development only; synthetic hosted SQL passed; real-engine lane prepared, not executed.** Current preparation base `8108cc95ee29c9e5caadcb8c3f2e2cf5dda42850`. No activation authorization.
 
 ## Blocking delta review disposition
 
@@ -70,18 +70,21 @@ Proposed protected local CLI `markdown-projection status|drain` is bounded by so
 | A1 | Exact-base isolated worktree; baseline stays clean | Verified via git; no commit/push/deploy |
 | A2 | Absent/disabled/db_only caller has zero IO/DB writes | Offline passing real temp fixture; capability-free implementation; no DB instantiated |
 | A3 | Enabled source-scoped deterministic preview; unsafe roots/paths/attachments block; explicit pending | Offline passing caller test; no physical-root or publish proof |
-| A4 | Atomic obligations across all writers/SQL/tags, rollback, watermark and purge tombstones | Unregistered PostgreSQL candidate + test-first hosted fixture authored; SQL execution/role compatibility/registration pending |
+| A4 | Atomic obligations across all writers/SQL/tags, rollback, watermark and purge tombstones | Synthetic baseline/candidate hosted run 35099879925 attempt 1 passed; not all writers. A4-engine below remains hosted-pending; registration prohibited |
 | A5 | Full canonical serializer and generation/hash snapshots, rights and engine admission | Pending integration/proof |
 | A6 | Guarded physical roots, ownership, symlink races, conflicts and attachments unchanged | Pending real-FS adapter tests |
 | A7 | Shared writer serialization, two workers, stale retry/delete/rename/source-move/recreate | Source-local SHARE/UPDATE guard candidate; fixed-snapshot and coexistence assertions authored, not executed; FS worker remains disconnected |
 | A8 | Crash/fsync/install/ack/restart and bounded retry/reconciliation | Pending fault-injection + hosted DB proof |
 | A9 | Accurate API/CLI/status, protected job and scheduler, portal/reverse-sync isolation | Pending production-call-path implementation and tests |
 | A10 | Measured <=1min healthy latency, >5min alert; stopped worker | Pending controlled acceptance measurements |
-| A11 | Independent exact-artifact review + hosted DB acceptance | Pending; no local PostgreSQL/PGLite/container/provider tests authorized |
+| A11 | Independent exact-artifact review + hosted DB acceptance | First reviewed synthetic hosted run passed; new engine-lane bytes require fresh review then separately authorized exact-SHA run. No local DB execution |
+| A4-engine | Real initializer/migrations + service-owner page/tag engine differential | Executable scripts/markdown-projection-engine-hosted.{ts,sh} prepared; offline compilation only. Hosted result pending; application-auth excluded |
 | A12 | Separate activation/rollout and any historical backfill approval | Not authorized; gates remain closed |
 
 ## Executed proof and exact next task
 
 Strict sequence: test missing caller RED (assertion undefined/function), implement disabled slice GREEN (1 test), extend enabled caller RED (expected pending, got not_required), implement pure enabled contract GREEN (2 tests, 57 assertions). Receipts: `projection-red-1.log`, `projection-green-1.log`, `projection-red-2.log`, `projection-green-2.log` in the external development-start report directory. Exact command: `timeout -k 3s 25s bun test test/markdown-projection.test.ts`. Only this file ran. Initial prerequisite run failed because isolated worktree lacked dependencies; read-only reuse via temporary node_modules symlink to installed dependencies resolved it without install/postinstall; the symlink was removed after verification. No dependencies modified. Narrow Bun compilation succeeded (not a project typecheck). A combined typecheck command was blocked by an execution safety guard; no typecheck coverage is claimed. No broad tests or DB/provider calls.
 
-**Next gate (blocked):** review the source-local replacement, finish MP-B2 topology/engine and remaining schedules, and obtain focused exact-byte review. Only then authorize disposable hosted RED/candidate proof described in `markdown-projection-candidate-proof.md`. No local SQL was run. Registration in MIGRATIONS, engine bootstrap parity, FS adapter and scheduler remain pending.
+**Current evidence supersedes earlier unexecuted-SQL descriptions above:** source `8108cc95ee29c9e5caadcb8c3f2e2cf5dda42850`, workflow `c83258fdaf5b7b9bd3eafe9fec1c0edc2ae2669e`, run `35099879925`, attempt 1: synthetic RED exit 1 at missing table, candidate exit 0/final passed, cleanup passed (parent-verified downloaded artifacts). Filesystem worker remains disconnected. This does not certify initializer, migrations, service-engine callers, application authorization or files.
+
+**Next gate:** review the separate real-engine lane, then commit/push/hosted dispatch only with separate authorization. The wrapper requires hosted socat, sudo/unshare/setpriv and frozen repository dependencies; it exposes only a Unix-socket relay to the dedicated PostgreSQL service inside a loopback-only network namespace. It does not install dependencies. Full initSchema calls schema rendering, runMigrations and verifySchema, including migration v35 auto-RLS. The disposable service login is explicitly verified as superuser/BYPASSRLS and table owner; this is not nonowner or application-auth proof. Baseline completes before unchanged candidate SQL installation; candidate inventories auto-RLS and checks real putPage insert/conflict, getPage, addTag/removeTag/getTags, searchKeyword, softDeletePage/restorePage/deletePage and transaction rollback with observer-visible obligations. Raw SQL only seeds timeline/chunks and observes catalog/ledger. Rename, versions, batch purge, import/registered operations, auth, retry/concurrency integration and serializer/FS/scheduler remain separate open rows. Do not close A4-engine until a real hosted receipt passes. No local database or provider was run.

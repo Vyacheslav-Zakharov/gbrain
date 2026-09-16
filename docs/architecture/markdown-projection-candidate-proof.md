@@ -1,4 +1,4 @@
-# Source-local candidate proof — NOT executed / NOT registered
+# Source-local candidate proof — synthetic hosted pass / NOT registered
 
 The SQL remains outside MIGRATIONS, fresh schemas and engine wiring. No DB, PGLite, container, provider, production service, migration, enrollment, commit, push or hosted dispatch was executed in this development slice. Bun compilation checks fixture syntax only, not SQL or roles.
 
@@ -56,6 +56,18 @@ success must never be represented as deployed writer or engine compatibility pro
 Full catalog/trigger/FK inventory, every callable-helper/internal-table denial, full owner
 snapshots for every refusal, UPSERT/zero-row differential coverage and per-mutation ordinary
 obligation/rollback comparison remain review/implementation gates beyond this bounded slice.
+
+## Verified hosted evidence and next executable lane
+
+The earlier unexecuted descriptions are historical to authoring: synthetic source-SQL run 35099879925 attempt 1 passed under workflow c83258fdaf5b7b9bd3eafe9fec1c0edc2ae2669e, source 8108cc95ee29c9e5caadcb8c3f2e2cf5dda42850. Parent verified RED reason/exit, candidate final passed/exit zero and cleanup in mp-baseline-artifacts. This closes only that fixture's executed assertions.
+
+New `scripts/markdown-projection-engine-hosted.ts` calls real initSchema and engine methods; `scripts/markdown-projection-engine-hosted.sh` confines execution to a fresh network namespace with loopback and a dedicated PostgreSQL Unix-socket relay. Hosted dependencies must already include socat, util-linux, iproute2 and the frozen Bun dependencies. No provider credentials or inherited application config are forwarded. Retain the established workflow exact-source checks, independent docker-inspected expected service IP, output/exit capture, catalog residue check and unconditional whole-service removal; add this as a separate phase, never replace the green synthetic fixture. Do not dispatch before review. Command on that runner only:
+
+```sh
+timeout -k 5s 200s bash scripts/markdown-projection-engine-hosted.sh
+```
+
+Require zero exit, `phase:engine/status:passed`, baseline/candidate catalog and semantic receipts, and cleanup passed. A compiled fixture is not hosted proof. Full dependencies, initializer migration success, namespace relay readiness and auto-RLS facts remain to be exercised; any failure is a blocker, not permission to bypass migrations or disable RLS. No application-auth or filesystem proof is claimed.
 
 ## Remaining gates — explicit, not silently covered
 
