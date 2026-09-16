@@ -119,20 +119,34 @@ try {
   await a`ROLLBACK`;
   for (const isolation of ['REPEATABLE READ','SERIALIZABLE']) {
     const s = `move-${isolation.replaceAll(' ','-')}`;
+    // The prior case intentionally leaves its moved page in mp-disabled.
+    // Slug identity must therefore be unique in the destination, not just s.
+    const slug = `${s}-moving`;
     await a`INSERT INTO sources(id,name) VALUES (${s},${s})`;
-    const [moving] = await a`INSERT INTO pages(source_id,slug,type,title) VALUES (${s},'moving','note','Before') RETURNING id`;
+    const [moving] = await a`INSERT INTO pages(source_id,slug,type,title) VALUES (${s},${slug},'note','Before') RETURNING id`;
+    const retainedState = async () => ({
+      pages: Array.from(await a!`SELECT * FROM pages WHERE id=${moving.id}`),
+      tags: Array.from(await a!`SELECT * FROM tags WHERE page_id=${moving.id} ORDER BY id`),
+      obligations: Array.from(await a!`SELECT * FROM markdown_projection_obligations WHERE page_id=${moving.id} ORDER BY source_id, incarnation`),
+      policy: Array.from(await a!`SELECT * FROM markdown_projection_policy WHERE source_id IN (${s},'mp-disabled') ORDER BY source_id`),
+    });
     await b.unsafe(`BEGIN ISOLATION LEVEL ${isolation}`);
     await b`SELECT * FROM markdown_projection_policy WHERE source_id=${s}`;
     await a`SELECT markdown_projection_set_policy(${s},true)`;
+    const beforeMoveRefusal = await retainedState();
     await denied(() => b!`UPDATE pages SET source_id='mp-disabled' WHERE id=${moving.id}`, '40001');
     await b`ROLLBACK`;
+    assert.deepEqual(await retainedState(), beforeMoveRefusal, `${isolation}: refused move changed retained state`);
     assert.equal((await a`SELECT source_id FROM pages WHERE id=${moving.id}`)[0].source_id,s);
     await a`INSERT INTO tags(page_id,tag) VALUES (${moving.id},'route')`;
     await b.unsafe(`BEGIN ISOLATION LEVEL ${isolation}`);
     await b`SELECT * FROM pages WHERE id=${moving.id}`;
     await a`UPDATE pages SET source_id='mp-disabled' WHERE id=${moving.id}`;
+    const beforeTagRefusal = await retainedState();
     await denied(() => b!`UPDATE tags SET tag='stale-route' WHERE page_id=${moving.id}`, '40001');
     await b`ROLLBACK`;
+    assert.deepEqual(await retainedState(), beforeTagRefusal, `${isolation}: refused tag update changed retained state`);
+    assert.equal((await a`SELECT source_id FROM pages WHERE id=${moving.id}`)[0].source_id,'mp-disabled', 'concurrent committed move retained');
     assert.equal((await a`SELECT tag FROM tags WHERE page_id=${moving.id}`)[0].tag,'route');
   }
   const beforeActivation = await count();
