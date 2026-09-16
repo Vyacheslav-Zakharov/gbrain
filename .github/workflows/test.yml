@@ -18,7 +18,7 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
     env:
-      SOURCE_SHA: 5a430e5e4a3187ab54c3617ca9d81202fd6ea68e
+      SOURCE_SHA: a0a982b065cea66a52b85a8c4d950c85d29ee1d5
       EVIDENCE: ${{ github.workspace }}/markdown-projection-evidence
     services:
       postgres:
@@ -181,6 +181,7 @@ jobs:
           set -euo pipefail
           cd source
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git status --porcelain --untracked-files=all | tee "$EVIDENCE/engine-source-status-$(date +%s%N).txt"
           test -z "$(git status --porcelain)"
           sha256sum scripts/markdown-projection-engine-* > "$EVIDENCE/engine-source-sha256.txt"
           set +e
@@ -216,9 +217,11 @@ jobs:
           cleanup = [r for r in receipts if 'cleanup' in r]
           assert len(cleanup) == 1 and cleanup[0]['cleanup'] == 'passed' and cleanup[0]['errors'] == []
           groups = [r for r in receipts if r.get('stage') == 'process.cleanup']
-          assert len(groups) == len(receipt['attempts']) + 1 and all(r['status'] == 'passed' and r['members'] == [] and r['sessionMembers'] == [] for r in groups)
+          # Outer and inner supervisors each reap their relay and command.
+          assert len(groups) == len(receipt['attempts']) + 4 and all(r['status'] == 'passed' and r['members'] == [] and r['sessionMembers'] == [] for r in groups)
           (p/'engine-receipts.json').write_text(json.dumps(receipts, indent=2)+'\n')
           PY
+          git status --porcelain --untracked-files=all | tee "$EVIDENCE/engine-source-status-$(date +%s%N).txt"
           test -z "$(git status --porcelain)"
       - name: Always verify fixture cleanup and remove service
         if: always()
