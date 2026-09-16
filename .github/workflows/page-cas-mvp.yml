@@ -63,6 +63,7 @@ jobs:
             test/page-cas-mvp.test.ts test/page-cas-security.test.ts test/page-cas-store.test.ts \
             test/embedding-checked-write.test.ts test/embedding-followup.test.ts \
             test/contextual-retrieval-service-pure.test.ts test/schema-bootstrap-coverage.test.ts \
+            test/schema-function-byte-parity.test.ts test/schema-fresh-first-workflow.test.ts \
             test/embedding-contextual-fence.serial.test.ts \
             test/portal-db-reader.test.ts test/portal-ui-contract.test.ts
           do
@@ -134,6 +135,31 @@ jobs:
             if [ "$rc" -ne 0 ]; then failed=1; fi
           done
           exit "$failed"
+      - name: Prepare disposable protected bootstrap directory (hosted runner only)
+        if: ${{ !cancelled() }}
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test ! -e /etc/gbrain
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /etc/gbrain
+      - name: Fresh-first PostgreSQL SQL authority and connected offline plus production-pilot admission (disposable only)
+        if: ${{ !cancelled() }}
+        env:
+          DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
+          REQUIRE_PAGE_FILE_FRESH_CATALOG_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_SQL_AUTHORITY_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_UPGRADE_REPLAY_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_CONNECTED_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_PILOT_POSTGRES: '1'
+          PAGE_FILE_CAS_DISPOSABLE: '1'
+          PAGE_FILE_SQL_EVIDENCE_DIR: cas-evidence
+        run: |
+          set -o pipefail
+          set +e
+          env -u GBRAIN_DIRECT_DATABASE_URL timeout --signal=TERM --kill-after=10s 420s bun test --timeout 120000 test/e2e/page-file-sql-authority.test.ts 2>&1 | tee cas-evidence/postgres-sql-authority.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" > cas-evidence/postgres-sql-authority-exit.txt
+          exit "$rc"
       - name: Real PostgreSQL DB-only conditional-write acceptance
         if: ${{ !cancelled() }}
         env:
@@ -175,30 +201,6 @@ jobs:
           set -e
           printf '%s\n' "$rc" > cas-evidence/postgres-runtime-authority-exit.txt
           exit "$rc"
-      - name: Prepare disposable protected bootstrap directory (hosted runner only)
-        if: ${{ !cancelled() }}
-        run: |
-          test "$GITHUB_ACTIONS" = true
-          test ! -e /etc/gbrain
-          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /etc/gbrain
-      - name: Real PostgreSQL SQL authority and connected offline plus production-pilot admission (disposable only)
-        if: ${{ !cancelled() }}
-        env:
-          DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
-          REQUIRE_PAGE_FILE_SQL_AUTHORITY_POSTGRES: '1'
-          REQUIRE_PAGE_FILE_UPGRADE_REPLAY_POSTGRES: '1'
-          REQUIRE_PAGE_FILE_CONNECTED_POSTGRES: '1'
-          REQUIRE_PAGE_FILE_PILOT_POSTGRES: '1'
-          PAGE_FILE_CAS_DISPOSABLE: '1'
-          PAGE_FILE_SQL_EVIDENCE_DIR: cas-evidence
-        run: |
-          set -o pipefail
-          set +e
-          env -u GBRAIN_DIRECT_DATABASE_URL timeout --signal=TERM --kill-after=10s 420s bun test --timeout 120000 test/e2e/page-file-sql-authority.test.ts 2>&1 | tee cas-evidence/postgres-sql-authority.log
-          rc=${PIPESTATUS[0]}
-          set -e
-          printf '%s\n' "$rc" > cas-evidence/postgres-sql-authority-exit.txt
-          exit "$rc"
       - name: Verify tracked source and complete explicit file inventory
         if: always()
         run: |
@@ -221,6 +223,7 @@ jobs:
           for name in ('postgres-db', 'postgres-file', 'postgres-runtime-authority', 'postgres-sql-authority'):
               assert pathlib.Path(f'cas-evidence/{name}-exit.txt').read_text().strip() == '0', name
           sql_log = pathlib.Path('cas-evidence/postgres-sql-authority.log').read_text()
+          assert sql_log.count('PG_SQL_AUTHORITY_FRESH: empty public catalog verified before first initSchema') == 1, 'missing/duplicate fresh-first precondition'
           for marker in (
               'already-v142 initSchema and no-pending runner preserve rows revisions receipts and original authority pins',
               'existing runner replays 141 and 142 twice preserving populated v142 state and original authority pins',

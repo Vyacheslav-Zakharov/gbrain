@@ -161,25 +161,25 @@ CREATE TABLE IF NOT EXISTS pages (
 -- to include title/type/page_kind/corpus_generation/content_hash) so
 -- read-time mutations don't invalidate every cache row.
 CREATE OR REPLACE FUNCTION bump_page_generation_fn() RETURNS trigger AS $func$
-BEGIN
-  IF (TG_OP = 'INSERT') THEN
-    NEW.generation := COALESCE((SELECT MAX(generation) FROM pages), 0) + 1;
-  ELSIF (OLD.compiled_truth IS DISTINCT FROM NEW.compiled_truth)
-     OR (OLD.timeline IS DISTINCT FROM NEW.timeline)
-     OR (OLD.frontmatter IS DISTINCT FROM NEW.frontmatter)
-     OR (OLD.deleted_at IS DISTINCT FROM NEW.deleted_at)
-     OR (OLD.contextual_retrieval_mode IS DISTINCT FROM NEW.contextual_retrieval_mode)
-     OR (OLD.title IS DISTINCT FROM NEW.title)
-     OR (OLD.type IS DISTINCT FROM NEW.type)
-     OR (OLD.page_kind IS DISTINCT FROM NEW.page_kind)
-     OR (OLD.corpus_generation IS DISTINCT FROM NEW.corpus_generation)
-     OR (OLD.content_hash IS DISTINCT FROM NEW.content_hash)
-  THEN
-    NEW.generation := OLD.generation + 1;
-  END IF;
-  RETURN NEW;
-END;
-$func$ LANGUAGE plpgsql;
+        BEGIN
+          IF (TG_OP = 'INSERT') THEN
+            NEW.generation := COALESCE((SELECT MAX(generation) FROM pages), 0) + 1;
+          ELSIF (OLD.compiled_truth IS DISTINCT FROM NEW.compiled_truth)
+             OR (OLD.timeline IS DISTINCT FROM NEW.timeline)
+             OR (OLD.frontmatter IS DISTINCT FROM NEW.frontmatter)
+             OR (OLD.deleted_at IS DISTINCT FROM NEW.deleted_at)
+             OR (OLD.contextual_retrieval_mode IS DISTINCT FROM NEW.contextual_retrieval_mode)
+             OR (OLD.title IS DISTINCT FROM NEW.title)
+             OR (OLD.type IS DISTINCT FROM NEW.type)
+             OR (OLD.page_kind IS DISTINCT FROM NEW.page_kind)
+             OR (OLD.corpus_generation IS DISTINCT FROM NEW.corpus_generation)
+             OR (OLD.content_hash IS DISTINCT FROM NEW.content_hash)
+          THEN
+            NEW.generation := OLD.generation + 1;
+          END IF;
+          RETURN NEW;
+        END;
+        $func$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS bump_page_generation_trg ON pages;
 CREATE TRIGGER bump_page_generation_trg
@@ -241,11 +241,11 @@ SELECT setval('page_generation_clock_seq', GREATEST(
 ));
 
 CREATE OR REPLACE FUNCTION bump_page_generation_clock_fn() RETURNS trigger AS $func$
-BEGIN
-  PERFORM nextval('page_generation_clock_seq');
-  RETURN NULL;
-END;
-$func$ LANGUAGE plpgsql;
+      BEGIN
+        PERFORM nextval('page_generation_clock_seq');
+        RETURN NULL;
+      END;
+      $func$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS bump_page_generation_clock_trg ON pages;
 CREATE TRIGGER bump_page_generation_clock_trg
@@ -357,14 +357,14 @@ CREATE INDEX IF NOT EXISTS content_chunks_stale_idx
 -- BEFORE INSERT OR UPDATE OF specific columns — only refires when those change,
 -- not on every chunk update (e.g., embedding refresh doesn't trigger rebuild).
 CREATE OR REPLACE FUNCTION update_chunk_search_vector() RETURNS TRIGGER AS $fn$
-BEGIN
-  NEW.search_vector :=
-    setweight(to_tsvector('english', COALESCE(NEW.doc_comment, '')), 'A') ||
-    setweight(to_tsvector('english', COALESCE(NEW.symbol_name_qualified, '')), 'A') ||
-    setweight(to_tsvector('english', COALESCE(NEW.chunk_text, '')), 'B');
-  RETURN NEW;
-END;
-$fn$ LANGUAGE plpgsql;
+      BEGIN
+        NEW.search_vector :=
+          setweight(to_tsvector('english', COALESCE(NEW.doc_comment, '')), 'A') ||
+          setweight(to_tsvector('english', COALESCE(NEW.symbol_name_qualified, '')), 'A') ||
+          setweight(to_tsvector('english', COALESCE(NEW.chunk_text, '')), 'B');
+        RETURN NEW;
+      END;
+      $fn$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS chunk_search_vector_trigger ON content_chunks;
 CREATE TRIGGER chunk_search_vector_trigger

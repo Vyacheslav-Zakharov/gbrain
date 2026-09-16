@@ -10,6 +10,11 @@ import { exerciseConnectedBootstrap, exerciseConnectedSourceBootstrap } from './
 import { pageFileSqlAuthorityQueries, verifyPageFileSqlAuthority, type PageFileSqlAuthorityExpectation } from '../../src/core/page-file-sql-authority.ts';
 
 const url = process.env.DATABASE_URL;
+if (process.env.REQUIRE_PAGE_FILE_FRESH_CATALOG_POSTGRES === '1' && (process.env.GITHUB_ACTIONS !== 'true'
+  || process.env.REQUIRE_PAGE_FILE_SQL_AUTHORITY_POSTGRES !== '1'
+  || process.env.REQUIRE_PAGE_FILE_UPGRADE_REPLAY_POSTGRES !== '1' || !url)) {
+  throw new Error('fresh catalog acceptance requires explicit disposable hosted SQL authority and replay');
+}
 if (process.env.REQUIRE_PAGE_FILE_PILOT_POSTGRES === '1' && (process.env.GITHUB_ACTIONS !== 'true'
   || process.env.REQUIRE_PAGE_FILE_CONNECTED_POSTGRES !== '1' || !url)) {
   throw new Error('production-pilot acceptance requires explicit disposable hosted connected fixture');
@@ -128,6 +133,19 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
     await admin.connect({ database_url: url!, poolSize: 1 });
     await admin.executeRaw("SET statement_timeout='15s'");
     await admin.executeRaw("SET lock_timeout='10s'");
+    if (process.env.REQUIRE_PAGE_FILE_FRESH_CATALOG_POSTGRES === '1') {
+      // Fail on any prior application bootstrap; never warm the DB before pins.
+      const [relations] = await admin.executeRaw<{ count: number }>(`SELECT count(*)::int AS count
+        FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public'`);
+      expect(relations.count).toBe(0);
+      const [functions] = await admin.executeRaw<{ count: number }>(`SELECT count(*)::int AS count
+        FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname='public' AND p.proname IN
+          ('bump_page_generation_fn','bump_page_generation_clock_fn','update_chunk_search_vector')`);
+      expect(functions.count).toBe(0);
+      console.log('PG_SQL_AUTHORITY_FRESH: empty public catalog verified before first initSchema');
+    }
     await admin.initSchema();
 
     for (const role of Object.values(roles)) {
