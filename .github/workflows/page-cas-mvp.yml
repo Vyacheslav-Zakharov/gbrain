@@ -257,10 +257,13 @@ jobs:
               'executable paginated inventory and enrollment; two existing pages; separate login; idempotent readback',
               'registered ordinary enrolled put preserves tags metadata file and DB; stale checked baseline refuses without mutation',
               'executable capture --file --slug --source updates enrolled page with file DB tags and capture provenance; stale token unchanged refusal; subsequent executable ingest link remains ordinary',
+              'actual capture persists nonempty normalized alias; stale and no-op preserve exact alias rows',
               'ordinary-created future page enrolled by fresh paginated sweep without repinning; cross-source inventory and reconcile denied',
           ):
               assert sql_log.count(f'PG_CONNECTED_SOURCE_V2: {marker}') == 1, ('missing/duplicate source-v2 completion', marker)
           assert not pathlib.Path('/etc/gbrain/page-file-bootstrap-anchor.json').exists(), 'fixture anchor leaked'
+          assert sql_log.count('PG_SQL_AUTHORITY: ordinary alias replace/clear; exact grants; source RLS and private-role denials preserve rows') == 1
+          assert 'page_aliases projection failed' not in sql_log, 'ordinary alias projection failed'
           assert not list(pathlib.Path('/etc/gbrain').glob('connected-fixture-*')), 'protected fixture or credential leaked'
           import json, hashlib
           fixtures = list(pathlib.Path('cas-evidence').glob('fixture-catalog-*.json'))

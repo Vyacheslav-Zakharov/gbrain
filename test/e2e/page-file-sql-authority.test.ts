@@ -106,6 +106,20 @@ test('offline fixture ordinary graph grants and endpoint/origin policy stay narr
   expect(adapter).not.toContain('public.links');
 });
 
+test('offline fixture aliases are ordinary-only, source scoped and outside protected inventory', () => {
+  const fixture = readFileSync(import.meta.path, 'utf8').split(/\n  beforeAll\(async \(\) => \{/)[1].split(/\n  afterAll\(async \(\) => \{/)[0];
+  const ordinary = fixture.split('if (role === roles.ordinary)')[1].split('if (role === roles.adapter)')[0];
+  expect(ordinary).toContain('GRANT SELECT,INSERT,DELETE ON public.page_aliases TO ${role}');
+  expect(ordinary).toContain("pg_get_serial_sequence('public.page_aliases','id')");
+  expect(ordinary).toContain('GRANT USAGE ON SEQUENCE ${aliasSequence.name} TO ${role}');
+  expect(fixture).toContain("['page_aliases', `source_id='${source}'`, roles.ordinary, 'ALL']");
+  expect(fixture.split('if (role === roles.adapter)')[1]).not.toContain('public.page_aliases');
+  expect(fixture.split('if (role === roles.enrollment)')[1]).not.toContain('GRANT SELECT,INSERT,DELETE ON public.page_aliases');
+  const probes = pageFileSqlAuthorityQueries({ ...expectation(roles.ordinary), catalogPins: {} });
+  expect(probes.filter(p => p.catalog)).toHaveLength(12);
+  expect(probes.some(p => p.id.includes('page_aliases'))).toBe(false);
+});
+
 suite('SQL authority — real PostgreSQL with external fixture pins', () => {
   beforeAll(async () => {
     pinDirectory = process.env.PAGE_FILE_SQL_EVIDENCE_DIR || mkdtempSync(join(tmpdir(), 'sql-authority-'));
@@ -126,6 +140,11 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       await admin.executeRaw(`GRANT USAGE ON SCHEMA public TO ${role}`);
       await admin.executeRaw(`GRANT SELECT ON sources,pages,page_file_bindings,config TO ${role}`);
       if (role === roles.ordinary) {
+        // Existing v110 alias projection: DELETE + INSERT, never private CAS.
+        await admin.executeRaw(`GRANT SELECT,INSERT,DELETE ON public.page_aliases TO ${role}`);
+        const [aliasSequence] = await admin.executeRaw<{ name: string }>("SELECT pg_get_serial_sequence('public.page_aliases','id') AS name");
+        expect(aliasSequence.name).toBeString();
+        await admin.executeRaw(`GRANT USAGE ON SEQUENCE ${aliasSequence.name} TO ${role}`);
         // Existing ordinary graph reconciliation, NOT adapter/page-CAS authority.
         await admin.executeRaw(`GRANT SELECT,INSERT,DELETE,UPDATE(context,origin_field) ON public.links TO ${role}`);
         const [linkSequence] = await admin.executeRaw<{ name: string }>("SELECT pg_get_serial_sequence('public.links','id') AS name");
@@ -175,6 +194,7 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       ['page_file_bindings', `source_id='${source}' AND ${ownPage}`, all, 'ALL'],
       ['tags', ownPage, roles.ordinary, 'ALL'],
       ['links', ownLink, roles.ordinary, 'ALL'],
+      ['page_aliases', `source_id='${source}'`, roles.ordinary, 'ALL'],
       ...['content_chunks', 'page_versions', 'timeline_entries'].map(t => [t, ownPage, `${roles.ordinary},${roles.adapter}`, 'ALL'] as [string,string,string,string]),
       ['page_file_operations', ownBinding, roles.adapter, 'ALL'], ['page_file_write_authorizations', ownPage, roles.adapter, 'ALL'],
       ['config', "key='sync.repo_path'", all, 'ALL'],
@@ -199,6 +219,8 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       await admin.executeRaw('DELETE FROM page_file_operations WHERE binding_id IN (SELECT binding_id FROM page_file_bindings WHERE source_id=$1)', [source]);
       await admin.executeRaw('DELETE FROM page_file_bindings WHERE source_id=$1', [source]);
       await admin.executeRaw('DELETE FROM sources WHERE id=$1', [source]);
+      // page_aliases deliberately has no FK/cascade to sources/pages.
+      await admin.executeRaw('DELETE FROM page_aliases WHERE source_id=$1', [source]);
       await admin.executeRaw(`DROP POLICY IF EXISTS ${policy}_tags_read ON public.tags`);
       await admin.executeRaw(`DROP POLICY IF EXISTS ${policy}_tags_add ON public.tags`);
       for (const table of policyTables) await admin.executeRaw(`DROP POLICY ${policy} ON public.${table}`);
@@ -399,6 +421,70 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
       await ordinary.unsafe('DELETE FROM pages WHERE source_id=$1 AND slug IN ($2,$3)', [source, guideSlug, codeSlug]);
     }
   }, 60_000);
+  test('ordinary alias projection replaces and clears; cross-source and private-role denials preserve rows', async () => {
+    const engine = new PostgresEngine();
+    const ordinary = pools.get(roles.ordinary)!;
+    const slug = 'alias-fixture', foreignSource = source + '-alias-foreign';
+    const snapshot = () => admin.executeRaw('SELECT * FROM page_aliases WHERE source_id IN ($1,$2) ORDER BY id', [source, foreignSource]);
+    try {
+      await engine.connect({ database_url: loginUrls.get(roles.ordinary)!, poolSize: 1 });
+      const [sequence] = await admin.executeRaw<{ name: string }>("SELECT pg_get_serial_sequence('public.page_aliases','id') AS name");
+      for (const role of Object.values(roles)) {
+        const [rights] = await pools.get(role)!.unsafe<Record<string, boolean>[]>(`SELECT
+          has_table_privilege(current_user,'public.page_aliases','SELECT') AS read,
+          has_table_privilege(current_user,'public.page_aliases','INSERT') AS add,
+          has_table_privilege(current_user,'public.page_aliases','DELETE') AS remove,
+          has_table_privilege(current_user,'public.page_aliases','UPDATE') AS update,
+          has_table_privilege(current_user,'public.page_aliases','TRUNCATE') AS truncate,
+          has_table_privilege(current_user,'public.page_aliases','REFERENCES') AS reference,
+          has_table_privilege(current_user,'public.page_aliases','TRIGGER') AS trigger,
+          has_sequence_privilege(current_user,$1,'USAGE') AS sequence_usage,
+          has_sequence_privilege(current_user,$1,'SELECT') AS sequence_read,
+          has_sequence_privilege(current_user,$1,'UPDATE') AS sequence_update,
+          row_security_active('public.page_aliases') AS rls`, [sequence.name]);
+        const allowed = role === roles.ordinary;
+        expect({ ...rights }).toEqual({ read: allowed, add: allowed, remove: allowed, update: false,
+          truncate: false, reference: false, trigger: false, sequence_usage: allowed,
+          sequence_read: false, sequence_update: false, rls: true });
+        // No column UPDATE/REFERENCES back door or grant options.
+        expect([...await pools.get(role)!.unsafe(`SELECT attname FROM pg_attribute
+          WHERE attrelid='public.page_aliases'::regclass AND attnum>0 AND NOT attisdropped AND (
+          has_column_privilege(current_user,attrelid,attnum,'UPDATE') OR
+          has_column_privilege(current_user,attrelid,attnum,'REFERENCES') OR
+          has_column_privilege(current_user,attrelid,attnum,'SELECT WITH GRANT OPTION') OR
+          has_column_privilege(current_user,attrelid,attnum,'INSERT WITH GRANT OPTION'))`)]).toEqual([]);
+      }
+      await engine.setPageAliases(slug, source, ['first', 'first']);
+      expect([...await ordinary.unsafe<{ alias_norm: string }[]>('SELECT alias_norm FROM page_aliases WHERE source_id=$1 AND slug=$2', [source, slug])]).toEqual([{ alias_norm: 'first' }]);
+      await engine.setPageAliases(slug, source, ['replacement']);
+      expect([...await ordinary.unsafe<{ alias_norm: string }[]>('SELECT alias_norm FROM page_aliases WHERE source_id=$1 AND slug=$2', [source, slug])]).toEqual([{ alias_norm: 'replacement' }]);
+      // No FK is required by the existing alias table; use the same slug in a
+      // foreign source to prove the source policy rather than a FK rejection.
+      await admin.executeRaw('INSERT INTO page_aliases(source_id,alias_norm,slug) VALUES($1,$2,$3)', [foreignSource, 'hidden', slug]);
+      const before = await snapshot();
+      expect([...await ordinary.unsafe('SELECT * FROM page_aliases WHERE source_id=$1', [foreignSource])]).toEqual([]);
+      expect([...await ordinary.unsafe('DELETE FROM page_aliases WHERE source_id=$1 RETURNING id', [foreignSource])]).toEqual([]);
+      await expect(engine.setPageAliases(slug, foreignSource, ['denied'])).rejects.toMatchObject({ code: '42501' });
+      await expect(ordinary.unsafe('UPDATE page_aliases SET alias_norm=alias_norm').execute()).rejects.toMatchObject({ code: '42501' });
+      expect(await snapshot()).toEqual(before);
+      for (const role of [roles.adapter, roles.enrollment]) {
+        for (const sql of ['SELECT * FROM page_aliases', "INSERT INTO page_aliases(source_id,alias_norm,slug) VALUES($1,'denied','alias-fixture')",
+          'UPDATE page_aliases SET alias_norm=alias_norm', 'DELETE FROM page_aliases']) {
+          await expect(pools.get(role)!.unsafe(sql, sql.includes('$1') ? [source] : []).execute()).rejects.toMatchObject({ code: '42501' });
+          expect(await snapshot()).toEqual(before);
+        }
+      }
+      await engine.setPageAliases(slug, source, []);
+      expect([...await ordinary.unsafe('SELECT * FROM page_aliases WHERE source_id=$1 AND slug=$2', [source, slug])]).toEqual([]);
+      expect((await snapshot()).filter(row => row.source_id === foreignSource)).toEqual(before.filter(row => row.source_id === foreignSource));
+      await allAccepted(); // original protected pins, never refreshed for aliases
+      console.log('PG_SQL_AUTHORITY: ordinary alias replace/clear; exact grants; source RLS and private-role denials preserve rows');
+    } finally {
+      await engine.disconnect();
+      await admin.executeRaw('DELETE FROM page_aliases WHERE source_id IN ($1,$2) AND slug=$3', [source, foreignSource, slug]);
+    }
+  });
+
   test('candidate adapter add-only tags retain RLS, exact grants and per-statement revision fence', async () => {
     const adapter = pools.get(roles.adapter)!;
     const [page] = await adapter.unsafe("SELECT id FROM pages WHERE source_id=$1 AND slug='protected'", [source]);

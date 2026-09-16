@@ -23,7 +23,7 @@ let config: OperationContext['config'];
 const source = 'capture-fixture';
 const slug = 'concepts/captured';
 const original = '---\ntype: concept\ntitle: Original\ntags: [original]\n---\n\nOriginal body.\n';
-const revised = '---\ntype: concept\ntitle: Revised\ntags: [revised]\nowner: fixture\n---\n\nRevised publication with [[concepts/target]]. See src/core/sync.ts:42 and src/core/not-imported.ts:7.\n';
+const revised = '---\ntype: concept\ntitle: Revised\ntags: [revised]\naliases: ["  Capture Alias  "]\nowner: fixture\n---\n\nRevised publication with [[concepts/target]]. See src/core/sync.ts:42 and src/core/not-imported.ts:7.\n';
 const ctx = (): OperationContext => ({ engine, config, remote: false, sourceId: source, dryRun: false,
   logger: { info() {}, warn() {}, error() {} } });
 const call = (name: string, params: Record<string, unknown> = {}) =>
@@ -87,6 +87,10 @@ test('local capture --file --slug --source publishes code references on an enrol
     expect(current.revision).not.toBe(snapshot.revision);
     expect(current.file.baseline.generation).not.toBe(snapshot.file.baseline.generation);
     expect(current.page.title).toBe('Revised');
+    const persistedAliases = await engine.executeRaw('SELECT * FROM page_aliases WHERE source_id=$1 AND slug=$2 ORDER BY id', [source, slug]);
+    expect(persistedAliases).toHaveLength(1);
+    expect(persistedAliases[0]).toMatchObject({ source_id: source, slug, alias_norm: 'capture alias' });
+    expect(await engine.executeRaw('SELECT * FROM page_aliases WHERE source_id=$1 AND slug=$2', ['default', slug])).toEqual([]);
     expect(current.file.raw_markdown).toContain('Revised publication');
     // Local put_page file provenance differs from the capture channel columns.
     expect(current.page.frontmatter.ingested_via).toBe('put_page');
@@ -128,6 +132,7 @@ test('local capture --file --slug --source publishes code references on an enrol
     expect(JSON.parse(lines.join('\n'))).toMatchObject({ slug, status: 'skipped', written: true });
     expect(await call('get_page_checked')).toEqual(current);
     expect(await engine.getLinks(slug, { sourceId: source })).toEqual(links);
+    expect(await engine.executeRaw('SELECT * FROM page_aliases WHERE source_id=$1 AND slug=$2 ORDER BY id', [source, slug])).toEqual(persistedAliases);
     expect(network).not.toHaveBeenCalled();
   } finally { network.mockRestore(); exit.mockRestore(); err.mockRestore(); out.mockRestore(); }
 }), 30000);
@@ -137,6 +142,8 @@ test('actual capture stale page CAS never runs ordinary link or alias follow-up'
   const rows = await engine.executeRaw('SELECT * FROM page_file_operations');
   const journal = await readdir(join(home, 'journal'));
   const links = await engine.executeRaw('SELECT * FROM links ORDER BY id');
+  const persistedAliases = await engine.executeRaw('SELECT * FROM page_aliases ORDER BY id');
+  expect(persistedAliases.length).toBeGreaterThan(0);
   const input = join(home, 'stale-publication.md');
   await writeFile(input, revised + '\nStale candidate must not publish.\n');
   const putOrdinary = PageFileDatabase.prototype.putOrdinary;
@@ -160,6 +167,7 @@ test('actual capture stale page CAS never runs ordinary link or alias follow-up'
     expect(await engine.executeRaw('SELECT * FROM page_file_operations')).toEqual(rows);
     expect(await readdir(join(home, 'journal'))).toEqual(journal);
     expect(await engine.executeRaw('SELECT * FROM links ORDER BY id')).toEqual(links);
+    expect(await engine.executeRaw('SELECT * FROM page_aliases ORDER BY id')).toEqual(persistedAliases);
   } finally {
     network.mockRestore(); exit.mockRestore(); err.mockRestore(); out.mockRestore();
     aliases.mockRestore(); addLink.mockRestore(); stale.mockRestore();
@@ -203,6 +211,7 @@ test('legacy unenrolled capture accepts the same code references and retains sou
   try {
     await runCapture(engine, ['--file', input, '--slug', legacySlug, '--source', source, '--json']);
     expect(JSON.parse(lines.join('\n'))).toMatchObject({ slug: legacySlug, status: 'created_or_updated', written: true });
+    expect(await engine.executeRaw('SELECT alias_norm FROM page_aliases WHERE source_id=$1 AND slug=$2', [source, legacySlug])).toEqual([{ alias_norm: 'capture alias' }]);
     expect(await engine.getLinks(slugifyCodePath('src/core/sync.ts'), { sourceId: source })).toContainEqual(
       expect.objectContaining({ to_slug: legacySlug, link_type: 'documented_by', link_source: 'markdown',
         origin_slug: legacySlug, origin_field: 'compiled_truth', context: 'src/core/sync.ts' }),

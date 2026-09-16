@@ -178,10 +178,11 @@ export async function exerciseConnectedSource(f: {
     const capturePolicy = readFileSync(contractPath, 'utf8');
     const captureAnchor = readFileSync(operatorAnchor, 'utf8');
     const captureInput = join(f.directory, 'capture-publication.md');
-    writeFileSync(captureInput, '---\ntitle: Captured\ntype: concept\ntags: [captured]\nowner: capture-fixture\ndate: "2026-01-03"\n---\n\nCaptured publication with [[concepts/capture-target]].\n', { flag: 'wx', mode: 0o600 });
+    writeFileSync(captureInput, '---\ntitle: Captured\ntype: concept\ntags: [captured]\naliases: ["  Capture Alias  "]\nowner: capture-fixture\ndate: "2026-01-03"\n---\n\nCaptured publication with [[concepts/capture-target]].\n', { flag: 'wx', mode: 0o600 });
     const capture = await run('../../../src/cli.ts', ['capture', '--file', captureInput,
       '--slug', 'sibling', '--source', f.source, '--json']);
     const receipt = JSON.parse(capture.out);
+    expect(capture.err).not.toContain('page_aliases projection failed');
     expect(receipt).toMatchObject({ slug: 'sibling', status: 'created_or_updated', written: true, source_kind: 'capture-cli' });
     expect(receipt.chunks).toBeGreaterThan(0);
     const captured = await call('get_page_checked', 'sibling');
@@ -218,11 +219,25 @@ export async function exerciseConnectedSource(f: {
     const captureStable = await state();
     const captureLinks = await f.engine.getLinks('sibling', { sourceId: f.source });
     expect(captureLinks.some(link => link.to_slug === 'concepts/capture-target' && link.link_source === 'markdown')).toBe(true);
+    const readCaptureAliases = () => f.admin.executeRaw('SELECT * FROM page_aliases WHERE source_id=$1 AND slug=$2 ORDER BY id', [f.source, 'sibling']);
+    const captureAliases = await readCaptureAliases();
+    expect(captureAliases).toHaveLength(1);
+    expect(captureAliases[0]).toMatchObject({ source_id: f.source, slug: 'sibling', alias_norm: 'capture alias' });
+    expect(await f.admin.executeRaw('SELECT * FROM page_aliases WHERE source_id=$1 AND slug=$2', ['default', 'sibling'])).toEqual([]);
     await expect(call('put_page_checked', 'sibling', { operation_id: randomUUID(), expected_revision: captureBefore.revision,
       file_baseline: captureBefore.file.baseline, page: captured.page, raw_markdown: capturedRaw })).rejects.toThrow('precondition_failed');
     expect(await call('get_page_checked', 'sibling')).toEqual(captured);
     expect(await state()).toEqual(captureStable);
     expect(await f.engine.getLinks('sibling', { sourceId: f.source })).toEqual(captureLinks);
+    expect(await readCaptureAliases()).toEqual(captureAliases);
+    const skippedCapture = await run('../../../src/cli.ts', ['capture', '--file', captureInput,
+      '--slug', 'sibling', '--source', f.source, '--json']);
+    expect(JSON.parse(skippedCapture.out)).toMatchObject({ slug: 'sibling', status: 'skipped', written: true });
+    expect(skippedCapture.err).not.toContain('page_aliases projection failed');
+    expect(await readCaptureAliases()).toEqual(captureAliases); // IDs/timestamps too: no delete/reinsert.
+    expect(await call('get_page_checked', 'sibling')).toEqual(captured);
+    expect(await state()).toEqual(captureStable);
+    console.log('PG_CONNECTED_SOURCE_V2: actual capture persists nonempty normalized alias; stale and no-op preserve exact alias rows');
     expect(await f.admin.executeRaw('SELECT * FROM page_file_write_authorizations WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1)', [f.source])).toEqual([]);
 
     // Ingest publishes explicit links AFTER capture. This remains ordinary graph
