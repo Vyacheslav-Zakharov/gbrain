@@ -18,7 +18,7 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
     env:
-      SOURCE_SHA: 1706b24edb6f44f8fde1e9534e97d97a4bdb8289
+      SOURCE_SHA: 19a49c820911b90aa6383f44e29b8ebb64545f0a
       EVIDENCE: ${{ github.workspace }}/markdown-projection-evidence
     services:
       postgres:
@@ -77,6 +77,20 @@ jobs:
           SERVICE_ID: ${{ job.services.postgres.id }}
         run: |
           set -euo pipefail
+          [[ "$SERVICE_ID" =~ ^[0-9a-f]{64}$ ]]
+          timeout -k 5s 20s docker inspect --format '{{json .NetworkSettings.Networks}}' "$SERVICE_ID" > "$EVIDENCE/service-networks.json"
+          python3 - <<'PY'
+          import os, json, pathlib, ipaddress
+          p = pathlib.Path(os.environ['EVIDENCE'])
+          networks = json.loads((p/'service-networks.json').read_text())
+          assert isinstance(networks, dict) and len(networks) == 1, 'missing or ambiguous service network'
+          network, data = next(iter(networks.items()))
+          address = data['IPAddress']
+          assert str(ipaddress.IPv4Address(address)) == address, 'missing or noncanonical service IP'
+          receipt = dict(service_id=os.environ['SERVICE_ID'], network=network, expected_service_ip=address, expected_service_port=5432, caller_endpoint='127.0.0.1:5432', provenance='docker inspect Actions service ID')
+          (p/'topology-receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
+          (p/'expected-service-ip').write_text(address+'\n')
+          PY
           timeout -k 5s 20s docker exec "$SERVICE_ID" psql -U postgres -d postgres -X -v ON_ERROR_STOP=1 -Atc 'SELECT version()' > "$EVIDENCE/postgres-version.txt"
           timeout -k 5s 20s docker exec "$SERVICE_ID" psql -U postgres -d postgres -X -v ON_ERROR_STOP=1 -Atc "SELECT (SELECT count(*) FROM pg_database WHERE datname ~ '^mp_accept_[0-9a-f]{16}$'), (SELECT count(*) FROM pg_roles WHERE rolname ~ '^mp_accept_[0-9a-f]{16}_ordinary$')" > "$EVIDENCE/baseline.catalog"
           test "$(< "$EVIDENCE/baseline.catalog")" = '0|0'
@@ -89,7 +103,7 @@ jobs:
           set -euo pipefail
           cd source
           set +e
-          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-home" GITHUB_ACTIONS="$GITHUB_ACTIONS" MARKDOWN_PROJECTION_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres MARKDOWN_PROJECTION_DISPOSABLE=CREATE_AND_DROP_DATABASE MARKDOWN_PROJECTION_PHASE=red timeout -k 5s 120s bun run scripts/markdown-projection-hosted-acceptance.ts > "$EVIDENCE/red.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-home" GITHUB_ACTIONS="$GITHUB_ACTIONS" MARKDOWN_PROJECTION_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP="$(< "$EVIDENCE/expected-service-ip")" MARKDOWN_PROJECTION_DISPOSABLE=CREATE_AND_DROP_DATABASE MARKDOWN_PROJECTION_PHASE=red timeout -k 5s 120s bun run scripts/markdown-projection-hosted-acceptance.ts > "$EVIDENCE/red.output" 2>&1
           rc=$?
           set -e
           printf '%s\n' "$rc" > "$EVIDENCE/red.exit"
@@ -120,7 +134,7 @@ jobs:
           set -euo pipefail
           cd source
           set +e
-          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-home" GITHUB_ACTIONS="$GITHUB_ACTIONS" MARKDOWN_PROJECTION_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres MARKDOWN_PROJECTION_DISPOSABLE=CREATE_AND_DROP_DATABASE MARKDOWN_PROJECTION_PHASE=candidate timeout -k 5s 120s bun run scripts/markdown-projection-hosted-acceptance.ts > "$EVIDENCE/candidate.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-home" GITHUB_ACTIONS="$GITHUB_ACTIONS" MARKDOWN_PROJECTION_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP="$(< "$EVIDENCE/expected-service-ip")" MARKDOWN_PROJECTION_DISPOSABLE=CREATE_AND_DROP_DATABASE MARKDOWN_PROJECTION_PHASE=candidate timeout -k 5s 120s bun run scripts/markdown-projection-hosted-acceptance.ts > "$EVIDENCE/candidate.output" 2>&1
           rc=$?
           set -e
           printf '%s\n' "$rc" > "$EVIDENCE/candidate.exit"
