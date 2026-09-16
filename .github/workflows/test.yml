@@ -18,7 +18,7 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
     env:
-      SOURCE_SHA: f8498893e34185feeff530e457a1dcc26712863a
+      SOURCE_SHA: b5f1ba3561bf85df1511945fdcb9820325b11ad6
       EVIDENCE: ${{ github.workspace }}/markdown-projection-evidence
     services:
       postgres:
@@ -71,6 +71,15 @@ jobs:
           test ! -s "$EVIDENCE/source-status.txt"
           sha256sum scripts/markdown-projection-hosted-acceptance.ts docs/architecture/sql/markdown-projection-candidate.sql src/schema.sql bun.lock > "$EVIDENCE/source-sha256.txt"
           env -i PATH="$PATH" HOME="$HOME" CI=true timeout -k 5s 150s bun install --frozen-lockfile > "$EVIDENCE/install.output" 2>&1
+      - name: Bounded offline worker regressions and typecheck
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          cd source
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test test/markdown-projection-worker-blockers.serial.test.ts > "$EVIDENCE/worker-blockers.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test test/markdown-projection-worker.test.ts test/markdown-projection.test.ts > "$EVIDENCE/worker-regression.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 5s 120s bun x --no-install tsc --noEmit > "$EVIDENCE/worker-typecheck.output" 2>&1
+          printf 'passed\n' > "$EVIDENCE/worker-offline.status"
       - name: Service identity and empty fixture baseline
         timeout-minutes: 1
         env:
@@ -179,9 +188,10 @@ jobs:
               try: receipts.append(json.loads(line))
               except ValueError: pass
           receipts = [r for r in receipts if isinstance(r, dict)]
-          for stage in ['namespace.admission','service.identity','baseline.catalog','candidate.catalog','baseline.complete','candidate.complete']:
+          for stage in ['namespace.admission','service.identity','baseline.catalog','candidate.catalog','baseline.complete','candidate.complete','worker.complete']:
               assert sum(r.get('stage') == stage for r in receipts) == 1, stage
-          assert sum(r.get('phase') == 'engine' and r.get('status') == 'passed' and r.get('filesystemWorkerConnected') is False and r.get('applicationAuthProven') is False for r in receipts) == 1
+          assert sum(r.get('stage') == 'worker.complete' and r.get('status') == 'passed' and r.get('filesystemWorkerConnected') is True and r.get('applicationAuthProven') is False for r in receipts) == 1
+          assert sum(r.get('phase') == 'engine' and r.get('status') == 'passed' and r.get('filesystemWorkerConnected') is True and r.get('applicationAuthProven') is False for r in receipts) == 1
           cleanup = [r for r in receipts if 'cleanup' in r]
           assert len(cleanup) == 1 and cleanup[0]['cleanup'] == 'passed' and cleanup[0]['errors'] == []
           groups = [r for r in receipts if r.get('stage') == 'process.cleanup']
