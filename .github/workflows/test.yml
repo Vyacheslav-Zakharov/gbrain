@@ -79,6 +79,7 @@ jobs:
         set -euo pipefail
         uid="$1"; gid="$2"; source_dir="$3"; evidence="$4"; host_net="$5"; bun_path="$6"
         cd "$source_dir"
+        unset OLDPWD
         # Fail closed before Bun starts. No inherited credentials or host network.
         python3 - "$uid" "$gid" "$host_net" > "$evidence/network-proof.json" <<'PY'
         import json, os, subprocess, sys
