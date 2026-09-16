@@ -101,7 +101,9 @@ export async function exerciseConnectedBootstrap(f: {
     // SQL suite's own adapter probe pool is still open; only startup's additional
     // private session must disappear, not the independently-owned fixture pool.
     expect((await sessions()).length).toBeLessThan(adapter.length);
-    await expect(runtime.pages.get(f.source, 'connected', () => {})).rejects.toThrow('page_file_runtime_closed');
+    // Candidate target checks may throw synchronously before returning a promise.
+    // Normalize invocation, not just its result, so both failure forms are asserted.
+    await expect(Promise.resolve().then(() => runtime.pages.get(f.source, 'connected', () => {}))).rejects.toThrow('page_file_runtime_closed');
     await engine.connect(config); await engine.initSchema();
     runtime = (await resolvePageFileRuntime(ctx, f.source, 'connected'))!;
     expect((await runtime.pages.get(f.source, 'connected', () => {})).persistence).toBe('file_and_database');
@@ -117,7 +119,7 @@ export async function exerciseConnectedBootstrap(f: {
     for (const role of [f.roles.ordinary, f.roles.adapter]) {
       await f.admin.executeRaw(`GRANT INSERT ON page_file_bindings TO ${role}`);
       try {
-        await expect(runtime.pages.get(f.source, 'connected', () => {})).rejects.toThrow();
+        await expect(Promise.resolve().then(() => runtime.pages.get(f.source, 'connected', () => {}))).rejects.toThrow();
         expect(await snapshot()).toEqual(stable); expect(readFileSync(join(root, 'connected.md'), 'utf8')).toBe(raw);
       } finally { await f.admin.executeRaw(`REVOKE INSERT ON page_file_bindings FROM ${role}`); }
       expect((await runtime.pages.get(f.source, 'connected', () => {})).persistence).toBe('file_and_database');
@@ -131,7 +133,7 @@ export async function exerciseConnectedBootstrap(f: {
     await engine.initSchema();
     console.log('PG_CONNECTED_BOOTSTRAP: per-borrow ordinary and adapter drift denied; no catalog self-repair');
     chmodSync(anchorPath, 0o600);
-    await expect(runtime.pages.get(f.source, 'connected', () => {})).rejects.toThrow();
+    await expect(Promise.resolve().then(() => runtime.pages.get(f.source, 'connected', () => {}))).rejects.toThrow();
     await expect(engine.initSchema()).rejects.toThrow();
     await expect(engine.reconnect()).rejects.toThrow();
     expect(await snapshot()).toEqual(stable); expect(readFileSync(join(root, 'connected.md'), 'utf8')).toBe(raw);

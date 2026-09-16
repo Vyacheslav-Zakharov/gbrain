@@ -7,7 +7,7 @@ const pool: any = Object.assign(async () => [], { reserve: async () => session, 
 mock.module('postgres', () => ({ default: Object.assign(() => { opened++; return pool; }, { BigInt: {} }) }));
 const db = await import('../src/core/db.ts');
 mock.module('../src/core/db.ts', () => ({ ...db, connect: async () => false, getConnection: () => pool, disconnect: async () => {} }));
-mock.module('../src/core/page-file-host.ts', () => ({ validatePageFileHostManifest: () => ({ manifest: { database: 'fixture', adapterRole: 'adapter' }, revalidate() {} }) }));
+mock.module('../src/core/page-file-host.ts', () => ({ validatePageFileHostManifest: () => ({ manifest: { database: 'fixture', adapterRole: 'adapter', brainId: 'fixture', topology: 'single-host-local', lock: { path: '/tmp/unused-connected-lock' }, roots: [{ sourceId: 'fixture', mappingGeneration: '1', directory: { path: '/tmp/unused-connected-root' }, journal: { path: '/tmp/unused-connected-journal' } }] }, revalidate() {} }) }));
 const runtime = await import('../src/core/page-file-runtime.ts');
 const options = (engine: any): any => ({ mode: 'offline-verification', engine, host: {}, authority: { mode: 'offline-verification', credentialReference: 'fixture', resolveCredential: async () => 'postgres://adapter:***@example.invalid/fixture', expected: { role: 'adapter', ordinaryRole: 'ordinary', database: 'fixture' } } });
 mock.module('../src/core/page-file-bootstrap.ts', () => ({ loadPageFileStartupBootstrap: () => ({ status: 'offline-verification', start: (engine: any) => runtime.createPageFileRuntimeCandidate(options(engine)) }) }));
@@ -40,6 +40,27 @@ test('connected validation failure closes candidate pool and never resets tombst
   await expect(runtime.createPageFileRuntimeCandidate(options(engine))).rejects.toThrow('already_registered');
   expect(opened).toBe(1);
 });
+test('connected retained runtime rejects after disconnect without a database fallback', async () => {
+  const engine = new PostgresEngine();
+  await engine.connect(config);
+  let queries = 0;
+  // Only the binding lookup is fixture data; resolveCandidate, its returned
+  // pages.get method, and the engine's disconnect lifecycle are real.
+  engine.executeRaw = (async () => {
+    queries++;
+    return [{ canonical_root: '/tmp/unused-connected-root', relative_path: 'connected.md', binding_id: 'fixture' }];
+  }) as typeof engine.executeRaw;
+  const ctx = { engine, config: { engine: 'postgres' as const } };
+  const retained = (await runtime.resolvePageFileRuntime(ctx, 'fixture', 'connected'))!;
+  expect(retained).toBeDefined();
+  await engine.disconnect();
+  const before = queries;
+  await expect(Promise.resolve().then(() => retained.pages.get('fixture', 'connected', () => {}))).rejects.toThrow('page_file_runtime_closed');
+  await expect(runtime.resolvePageFileRuntime(ctx, 'fixture', 'connected')).rejects.toThrow('page_file_runtime_closed');
+  expect(queries).toBe(before);
+  expect(opened).toBe(1); expect(ended).toBe(1);
+});
+
 test('connected failed private close stays closed and cannot re-register', async () => {
   const engine = new PostgresEngine(); await engine.connect(config);
   failEnd = true;
