@@ -126,7 +126,7 @@ export class PostgresEngine implements BrainEngine {
    * v0.30.1 (Fix 1 + X1 + T5): instance-owned ConnectionManager.
    * - INSTANCE-owned: each PostgresEngine constructs its own.
    * - Worker engines (cycle, sync) inherit via opts.parentConnectionManager.
-   * - transaction() clones share the parent's via copy.
+   * - transaction() facades deny manager access; statements stay on reserved SQL.
    * - Module-singleton path (when poolSize unset) wraps the db.ts singleton.
    *
    * Public so callers can access read()/ddl()/bulk()/healthCheck() without
@@ -968,13 +968,70 @@ export class PostgresEngine implements BrainEngine {
 
   async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
     const conn = this.sql;
-    return conn.begin(async (tx) => {
-      // Create a scoped engine with tx as its connection, no shared state mutation
-      const txEngine = Object.create(this) as PostgresEngine;
-      Object.defineProperty(txEngine, 'sql', { get: () => tx });
-      Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
-      return fn(txEngine);
-    }) as Promise<T>;
+    let active = true;
+    try {
+      return await conn.begin(async (tx) => {
+        const assertActive = () => {
+          if (!active) throw new Error('Transaction is no longer active');
+        };
+        const unsupported = (key: PropertyKey): never => {
+          throw new Error(`${String(key)} is not supported on a transaction facade`);
+        };
+        // Narrow postgres.js 3.4.x contract: tagged SQL/builders, unsafe and
+        // value helpers only. notify closes over the ROOT sql (pool escape);
+        // file dispatches asynchronously; savepoint/prepare own lifecycles.
+        const helpers = new Set(['unsafe', 'json', 'array', 'typed', 'types']);
+        const wrap = (callable: Function, owner: unknown, root = false): Function =>
+          new Proxy(callable, {
+            apply(target, _receiver, args) {
+              assertActive();
+              const result = Reflect.apply(target, owner, args);
+              // Preserve the actual Query identity (fragment instanceof checks,
+              // Promise binding and chainable values/simple/cursor helpers).
+              // Query.handle defers handler by a microtask: guard at dispatch
+              // too, including queries constructed before expiry but awaited later.
+              if (result && typeof result.handler === 'function' && typeof result.reject === 'function') {
+                const handler = result.handler;
+                result.handler = function (...handlerArgs: unknown[]) {
+                  try { assertActive(); } catch (error) { result.reject(error); return; }
+                  return Reflect.apply(handler, this, handlerArgs);
+                };
+              }
+              return result;
+            },
+            get(target, key) {
+              // Promise assimilation probes nonthenable SQL/helper functions even
+              // after expiry. Preserve absence only; invocation stays guarded.
+              if (key === 'then' && !Reflect.has(target, key)) return undefined;
+              assertActive();
+              if (root && !helpers.has(String(key))) return unsupported(key);
+              // Custom typed helpers are own properties; no Function prototype
+              // or constructor route back to an unguarded callable.
+              if (!Object.hasOwn(target, key)) return unsupported(key);
+              const value = Reflect.get(target, key, target);
+              return typeof value === 'function' ? wrap(value, target) : value;
+            },
+          });
+        const scopedSql = wrap(tx, tx, true) as unknown as ReturnType<typeof postgres>;
+        const txEngine = Object.create(this) as PostgresEngine;
+        Object.defineProperty(txEngine, 'sql', { get: () => { assertActive(); return scopedSql; } });
+        Object.defineProperty(txEngine, '_sql', { value: scopedSql, writable: false });
+        // Scope supports query methods, not pool/DDL/lifecycle management.
+        // Fail before inherited implementations can access parent-owned state.
+        for (const key of ['connectionManager', 'connect', 'disconnect', 'reconnect',
+          'initSchema', 'transaction', 'withReservedConnection']) {
+          Object.defineProperty(txEngine, key, { get: () => unsupported(key) });
+        }
+        // Explicit transaction routing avoids even inspecting the parent manager.
+        Object.defineProperty(txEngine, 'executeRawDirect', { value: txEngine.executeRaw.bind(txEngine) });
+        return fn(txEngine);
+      }) as T;
+    } finally {
+      // postgres.js races the callback against connection.onclose. The driver
+      // can settle while the callback is still suspended: expire the adapter
+      // at driver settlement, not callback completion. Never retry on a pool.
+      active = false;
+    }
   }
 
   async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
@@ -5372,13 +5429,10 @@ export class PostgresEngine implements BrainEngine {
    * heartbeats survive the transaction-pooler's per-transaction connection
    * recycling. See BrainEngine.executeRawDirect for the full rationale.
    *
-   * When this engine is a transaction-scoped clone (txEngine from
-   * transaction()), `connectionManager` is inherited but `this.sql` is the tx
-   * connection; we intentionally honor the tx connection in that case by
-   * falling through to this.sql, because routing a statement inside an open
-   * transaction onto a different pool would break atomicity. The lock
-   * hot-path (claim/renewLock) does NOT run inside transaction(), so in
-   * practice this always reaches the direct pool there.
+   * transaction() facades override this method with executeRaw on the guarded
+   * reserved connection and deny connectionManager access entirely. Ordinary
+   * parent engines retain the direct-pool routing below. The lock hot-path
+   * (claim/renewLock) does NOT run inside transaction().
    */
   async executeRawDirect<T = Record<string, unknown>>(
     sql: string,
