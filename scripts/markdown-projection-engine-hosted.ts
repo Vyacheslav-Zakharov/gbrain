@@ -164,7 +164,7 @@ try {
   assert.equal((await observer`SELECT status FROM markdown_projection_obligations WHERE page_id=${page.id}`)[0].status,'pending');
   assert.equal((await observer`SELECT * FROM markdown_projection_current`).length,0);
   const result=await drainMarkdownProjectionOnce(config,engine);
-  assert.equal(result.status,'materialized');
+  assert.equal(result.status,'materialized');assert('path' in result);
   const [current]=await observer`SELECT * FROM markdown_projection_current WHERE source_id='default'`;
   assert(current);assert.equal(current.current_path,result.path);
   const bytes=await readFile(`${root}/${current.current_path}`,'utf8');
@@ -174,6 +174,9 @@ try {
   assert.equal(bytes,serializePageToMarkdown((await engine.getPage('worker-lane',opts))!,['worker-tag']));
   assert.equal((await drainMarkdownProjectionOnce(config,engine)).status,'idle');
   emit({stage:'worker.complete',status:'passed',filesystemWorkerConnected:true,applicationAuthProven:false});
+  enter('worker.races');
+  const {workerRaces}=await import('./markdown-projection-worker-races');
+  await workerRaces(engine,observer,target.href,config,emit);
 } catch(e) { failed=true; failure=e; emit({stage,status:'failed',message:String(e),code:(e as any)?.code}); }
 finally {
   const errors:unknown[]=[];
@@ -183,7 +186,9 @@ finally {
   if(created)await attempt('database.drop',()=>admin.unsafe(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`));
   await attempt('catalog.residue',async()=>assert.equal((await admin`SELECT datname FROM pg_database WHERE datname=${name}`).length,0));
   await attempt('admin.close',()=>admin.end({timeout:2}));
-  await attempt('home.remove',()=>rm(home,{recursive:true,force:true}));
+  // A timed-out JS callback can still write: retain its root for supervisor teardown.
+  if(!(failure as any)?.unsafeFilesystemCleanup)await attempt('home.remove',()=>rm(home,{recursive:true,force:true}));
+  else errors.push({label:'home.retained',error:'worker callback did not finish; filesystem cleanup refused'});
   emit({cleanup:errors.length?'failed':'passed',errors,wholeServiceTeardownRequired:true});
   if(failed)throw failure; assert.equal(errors.length,0);
 }

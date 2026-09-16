@@ -1,6 +1,6 @@
 # Markdown projection: development contract and finite acceptance ledger
 
-Status: **Development only; prior real-engine hosted lane passed; new filesystem worker is offline-tested and hosted-unexecuted.** Current preparation base `8108cc95ee29c9e5caadcb8c3f2e2cf5dda42850`. No activation authorization.
+Status: **Development only; first actual filesystem worker hosted run VERIFIED; new backend-race/process-crash schedules authored, hosted-unexecuted.** Current preparation base `b5f1ba3561bf85df1511945fdcb9820325b11ad6`. No activation authorization.
 
 ## Blocking delta review disposition
 
@@ -73,8 +73,8 @@ Proposed protected local CLI `markdown-projection status|drain` is bounded by so
 | A4 | Atomic obligations across all writers/SQL/tags, rollback, watermark and purge tombstones | Synthetic baseline/candidate hosted run 35099879925 attempt 1 passed; not all writers. A4-engine below remains hosted-pending; registration prohibited |
 | A5 | Full canonical serializer and generation/hash snapshots, rights and engine admission | Pending integration/proof |
 | A6 | Guarded physical roots, ownership, symlink races, conflicts and attachments unchanged | Pending real-FS adapter tests |
-| A7 | Shared writer serialization, two workers, stale retry/delete/rename/source-move/recreate | Source-local SHARE/UPDATE guard candidate; fixed-snapshot and coexistence assertions authored, not executed; FS worker remains disconnected |
-| A8 | Crash/fsync/install/ack/restart and bounded retry/reconciliation | Pending fault-injection + hosted DB proof |
+| A7 | Shared writer serialization, two workers, stale retry/delete/rename/source-move/recreate | Actual worker hosted connected. Two independent worker-engine sessions plus observer termination at before_write/after_write authored; actual PID separation, terminated-backend absence, stale ACK rejection and latest-pointer preservation required. New schedules hosted-unexecuted; remaining mutation schedules open |
+| A8 | Crash/fsync/install/ack/restart and bounded retry/reconciliation | First hosted exception/rollback/retry passed; real SIGKILL-after-durable-file recovery authored through worker, hosted-unexecuted. Offline supervisor SIGKILL/group-reaping passed; not DB proof |
 | A9 | Accurate API/CLI/status, protected job and scheduler, portal/reverse-sync isolation | Pending production-call-path implementation and tests |
 | A10 | Measured <=1min healthy latency, >5min alert; stopped worker | Pending controlled acceptance measurements |
 | A11 | Independent exact-artifact review + hosted DB acceptance | First reviewed synthetic hosted run passed; new engine-lane bytes require fresh review then separately authorized exact-SHA run. No local DB execution |
@@ -96,8 +96,9 @@ write/ack seams, not SIGKILL or a real PostgreSQL backend death. The first missi
 module was observed RED, followed by caller GREEN; adversarial cases were added
 subsequently (not individually observed RED). Prior engine artifact identity and
 completion/cleanup receipts were independently reread; that proof predates these
-worker bytes. Hosted lane now invokes the worker and checks rollback/retry, exact
-canonical bytes, hash, current view and idle repeat, but has NOT been dispatched.
+worker bytes. That historical limitation is superseded by the first-worker receipt below.
+Hosted lane invoked the worker and passed rollback/retry, exact canonical bytes, hash,
+current view and idle repeat. The new race/crash delta has NOT been dispatched.
 
 Remaining seams: separate nonowner worker authorization/enrollment and complete root
 inventory/admission, scheduler/CLI/status, tombstone handling, stale two-worker real
@@ -105,7 +106,29 @@ backend-death concurrency and process/power-loss tests, error/lag persistence an
 Roots must be trusted precreated mode 0700; same-UID malicious writers are outside
 this protection. No archive/import/backfill/attachments/manual-file mutation.
 
-## Executed proof and exact next task
+## First worker receipt and next finite proof
+
+Verified downloaded identity: source `b5f1ba3561bf85df1511945fdcb9820325b11ad6`,
+workflow `8affe345efe43e7e1f7a669eff1a15f480f18de7`, run `35104957553`, attempt 1.
+`engine.exit=0`, `worker.complete` passed with `filesystemWorkerConnected:true`,
+engine complete passed, cleanup errors empty, final catalog `0|0`, supervised groups
+and sessions empty. Service-owner fixture only; no application-role proof.
+
+New `scripts/markdown-projection-worker-races.ts` is called from the actual hosted
+engine lane after first-worker assertions. No worker/product/SQL privileges changed.
+Two schedules terminate a real independently observed worker backend, commit a newer
+ordinary engine write, publish via a second independent worker, then resume the stale
+worker and require real ACK failure plus byte/pointer preservation. A separate real
+worker child stops after fsync/readback before ACK; the bounded Python supervisor
+SIGKILLs it, reuses existing process-group/session reaping, and parent verifies backend
+absence, unchanged pending obligation, exact-path/bytes retry and idle repeat.
+These are **executable hosted assertions, not executed backend-death/crash proof**.
+No local DB, PGLite, containers, production writes, commit or dispatch in preparation.
+No production defect was demonstrated; no product fix or claimed RED/GREEN cycle.
+Next: exact-delta review and separately authorized immutable hosted run; require both
+`worker.backend-race` receipts and `worker.process-crash` plus aggregate exit/cleanup.
+
+## Historical executed proof and task history
 
 Strict sequence: test missing caller RED (assertion undefined/function), implement disabled slice GREEN (1 test), extend enabled caller RED (expected pending, got not_required), implement pure enabled contract GREEN (2 tests, 57 assertions). Receipts: `projection-red-1.log`, `projection-green-1.log`, `projection-red-2.log`, `projection-green-2.log` in the external development-start report directory. Exact command: `timeout -k 3s 25s bun test test/markdown-projection.test.ts`. Only this file ran. Initial prerequisite run failed because isolated worktree lacked dependencies; read-only reuse via temporary node_modules symlink to installed dependencies resolved it without install/postinstall; the symlink was removed after verification. No dependencies modified. Narrow Bun compilation succeeded (not a project typecheck). A combined typecheck command was blocked by an execution safety guard; no typecheck coverage is claimed. No broad tests or DB/provider calls.
 
