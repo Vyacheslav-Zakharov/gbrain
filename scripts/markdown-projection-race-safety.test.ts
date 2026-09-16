@@ -1,4 +1,33 @@
 import {test,expect} from 'bun:test';
+import postgres from 'postgres';
+
+// Offline driver seam: real postgres.js serializers, no database/socket opened.
+// The SQL cast supplies ParameterDescription's OID; simulate only catalog rows.
+function precisionObserver(initial:BackendIdentity, final:BackendIdentity|null=initial){
+ const driver=postgres({max:1});let kills=0;
+ const sql=async(strings:TemplateStringsArray,...values:unknown[])=>{
+  const text=strings.join('?');
+  if(!text.includes('pg_stat_activity'))return [{pid:99}];
+  if(!text.includes('pg_terminate_backend'))return [initial];
+  const timestampSlot=values.length-1;
+  const oid=strings[timestampSlot+1].startsWith('::text')?25:1184;
+  const wire=(driver.options.serializers as any)[oid](values[timestampSlot]);
+  // Normalize only spelling, never fractional precision. A 1us reused PID differs.
+  const instant=(x:string)=>x.replace(' ','T').replace('+00','Z').replace(/(\.\d{3})Z$/,'$1000Z');
+  if(!final || final.pid!==values[0] || final.pid===99 || final.datname!==values[1] || final.usename!==values[2] || final.application_name!==values[3] || instant(final.backend_start)!==instant(wire))return [];
+  kills++;return [{killed:true}];
+ };
+ return {sql,get kills(){return kills;},close:()=>driver.end()};
+}
+test('real driver timestamp serializer preserves guarded microsecond identity',async()=>{
+ const o=precisionObserver(identity);
+ try{await terminateWorker(o.sql,identity,expected);expect(o.kills).toBe(1);}finally{await o.close();}
+});
+for(const field of ['missing','backend_start','datname','usename','application_name','pid'] as const)test(`second statement refuses changed ${field} with zero termination`,async()=>{
+ const final=field==='missing'?null:{...identity,...(field==='backend_start'?{backend_start:'2026-09-16 00:00:00.123457+00'}:field==='pid'?{pid:43}:{[field]:'wrong'})};
+ const o=precisionObserver(identity,final);
+ try{await expect(terminateWorker(o.sql,identity,expected)).rejects.toThrow('worker identity changed before termination');expect(o.kills).toBe(0);}finally{await o.close();}
+});
 import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';

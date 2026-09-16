@@ -9,7 +9,9 @@ export async function terminateWorker(observer:any, identity:BackendIdentity, ex
  assert.equal(rows.length,1,'worker identity absent');
  for(const key of ['pid','datname','usename','application_name','backend_start'] as const)assert.equal(rows[0][key],identity[key],`worker identity mismatch: ${key}`);
  // Recheck every ownership field in the terminating statement, not just the earlier read.
- const killed=await observer`SELECT pg_terminate_backend(pid) AS killed FROM pg_stat_activity WHERE pid=${identity.pid} AND pid<>pg_backend_pid() AND datname=${expected.datname} AND usename=${expected.usename} AND application_name=${expected.application_name} AND backend_start=${identity.backend_start}::timestamptz`;
+ // Bind as text before the server cast: postgres.js OID 1184 serialization uses
+ // JS Date and truncates backend_start microseconds. Keep exact timestamp equality.
+ const killed=await observer`SELECT pg_terminate_backend(pid) AS killed FROM pg_stat_activity WHERE pid=${identity.pid} AND pid<>pg_backend_pid() AND datname=${expected.datname} AND usename=${expected.usename} AND application_name=${expected.application_name} AND backend_start=${identity.backend_start}::text::timestamptz`;
  assert.equal(killed.length,1,'worker identity changed before termination');assert.equal(killed[0].killed,true);
 }
 async function bounded(promise:Promise<unknown>,timeoutMs:number,label:string){
