@@ -20,6 +20,18 @@ type Candidate = {
 // associated after close/failure so requests cannot fall through to ordinary SQL.
 const candidates = new WeakMap<object, Candidate>();
 
+/** Import routing probes the private registration, not a public config flag.
+ * Tombstones and host drift must refuse before any legacy import fallback. */
+export async function hasPageFileRuntimeCandidate(engine: BrainEngine): Promise<boolean> {
+  const candidate = candidates.get(engine);
+  if (!candidate) return false;
+  if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
+  const { host } = await candidate.ready;
+  if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
+  host.revalidate();
+  return true;
+}
+
 /** Disabled-candidate integration only. No production caller installs this.
  * The lifecycle owner must await close before disconnecting its ordinary engine.
  * All request contexts sharing that engine share this one private authority.
@@ -114,8 +126,40 @@ export interface PageFileRuntimeConfig {
 /** Entire legacy operation owns the gate; its write-through tail deliberately
  * does not reacquire flock. Only trusted server config supplies lock identity. */
 export async function withRuntimeLegacyPageWrite<T>(ctx: Pick<OperationContext, 'engine' | 'config'>, source: string, slug: string, mutate: () => Promise<T>): Promise<T> {
-  if (candidates.has(ctx.engine)) throw new PageFileSyncConflict('page_file_candidate_lifecycle_unavailable');
   const config = ctx.config.page_file_runtime;
+  if (config?.mode === 'production') throw new PageFileSyncConflict('file_runtime_prerequisites_pending');
+  const candidate = candidates.get(ctx.engine);
+  if (candidate) {
+    if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
+    const { host } = await candidate.ready;
+    const validate = () => {
+      if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
+      host.revalidate();
+    };
+    validate();
+    const root = host.manifest.roots.find(r => r.sourceId === source);
+    if (!root) throw new PageFileSyncConflict('page_file_runtime_source_unavailable');
+    const target = async () => {
+      const [src] = await ctx.engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1', [source]);
+      if (src?.local_path !== root.directory.path) throw new PageFileSyncConflict('binding_changed');
+      const [page] = await ctx.engine.executeRaw<{ source_path: string | null }>('SELECT source_path FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL LIMIT 1', [source, slug]);
+      const stored = page?.source_path?.trim();
+      if (stored && isAbsolute(stored)) throw new Error('page_file_path_outside_root');
+      return resolve(root.directory.path, stored || `${slug}.md`);
+    };
+    const filePath = await target();
+    validate();
+    const coordination = { root: root.directory.path, lockDirectory: host.manifest.lock.path, topology: host.manifest.topology, timeoutMs: 1000 };
+    // Ordinary engine only. The existing gate checks enrollment/collisions under
+    // root(shared)+path(exclusive), held until the registered DB+file tail ends.
+    return withLegacyPageFileWrite(ctx.engine, source, slug, filePath, async () => {
+      validate();
+      assertPageFileRootClean(coordination);
+      if (await target() !== filePath) throw new PageFileSyncConflict('binding_changed');
+      validate();
+      return mutate();
+    }, coordination);
+  }
   if (!config || config.mode === 'disabled') return mutate();
   if (config.mode !== 'isolated-integration') throw new PageFileSyncConflict('file_runtime_prerequisites_pending');
   if (ctx.engine.kind !== 'pglite' || config.topology !== 'single-host-local' || !config.brainId)

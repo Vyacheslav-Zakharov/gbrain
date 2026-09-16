@@ -1,9 +1,11 @@
-import { test, expect, mock } from 'bun:test';
+import { test, expect, mock, spyOn } from 'bun:test';
 import { mkdtempSync, mkdirSync, lstatSync, realpathSync, rmSync, writeFileSync, readFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { PageFileDatabase } from '../src/core/page-file-db.ts';
+import { acquirePageFileLock } from '../src/core/page-file-lock.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 // Offline transport bridge only: real authority/PostgresEngine/adapters/registry.
 // PGLite is NOT evidence of PostgreSQL login, grants or RLS isolation.
@@ -35,7 +37,7 @@ const sql: any = Object.assign((parts: TemplateStringsArray, ...values: any[]) =
 });
 mock.module('postgres', () => ({ default: Object.assign(() => sql, { BigInt: {} }) }));
 
-async function fixture(allowDatabaseOnly = false) {
+async function fixture(allowDatabaseOnly = false, allowLegacy = false) {
   const base = mkdtempSync(join(realpathSync(import.meta.dir), 'runtime-authority-'));
   const pin = (name: string) => {
     const path = join(base, name); mkdirSync(path, { mode: 0o700 });
@@ -55,11 +57,15 @@ async function fixture(allowDatabaseOnly = false) {
   let ordinaryReads = 0;
   const engine: any = { kind: 'postgres', executeRaw: async (query: string, values?: unknown[]) => {
     ordinaryReads++;
-    if (!query.startsWith('SELECT canonical_root,relative_path,binding_id FROM page_file_bindings')
+    if (!allowLegacy && !query.startsWith('SELECT canonical_root,relative_path,binding_id FROM page_file_bindings')
       && !(allowDatabaseOnly && (query.startsWith('SELECT * FROM pages WHERE source_id = $1')
         || query === 'SELECT local_path FROM sources WHERE id = $1'))) throw new Error('ordinary_sql_forbidden');
     return backing.executeRaw(query, values);
   } };
+  if (allowLegacy) Object.setPrototypeOf(engine, new Proxy(backing, { get(target, key) {
+    const value = Reflect.get(target, key);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } }));
   if (allowDatabaseOnly) engine.getConfig = (key: string) => backing.getConfig(key);
   const ctx: any = { engine, config: { engine: 'postgres', page_file_runtime: { mode: 'disabled' } }, remote: false, sourceId: 'default', dryRun: false };
   const authority = { mode: 'offline-verification' as const, credentialReference: 'offline-fixture', resolveCredential: async () => 'postgres://fixture.invalid/offline', expected: { role: manifest.adapterRole, database: manifest.database, ordinaryRole: 'ordinary-example' } };
@@ -67,8 +73,84 @@ async function fixture(allowDatabaseOnly = false) {
   const runtime = await import('../src/core/page-file-runtime.ts');
   const { operationsByName } = await import('../src/core/operations.ts');
   const call = (name: string, params: any, context = ctx) => operationsByName[name].handler(context, params) as Promise<any>;
-  return { base, host, manifest, ctx, authority, runtime, call, page, ordinaryReads: () => ordinaryReads,
+  return { base, host, manifest, ctx, authority, runtime, call, page, backing, ordinaryReads: () => ordinaryReads,
     cleanup: async () => { borrowHook = undefined; await backing.disconnect(); rmSync(base, { recursive: true, force: true }); } };
+}
+
+test('registered candidate legacy put holds manifest root and path across ordinary DB and file tail', async () => {
+  const f = await fixture(false, true); let lifecycle: any;
+  let release = () => {}; let spy: any;
+  try {
+    const root = f.manifest.roots[0].directory.path;
+    await f.backing.putPage('ordinary', f.page);
+    writeFileSync(join(root, 'ordinary.md'), 'Before');
+    lifecycle = await f.runtime.createPageFileRuntimeCandidate({ mode: 'offline-verification', engine: f.ctx.engine, host: f.host, authority: f.authority });
+    const privateBefore = statements.length;
+    let entered!: () => void;
+    const ready = new Promise<void>(r => entered = r), barrier = new Promise<void>(r => release = r);
+    const getTags = f.backing.getTags.bind(f.backing);
+    spy = spyOn(f.ctx.engine, 'getTags').mockImplementation(async (slug: string, opts: any) => {
+      if (slug === 'ordinary') { entered(); await barrier; }
+      return getTags(slug, opts);
+    });
+    const writer = withEnv({ GBRAIN_HOME: f.base, OPENAI_API_KEY: undefined, ANTHROPIC_API_KEY: undefined, GEMINI_API_KEY: undefined, GOOGLE_API_KEY: undefined, VOYAGE_API_KEY: undefined }, () => f.call('put_page', { source_id: 'default', slug: 'ordinary', content: 'After' }, { ...f.ctx, remote: true }));
+    try {
+      await Promise.race([ready, writer.then(() => { throw new Error('missing file-tail barrier'); })]);
+      expect((await f.backing.getPage('ordinary'))!.compiled_truth).toBe('After');
+      expect(readFileSync(join(root, 'ordinary.md'), 'utf8')).toBe('Before');
+      for (const options of [{ rootMode: 'exclusive' as const, paths: [] }, { rootMode: 'shared' as const, paths: ['ordinary.md'] }]) {
+        const lock = await acquirePageFileLock({ root, lockDirectory: f.manifest.lock.path, topology: 'single-host-local', timeoutMs: 20, ...options });
+        try { expect(lock).toBeNull(); } finally { await lock?.release(); }
+      }
+    } finally { release(); }
+    const result = await writer;
+    expect(result.write_through.written).toBe(true);
+    expect(readFileSync(join(root, 'ordinary.md'), 'utf8')).toContain('After');
+    expect(statements.length).toBe(privateBefore);
+    await expect(f.call('put_page', { source_id: 'default', slug: 'example', content: 'Rejected' })).rejects.toThrow('page_file_unsupported_writer');
+    expect((await f.backing.getPage('example'))!.compiled_truth).toBe('Before');
+    expect(readFileSync(join(root, 'example.md'), 'utf8')).toBe('Before');
+  } finally { release(); spy?.mockRestore(); await lifecycle?.close(); await f.cleanup(); }
+}, 60000);
+
+for (const state of ['closed', 'failed', 'host-drift', 'host-drift-under-lock', 'mapping-drift-under-lock', 'production'] as const) {
+  test(`registered candidate legacy put rejects ${state} before ordinary mutation`, async () => {
+    const f = await fixture(false, true); let lifecycle: any; let spy: any;
+    try {
+      const root = f.manifest.roots[0].directory.path;
+      await f.backing.putPage('ordinary', f.page);
+      writeFileSync(join(root, 'ordinary.md'), 'Before');
+      const before = await f.backing.getPage('ordinary');
+      const options = { mode: 'offline-verification' as const, engine: f.ctx.engine, host: f.host, authority: f.authority };
+      if (state === 'failed') {
+        await expect(f.runtime.createPageFileRuntimeCandidate({ ...options, authority: { ...f.authority, expected: { ...f.authority.expected, database: 'wrong-example' } } })).rejects.toThrow('page_file_runtime_identity_mismatch');
+      } else lifecycle = await f.runtime.createPageFileRuntimeCandidate(options);
+      if (state === 'closed') await lifecycle.close();
+      if (state === 'host-drift') chmodSync(f.manifest.lock.path, 0o755);
+      if (state === 'production') f.ctx.config.page_file_runtime.mode = 'production';
+      if (state.endsWith('under-lock')) {
+        let reads = 0;
+        const executeRaw = f.ctx.engine.executeRaw.bind(f.ctx.engine);
+        spy = spyOn(f.ctx.engine, 'executeRaw').mockImplementation(async (query: string, values: any) => {
+          if (query === 'SELECT local_path FROM sources WHERE id=$1' && ++reads === 2) {
+            if (state === 'host-drift-under-lock') chmodSync(f.manifest.lock.path, 0o755);
+            else return [{ local_path: f.base }];
+          }
+          return executeRaw(query, values);
+        });
+      }
+      const writes = spyOn(f.backing, 'putPage');
+      try {
+        const code = state.startsWith('host-drift') ? 'page_file_host_directory_drift'
+          : state === 'production' ? 'file_runtime_prerequisites_pending'
+          : state === 'mapping-drift-under-lock' ? 'binding_changed' : 'page_file_runtime_closed';
+        await expect(f.call('put_page', { source_id: 'default', slug: 'ordinary', content: 'Rejected' })).rejects.toThrow(code);
+        expect(writes).not.toHaveBeenCalled();
+        expect(await f.backing.getPage('ordinary')).toEqual(before);
+        expect(readFileSync(join(root, 'ordinary.md'), 'utf8')).toBe('Before');
+      } finally { writes.mockRestore(); }
+    } finally { spy?.mockRestore(); await lifecycle?.close(); await f.cleanup(); }
+  }, 60000);
 }
 
 test('registered checked operations use the private shared candidate and close without ordinary fallback', async () => {
@@ -155,15 +237,12 @@ test('registered read revalidates host after resolution and session borrow under
 }, 60000);
 
 
-test('candidate never falls through to ordinary legacy, root or enrollment paths', async () => {
+test('candidate never falls through to ordinary root or enrollment paths', async () => {
   const f = await fixture(); let lifecycle: any;
   try {
     lifecycle = await f.runtime.createPageFileRuntimeCandidate({ mode: 'offline-verification', engine: f.ctx.engine, host: f.host, authority: f.authority });
-    let mutated = false;
-    await expect(f.runtime.withRuntimeLegacyPageWrite(f.ctx, 'default', 'example', async () => { mutated = true; })).rejects.toThrow('page_file_candidate_lifecycle_unavailable');
     await expect(f.runtime.resolvePageFileRootHost(f.ctx, f.manifest.roots[0].directory.path)).rejects.toThrow('page_file_candidate_lifecycle_unavailable');
     await expect(f.runtime.enrollPageFileRuntime(f.ctx, 'default', 'example')).rejects.toThrow('page_file_candidate_lifecycle_unavailable');
-    expect(mutated).toBe(false);
     expect(f.ordinaryReads()).toBe(0);
   } finally { await lifecycle?.close(); await f.cleanup(); }
 }, 60000);
