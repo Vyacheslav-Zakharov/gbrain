@@ -159,6 +159,8 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
   afterAll(async () => {
     try {
       await Promise.all([...pools.values()].map(pool => pool.end({ timeout: 5 })));
+      await admin.executeRaw('DELETE FROM page_file_write_authorizations WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1)', [source]);
+      await admin.executeRaw('DELETE FROM page_file_operations WHERE binding_id IN (SELECT binding_id FROM page_file_bindings WHERE source_id=$1)', [source]);
       await admin.executeRaw('DELETE FROM page_file_bindings WHERE source_id=$1', [source]);
       await admin.executeRaw('DELETE FROM sources WHERE id=$1', [source]);
       for (const table of policyTables) await admin.executeRaw(`DROP POLICY ${policy} ON public.${table}`);

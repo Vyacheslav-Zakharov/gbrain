@@ -74,16 +74,19 @@ export async function exerciseConnectedDirtyRoot(f: {
       `SELECT to_jsonb(t)::text AS row FROM ${table} t WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1) ORDER BY to_jsonb(t)::text`, [f.source]));
     return rows;
   };
+  console.log('PG_CONNECTED_DIRTY_ROOT_PHASE: initial-read');
   const before = (await get()).result;
   expect(before).toBeDefined();
   const request = { ...target, operation_id: randomUUID(), expected_revision: before.revision,
     file_baseline: before.file.baseline, page: { ...before.page, compiled_truth: 'Unchosen page intent' },
     raw_markdown: before.file.raw_markdown.replace(before.page.compiled_truth, 'Unchosen page intent') };
   // Genuine pre-prepare page intent, not a fabricated pending_op_id or journal.
+  console.log('PG_CONNECTED_DIRTY_ROOT_PHASE: intent-crash');
   await invoke({ operation: 'put_page_checked', request, boundary: 'intent' });
   const intent = tree(f.journal);
   expect(Object.keys(intent).some(path => path.startsWith(request.operation_id + '/'))).toBe(true);
   const beforeDb = await db();
+  console.log('PG_CONNECTED_DIRTY_ROOT_PHASE: git-fixture');
   git('init', '-b', 'main'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
   git('add', '.'); git('commit', '-m', 'before interrupted root');
   git('checkout', '-b', 'incoming');
@@ -93,6 +96,7 @@ export async function exerciseConnectedDirtyRoot(f: {
   git('add', '.'); git('commit', '-m', 'incoming root');
   const incomingHead = git('rev-parse', 'HEAD');
   git('checkout', 'main'); git('remote', 'add', 'origin', f.root);
+  console.log('PG_CONNECTED_DIRTY_ROOT_PHASE: pull-crash');
   await invoke({ action: 'pull', boundary: 'dirty-root' });
   const marker = join(f.lock, createHash('sha256').update(f.root + '\0ROOT').digest('hex') + '.dirty');
   expect(JSON.parse(readFileSync(marker, 'utf8'))).toEqual({ root: f.root, state: 'mutating' });

@@ -26,6 +26,8 @@ export async function exerciseConnectedBootstrap(f: {
   const directory = mkdtempSync('/etc/gbrain/connected-fixture-');
   const engines: PostgresEngine[] = [];
   let ownsAnchor = false;
+  let primaryFailure: { error: unknown } | undefined;
+  let phase = 'bootstrap-and-operator';
   const protectedFile = (name: string, value: string) => {
     const path = join(directory, name); writeFileSync(path, value, { flag: 'wx', mode: 0o400 }); return path;
   };
@@ -142,18 +144,39 @@ export async function exerciseConnectedBootstrap(f: {
     chmodSync(anchorPath, 0o400);
     await engine.disconnect();
     const { exerciseConnectedCrash } = await import('./page-file-connected-crash.ts');
+    phase = 'connected-crash';
     await exerciseConnectedCrash({ admin: f.admin, source: f.source, root,
       journal: manifest.roots[0].journal.path, config });
     const { exerciseConnectedDirtyRoot } = await import('./page-file-connected-dirty-root.ts');
+    phase = 'connected-dirty-root';
     await exerciseConnectedDirtyRoot({ admin: f.admin, source: f.source, root,
       journal: manifest.roots[0].journal.path, lock: manifest.lock.path, config });
+  } catch (error) {
+    primaryFailure = { error };
+    // Phase labels are fixed fixture vocabulary, never URLs, requests or credentials.
+    console.error(`PG_CONNECTED_FAILURE: phase=${phase}`);
+    throw error;
   } finally {
-    try { for (const e of engines) await e.disconnect(); }
-    finally {
-      if (ownsAnchor) rmSync(anchorPath);
-      await f.admin.executeRaw('DELETE FROM page_file_bindings WHERE source_id=$1', [f.source]);
-      await f.admin.executeRaw('DELETE FROM sources WHERE id=$1', [f.source]);
-      rmSync(directory, { recursive: true, force: true });
+    let cleanupFailure: { error: unknown } | undefined;
+    // Attempt every resource cleanup, but preserve the original assertion/error.
+    // These owner-only deletes are scoped to this disposable fixture source.
+    const steps = [
+      ...engines.map(e => () => e.disconnect()),
+      () => { if (ownsAnchor) rmSync(anchorPath); },
+      async () => {
+        await f.admin.executeRaw('DELETE FROM page_file_write_authorizations WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1)', [f.source]);
+        await f.admin.executeRaw('DELETE FROM page_file_operations WHERE binding_id IN (SELECT binding_id FROM page_file_bindings WHERE source_id=$1)', [f.source]);
+        await f.admin.executeRaw('DELETE FROM page_file_bindings WHERE source_id=$1', [f.source]);
+        await f.admin.executeRaw('DELETE FROM sources WHERE id=$1', [f.source]);
+      },
+      () => rmSync(directory, { recursive: true, force: true }),
+    ];
+    for (const step of steps) {
+      try { await step(); } catch (error) { cleanupFailure ??= { error }; }
+    }
+    if (cleanupFailure) {
+      if (primaryFailure) console.error('PG_CONNECTED_CLEANUP_FAILURE: original test error preserved');
+      else throw cleanupFailure.error;
     }
   }
 }

@@ -107,6 +107,7 @@ jobs:
             test/page-file-connected-lifecycle.serial.test.ts test/page-file-lifecycle-races.serial.test.ts \
             test/page-file-connected-candidate.serial.test.ts test/page-file-operator.serial.test.ts \
             test/page-file-crash-supervision.serial.test.ts test/page-file-dirty-root-supervision.serial.test.ts \
+            test/page-file-fixture-cleanup.test.ts \
             test/postgres-engine-singleton-ownership.test.ts test/postgres-engine.test.ts \
             test/postgres-engine-getter-selfheal.test.ts test/postgres-disconnect-bounded.test.ts \
             test/page-file-runtime-authority.serial.test.ts test/page-file-runtime-enrollment.serial.test.ts \
