@@ -30,7 +30,7 @@ jobs:
         printf '%s\n' "$GITHUB_RUN_ID" > "$EVIDENCE/run-id.txt"
         printf '%s\n' "$GITHUB_RUN_ATTEMPT" > "$EVIDENCE/run-attempt.txt"
         printf '%s\n' 'not-started' > "$EVIDENCE/exit-status.txt"
-        printf '%s\n' "timeout --signal=TERM --kill-after=5s 90s bun test test/source-ingest-executor.test.ts --test-name-pattern 'SQL transform aborts long-running work without blocking other JS timers|SQL transform rejects missing and null primary keys instead of row-N fallback|failed rows are retried on next transform run'" > "$EVIDENCE/command.txt"
+        printf '%s\n' 'timeout --signal=TERM --kill-after=5s 150s bun test --timeout=60000 test/source-ingest-executor.test.ts' > "$EVIDENCE/command.txt"
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
         repository: Vyacheslav-Zakharov/gbrain
@@ -101,12 +101,11 @@ jobs:
         PY
         "$bun_path" --version > "$evidence/sandbox-bun-version.txt"
         test "$("$bun_path" --version)" = '1.3.13'
-        # Three unchanged cases; retry retains its explicit 30000ms cap.
+        # Entire unchanged file; retry retains explicit 30000ms cap.
         set +e
         /usr/bin/time -v -o "$evidence/resource-usage.txt" \
-          timeout --signal=TERM --kill-after=5s 90s \
-          "$bun_path" test test/source-ingest-executor.test.ts \
-          --test-name-pattern 'SQL transform aborts long-running work without blocking other JS timers|SQL transform rejects missing and null primary keys instead of row-N fallback|failed rows are retried on next transform run' \
+          timeout --signal=TERM --kill-after=5s 150s \
+          "$bun_path" test --timeout=60000 test/source-ingest-executor.test.ts \
           > "$evidence/test-output.txt" 2>&1
         rc=$?
         set -e
