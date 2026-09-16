@@ -86,13 +86,12 @@ export async function exerciseConnectedBootstrap(f: {
 
     const [page] = await engine.executeRaw<{ id: string; write_revision: string }>('SELECT id::text,write_revision FROM pages WHERE source_id=$1', [f.source]);
     await expect(enrollPageFileRuntime(ctx, f.source, 'connected')).rejects.toThrow('page_file_candidate_lifecycle_unavailable');
-    await enrollPageFileRuntime(ctx, f.source, 'connected', {
+    const { exerciseConnectedOperator } = await import('./page-file-connected-operator.ts');
+    await exerciseConnectedOperator({ admin: f.admin, engine, source: f.source, root, directory,
+      bootstrap: JSON.parse(anchor), ordinaryUrl: config.database_url,
+      enrollmentUrl: f.loginUrls.get(f.roles.enrollment)!,
       reviewed: { hostManifestSha256: hash(manifestJson), source: f.source, slug: 'connected', pageId: page.id,
         revision: page.write_revision, canonicalRoot: root, relativePath: 'connected.md', rawSha256: hash(raw) },
-      authority: { mode: 'offline-verification', credentialReference: 'operator-only-fixture',
-        resolveCredential: async () => f.loginUrls.get(f.roles.enrollment)!, adapterRole: f.roles.adapter,
-        expected: { database: 'gbrain_test', role: f.roles.enrollment, ordinaryRole: f.roles.ordinary },
-        sqlAuthority: { database: 'gbrain_test', role: f.roles.enrollment, roles: f.roles, catalogPins: f.pins } },
     });
     let runtime = (await resolvePageFileRuntime(ctx, f.source, 'connected'))!;
     expect((await runtime.pages.get(f.source, 'connected', () => {})).persistence).toBe('file_and_database');
@@ -138,6 +137,16 @@ export async function exerciseConnectedBootstrap(f: {
     await expect(engine.reconnect()).rejects.toThrow();
     expect(await snapshot()).toEqual(stable); expect(readFileSync(join(root, 'connected.md'), 'utf8')).toBe(raw);
     console.log('PG_CONNECTED_BOOTSTRAP: protected fixed anchor drift denied without mutation');
+    // Restore the exact protected anchor, close the parent candidate, and reuse
+    // this fixture for independently killed/restarted connected processes.
+    chmodSync(anchorPath, 0o400);
+    await engine.disconnect();
+    const { exerciseConnectedCrash } = await import('./page-file-connected-crash.ts');
+    await exerciseConnectedCrash({ admin: f.admin, source: f.source, root,
+      journal: manifest.roots[0].journal.path, config });
+    const { exerciseConnectedDirtyRoot } = await import('./page-file-connected-dirty-root.ts');
+    await exerciseConnectedDirtyRoot({ admin: f.admin, source: f.source, root,
+      journal: manifest.roots[0].journal.path, lock: manifest.lock.path, config });
   } finally {
     try { for (const e of engines) await e.disconnect(); }
     finally {

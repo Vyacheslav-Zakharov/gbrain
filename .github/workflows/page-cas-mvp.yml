@@ -105,7 +105,8 @@ jobs:
             test/page-file-authority.serial.test.ts test/page-file-host.test.ts \
             test/page-file-bootstrap.serial.test.ts test/page-file-sql-authority.test.ts \
             test/page-file-connected-lifecycle.serial.test.ts test/page-file-lifecycle-races.serial.test.ts \
-            test/page-file-connected-candidate.serial.test.ts \
+            test/page-file-connected-candidate.serial.test.ts test/page-file-operator.serial.test.ts \
+            test/page-file-crash-supervision.serial.test.ts test/page-file-dirty-root-supervision.serial.test.ts \
             test/postgres-engine-singleton-ownership.test.ts test/postgres-engine.test.ts \
             test/postgres-engine-getter-selfheal.test.ts test/postgres-disconnect-bounded.test.ts \
             test/page-file-runtime-authority.serial.test.ts test/page-file-runtime-enrollment.serial.test.ts \
@@ -211,6 +212,18 @@ jobs:
               assert f'PG_SQL_AUTHORITY: {marker}' in sql_log, marker
           for marker in ('actual ordinary and adapter admission; initSchema no migration or enrollment', 'operator-only enrollment; disconnect tombstone and same-engine reconnect', 'per-borrow ordinary and adapter drift denied; no catalog self-repair', 'protected fixed anchor drift denied without mutation'):
               assert f'PG_CONNECTED_BOOTSTRAP: {marker}' in sql_log, marker
+          for boundary in ('journal', 'prepared', 'rename', 'commit'):
+              marker = f'PG_CONNECTED_CRASH: SIGKILL {boundary}; fresh protected bootstrap; no auto-publish; exact authorized terminal replay'
+              assert sql_log.count(marker) == 1, ('missing/duplicate crash completion', boundary)
+          dirty_root_marker = 'PG_CONNECTED_DIRTY_ROOT: SIGKILL after Git before reconciliation; fresh protected bootstrap denies writes; explicit reconciliation preserves DB files Git and page intent; no automatic winner'
+          assert sql_log.count(dirty_root_marker) == 1, 'missing/duplicate dirty-root crash completion'
+          for marker in (
+              'executable status/verify read-only without enrollment credential; enroll requires separate credential',
+              'remote/unset rejected; stale exact reviewed revision and bytes rejected without mutation',
+              'executable exact enrollment and idempotent repeat; enrolled status/verify read-only without credential',
+          ):
+              assert sql_log.count(f'PG_CONNECTED_OPERATOR: {marker}') == 1, ('missing/duplicate operator completion', marker)
+          assert not pathlib.Path('/etc/gbrain/page-file-operator-anchor.json').exists(), 'operator anchor leaked'
           assert not pathlib.Path('/etc/gbrain/page-file-bootstrap-anchor.json').exists(), 'fixture anchor leaked'
           assert not list(pathlib.Path('/etc/gbrain').glob('connected-fixture-*')), 'protected fixture or credential leaked'
           import json, hashlib
