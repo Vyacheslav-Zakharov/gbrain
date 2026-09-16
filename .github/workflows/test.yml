@@ -30,7 +30,7 @@ jobs:
         printf '%s\n' "$GITHUB_RUN_ID" > "$EVIDENCE/run-id.txt"
         printf '%s\n' "$GITHUB_RUN_ATTEMPT" > "$EVIDENCE/run-attempt.txt"
         printf '%s\n' 'not-started' > "$EVIDENCE/exit-status.txt"
-        printf '%s\n' "timeout --signal=TERM --kill-after=5s 150s bun test ./test/storage-pglite.test.ts ./test/phantom-redirect.test.ts ./test/source-ingest-executor.test.ts --test-name-pattern 'Storage tiering on PGLite.*engine.kind is pglite|phantom-audit module.*write failure does not throw|failed rows are retried on next transform run'" > "$EVIDENCE/command.txt"
+        printf '%s\n' "timeout --signal=TERM --kill-after=5s 90s bun test test/source-ingest-executor.test.ts --test-name-pattern 'SQL transform aborts long-running work without blocking other JS timers|SQL transform rejects missing and null primary keys instead of row-N fallback|failed rows are retried on next transform run'" > "$EVIDENCE/command.txt"
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
         repository: Vyacheslav-Zakharov/gbrain
@@ -104,9 +104,9 @@ jobs:
         # Three unchanged cases; retry retains its explicit 30000ms cap.
         set +e
         /usr/bin/time -v -o "$evidence/resource-usage.txt" \
-          timeout --signal=TERM --kill-after=5s 150s \
-          "$bun_path" test ./test/storage-pglite.test.ts ./test/phantom-redirect.test.ts ./test/source-ingest-executor.test.ts \
-          --test-name-pattern 'Storage tiering on PGLite.*engine.kind is pglite|phantom-audit module.*write failure does not throw|failed rows are retried on next transform run' \
+          timeout --signal=TERM --kill-after=5s 90s \
+          "$bun_path" test test/source-ingest-executor.test.ts \
+          --test-name-pattern 'SQL transform aborts long-running work without blocking other JS timers|SQL transform rejects missing and null primary keys instead of row-N fallback|failed rows are retried on next transform run' \
           > "$evidence/test-output.txt" 2>&1
         rc=$?
         set -e
