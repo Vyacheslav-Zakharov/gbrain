@@ -7,6 +7,12 @@ import { acquirePageFileLock } from './page-file-lock.ts';
 import type { PageFileCoordinationHost } from './page-file-writer-gate.ts';
 
 type Engine = Pick<BrainEngine, 'executeRaw'>;
+/** Trusted typed services only; never expose the private adapter engine. */
+export interface PageFileRootHost extends PageFileCoordinationHost {
+  revalidate?(): Promise<void>;
+  transition?<T>(mutate: () => Promise<T>): Promise<T>;
+  reconcile?(): Promise<void>;
+}
 type Binding = { binding_id:string; canonical_root:string; relative_path:string; pending_op_id:string|null };
 const digest = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 function marker(host: PageFileCoordinationHost) {
@@ -65,7 +71,8 @@ function finish(rows:Binding[], root:string, host:PageFileCoordinationHost) {
  * be drained/replaced before activation. Root replacement/remapping is excluded.
  * Failure leaves a durable dirty marker; NEVER rollback authored files or journals.
  */
-export async function transitionPageFileRoot<T>(engine:Engine, host:PageFileCoordinationHost, mutate:()=>Promise<T>):Promise<T> {
+export async function transitionPageFileRoot<T>(engine:Engine, host:PageFileRootHost, mutate:()=>Promise<T>):Promise<T> {
+  await host.revalidate?.();
   const root = realpathSync(host.root);
   assertPageFileRootClean(host);
   const rows = await bindings(engine,root);
@@ -79,16 +86,20 @@ export async function transitionPageFileRoot<T>(engine:Engine, host:PageFileCoor
   // This is NOT indexed completion and never alters pending/journal authority.
   await engine.executeRaw('UPDATE page_file_bindings SET file_generation=file_generation+1 WHERE canonical_root=$1',[root]);
   const result = await mutate();
+  await host.revalidate?.();
   if (realpathSync(host.root) !== root) throw new Error('page_file_binding_changed');
   finish(await bindings(engine,root),root,host);
   return result;
 }
 /** Recovery classifies actual current files under the same exclusive gate, does
  * not rerun Git, change its index, clear pending ops, or overwrite any file. */
-export async function reconcilePageFileRootTransition(engine:Engine, host:PageFileCoordinationHost):Promise<void> {
+export async function reconcilePageFileRootTransition(engine:Engine, host:PageFileRootHost):Promise<void> {
+  if (host.reconcile) return host.reconcile();
+  await host.revalidate?.();
   const lock = await acquirePageFileLock({...host,rootMode:'exclusive',paths:[]});
   if (!lock) throw new Error('page_file_root_gate_unavailable');
   try {
+    await host.revalidate?.();
     const root = realpathSync(host.root);
     if (!existsSync(marker(host))) return;
     finish(await bindings(engine,root),root,host);

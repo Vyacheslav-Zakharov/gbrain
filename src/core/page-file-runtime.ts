@@ -1,4 +1,5 @@
 import { assertPageFileRootClean } from './page-file-root-transition.ts';
+import { acquirePageFileLock } from './page-file-lock.ts';
 import type { OperationContext } from './operations.ts';
 import { PageFileDatabase } from './page-file-db.ts';
 import { pageFileSyncHost, PageFileSync, PageFileSyncConflict } from './page-file-sync.ts';
@@ -181,8 +182,47 @@ export async function withRuntimeLegacyPageWrite<T>(ctx: Pick<OperationContext, 
 }
 
 /** Trusted server configuration shared by actual root pull callers. */
-export async function resolvePageFileRootHost(ctx: { engine: { readonly kind?: string }; config: OperationContext['config'] | null }, sourceRoot: string) {
-  if (candidates.has(ctx.engine)) throw new PageFileSyncConflict('page_file_candidate_lifecycle_unavailable');
+export async function resolvePageFileRootHost(ctx: { engine: Partial<Pick<BrainEngine, 'kind' | 'executeRaw'>>; config: OperationContext['config'] | null }, sourceRoot: string): Promise<import('./page-file-root-transition.ts').PageFileRootHost | undefined> {
+  if (ctx.config?.page_file_runtime?.mode === 'production') throw new PageFileSyncConflict('file_runtime_prerequisites_pending');
+  const candidate = candidates.get(ctx.engine);
+  if (candidate) {
+    if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
+    const { host, authority } = await candidate.ready;
+    const validate = () => {
+      if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
+      host.revalidate();
+    };
+    validate();
+    const canonical = await realpath(sourceRoot);
+    const root = host.manifest.roots.find(r => r.directory.path === canonical);
+    if (!root) {
+      // Independent sources retain the ordinary catalog absence gate. Never
+      // send overlapping unmanaged roots through a different lock namespace.
+      if (host.manifest.roots.some(r => canonical.startsWith(r.directory.path + sep) || r.directory.path.startsWith(canonical + sep)))
+        throw new PageFileSyncConflict('page_file_nested_root_unsupported');
+      return undefined;
+    }
+    const coordination = { root: canonical, lockDirectory: host.manifest.lock.path, topology: host.manifest.topology, timeoutMs: 1000 };
+    const validateTarget = async () => {
+      validate();
+      if (await realpath(sourceRoot) !== canonical) throw new PageFileSyncConflict('binding_changed');
+      if (!ctx.engine.executeRaw) throw new PageFileSyncConflict('page_file_root_gate_unavailable');
+      const [src] = await ctx.engine.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1', [root.sourceId]);
+      if (src?.local_path !== canonical) throw new PageFileSyncConflict('binding_changed');
+      validate();
+    };
+    await validateTarget();
+    const withExclusiveRoot = async <T>(fn: () => Promise<T>): Promise<T> => {
+      await validateTarget();
+      const lock = await acquirePageFileLock({ ...coordination, rootMode: 'exclusive', paths: [] });
+      if (!lock) throw new PageFileSyncConflict('page_file_root_gate_unavailable');
+      try { await validateTarget(); const result = await fn(); await validateTarget(); return result; }
+      finally { await lock.release(); }
+    };
+    const services = authority.forRoot({ ...coordination, withExclusiveRoot, revalidate: validateTarget });
+    return Object.freeze({ ...coordination, transition: services.transition,
+      reconcile: async () => { await validateTarget(); await services.reconcile(); await validateTarget(); } });
+  }
   const configured = ctx.config?.page_file_runtime;
   if (!configured || configured.mode === 'disabled') return undefined;
   const config = structuredClone(configured);

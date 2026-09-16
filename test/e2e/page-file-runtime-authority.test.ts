@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { withEnv } from '../helpers/with-env.ts';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
@@ -241,6 +243,101 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
     expect(await snapshot()).toEqual(final);
     console.log('PG_RUNTIME_AUTHORITY: registered get/put, separate login/PID, ordinary SQLSTATE 42501, CAS replay/stale, close verified');
     } finally { await lifecycle.close(); }
+  }, 60_000);
+
+  test('actual local-Git source pull uses private generation authority; dirty and pending refusals preserve bytes', async () => {
+    // Use another ordinary login: the preceding lifecycle deliberately tombstones
+    // its engine. No owner credentials or monkey-patched SQL on the request path.
+    const engine = await connect(ordinaryUrl);
+    const lifecycle = await install(engine);
+    const originalBytes = readFileSync(join(root, 'example.md'));
+    const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], {
+      encoding: 'utf8', stdio: 'pipe', timeout: 10_000,
+    }).trim();
+    try {
+      await withEnv({ GBRAIN_HOME: directory, GBRAIN_GIT_ALLOW_FILE_TRANSPORT: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '0',
+        GIT_OPTIONAL_LOCKS: '0', GIT_CONFIG_PARAMETERS: undefined, GIT_TEMPLATE_DIR: undefined,
+        GIT_DIR: undefined, GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined,
+        GIT_OBJECT_DIRECTORY: undefined, GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
+      }, async () => {
+        // Entire remote history is local and disposable. Fetch/merge is the real
+        // sources-pull command, not a callback that writes the expected bytes.
+        git('init', '-b', 'main');
+        git('config', 'user.name', 'Test');
+        git('config', 'user.email', 'test@example.invalid');
+        git('config', 'core.hooksPath', '/dev/null');
+        git('config', 'commit.gpgSign', 'false');
+        git('add', 'example.md'); git('commit', '-m', 'fixture baseline');
+        const initialHead = git('rev-parse', 'HEAD');
+        git('checkout', '-b', 'incoming');
+        writeFileSync(join(root, 'example.md'), 'Pulled through private root authority\n');
+        git('commit', '-am', 'fixture incoming');
+        const incomingHead = git('rev-parse', 'HEAD');
+        git('checkout', 'main'); git('remote', 'add', 'origin', root);
+        expect(incomingHead).not.toBe(initialHead);
+        expect(git('status', '--porcelain', '--untracked-files=all')).toBe('');
+
+        const before = await snapshot();
+        const [bindingBefore] = await admin.executeRaw<{ file_generation: string; indexed_raw_sha256: string }>(
+          'SELECT file_generation::text,indexed_raw_sha256 FROM page_file_bindings WHERE source_id=$1', [source]);
+        // Existing column grant is sufficient; do not add table-wide UPDATE.
+        for (const role of roles) {
+          const [privilege] = await admin.executeRaw<{ generation: boolean; root: boolean }>(
+            "SELECT has_column_privilege($1,'public.page_file_bindings','file_generation','UPDATE') AS generation, has_column_privilege($1,'public.page_file_bindings','canonical_root','UPDATE') AS root", [role]);
+          expect(privilege).toEqual({ generation: role === adapterRole, root: false });
+        }
+        await expect(engine.executeRaw('UPDATE page_file_bindings SET file_generation=file_generation+1 WHERE source_id=$1', [source])).rejects.toMatchObject({ code: '42501' });
+        await expect(engine.executeRaw('UPDATE page_file_bindings SET pending_op_id=$1 WHERE source_id=$2', [randomUUID(), source])).rejects.toMatchObject({ code: '42501' });
+        expect(await snapshot()).toEqual(before);
+        const sessions = await adapterSessions(); expect(sessions).toHaveLength(1);
+        const [ordinaryPid] = await engine.executeRaw<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+        expect(sessions[0].pid).not.toBe(ordinaryPid.pid);
+
+        const { runPull } = await import('../../src/commands/sources-harden.ts');
+        await runPull(engine, [source, '--branch', 'incoming']);
+        expect(git('rev-parse', 'HEAD')).toBe(incomingHead);
+        expect(readFileSync(join(root, 'example.md'), 'utf8')).toBe('Pulled through private root authority\n');
+        expect(git('status', '--porcelain', '--untracked-files=all')).toBe('');
+        const [bindingAfter] = await admin.executeRaw<{ file_generation: string; indexed_raw_sha256: string; pending_op_id: string | null }>(
+          'SELECT file_generation::text,indexed_raw_sha256,pending_op_id FROM page_file_bindings WHERE source_id=$1', [source]);
+        expect(BigInt(bindingAfter.file_generation)).toBe(BigInt(bindingBefore.file_generation) + 1n);
+        expect(bindingAfter.indexed_raw_sha256).toBe(bindingBefore.indexed_raw_sha256);
+        expect(bindingAfter.pending_op_id).toBeNull();
+        const after = await snapshot();
+        // Pull invalidates baselines, but does not pretend to index or project.
+        for (const key of Object.keys(before).filter(k => k !== 'file' && k !== 'page_file_bindings')) {
+          expect(after[key]).toEqual(before[key]);
+        }
+        const gitState = () => ({ head: git('rev-parse', 'HEAD'),
+          index: readFileSync(join(root, '.git', 'index')),
+          status: git('status', '--porcelain', '--untracked-files=all') });
+        writeFileSync(join(root, 'example.md'), 'Dirty authored bytes\r\nDo not overwrite\n');
+        const dirty = await snapshot(), dirtyGit = gitState();
+        await expect(runPull(engine, [source, '--branch', 'incoming'])).rejects.toThrow('page_file_root_worktree_dirty');
+        expect(await snapshot()).toEqual(dirty);
+        expect(gitState()).toEqual(dirtyGit);
+
+        // A clean worktree isolates pending-op refusal from dirty-file refusal.
+        // Owner SQL only seeds the source-scoped recovery fixture, never pulls.
+        writeFileSync(join(root, 'example.md'), 'Pulled through private root authority\n');
+        expect(git('status', '--porcelain', '--untracked-files=all')).toBe('');
+        const pendingId = randomUUID();
+        await admin.executeRaw('UPDATE page_file_bindings SET pending_op_id=$1 WHERE source_id=$2', [pendingId, source]);
+        const pending = await snapshot(), pendingGit = gitState();
+        await expect(runPull(engine, [source, '--branch', 'incoming'])).rejects.toThrow('pending_recovery');
+        expect(await snapshot()).toEqual(pending);
+        expect(gitState()).toEqual(pendingGit);
+        expect((await admin.executeRaw<{ pending_op_id: string }>('SELECT pending_op_id FROM page_file_bindings WHERE source_id=$1', [source]))[0].pending_op_id).toBe(pendingId);
+        console.log('PG_RUNTIME_AUTHORITY: actual local-Git source pull, ordinary binding SQLSTATE 42501, private generation +1, unchanged projection, dirty/pending DB+Git+file preservation verified');
+      });
+    } finally {
+      await lifecycle.close();
+      await admin.executeRaw('UPDATE page_file_bindings SET pending_op_id=NULL WHERE source_id=$1', [source]);
+      writeFileSync(join(root, 'example.md'), originalBytes);
+      rmSync(join(root, '.git'), { recursive: true, force: true });
+      await engine.disconnect();
+    }
   }, 60_000);
 
   test('real login identity mismatch closes failed adapter pool and denies registered fallback', async () => {

@@ -9,6 +9,7 @@ import { transitionPageFileRoot, reconcilePageFileRootTransition } from './page-
 import type { PageFileCoordinationHost } from './page-file-writer-gate.ts';
 
 export interface PageFileAuthorityRoot extends PageFileCoordinationHost {
+  revalidate?(): Promise<void>;
   withExclusiveRoot<T>(fn: () => Promise<T>): Promise<T>;
 }
 

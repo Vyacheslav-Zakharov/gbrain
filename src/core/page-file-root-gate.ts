@@ -2,8 +2,8 @@ import { resolve, dirname, basename, join } from 'node:path';
 import { realpathSync } from 'node:fs';
 import type { BrainEngine } from './engine.ts';
 import { acquirePageFileLock } from './page-file-lock.ts';
-import type { PageFileCoordinationHost } from './page-file-writer-gate.ts';
-import { transitionPageFileRoot } from './page-file-root-transition.ts';
+
+import { transitionPageFileRoot, type PageFileRootHost } from './page-file-root-transition.ts';
 
 export class PageFileRootGateError extends Error {
   constructor(public readonly code: 'page_file_root_gate_unavailable' | 'page_file_unsupported_root_writer') {
@@ -37,11 +37,18 @@ const contains = (root: string, path: string) => path === root || path.startsWit
 export async function withLegacyPageFileRootMutation<T>(
   engine: Pick<BrainEngine, 'executeRaw'>, root: string,
   mutate: (permit: PageFileRootPermit) => T,
-  host?: PageFileCoordinationHost,
+  host?: PageFileRootHost,
 ): Promise<Awaited<T>> {
   if (host) {
     const canonical = realpathSync(host.root);
     if (realpathSync(root) !== canonical) throw new PageFileRootGateError('page_file_root_gate_unavailable');
+    if (host.transition) {
+      const result = await host.transition(async () => {
+        const permit = Object.freeze({ root: resolve(root) }); permits.add(permit);
+        try { return await mutate(permit); } finally { permits.delete(permit); }
+      });
+      return result as Awaited<T>;
+    }
     const lock = await acquirePageFileLock({ ...host, root: canonical, rootMode: 'exclusive', paths: [] });
     if (!lock) throw new PageFileRootGateError('page_file_root_gate_unavailable');
     try {
