@@ -54,7 +54,7 @@ async function fixture(allowDatabaseOnly = false, allowLegacy = false) {
     const s = lstatSync(path, { bigint: true });
     return { path, dev: String(s.dev), ino: String(s.ino), uid: Number(s.uid), gid: Number(s.gid), mode: 0o700 as const };
   };
-  const manifest = { version: 1 as const, deploymentId: 'deployment-example', brainId: randomUUID(), database: 'db-example', adapterRole: 'adapter-example', generation: '1', topology: 'single-host-local' as const, serviceUid: process.getuid!(), roots: [{ sourceId: 'default', mappingGeneration: '1', directory: pin('root'), journal: pin('journal') }], lock: pin('lock'), indexedRoots: [] };
+  const manifest = { version: 1 as const, deploymentId: 'deployment-example', brainId: randomUUID(), database: 'db-example', adapterRole: 'adapter-example', generation: '1', topology: 'single-host-local' as const, serviceUid: process.getuid!(), roots: [{ sourceId: 'default', mappingGeneration: 'enrollment-pin', directory: pin('root'), journal: pin('journal') }], lock: pin('lock'), indexedRoots: [] };
   const manifestJson = JSON.stringify(manifest);
   const host = { mode: 'offline-verification' as const, manifestJson, expected: { manifestSha256: createHash('sha256').update(manifestJson).digest('hex'), deploymentId: manifest.deploymentId, brainId: manifest.brainId, database: manifest.database, adapterRole: manifest.adapterRole, generation: manifest.generation } };
   db = new PGLiteEngine(); await db.connect({}); await db.initSchema();
@@ -128,6 +128,8 @@ test('explicit candidate enrollment checks reviewed baseline and holds exclusive
     expect(await db.executeRaw("SELECT * FROM pages WHERE slug='example'")).toEqual([before]);
     expect(readFileSync(join(root, 'example.md'), 'utf8')).toBe('Before');
     expect(statements.filter(q => /^(INSERT|UPDATE|DELETE)/i.test(q.trim())).every(q => q.includes('INSERT INTO page_file_bindings'))).toBe(true);
+    const services = await f.runtime.resolvePageFileRuntime(f.ctx, 'default', 'example');
+    expect((await services!.pages.get('default', 'example', () => {})).file.raw_markdown).toBe('Before');
     const bindings = await db.executeRaw('SELECT * FROM page_file_bindings');
     const repeated = await f.runtime.enrollPageFileRuntime(f.ctx, 'default', 'example', request);
     expect(repeated).toEqual({ ...result, status: 'already_enrolled' });

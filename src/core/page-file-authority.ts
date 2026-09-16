@@ -128,7 +128,7 @@ export interface PageFileEnrollmentTarget {
   source: string;
   slug: string;
   reviewed?: Parameters<PageFileDatabase['enroll']>[2];
-  host: { brainId: string; journalDirectory: string; revalidate?(): Promise<void>; withExclusiveRoot<T>(fn: () => Promise<T>): Promise<T> };
+  host: { brainId: string; journalDirectory: string; mappingGeneration?: string; revalidate?(): Promise<void>; withExclusiveRoot<T>(fn: () => Promise<T>): Promise<T> };
 }
 
 /** Separate offline lifecycle bootstrap; never registered in request context.
@@ -145,7 +145,7 @@ export async function createPageFileEnrollmentAuthority(options: PageFileAuthori
     // Exclusive gate encloses identity verification, DB locks, and COMMIT.
     // Database's required host callback is already inside that gate: no flock
     // reacquisition, and no engine passed to host/operator code.
-    const pages = new PageFileDatabase(engine, { brainId: host.brainId, journalDirectory: host.journalDirectory,
+    const pages = new PageFileDatabase(engine, { brainId: host.brainId, mappingGeneration: host.mappingGeneration, journalDirectory: host.journalDirectory,
       withLockedBinding: fn => fn() });
     const reviewed = target.reviewed && structuredClone(target.reviewed);
     return Object.freeze({ enroll: () => host.withExclusiveRoot(() => run(async () => {

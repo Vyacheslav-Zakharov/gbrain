@@ -21,7 +21,7 @@
 import { join, dirname } from 'node:path';
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import type { BrainEngine } from '../engine.ts';
-import { assertLegacyPageFileWriteAllowed } from '../page-file-writer-gate.ts';
+import { withCycleFileWrites } from './with-file-writes.ts';
 import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { MinionQueue } from '../minions/queue.ts';
 import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.ts';
@@ -269,23 +269,24 @@ export async function reverseWriteRefs(
       ? join(brainDir, `${slug}.md`)
       : join(brainDir, '.sources', source_id, `${slug}.md`);
     // Outside best-effort catch: safety refusals must abort the phase.
-    await assertLegacyPageFileWriteAllowed(engine, source_id, slug, targetPath);
-    try {
-      const md = renderPageToMarkdown(page, tags);
-      // v0.32.8 F6: non-default sources land under brainDir/.sources/<id>/<slug>.md
-      // so same-slug-different-source pages don't collide on disk. Default-source
-      // pages stay at brainDir/<slug>.md so single-source brains see no change.
-      // `.sources/` is a reserved prefix; walkBrainRepo skips dot-dirs.
-      const filePath = source_id === 'default'
-        ? join(brainDir, `${slug}.md`)
-        : join(brainDir, '.sources', source_id, `${slug}.md`);
-      mkdirSync(dirname(filePath), { recursive: true });
-      writeFileSync(filePath, md, 'utf8');
-      count++;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      process.stderr.write(`[dream] reverse-write ${slug}@${source_id} failed: ${msg}\n`);
-    }
+    await withCycleFileWrites(engine, brainDir, [{ sourceId: source_id, slug, filePath: targetPath }], async () => {
+      try {
+        const md = renderPageToMarkdown(page, tags);
+        // v0.32.8 F6: non-default sources land under brainDir/.sources/<id>/<slug>.md
+        // so same-slug-different-source pages don't collide on disk. Default-source
+        // pages stay at brainDir/<slug>.md so single-source brains see no change.
+        // `.sources/` is a reserved prefix; walkBrainRepo skips dot-dirs.
+        const filePath = source_id === 'default'
+          ? join(brainDir, `${slug}.md`)
+          : join(brainDir, '.sources', source_id, `${slug}.md`);
+        mkdirSync(dirname(filePath), { recursive: true });
+        writeFileSync(filePath, md, 'utf8');
+        count++;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        process.stderr.write(`[dream] reverse-write ${slug}@${source_id} failed: ${msg}\n`);
+      }
+    });
   }
   return count;
 }

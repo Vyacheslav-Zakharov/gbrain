@@ -100,10 +100,14 @@ jobs:
             test/page-file-sync.test.ts test/page-file-sync-failure.test.ts \
             test/page-file-import.test.ts test/page-file-import-failure.test.ts \
             test/page-file-import-command.serial.test.ts test/page-file-pull-callers.serial.test.ts \
+            test/sources-pull-arguments.serial.test.ts \
             test/page-file-direct-writers.test.ts test/page-file-cycle-gates.test.ts \
             test/page-file-authority.serial.test.ts test/page-file-host.test.ts \
             test/page-file-runtime-authority.serial.test.ts test/page-file-runtime-enrollment.serial.test.ts \
-            test/import-file-runtime-authority.serial.test.ts
+            test/import-file-runtime-authority.serial.test.ts \
+            test/page-file-runtime-receipt.test.ts test/brain-durability-pull-template.test.ts \
+            test/page-file-facts-coordination.serial.test.ts test/page-file-ingest-coordination.serial.test.ts \
+            test/page-file-cycle-coordination.serial.test.ts
           do
             set +e
             env -u DATABASE_URL timeout --signal=TERM --kill-after=10s 180s bun test --timeout 60000 "$file" 2>&1 | tee "cas-evidence/$(basename "$file").log"

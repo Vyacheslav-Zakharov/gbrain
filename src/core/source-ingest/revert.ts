@@ -6,6 +6,7 @@ import type { BrainEngine } from '../engine.ts';
 import { importFromContent } from '../import-file.ts';
 import { writePageThrough } from '../write-through.ts';
 import { assertLegacyPageFileWriteAllowed } from '../page-file-writer-gate.ts';
+import { withFactsFileWrite as withTrustedFileWrite } from '../facts/with-file-write.ts';
 
 export interface SourceRevertReportRow {
   connector_id: string;
@@ -139,7 +140,7 @@ export async function buildSourceRevertReport(engine: BrainEngine, runId: string
 
     // A revert is a new write, never authority to restore/delete an enrolled
     // page. Refuse before either DB mutation or canonical unlink/import.
-    if (apply) {
+    if (apply && r.action !== 'created') {
       try {
         if (!absPath) throw new Error('page_file_gate_unavailable');
         await assertLegacyPageFileWriteAllowed(engine, r.approved_source_id, r.slug, absPath);
@@ -154,10 +155,20 @@ export async function buildSourceRevertReport(engine: BrainEngine, runId: string
         pages.push({ ...base, revert_action: 'would-soft-delete', reason: 'created_by_run_no_prior_version' });
         continue;
       }
-      await engine.softDeletePage(r.slug, { sourceId: r.approved_source_id });
-      if (absPath && existsSync(absPath)) {
-        unlinkSync(absPath);
-        touchedPaths.push(relPath);
+      try {
+        if (!localPath || !absPath) throw new Error('page_file_gate_unavailable');
+        // Enrollment and root transitions cannot enter between deletion and
+        // unlink. Resolve the actual legacy path, not pages.source_path.
+        await withTrustedFileWrite(engine, r.approved_source_id, r.slug, localPath, absPath, async () => {
+          await engine.softDeletePage(r.slug, { sourceId: r.approved_source_id });
+          if (existsSync(absPath)) {
+            unlinkSync(absPath);
+            touchedPaths.push(relPath);
+          }
+        });
+      } catch (error) {
+        pages.push({ ...base, revert_action: 'blocked', reason: error instanceof Error ? error.message : String(error) });
+        continue;
       }
       pages.push({ ...base, revert_action: 'soft-deleted', reason: 'created_by_run_no_prior_version' });
       continue;

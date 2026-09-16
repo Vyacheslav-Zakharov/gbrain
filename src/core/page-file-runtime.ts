@@ -79,7 +79,7 @@ async function resolveCandidate(candidate: Candidate, engine: BrainEngine, sourc
   const coordination = { root: root.directory.path, paths: [binding.relative_path], lockDirectory: host.manifest.lock.path,
     topology: host.manifest.topology, timeoutMs: 1000 };
   const lockHost = pageFileSyncHost(coordination);
-  const targetHost = { brainId: host.manifest.brainId, journalDirectory: root.journal.path,
+  const targetHost = { brainId: host.manifest.brainId, mappingGeneration: root.mappingGeneration, journalDirectory: root.journal.path,
     async withLockedBinding<T>(fn: () => Promise<T>): Promise<T> {
       // Refuse missing/replaced directories before the integration lock helper
       // can create them; repeat under the lock through adapter completion.
@@ -276,7 +276,7 @@ export async function enrollPageFileRuntime(ctx: Pick<OperationContext, 'engine'
     const enrollment = await createPageFileEnrollmentAuthority(options);
     try {
       return await enrollment.forPage({ source, slug, reviewed, host: {
-        brainId: host.manifest.brainId, journalDirectory: root.journal.path, revalidate,
+        brainId: host.manifest.brainId, mappingGeneration: root.mappingGeneration, journalDirectory: root.journal.path, revalidate,
         async withExclusiveRoot<T>(fn: () => Promise<T>): Promise<T> {
           await revalidate();
           const lock = await acquirePageFileLock({ ...coordination, rootMode: 'exclusive', paths: [] });

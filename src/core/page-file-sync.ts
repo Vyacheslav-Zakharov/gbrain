@@ -1,6 +1,6 @@
 import type { BrainEngine } from './engine.ts';
 import { acquirePageFileLock, type PageFileLockOptions } from './page-file-lock.ts';
-import { resolveExistingPageFileBinding } from './page-file-binding.ts';
+import { resolveExistingPageFileBinding, pageFileMappingIdentity } from './page-file-binding.ts';
 import { randomUUID } from 'node:crypto';
 import { rawDigest } from './page-file-journal.ts';
 import { parseMarkdown } from './markdown.ts';
@@ -25,7 +25,7 @@ export interface FileReadBaseline {
   readonly source: string; readonly slug: string; readonly raw: string;
   readonly identity: string;
 }
-type Host = { brainId: string; withLockedBinding<T>(fn: () => Promise<T>): Promise<T> };
+type Host = { brainId: string; mappingGeneration?: string; withLockedBinding<T>(fn: () => Promise<T>): Promise<T> };
 /** File -> DB ONLY. capture must precede provider/render work. Never accept a
  * caller string as a fresh file snapshot. Tokens are instance-owned capabilities. */
 export class PageFileSync {
@@ -41,7 +41,7 @@ export class PageFileSync {
     const sources = await tx.executeRaw<{id:string;local_path:string|null}>('SELECT id, local_path FROM sources');
     const paths = await tx.executeRaw<{pageId:string;sourceId:string;sourcePath:string}>(`SELECT id::text AS "pageId", source_id AS "sourceId", COALESCE(source_path, slug || '.md') AS "sourcePath" FROM pages WHERE deleted_at IS NULL`);
     const globalRepoPath = await tx.getConfig('sync.repo_path');
-    const file = await resolveExistingPageFileBinding({brainId:this.host.brainId,sourceId:source,slug,pageId:String(row.id),sourcePath:row.source_path,sources,otherPagePaths:paths,globalRepoPath,configGeneration:rawDigest(Buffer.from(JSON.stringify([sources,globalRepoPath])))});
+    const file = await resolveExistingPageFileBinding({brainId:this.host.brainId,sourceId:source,slug,pageId:String(row.id),sourcePath:row.source_path,sources,otherPagePaths:paths,globalRepoPath,configGeneration:pageFileMappingIdentity({sourceId:source,sources,globalRepoPath,mappingGeneration:this.host.mappingGeneration})});
     if (file.bindingKey !== b.binding_key) throw new PageFileSyncConflict('binding_changed');
     const identity = JSON.stringify([b.binding_id,b.page_id,b.binding_key,String(b.file_generation),b.indexed_raw_sha256,row.write_revision,file.rawSha256]);
     return { b,row,file,identity };

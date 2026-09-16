@@ -1,7 +1,7 @@
 import { readFileSync, statSync, lstatSync } from 'fs';
 import { basename, extname, resolve, join } from 'path';
 import { realpath } from 'node:fs/promises';
-import { hasPageFileRuntimeCandidate, resolvePageFileRuntime } from './page-file-runtime.ts';
+import { hasPageFileRuntimeCandidate, resolvePageFileRuntime, withRuntimeLegacyPageWrite } from './page-file-runtime.ts';
 import type { GBrainConfig } from './config.ts';
 import { createHash } from 'crypto';
 import { marked } from 'marked';
@@ -1018,6 +1018,23 @@ export async function importFromFile(
     throw new PageFileSyncConflict(error instanceof Error && error.message.startsWith('page_file_')
       ? error.message : 'unsupported_import_file_baseline');
   }
+  // The registered runtime owns enrollment exclusion through the entire import
+  // transaction. The inner absence check still covers the actual input path.
+  try {
+    return await withRuntimeLegacyPageWrite({ engine, config: opts.config ?? { engine: engine.kind } }, source, slugifyPath(relativePath),
+      () => importUnenrolledFile(engine, filePath, relativePath, opts));
+  } catch (error) {
+    if (error instanceof PageFileSyncConflict) throw error;
+    if (error instanceof Error && error.message.startsWith('page_file_'))
+      throw new PageFileSyncConflict(error.message);
+    throw error;
+  }
+}
+
+async function importUnenrolledFile(
+  engine: BrainEngine, filePath: string, relativePath: string,
+  opts: NonNullable<Parameters<typeof importFromFile>[3]>,
+): Promise<ImportResult> {
   // Binding identity comes from the server DB, not frontmatter or caller bytes.
   // Includes physical-path aliases before any read, inference or successful skip.
   await assertUnenrolledImport(engine, opts.sourceId ?? 'default', slugifyPath(relativePath), filePath);

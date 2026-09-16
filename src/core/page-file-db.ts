@@ -1,7 +1,7 @@
 import { parseMarkdown } from './markdown.ts';
 import type { BrainEngine } from './engine.ts';
 import { isDeepStrictEqual } from 'node:util';
-import { resolveExistingPageFileBinding } from './page-file-binding.ts';
+import { resolveExistingPageFileBinding, pageFileMappingIdentity } from './page-file-binding.ts';
 import { PageFileJournal, rawDigest, type FileJournalRecord } from './page-file-journal.ts';
 import { replacePageFile, type FileOperationState } from './page-file-store.ts';
 import { recoverPageFile, type PageFileRecoveryAdapter } from './page-file-recovery.ts';
@@ -16,7 +16,7 @@ type Row = Record<string, any>;
  */
 export class PageFileDatabase {
   constructor(private engine: BrainEngine, private host: {
-    brainId: string; journalDirectory: string;
+    brainId: string; journalDirectory: string; mappingGeneration?: string;
     withLockedBinding<T>(fn: () => Promise<T>): Promise<T>;
   }) {}
   private async observe(source: string, slug: string, tx = this.engine) {
@@ -27,7 +27,7 @@ export class PageFileDatabase {
     const globalRepoPath = await tx.getConfig('sync.repo_path');
     const binding = await resolveExistingPageFileBinding({ brainId: this.host.brainId, sourceId: source, slug,
       pageId: String(row.id), sourcePath: row.source_path, sources, otherPagePaths: paths,
-      globalRepoPath, configGeneration: rawDigest(Buffer.from(JSON.stringify([sources, globalRepoPath]))) });
+      globalRepoPath, configGeneration: pageFileMappingIdentity({ sourceId: source, sources, globalRepoPath, mappingGeneration: this.host.mappingGeneration }) });
     return { row, binding };
   }
   private projection(raw: string, slug: string) {
@@ -203,6 +203,9 @@ export class PageFileDatabase {
     const result = recovery
       ? await recoverPageFile(journal,adapter,{action:recovery,record})
       : await replacePageFile(journal,{...adapter,inspect},record,before,Buffer.from(p.raw_markdown));
-    return { ...result, operation_id: record.operationId, persistence: 'file_and_database' };
+    // Commit (including exact replay/recovery) includes transactional text chunks,
+    // not vectors. Unresolved or rejected intent must not claim committed chunks.
+    return { ...result, operation_id: record.operationId, persistence: 'file_and_database',
+      ...(result.status === 'committed' ? { derived_state: 'chunks_current_embeddings_pending' } : {}) };
   }
 }

@@ -129,7 +129,13 @@ export async function runPull(engine: BrainEngine | null, args: string[]): Promi
   if (path) {
     repoPath = path;
   } else {
-    const id = args.find(a => !a.startsWith('--') && a !== branchFlag);
+    // Skip option-value positions, not matching strings: a source may have
+    // exactly the same name as its branch (e.g. main --branch main).
+    let id: string | undefined;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--branch' || args[i] === '--path') { i++; continue; }
+      if (!args[i].startsWith('--')) { id = args[i]; break; }
+    }
     if (!engine || !id) {
       console.error('Usage: gbrain sources pull <id> | --path <dir> [--branch <b>]');
       process.exit(2);

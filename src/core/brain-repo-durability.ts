@@ -126,6 +126,11 @@ function pushLogPath(): string {
 // Rendered into BOTH the (committed) helper and the (local, untracked) hook so
 // there is one source of truth without the hook executing repo-controlled code.
 const PUSH_RETRY = `# --- gbrain durability push-retry (generated; one source of truth) ---
+brain_pull() {
+  # Connected source route owns enrollment checks, root locking and recovery.
+  # Never fall back to raw Git if the CLI/DB/coordinator is unavailable.
+  gbrain sources pull "$_gbrain_source" --branch "$1"
+}
 brain_push() {
   _branch="$1"
   _log="\${GBRAIN_HOME:-$HOME/.gbrain}/brain-push.log"
@@ -135,27 +140,27 @@ brain_push() {
   # rebase-retry herd. No-op if flock is unavailable.
   if command -v flock >/dev/null 2>&1; then
     exec 9>"$_gd/gbrain-push.lock"
-    flock -w 30 9 || { echo "$(date -u +%FT%TZ) [push] lock-timeout $_branch" >>"$_log"; return 0; }
+    flock -w 30 9 || { echo "$(date -u +%FT%TZ) [push] lock-timeout $_branch; NEEDS ATTENTION" >>"$_log"; return 1; }
   fi
   if git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
     echo "$(date -u +%FT%TZ) [push] ok $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
   fi
-  echo "$(date -u +%FT%TZ) [push] rejected; rebase-pull $_branch" >>"$_log"
-  if git pull --rebase origin "$_branch" >>"$_log" 2>&1 && git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
-    echo "$(date -u +%FT%TZ) [push] ok-after-rebase $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
+  echo "$(date -u +%FT%TZ) [push] rejected; coordinated source-pull $_branch" >>"$_log"
+  if brain_pull "$_branch" >>"$_log" 2>&1 && git push origin "HEAD:$_branch" >>"$_log" 2>&1; then
+    echo "$(date -u +%FT%TZ) [push] ok-after-retry (push only; indexing not verified) $_branch $(git rev-parse --short HEAD 2>/dev/null)" >>"$_log"; return 0
   fi
-  git rebase --abort >/dev/null 2>&1 || true
   echo "$(date -u +%FT%TZ) [push] LOCAL-ONLY, NEEDS ATTENTION: $_branch @ $(git rev-parse --short HEAD 2>/dev/null) could not reach origin. Run: gbrain sources pull <id> && git push" >>"$_log"
   return 1
 }`;
 
-function renderPostCommitHook(): string {
+function renderPostCommitHook(sourceId: string): string {
   return `#!/usr/bin/env bash
 ${HOOK_BANNER}
 # LOCAL + untracked — NEVER commit this file. Best-effort background auto-push so
 # agent writes don't sit local-only. The real guarantee is ${HELPER_REL}.
 # Bypass: git commit --no-verify.
 set -euo pipefail
+_gbrain_source='${sourceId.replace(/'/g, "'\\''")}'
 
 _branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
 if [ "$_branch" = "HEAD" ]; then
@@ -172,7 +177,7 @@ exit 0
 `;
 }
 
-function renderCommitPushHelper(): string {
+function renderCommitPushHelper(sourceId: string): string {
   return `#!/usr/bin/env bash
 ${HELPER_BANNER}
 # THE DURABILITY GUARANTEE: add -> commit -> push, atomically. Refuses to exit 0
@@ -180,6 +185,7 @@ ${HELPER_BANNER}
 #   scripts/brain-commit-push.sh "message" <path> [path ...]
 #   scripts/brain-commit-push.sh --push-only [branch]
 set -euo pipefail
+_gbrain_source='${sourceId.replace(/'/g, "'\\''")}'
 
 ${PUSH_RETRY}
 
@@ -190,8 +196,7 @@ fi
 
 _msg="\${1:?usage: brain-commit-push.sh <message> <path> [paths...]}"; shift || true
 # Pull first so the local tree is current before we stage.
-git fetch origin >/dev/null 2>&1 || true
-git pull --rebase origin "$_branch" || { git rebase --abort >/dev/null 2>&1 || true; echo "rebase conflict: manual attention needed" >&2; exit 3; }
+brain_pull "$_branch" || { echo "coordinated pull failed: manual attention needed; not synchronized" >&2; exit 3; }
 
 # EXPLICIT paths only — never a blind 'git add -A' (would risk committing
 # secrets, temp files, or unrelated edits).
@@ -199,7 +204,7 @@ if [ "$#" -eq 0 ]; then
   echo "refusing blind 'git add -A' — pass explicit path(s) to commit" >&2; exit 2
 fi
 git add -- "$@"
-if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+if git diff --cached --quiet; then echo "nothing to commit; verifying push"; brain_push "$_branch"; exit $?; fi
 git commit -m "$_msg"
 
 if brain_push "$_branch"; then exit 0; fi
@@ -240,7 +245,7 @@ ${renderTaxonomyLines()}
    with \`gbrain check-resolvable\`. Do not move on until the push succeeded. The
    post-commit hook is only a best-effort fallback — the helper is the guarantee.
 
-3. **Pull before you touch anything.** Run \`git fetch && git pull --rebase\` at
+3. **Pull before you touch anything.** Run \`gbrain sources pull <source-id>\` at
    session start and again before each batch of writes, so a long-lived session
    never edits a stale tree (a cron also pulls every ~30 min).
 ${AGENTS_END}`;
@@ -308,10 +313,10 @@ function ensureExcluded(repoPath: string, relPath: string): void {
   } catch { /* best-effort */ }
 }
 
-function installLocalHook(repoPath: string, dryRun: boolean): { status: StepStatus; detail: string } {
+function installLocalHook(repoPath: string, dryRun: boolean, sourceId: string): { status: StepStatus; detail: string } {
   const { dir, tracked } = resolveHooksDir(repoPath);
   const hookPath = join(dir, 'post-commit');
-  const script = renderPostCommitHook();
+  const script = renderPostCommitHook(sourceId);
 
   if (existsSync(hookPath)) {
     const cur = readFileSync(hookPath, 'utf-8');
@@ -345,9 +350,9 @@ function uninstallLocalHook(repoPath: string): boolean {
 
 // ── Committed helper ────────────────────────────────────────────────────────
 
-function installHelper(repoPath: string, dryRun: boolean): { status: StepStatus; detail: string } {
+function installHelper(repoPath: string, dryRun: boolean, sourceId: string): { status: StepStatus; detail: string } {
   const helperPath = join(repoPath, HELPER_REL);
-  const script = renderCommitPushHelper();
+  const script = renderCommitPushHelper(sourceId);
   if (existsSync(helperPath) && readFileSync(helperPath, 'utf-8') === script) {
     // Ensure exec bit even when content is current.
     try { chmodSync(helperPath, 0o755); } catch { /* */ }
@@ -644,9 +649,9 @@ export async function hardenBrainRepo(opts: HardenOpts): Promise<DurabilityRepor
   else push('credential', { status: 'skipped', detail: 'no PAT provided — relying on existing git auth' });
 
   // 3. local untracked hook
-  push('hook', installLocalHook(repoPath, dryRun));
+  push('hook', installLocalHook(repoPath, dryRun, sourceId));
   // 4. committed helper
-  push('helper', installHelper(repoPath, dryRun));
+  push('helper', installHelper(repoPath, dryRun, sourceId));
   // 5. resolver/AGENTS rules
   push('agents', patchResolverFile(repoPath, dryRun));
   // 6. cron

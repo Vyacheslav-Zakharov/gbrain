@@ -4,6 +4,23 @@ import { resolve, isAbsolute, parse, sep } from 'node:path';
 import { isValidSourceId } from './source-id.ts';
 import { createHash } from 'node:crypto';
 
+/** Versioned per-source mapping identity. The full inventory remains an input to
+ * collision validation, never to this digest. Generation 1 is the explicit
+ * disposable-adapter default; protected runtime hosts supply their pinned value.
+ * This deliberately changes legacy keys: persisted bindings are never rebound. */
+export function pageFileMappingIdentity(input: {
+  sourceId: string; sources: readonly { id: string; local_path: string | null }[];
+  globalRepoPath: string | null; mappingGeneration?: string;
+}): string {
+  const matches = input.sources.filter(source => source.id === input.sourceId);
+  if (matches.length !== 1 || input.mappingGeneration === '') throw new PageFileBindingError('invalid_binding');
+  const source = matches[0]!;
+  return 'source-mapping-v1:' + createHash('sha256').update(JSON.stringify([
+    input.sourceId, source.local_path, source.local_path === null ? input.globalRepoPath : null,
+    input.mappingGeneration ?? '1',
+  ])).digest('hex');
+}
+
 /** Server-owned metadata only. Never populate paths from remote request fields. */
 export interface PageFileBindingInput {
   brainId: string;

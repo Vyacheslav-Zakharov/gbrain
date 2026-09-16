@@ -45,7 +45,7 @@ async function fixture(allowDatabaseOnly = false, allowLegacy = false) {
     const s = lstatSync(path, { bigint: true });
     return { path, dev: String(s.dev), ino: String(s.ino), uid: Number(s.uid), gid: Number(s.gid), mode: 0o700 as const };
   };
-  const manifest = { version: 1 as const, deploymentId: 'deployment-example', brainId: randomUUID(), database: 'db-example', adapterRole: 'adapter-example', generation: '1', topology: 'single-host-local' as const, serviceUid: process.getuid!(), roots: [{ sourceId: 'default', mappingGeneration: '1', directory: pin('root'), journal: pin('journal') }], lock: pin('lock'), indexedRoots: [] };
+  const manifest = { version: 1 as const, deploymentId: 'deployment-example', brainId: randomUUID(), database: 'db-example', adapterRole: 'adapter-example', generation: '1', topology: 'single-host-local' as const, serviceUid: process.getuid!(), roots: [{ sourceId: 'default', mappingGeneration: 'pin-example', directory: pin('root'), journal: pin('journal') }], lock: pin('lock'), indexedRoots: [] };
   const manifestJson = JSON.stringify(manifest);
   const host = { mode: 'offline-verification' as const, manifestJson, expected: { manifestSha256: createHash('sha256').update(manifestJson).digest('hex'), deploymentId: manifest.deploymentId, brainId: manifest.brainId, database: manifest.database, adapterRole: manifest.adapterRole, generation: manifest.generation } };
   db = new PGLiteEngine(); await db.connect({}); await db.initSchema();
@@ -54,7 +54,7 @@ async function fixture(allowDatabaseOnly = false, allowLegacy = false) {
   await db.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [root.directory.path]);
   const page = { type: 'concept', title: 'Example', compiled_truth: 'Before', timeline: '', frontmatter: {} };
   await db.putPage('example', page); writeFileSync(join(root.directory.path, 'example.md'), 'Before');
-  await new PageFileDatabase(db, { brainId: manifest.brainId, journalDirectory: root.journal.path, withLockedBinding: fn => fn() }).enroll('default', 'example');
+  await new PageFileDatabase(db, { brainId: manifest.brainId, mappingGeneration: root.mappingGeneration, journalDirectory: root.journal.path, withLockedBinding: fn => fn() }).enroll('default', 'example');
   let ordinaryReads = 0;
   const engine: any = { kind: 'postgres', executeRaw: async (query: string, values?: unknown[]) => {
     ordinaryReads++;
@@ -153,6 +153,29 @@ for (const state of ['closed', 'failed', 'host-drift', 'host-drift-under-lock', 
     } finally { spy?.mockRestore(); await lifecycle?.close(); await f.cleanup(); }
   }, 60000);
 }
+
+test('reconstructed candidate pins preserve binding and changed mapping generation refuses', async () => {
+  const f = await fixture(); let lifecycle: any;
+  try {
+    const options = { mode: 'offline-verification' as const, engine: f.ctx.engine, host: f.host, authority: f.authority };
+    lifecycle = await f.runtime.createPageFileRuntimeCandidate(options);
+    const target = { source_id: 'default', slug: 'example' };
+    const before = await f.call('get_page_checked', target);
+    await lifecycle.close();
+    const engine = { ...f.ctx.engine };
+    lifecycle = await f.runtime.createPageFileRuntimeCandidate({ ...options, engine, host: structuredClone(f.host) });
+    expect(await f.call('get_page_checked', target, { ...f.ctx, engine })).toEqual(before);
+    const services = await f.runtime.resolvePageFileRuntime({ ...f.ctx, engine }, 'default', 'example');
+    expect((await services!.sync.capture('default', 'example')).raw).toBe('Before');
+    await lifecycle.close();
+    const manifest = structuredClone(f.manifest); manifest.roots[0].mappingGeneration = 'changed';
+    const manifestJson = JSON.stringify(manifest);
+    const changedEngine = { ...f.ctx.engine };
+    lifecycle = await f.runtime.createPageFileRuntimeCandidate({ ...options, engine: changedEngine,
+      host: { ...f.host, manifestJson, expected: { ...f.host.expected, manifestSha256: createHash('sha256').update(manifestJson).digest('hex') } } });
+    await expect(f.call('get_page_checked', target, { ...f.ctx, engine: changedEngine })).rejects.toThrow('binding_changed');
+  } finally { await lifecycle?.close(); await f.cleanup(); }
+}, 60000);
 
 test('registered checked operations use the private shared candidate and close without ordinary fallback', async () => {
   const f = await fixture(); let lifecycle: any;
