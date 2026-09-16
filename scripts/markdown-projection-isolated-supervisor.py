@@ -67,6 +67,7 @@ def run(command, config, seconds=20, attempts=1):
             output.seek(0)
             lines = output.read(65537).decode('utf8', errors='replace').splitlines()
             completed = []
+            projection_status = None
             for line in lines:
                 try:
                     event = json.loads(line)
@@ -77,6 +78,12 @@ def run(command, config, seconds=20, attempts=1):
                     receipt['errors'].append('child_protocol_error'); continue
                 if event.get('stage') == 'copy.complete' and event.get('status') in ('idle', 'not_required', 'materialized'):
                     completed.append(event['status'])
+                    if 'projectionStatus' in event:
+                        data = event['projectionStatus']
+                        if not isinstance(data, dict) or len(data) > 12 or not all(isinstance(k, str) and isinstance(v, str) and len(v) < 256 for k, v in data.items()):
+                            receipt['errors'].append('child_protocol_error')
+                        else:
+                            projection_status = data
                 elif event.get('stage') == 'copy.failed':
                     code = event.get('code')
                     allowed = {'connection_closed', 'unhandled_error', 'worker_failed', 'admission_failed'}
@@ -86,7 +93,7 @@ def run(command, config, seconds=20, attempts=1):
             if proc.returncode != 0: receipt['errors'].append('child_exit_failure')
             if len(completed) != 1: receipt['errors'].append('missing_unique_completion')
             if not receipt['errors'] and receipt['reaped']:
-                return final('passed', copyStatus=completed[0])
+                return final('passed', copyStatus=completed[0], **({'projectionStatus': projection_status} if projection_status is not None else {}))
             # Never launch another child if prior lifetime/reaping is unproven.
             if not receipt['reaped']: break
     return final('failed')
@@ -104,7 +111,8 @@ def main():
     bun = sys.argv[2]
     if not Path(bun).is_absolute() or not Path(bun).is_file() or not os.access(bun, os.X_OK):
         raise RuntimeError('bun_required')
-    result = run([bun, str(Path(__file__).with_name('markdown-projection-isolated-worker.ts'))], config)
+    worker = 'markdown-projection-runtime-worker.ts' if config.get('admission') == 'PROTECTED_RUNTIME_V1' else 'markdown-projection-isolated-worker.ts'
+    result = run([bun, str(Path(__file__).with_name(worker))], config)
     print(json.dumps(result), flush=True)
     return 0 if result['status'] == 'passed' else 1
 

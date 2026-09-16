@@ -12,6 +12,7 @@ const codes=new Set(['lifetime_deadline','output_limit','supervisor_interrupted'
 // A matching envelope alone is NOT proof. Every attempt and the final outcome
 // must agree with the private supervisor protocol and the observed CLI exit.
 function validReceipt(value:unknown,runId:string,primary:unknown):value is Receipt {
+ if(record(value) && 'projectionStatus' in value && (!record(value.projectionStatus) || Object.keys(value.projectionStatus).length>12 || !Object.values(value.projectionStatus).every(v=>typeof v==='string' && v.length<256)))return false;
  if(!record(value) || value.protocol!=='markdown-projection-reaping-v1' || value.runId!==runId || value.final!==true ||
     (value.status!=='passed' && value.status!=='failed') || !Array.isArray(value.attempts) || value.attempts.length<1 || value.attempts.length>3)return false;
  const pids=new Set<number>();

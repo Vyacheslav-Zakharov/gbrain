@@ -201,6 +201,8 @@ try {
     const {isolatedRecovery}=await import('./markdown-projection-isolated-recovery');
     await isolatedRecovery(engine,observer,isolatedConfig,emit);
   }
+  const {runtimeHosted}=await import('./markdown-projection-runtime-hosted');
+  await runtimeHosted(observer,engine,name,expectedServiceIP,process.env.MARKDOWN_PROJECTION_RUNTIME_ROOT!,emit);
 } catch(e) { failed=true; failure=e; emit({stage,status:'failed',message:String(e),code:(e as any)?.code}); }
 finally {
   const errors:unknown[]=[];

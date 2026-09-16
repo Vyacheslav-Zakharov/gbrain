@@ -1,6 +1,21 @@
 # Markdown projection: development contract and finite acceptance ledger
 
-Status: **Development only; owner-approved process-isolated copy-worker pivot.** Preparation base `4b33e3a9709b2d7acff37443d4718bd12d1a372c`. Prior ordinary hosted filesystem proof remains historical; real hosted connection-loss recovery for the isolated caller is PENDING. No activation authorization.
+Status: **Development only; owner-approved process-isolated copy-worker pivot.** Bounded isolated recovery accepted at source `4844c2f45b4b615530524ccc88fc22cfd527fb2d`, hosted run `35152934953` attempt 1; see external recovery acceptance closure. The runtime admission delta below is NOT covered by that hosted proof. No activation authorization.
+
+## Protected runtime one-shot preparation (current delta)
+
+Acceptance rows selected from the closure: **A5/A6/A11 production executable admission** and the bounded local drain/read-only subset of **A9-status**. A8 ambiguous-COMMIT is still a hosted gate. A9-scheduler/A10 and A9-tombstone remain separate, unimplemented. Earlier pending recovery statements below describe historical evidence, superseded by the closure, not this new runtime candidate.
+
+Actual local command: `bun scripts/markdown-projection-runtime.ts status|drain [--config /absolute/private.json]`. No config means disabled/not_required; an explicitly missing or unsafe file fails. Private JSON version 1 contains `enabled`, `connection` (host, port, database, username, password, expectedServerAddress, expectedServerPort, tls: verify-full|local-only), and `worker` (sourceId, root, inputRoots, inventoryComplete:true). No HOME/config discovery, environment credential fallback, enrollment, DDL, scheduler installation, or fixture injection. Config must be regular, single-link, current-UID, private and opened NOFOLLOW; ancestors must be protected and canonical. Runtime roots additionally require current-UID mode 0700, canonical nonoverlap with explicit input roots; unlike disposable fixtures no sticky-directory exception is accepted. The inventory completeness assertion is operator-supplied, NOT independent discovery of all application roots. Same-UID malicious mutation is outside this boundary.
+
+The existing supervisor launches a distinct runtime child with sanitized environment, one attempt and existing whole-lifetime/reaping bounds. That child alone creates a max-one dedicated postgres.js connection, pins database/login/effective user/server, refuses superuser/BYPASSRLS/role creation/database creation, public relation ownership and page-table DML privileges. No shared pool/driver changes. Least-privilege role grants, column-level/indirect authority audit, protected enrollment and registered migration/bootstrap parity are still release gates: this preparation does not provision or certify them.
+
+Drain reuses the unchanged worker ledger/source-lock/immutable publication algorithm and drains at most one upsert. Failure is nonzero with durable outcome unknown, never falsely acknowledged. A fresh attempt consults the durable ledger, not the preceding process exit. No automatic retry or error-clearing write. Status runs an explicit READ ONLY transaction, checks source/root policy, and reports aggregate pending/blocked/materialized counts, first pending timestamp and maximum desired/materialized generations. These maxima are source aggregates, not per-page equality or current-view guarantees. Last error and heartbeat explicitly say unavailable: durable errors/backoff/heartbeat and per-article API wiring are NOT implemented. No success receipt claims those rows closed.
+
+Offline proof: actual processes exercise default-disabled, explicit-disabled, missing/unsafe/malformed config and fixture refusals, plus unchanged config/root listing. Read-only SQL is source-contract checked; enabled real PostgreSQL execution and read-only DB postconditions remain hosted-unexecuted. No local DB/PGlite/container used.
+
+**Actual next hosted proof:** after independent exact-delta review and separate dispatch authorization, invoke this exact runtime CLI with a protected file and independently pinned separate nonowner login; use existing disposable engine fixture (no runtime hooks). Snapshot schema/policy/ledger/files around status and disabled calls; prove zero mutations. Prove eligible upsert canonical bytes/current-view readback, repeat idle, wrong source/root/identity and excessive-role denial, input-root exclusion, and unchanged ordinary writers. Add an externally controlled loss around COMMIT; accept either durable outcome, then fresh CLI ledger reconciliation without duplicate/stale publication. Retain all prior bounded recovery lanes. No new hosted lane is authored or claimed executed by this preparation.
+
 
 ## Approved isolated-worker pivot (current architecture)
 
@@ -183,3 +198,28 @@ Strict sequence: test missing caller RED (assertion undefined/function), impleme
 **Current evidence supersedes earlier unexecuted-SQL descriptions above:** source `8108cc95ee29c9e5caadcb8c3f2e2cf5dda42850`, workflow `c83258fdaf5b7b9bd3eafe9fec1c0edc2ae2669e`, run `35099879925`, attempt 1: synthetic RED exit 1 at missing table, candidate exit 0/final passed, cleanup passed (parent-verified downloaded artifacts). Filesystem worker remains disconnected. This does not certify initializer, migrations, service-engine callers, application authorization or files.
 
 **Next gate:** review the separate real-engine lane, then commit/push/hosted dispatch only with separate authorization. The wrapper requires hosted socat, sudo/unshare/setpriv and frozen repository dependencies; it exposes only a Unix-socket relay to the dedicated PostgreSQL service inside a loopback-only network namespace. It does not install dependencies. Full initSchema calls schema rendering, runMigrations and verifySchema, including migration v35 auto-RLS. The disposable service login is explicitly verified as superuser/BYPASSRLS and table owner; this is not nonowner or application-auth proof. Baseline completes before unchanged candidate SQL installation; candidate inventories auto-RLS and checks real putPage insert/conflict, getPage, addTag/removeTag/getTags, searchKeyword, softDeletePage/restorePage/deletePage and transaction rollback with observer-visible obligations. Raw SQL only seeds timeline/chunks and observes catalog/ledger. Rename, versions, batch purge, import/registered operations, auth, retry/concurrency integration and serializer/FS/scheduler remain separate open rows. Do not close A4-engine until a real hosted receipt passes. No local database or provider was run.
+
+### Runtime hosted extension preparation (not hosted proof)
+
+Actual protected status/drain CLI fixture is now wired after unchanged isolated
+healthy/recovery or selected legacy gates. A generated nonowner login receives
+source-constrained reads and acknowledgement-column updates only; policy source_id
+UPDATE is needed for SELECT FOR UPDATE, not policy enablement. Runtime bytes remain
+unchanged. All fixture provisioning stays inside the generated disposable database.
+
+Finite remaining gates (none inferred from offline green):
+- H1: hosted enabled CLI status/drain, independent row/catalog/file snapshots and
+  digest/generation/current-view readback; implementation authored, execution pending.
+- H2: service-side statement audit proving actual BEGIN READ ONLY and no DML/DDL,
+  independent runtime session identity observation; pending, not claimed by snapshots.
+- H3: ordinary nonowner writer coexistence after runtime drain, other-source post-drain
+  equality, expanded wrong login/database and symlink/hardlink refusal; pending.
+- H4: indirect/security-definer and inherited/column authority certification; fixture
+  inventories callable SECURITY DEFINERs but does not approve production authority.
+- A8: external ambiguous-COMMIT loss plus fresh actual CLI durable reconciliation; pending.
+- A10: scheduler/restart lifetime and durable error/backoff/heartbeat; pending.
+- T1: tombstone processing and obsolete publication collection; pending.
+- R1: registered migration/bootstrap parity, enrollment watermark, production ACLs
+  and source/ACL coexistence; pending. No install or production readiness approval.
+- V1: independent scoped patch review, then separate commit/push/dispatch authority
+  and exact source/workflow SHA hosted proof; pending. Prior run covers baseline only.
