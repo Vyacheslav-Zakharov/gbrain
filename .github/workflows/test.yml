@@ -239,8 +239,36 @@ jobs:
           cleanup = [r for r in receipts if 'cleanup' in r]
           assert len(cleanup) == 1 and cleanup[0]['cleanup'] == 'passed' and cleanup[0]['errors'] == []
           groups = [r for r in receipts if r.get('stage') == 'process.cleanup']
-          # Outer and inner supervisors each reap their relay and command.
-          assert len(groups) == len(receipt['attempts']) + 4 + 3 + sum(len(r['failedReceipt']['attempts']) + len(r['retryReceipt']['attempts']) for r in recovery) and all(r['status'] == 'passed' and r['members'] == [] and r['sessionMembers'] == [] for r in groups)
+          # Sync healthy caller forwards supervisor stderr; async recovery captures it.
+          # Every recovery child is covered by its validated final receipt, not a
+          # fictional external cleanup line. Relay wrappers emit four other groups.
+          starts = [r for r in receipts if r.get('stage') == 'worker.isolated.recovery' and r.get('status') == 'started']
+          assert len(starts) == 3 and {(r['mode'], r['seam']) for r in starts} == expected
+          finals = [receipt] + [f for r in recovery for f in (r['failedReceipt'], r['retryReceipt'])]
+          assert len({f['runId'] for f in finals}) == len(finals), 'duplicate supervisor run'
+          attempted = []
+          for f in finals:
+              assert f['protocol'] == 'markdown-projection-reaping-v1' and f['final'] is True
+              assert isinstance(f['runId'], str) and f['runId']
+              assert 1 <= len(f['attempts']) <= 3
+              for number, a in enumerate(f['attempts'], 1):
+                  assert a['attempt'] == number and a['runId'] == f['runId']
+                  assert type(a['pid']) is int and a['pid'] > 0 and a['reaped'] is True
+                  assert 'reaping_failed' not in a['errors']
+                  attempted.append((f['runId'], a['pid']))
+          assert len(set(attempted)) == len(attempted), 'duplicate child/run'
+          assert len({pid for _, pid in attempted}) == len(attempted), 'duplicate child PID'
+          assert all(r['status'] == 'passed' and r['members'] == [] and r['sessionMembers'] == [] for r in groups), 'unreaped external group'
+          group_ids = [r['pgid'] for r in groups]
+          assert all(type(pid) is int and pid > 0 for pid in group_ids)
+          assert len(set(group_ids)) == len(group_ids), 'duplicate external group'
+          healthy_ids = {a['pid'] for a in receipt['attempts']}
+          recovery_ids = {pid for _, pid in attempted} - healthy_ids
+          assert healthy_ids <= set(group_ids), 'missing healthy child group'
+          assert not recovery_ids.intersection(group_ids), 'unexpected forwarded async group'
+          relay_ids = set(group_ids) - healthy_ids
+          assert len(relay_ids) == 4 and len(groups) == len(healthy_ids) + 4, 'relay group inventory'
+          (p/'reaping-inventory.json').write_text(json.dumps(dict(attempted=attempted, externalGroups=group_ids, relayGroups=sorted(relay_ids)), indent=2)+'\n')
           (p/'engine-receipts.json').write_text(json.dumps(receipts, indent=2)+'\n')
           PY
           git status --porcelain --untracked-files=all | tee "$EVIDENCE/engine-source-status-$(date +%s%N).txt"
