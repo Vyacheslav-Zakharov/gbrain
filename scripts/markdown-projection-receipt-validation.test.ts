@@ -56,7 +56,7 @@ test('actual supervisor reaped failed child permits cleanup',async()=>{
  const home=await mkdtemp('/tmp/mp-real-failed-');let failure:any;
  const supervisor=new URL('./markdown-projection-isolated-supervisor.py',import.meta.url).pathname;
  const python=`import importlib.util,sys\ns=importlib.util.spec_from_file_location('m',${JSON.stringify(supervisor)})\nm=importlib.util.module_from_spec(s);s.loader.exec_module(m)\noriginal=m.run\nm.run=lambda command,config:original([sys.executable,'-c','raise SystemExit(1)'],config,seconds=.5)\nsys.exit(m.main())`;
- try{runIsolated({},['python3','-c',python]);}catch(e){failure=e;}
+ try{runIsolated({},['python3','-B','-c',python]);}catch(e){failure=e;}
  try{expect(failure.unsafeFilesystemCleanup).toBe(false);expect(failure.cause).toBe(failure.primaryError);expect(failure.receipt.attempts[0].reaped).toBe(true);await removeHostedHome(home,failure);await expect(access(home)).rejects.toThrow();}
  finally{await rm(home,{recursive:true,force:true});}
 });

@@ -20,7 +20,7 @@ m.run=lambda command,config:original([sys.executable,'-c',{child!r}],config,seco
 sys.exit(m.main())
 ''')
    bridge.write_text(f'''import {{runIsolated,removeHostedHome}} from {json.dumps(str(REPO/'scripts/markdown-projection-isolated-caller.ts'))};
-let failure:any;try{{runIsolated({{}},['python3',{json.dumps(str(wrapper))}]);}}catch(e){{failure=e;}}
+let failure:any;try{{runIsolated({{}},['python3','-B',{json.dumps(str(wrapper))}]);}}catch(e){{failure=e;}}
 let refused=false;try{{await removeHostedHome({json.dumps(str(home))},failure);}}catch{{refused=true;}}
 console.log(JSON.stringify({{refused,unsafe:failure?.unsafeFilesystemCleanup,receipt:failure?.receipt,primary:!!failure?.primaryError,cleanup:failure?.cleanupErrors}}));
 ''')

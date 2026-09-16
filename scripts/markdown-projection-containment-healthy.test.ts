@@ -9,6 +9,6 @@ test('actual supervisor CLI healthy receipt permits filesystem cleanup',async()=
  const supervisor=new URL('./markdown-projection-isolated-supervisor.py',import.meta.url).pathname;
  const child=`print('{"stage":"copy.complete","status":"idle"}')`;
  const python=`import importlib.util,sys\ns=importlib.util.spec_from_file_location('m',${JSON.stringify(supervisor)})\nm=importlib.util.module_from_spec(s);s.loader.exec_module(m)\noriginal=m.run\nm.run=lambda command,config:original([sys.executable,'-c',${JSON.stringify(child)}],config,seconds=.5)\nsys.exit(m.main())`;
- const receipt=runIsolated({},['python3','-c',python]);expect(receipt.status).toBe('passed');expect(receipt.attempts[0].reaped).toBe(true);
+ const receipt=runIsolated({},['python3','-B','-c',python]);expect(receipt.status).toBe('passed');expect(receipt.attempts[0].reaped).toBe(true);
  const home=await mkdtemp('/tmp/mp-healthy-');await removeHostedHome(home,undefined);await expect(access(home)).rejects.toThrow();
 });
