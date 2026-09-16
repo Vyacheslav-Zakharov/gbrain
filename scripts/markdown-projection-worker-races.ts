@@ -5,7 +5,7 @@ import {createHash} from 'node:crypto';
 import {PostgresEngine} from '../src/core/postgres-engine';
 import {drainMarkdownProjectionOnce,type ProjectionWorkerDB,type ProjectionWorkerConfig} from '../src/core/markdown-projection-worker';
 import {serializePageToMarkdown} from '../src/core/markdown';
-import {terminateWorker,cleanupRace,type BackendIdentity} from './markdown-projection-race-safety';
+import {terminateWorker,cleanupRace,raceStage,type BackendIdentity} from './markdown-projection-race-safety';
 
 export async function workerRaces(engine:PostgresEngine, observer:any, url:string, config:ProjectionWorkerConfig, emit:(x:unknown)=>void) {
  assert.equal(process.env.GITHUB_ACTIONS,'true');
@@ -61,22 +61,30 @@ export async function workerRaces(engine:PostgresEngine, observer:any, url:strin
     return result;
    }});}finally{if(e===stale)callbackFinished();}
   })});
+  const stage=<T>(name:string,operation:()=>T|PromiseLike<T>)=>raceStage(`worker.${name}`,operation,receipt=>emit({...receipt,seam}));
   let running:Promise<any>|undefined;
   try{
    await stale.connect({engine:'postgres',database_url:url,poolSize:1});
    await fresh.connect({engine:'postgres',database_url:url,poolSize:1});
    running=drainMarkdownProjectionOnce(config,observed(stale,p=>pid=p),async p=>{if(p===seam){reached();await gate;}}).then(value=>({value}),error=>({error}));
-   await Promise.race([ready,Bun.sleep(4000).then(()=>{throw Error('worker seam deadline');})]);
+   await stage('ready',()=>ready);
    const observerPid=Number((await observer`SELECT pg_backend_pid() AS pid`)[0].pid);
+   emit({stage:'worker.termination',seam,status:'started'});
    assert(identity);await terminateWorker(observer,identity,expected);
+   emit({stage:'worker.termination',seam,status:'passed'});
    await absent(pid);
    await write(`new-${seam}`);
    const pending=await row();assert.equal(pending.status,'pending');assert(BigInt(pending.generation)>BigInt(old.generation));
    assert.equal((await current()).length,0,'new write cannot retain a current pointer');
+   emit({stage:'worker.fresh.publication',seam,status:'started'});
    assert.equal((await drainMarkdownProjectionOnce(config,observed(fresh,p=>freshPid=p))).status,'materialized');
+   emit({stage:'worker.fresh.publication',seam,status:'passed'});
    assert(freshPid>0);assert.notEqual(freshPid,pid);assert.notEqual(freshPid,observerPid);
    const latest=await verify(), pointer=await current(), latestBytes=await bytes(latest.current_path);
-   release();const outcome=await running;await callbackDone;
+   await stage('gate.release',release);
+   const driver=running;
+   const outcome=await stage('driver.settlement',()=>driver);
+   await stage('callback.completion',()=>callbackDone);
    assert(outcome.error,'terminated transaction acknowledged');assert(staleAckRejected,'lost session must reject actual ACK SQL');
    assert.deepEqual(await current(),pointer);assert.deepEqual(await row(),latest);
    assert.equal(await bytes(latest.current_path),latestBytes);

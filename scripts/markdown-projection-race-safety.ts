@@ -14,14 +14,23 @@ export async function terminateWorker(observer:any, identity:BackendIdentity, ex
  const killed=await observer`SELECT pg_terminate_backend(pid) AS killed FROM pg_stat_activity WHERE pid=${identity.pid} AND pid<>pg_backend_pid() AND datname=${expected.datname} AND usename=${expected.usename} AND application_name=${expected.application_name} AND backend_start=${identity.backend_start}::text::timestamptz`;
  assert.equal(killed.length,1,'worker identity changed before termination');assert.equal(killed[0].killed,true);
 }
-async function bounded(promise:Promise<unknown>,timeoutMs:number,label:string){
+// A deadline bounds the join, not the operation: callback ownership remains
+// with cleanupRace until its finally has actually completed.
+export async function raceStage<T>(stage:string, operation:()=>T|PromiseLike<T>, emit:(receipt:{stage:string;status:string;error?:string})=>void, timeoutMs=4000):Promise<T> {
+ emit({stage,status:'started'});
+ try{
+  const value=await bounded(Promise.resolve().then(operation),timeoutMs,stage);
+  emit({stage,status:'passed'});return value;
+ }catch(error){emit({stage,status:'failed',error:String(error)});throw error;}
+}
+async function bounded<T>(promise:Promise<T>,timeoutMs:number,label:string):Promise<T>{
  let timer:ReturnType<typeof setTimeout>|undefined;
- try{return await Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error(`${label} deadline`)),timeoutMs);})]);}finally{clearTimeout(timer);}
+ try{return await Promise.race([promise,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(Error(`${label} deadline`)),timeoutMs);})]);}finally{clearTimeout(timer);}
 }
 export async function cleanupRace(release:()=>void, running:Promise<unknown>|undefined, callback:{started:boolean;done:Promise<void>}, disconnects:Array<()=>Promise<void>>, primary:unknown, timeoutMs=4000) {
  const errors:unknown[]=[];let unsafeFilesystemCleanup=false;
  const attempt=async(fn:()=>Promise<unknown>)=>{try{await fn();}catch(error){errors.push(error);}};
- release();
+ await attempt(()=>bounded(Promise.resolve().then(release),timeoutMs,'worker gate release'));
  // Driver settlement is NOT callback completion. Join actual finally first.
  if(running)try{await bounded(running,timeoutMs,'worker driver');}catch(error){unsafeFilesystemCleanup=true;errors.push(error);}
  if(callback.started)try{await bounded(callback.done,timeoutMs,'worker callback');}catch(error){unsafeFilesystemCleanup=true;errors.push(error);}

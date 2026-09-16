@@ -31,7 +31,7 @@ for(const field of ['missing','backend_start','datname','usename','application_n
 import {mkdtemp,writeFile,readFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {terminateWorker,cleanupRace,type BackendIdentity} from './markdown-projection-race-safety';
+import {terminateWorker,cleanupRace,raceStage,type BackendIdentity} from './markdown-projection-race-safety';
 const identity:BackendIdentity={pid:42,datname:'fixture',usename:'fixture_login',application_name:'race-unique',backend_start:'2026-09-16 00:00:00.123456+00'};
 const expected={datname:identity.datname,usename:identity.usename,application_name:identity.application_name};
 function observer(row:any){let kills=0;const queries:string[]=[];return {get kills(){return kills;},queries,sql:async(strings:TemplateStringsArray,...values:unknown[])=>{const text=strings.join('?');queries.push(text);if(text.includes('pg_terminate_backend')){kills++;return [{killed:true}];}if(text.includes('pg_stat_activity'))return row?[row]:[];return [{pid:99}];}};}
@@ -51,5 +51,31 @@ test('all disconnects attempted and primary retained with aggregate secondary er
  const primary=Error('primary'),a=Error('stale disconnect'),b=Error('fresh disconnect');const seen:string[]=[];let error:any;
  try{await cleanupRace(()=>seen.push('release'),Promise.resolve(),{started:false,done:new Promise(()=>{})},[async()=>{seen.push('stale');throw a;},async()=>{seen.push('fresh');throw b;}],primary,50);}catch(e){error=e;}
  expect(seen).toEqual(['release','stale','fresh']);expect(error.cause).toBe(primary);expect(error.errors).toEqual([primary,a,b]);
+});
+test('never-settling driver reports original stage and enters independent cleanup',async()=>{
+ const receipts:any[]=[];const pending=new Promise<void>(()=>{});let primary:any,error:any;const seen:string[]=[];
+ try{await raceStage('driver.settlement',()=>pending,x=>receipts.push(x),5);}catch(e){primary=e;}
+ try{await cleanupRace(()=>{seen.push('release');},pending,{started:true,done:Promise.resolve()},[async()=>{seen.push('disconnect');}],primary,5);}catch(e){error=e;}
+ expect(primary.message).toBe('driver.settlement deadline');expect(error.cause).toBe(primary);
+ expect(error.unsafeFilesystemCleanup).toBe(true);expect(seen).toEqual(['release','disconnect']);
+ expect(receipts.map(x=>[x.stage,x.status])).toEqual([['driver.settlement','started'],['driver.settlement','failed']]);
+});
+test('callback stage deadline retains filesystem guard until late callback completes',async()=>{
+ let finish!:()=>void;let completed=false;const done=new Promise<void>(r=>finish=r).then(()=>{completed=true;});let primary:any,error:any;
+ try{await raceStage('callback.completion',()=>done,()=>{},5);}catch(e){primary=e;}
+ try{await cleanupRace(()=>{},Promise.resolve(),{started:true,done},[],primary,5);}catch(e){error=e;}
+ expect(error.cause).toBe(primary);expect(error.unsafeFilesystemCleanup).toBe(true);expect(completed).toBe(false);
+ finish();await done;expect(completed).toBe(true);
+});
+test('gate cleanup failure does not prevent independent disconnects or mask primary',async()=>{
+ const primary=Error('original stage'),releaseError=Error('release failed');const seen:string[]=[];let error:any;
+ try{await cleanupRace(()=>{throw releaseError;},Promise.resolve(),{started:false,done:Promise.resolve()},[async()=>{seen.push('one');throw Error('disconnect failed');},async()=>{seen.push('two');}],primary,5);}catch(e){error=e;}
+ expect(error.cause).toBe(primary);expect(error.errors[1]).toBe(releaseError);expect(seen).toEqual(['one','two']);
+});
+test('normal stages emit paired receipts and preserve results',async()=>{
+ const receipts:any[]=[];
+ for(const stage of ['ready','gate.release','driver.settlement','callback.completion'])expect(await raceStage(stage,()=>Promise.resolve(42),x=>receipts.push(x),50)).toBe(42);
+ expect(receipts.map(x=>x.status)).toEqual(['started','passed','started','passed','started','passed','started','passed']);
+ const original=Error('driver exception');await expect(raceStage('driver.settlement',()=>Promise.reject(original),()=>{},50)).rejects.toBe(original);
 });
 test('callback deadline refuses return to filesystem cleanup',async()=>{let error:any;let disconnected=false;try{await cleanupRace(()=>{},Promise.resolve(),{started:true,done:new Promise(()=>{})},[async()=>{disconnected=true;}],undefined,10);}catch(e){error=e;}expect(error).toBeDefined();expect(disconnected).toBe(true);expect(error.unsafeFilesystemCleanup).toBe(true);});
