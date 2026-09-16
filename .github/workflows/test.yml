@@ -18,7 +18,7 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
     env:
-      SOURCE_SHA: f37e741a904f533ebd72baf6af97264603fe657f
+      SOURCE_SHA: 4b33e3a9709b2d7acff37443d4718bd12d1a372c
       EVIDENCE: ${{ github.workspace }}/markdown-projection-evidence
     services:
       postgres:
@@ -76,6 +76,8 @@ jobs:
         run: |
           set -euo pipefail
           cd source
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test --config=/dev/null test/postgres-transaction-lifetime.test.ts > "$EVIDENCE/transaction-lifetime.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test --config=/dev/null test/postgres-transaction-facade.test.ts > "$EVIDENCE/transaction-facade.output" 2>&1
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test test/markdown-projection-worker-blockers.serial.test.ts > "$EVIDENCE/worker-blockers.output" 2>&1
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test scripts/markdown-projection-race-safety.test.ts test/markdown-projection-worker.test.ts test/markdown-projection.test.ts > "$EVIDENCE/worker-regression.output" 2>&1
           env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 5s 120s bun x --no-install tsc --noEmit > "$EVIDENCE/worker-typecheck.output" 2>&1
