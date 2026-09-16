@@ -24,6 +24,33 @@ Seven test command tiers, each with a clear scope:
 
 This divergence is intentional. Don't try to make them equal — the two scripts deliberately solve different problems. The regression test at `test/scripts/run-unit-shard.test.ts` pins what the local fast loop should and shouldn't include.
 
+### Within-shard process isolation (CI matrix)
+
+`scripts/test-shard.sh` keeps `test/source-ingest-executor.test.ts` in its
+LPT-selected owning shard, but runs that exact whole file in a fresh Bun process
+**after** the ordinary selected files finish. Both non-empty batches are attempted
+even if one fails; either failure makes the shard exit nonzero. Empty batches do
+not invoke Bun. Discovery, weights, shard ownership and `--dry-run-list` are
+unchanged; no file or case is skipped or name-filtered. Both invocations retain
+`--timeout=60000`, and explicit per-test deadlines and CI job limits are unchanged.
+The local fast-loop runner and serial-file taxonomy are unaffected.
+
+This is containment for a cross-file process-state slowdown, not a proven root
+cause fix. Acceptance still requires independent review and a complete hosted
+suite on the exact candidate, including the full owning shard.
+
+Offline runner contract check (no database or test bodies executed):
+
+```sh
+python3 scripts/test-shard-isolation.test.py
+```
+
+The check uses the real pure LPT selector but replaces every `bun test` with an
+inert argv recorder. It checks all ten shards' selected/invoked multisets, complete
+tracked non-E2E inventory (matrix + serial + dedicated slow), one singleton on the
+owning shard, failure propagation in both directions, and empty/single-batch
+selection safety. These checks prove routing, not product-test correctness.
+
 ### Failure-first logging
 
 When `bun run test` finds any failure, the wrapper:

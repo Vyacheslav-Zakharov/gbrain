@@ -106,6 +106,26 @@ if [ "$SHARD_COUNT" -eq 0 ]; then
   exit 0
 fi
 
-# Convert newline-separated file list to argv. xargs handles the
-# whitespace correctly without word-splitting on spaces in paths.
-printf '%s\n' "$SHARD_FILES" | xargs bun test --timeout=60000
+# Partition only the selected shard; discovery, LPT ownership and dry-run
+# remain unchanged. This exact file gets a fresh process as containment,
+# not as a claim that the cross-file slowdown's root cause is known.
+ORDINARY_FILES=()
+ISOLATED_FILES=()
+while IFS= read -r file; do
+  if [ "$file" = "test/source-ingest-executor.test.ts" ]; then
+    ISOLATED_FILES+=("$file")
+  else
+    ORDINARY_FILES+=("$file")
+  fi
+done <<< "$SHARD_FILES"
+
+# Attempt both batches sequentially even if either fails. Never invoke an
+# empty batch: bare `bun test` would rediscover and run the entire suite.
+STATUS=0
+if [ "${#ORDINARY_FILES[@]}" -gt 0 ]; then
+  bun test --timeout=60000 "${ORDINARY_FILES[@]}" || STATUS=1
+fi
+if [ "${#ISOLATED_FILES[@]}" -gt 0 ]; then
+  bun test --timeout=60000 "${ISOLATED_FILES[@]}" || STATUS=1
+fi
+exit "$STATUS"
