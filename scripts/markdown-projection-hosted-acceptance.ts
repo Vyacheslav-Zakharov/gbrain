@@ -4,6 +4,7 @@ import postgres from 'postgres';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
+import { isIP } from 'node:net';
 
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'hosted Actions only');
 assert.equal(process.env.MARKDOWN_PROJECTION_DISPOSABLE, 'CREATE_AND_DROP_DATABASE');
@@ -16,6 +17,9 @@ assert(!/[?#\s\\]/.test(rawUrl), 'URL query/hash/options/whitespace forbidden');
 assert(/^postgres(?:ql)?:\/\/[A-Za-z_][A-Za-z0-9_]*(?::[^@/?#]*)?@(?:127\.0\.0\.1|localhost|\[::1\]):[1-9][0-9]{0,4}\/[A-Za-z_][A-Za-z0-9_]*$/.test(rawUrl), 'ambiguous hosted endpoint');
 const url = new URL(rawUrl);
 assert(Number(url.port) <= 65535, 'invalid port');
+// Independently captured by hosted docker inspect, never inferred from this connection.
+const expectedServiceIP = process.env.MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP;
+assert(expectedServiceIP && isIP(expectedServiceIP) === 4, 'exact expected service IP required');
 // Explicit fields prevent PG* environment defaults and URL startup overrides.
 const connectionArgs = (database: string, username = url.username, secret = decodeURIComponent(url.password)) => ({
   host: url.hostname === 'localhost' ? '127.0.0.1' : url.hostname.replace(/[\[\]]/g, ''),
@@ -24,11 +28,11 @@ const connectionArgs = (database: string, username = url.username, secret = deco
   connection: { statement_timeout: 5000, lock_timeout: 1500, idle_in_transaction_session_timeout: 10000, search_path: 'public' },
 });
 async function verifyTarget(client: ReturnType<typeof postgres>, database: string, user: string) {
-  const [target] = await client`SELECT current_database() AS database, session_user AS username, inet_server_addr()::text AS address, inet_server_port() AS port`;
+  const [target] = await client`SELECT current_database() AS database, session_user AS username, host(inet_server_addr()) AS address, inet_server_port() AS port`;
   assert.equal(target.database, database, 'wrong database');
   assert.equal(target.username, user, 'wrong session user');
-  assert.equal(target.address, connectionArgs(database).host, 'wrong server address');
-  assert.equal(Number(target.port), Number(url.port), 'wrong server port');
+  assert.equal(target.address, expectedServiceIP, 'wrong server address');
+  assert.equal(Number(target.port), 5432, 'wrong server port');
 }
 const name = `mp_accept_${randomBytes(8).toString('hex')}`;
 const role = `${name}_ordinary`;

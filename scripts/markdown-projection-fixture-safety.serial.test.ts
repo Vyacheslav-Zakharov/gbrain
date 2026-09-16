@@ -1,6 +1,6 @@
 // Offline only: postgres is replaced before importing the actual hosted fixture.
 import { test, expect, mock, afterAll } from 'bun:test';
-const envKeys = ['GITHUB_ACTIONS', 'MARKDOWN_PROJECTION_DISPOSABLE', 'MARKDOWN_PROJECTION_ADMIN_URL', 'MARKDOWN_PROJECTION_PHASE', 'DATABASE_URL', 'PGOPTIONS'];
+const envKeys = ['GITHUB_ACTIONS', 'MARKDOWN_PROJECTION_DISPOSABLE', 'MARKDOWN_PROJECTION_ADMIN_URL', 'MARKDOWN_PROJECTION_PHASE', 'MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP', 'DATABASE_URL', 'PGOPTIONS'];
 const originalEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
 afterAll(() => {
   for (const key of envKeys) {
@@ -42,19 +42,31 @@ test('reject inherited PostgreSQL options before client creation', async () => {
     expect(attempts).toBe(0);
   } finally { delete process.env.PGOPTIONS; }
 });
+for (const [i, ip] of [undefined, '', '172.18.0.2/32', '172.18.0.2,172.18.0.3', '172.18.0.2\n', 'localhost'].entries()) test(`reject missing/ambiguous service IP ${i}`, async () => {
+  process.env.MARKDOWN_PROJECTION_ADMIN_URL = base;
+  if (ip === undefined) delete process.env.MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP;
+  else process.env.MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP = ip;
+  attempts = 0;
+  let error: any;
+  try { await import(`./markdown-projection-hosted-acceptance.ts?badip=${i}`); } catch (e) { error = e; }
+  expect(error?.message).toContain('expected service IP');
+  expect(attempts).toBe(0);
+});
 for (const mismatch of ['database', 'username', 'address', 'port', 'none']) test(`identity fence / cleanup: ${mismatch}`, async () => {
   const events: string[] = [];
   const argsSeen: any[] = [];
   process.env.MARKDOWN_PROJECTION_ADMIN_URL = base;
   process.env.MARKDOWN_PROJECTION_PHASE = 'red';
+  process.env.MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP = '172.18.0.2';
   factory = (args: any) => {
     argsSeen.push(args);
     const index = argsSeen.length;
     const client: any = async (sql: TemplateStringsArray) => {
       if (sql.join('').includes('current_database()')) {
         events.push(`verify ${index}`);
-        const row: any = { database: args.database, username: args.username, address: args.host, port: args.port };
-        if (index === 2 && mismatch !== 'none') row[mismatch] = 'WRONG';
+        expect(sql.join('')).toContain('host(inet_server_addr())');
+        const row: any = { database: args.database, username: args.username, address: '172.18.0.2', port: 5432 };
+        if (index === 2 && mismatch !== 'none') row[mismatch] = mismatch === 'address' ? '172.18.0.3' : 'WRONG';
         return [row];
       }
       return [{ name: null }]; // exact hosted RED table probe
@@ -71,11 +83,15 @@ for (const mismatch of ['database', 'username', 'address', 'port', 'none']) test
   expect(events).toContain('drop');
   expect(events).toContain('close 1');
   expect(argsSeen[1].database).toMatch(/^mp_accept_[0-9a-f]{16}$/);
+  expect(argsSeen[1].host).toBe('127.0.0.1');
   expect(argsSeen[1].connection).toEqual({ statement_timeout: 5000, lock_timeout: 1500, idle_in_transaction_session_timeout: 10000, search_path: 'public' });
   if (mismatch === 'none') {
     expect(error.message).toContain('atomic obligation table missing');
     expect(error.actual).toBe(null);
     expect(error.expected).toBe('markdown_projection_obligations');
     expect(events.indexOf('schema')).toBeGreaterThan(events.indexOf('verify 3'));
-  } else expect(events).not.toContain('schema');
+  } else {
+    expect(events).not.toContain('schema');
+    if (mismatch === 'address') expect(error.message).toContain('wrong server address');
+  }
 });
