@@ -18,7 +18,7 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
     env:
-      SOURCE_SHA: eceff74b7e527e47ae13358420d374876e5d58e0
+      SOURCE_SHA: 8108cc95ee29c9e5caadcb8c3f2e2cf5dda42850
       EVIDENCE: ${{ github.workspace }}/markdown-projection-evidence
     services:
       postgres:
