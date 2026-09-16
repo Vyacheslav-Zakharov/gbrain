@@ -295,6 +295,10 @@ export type ContentImportOptions = {
     source_kind?: string | null;
     source_uri?: string | null;
     ingested_via?: string | null;
+    /** Internal put_page write-through stamp. Persist before rendering so the
+     * file and JSONB have the same projection. Not a caller-controlled field;
+     * the operation derives this from its trust context. */
+    writeThroughProvenance?: 'put_page' | 'mcp:put_page';
     /**
      * v0.42 (#1699 trust boundary). When `true` (untrusted caller — remote MCP
      * put_page), gate-owned frontmatter markers (`quarantine`, `content_flag`,
@@ -535,6 +539,12 @@ export async function prepareContentImport(engine: BrainEngine, slug: string, co
         `[gbrain] content-sanity warn: ${slug} (${sanityResult.bytes} bytes) — exceeds warn threshold, consider splitting\n`,
       );
     }
+  }
+
+  if (opts.writeThroughProvenance) {
+    parsed.frontmatter.ingested_via = opts.writeThroughProvenance;
+    parsed.frontmatter.source_kind = opts.writeThroughProvenance;
+    parsed.frontmatter.ingested_at = new Date().toISOString();
   }
 
   // v0.39.3.0 CV8 — DB content_hash excludes timestamp-bearing frontmatter

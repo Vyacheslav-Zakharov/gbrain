@@ -985,6 +985,8 @@ const put_page: Operation = {
       // Pack load failed; fall through to legacy inferType behavior.
       activePack = undefined;
     }
+    const isSandboxSubagent = ctx.viaSubagent === true
+      && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
     const importOptions = {
       noEmbed,
       // v0.42 (#1699): untrusted callers can't smuggle gate-owned frontmatter
@@ -1003,6 +1005,7 @@ const put_page: Operation = {
       source_kind: provenanceKind,
       source_uri: provenanceUri,
       ingested_via: provenanceVia,
+      ...(!isSandboxSubagent ? { writeThroughProvenance: ctx.remote === false ? 'put_page' as const : 'mcp:put_page' as const } : {}),
     };
     let result: import('./import-file.ts').ImportResult;
     if (fileRuntime) {
@@ -1075,23 +1078,18 @@ const put_page: Operation = {
     //   - Subagent sandbox (viaSubagent without allowedSlugPrefixes) → DB-only.
     //   - All other writes → write-through.
     let writeThrough: { written: boolean; path?: string; skipped?: string; error?: string } | undefined;
-    const isSandboxSubagent = ctx.viaSubagent === true
-      && !(Array.isArray(ctx.allowedSlugPrefixes) && ctx.allowedSlugPrefixes.length > 0);
     if (ordinaryWriteThrough) {
       writeThrough = ordinaryWriteThrough;
     } else if (!ctx.dryRun && result.status !== 'error' && !isSandboxSubagent) {
       const sourceId = targetSourceId;
-      const provenanceVia = ctx.remote === false ? 'put_page' : 'mcp:put_page';
+
       // Shared canonical write-through (also used by `gbrain brainstorm/lsd
       // --save`). Renders the file from the saved DB row and writes it
       // atomically; never throws (failures land in skipped/error).
       writeThrough = await writePageThrough(ctx.engine, result.slug, {
         sourceId,
-        frontmatterOverrides: {
-          ingested_via: provenanceVia,
-          ingested_at: new Date().toISOString(),
-          source_kind: provenanceVia,
-        },
+        // Provenance is already in the imported row. In particular, a hash-
+        // equal skip must render its saved timestamp, not invent file-only data.
         logger: ctx.logger,
       });
     } else if (isSandboxSubagent) {

@@ -112,7 +112,7 @@ jobs:
             test/page-file-fixture-cleanup.test.ts test/page-file-tag-fence.test.ts \
             test/page-file-source-operator.serial.test.ts test/page-file-source-runtime-enrollment.serial.test.ts \
             test/page-file-ordinary-preparation.serial.test.ts test/page-file-ordinary-put-compat.serial.test.ts \
-            test/page-file-ordinary-writer-vertical.serial.test.ts \
+            test/page-file-ordinary-writer-vertical.serial.test.ts test/page-file-created-enrollment.serial.test.ts \
             test/postgres-engine-singleton-ownership.test.ts test/postgres-engine.test.ts \
             test/postgres-engine-getter-selfheal.test.ts test/postgres-disconnect-bounded.test.ts \
             test/page-file-runtime-authority.serial.test.ts test/page-file-runtime-enrollment.serial.test.ts \
