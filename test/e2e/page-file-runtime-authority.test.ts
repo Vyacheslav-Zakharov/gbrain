@@ -115,6 +115,10 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
       await admin.executeRaw(`GRANT SELECT ON sources,pages,page_file_bindings,config TO ${role}`);
       if (role === adapterRole) {
         await admin.executeRaw(`GRANT UPDATE ON pages TO ${role}`);
+        // The canonical AFTER page-write trigger runs as the caller and calls
+        // nextval(), even though this is an UPDATE (not a serial-ID INSERT).
+        // Do not broaden this to ALL SEQUENCES or change trigger ownership.
+        await admin.executeRaw(`GRANT USAGE ON SEQUENCE page_generation_clock_seq TO ${role}`);
         await admin.executeRaw(`GRANT SELECT ON tags,timeline_entries TO ${role}`);
         await admin.executeRaw(`GRANT SELECT,INSERT,UPDATE,DELETE ON content_chunks TO ${role}`);
         await admin.executeRaw(`GRANT SELECT,INSERT ON page_versions TO ${role}`);
@@ -137,6 +141,11 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
       const url = new URL(databaseUrl!); url.username = role; url.password = password; urls.push(url.toString());
     }
     [ordinaryUrl, adapterUrl] = urls;
+    for (const role of roles) {
+      const [clock] = await admin.executeRaw<{ usage: boolean }>(
+        "SELECT has_sequence_privilege($1, 'public.page_generation_clock_seq', 'USAGE') AS usage", [role]);
+      expect(clock.usage).toBe(role === adapterRole);
+    }
     const ownPage = `page_id IN (SELECT id FROM public.pages WHERE source_id='${source}')`;
     const ownBinding = `binding_id IN (SELECT binding_id FROM public.page_file_bindings WHERE source_id='${source}')`;
     const policies: [string, string, string, 'ALL' | 'SELECT'][] = [
