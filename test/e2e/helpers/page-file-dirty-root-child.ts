@@ -3,6 +3,7 @@ import { PostgresEngine } from '../../../src/core/postgres-engine.ts';
 import { PageFileJournal } from '../../../src/core/page-file-journal.ts';
 import { operationsByName, type OperationContext } from '../../../src/core/operations.ts';
 import { runPull } from '../../../src/commands/sources-harden.ts';
+import { installDirtyRootBoundary } from './page-file-dirty-root-boundary.ts';
 
 if (process.env.GITHUB_ACTIONS !== 'true' || process.env.PAGE_FILE_CAS_DISPOSABLE !== '1'
   || process.env.REQUIRE_PAGE_FILE_CONNECTED_POSTGRES !== '1' || !process.send) {
@@ -26,16 +27,9 @@ process.once('message', async (input: any) => {
       };
     }
     if (input.boundary === 'dirty-root') {
-      const execute = PostgresEngine.prototype.executeRaw;
-      let captures = 0;
-      PostgresEngine.prototype.executeRaw = async function <T = Record<string, unknown>>(sql: string, params?: any[]): Promise<T[]> {
-        const result = await execute.call(this, sql, params) as T[];
-        // First capture precedes durable invalidation; second is AFTER actual
-        // divergenceSafePull returns, BEFORE finish writes observed/unlinks dirty.
-        if (sql === 'SELECT binding_id, canonical_root, relative_path, pending_op_id FROM public.page_file_bindings'
-          && ++captures === 2) await park('dirty-root');
-        return result;
-      };
+      // Root services use a private adapter engine, so intercept the prototype,
+      // not only the ordinary connected engine passed to runPull.
+      installDirtyRootBoundary(PostgresEngine.prototype, () => park('dirty-root'));
     }
     let result: unknown;
     if (input.action === 'pull' || input.action === 'reconcile') {

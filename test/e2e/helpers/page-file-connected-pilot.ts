@@ -136,12 +136,27 @@ export async function exerciseConnectedPilot(f: {
   console.log('PG_CONNECTED_PILOT: ordinary unenrolled DML coexists and enrolled SQL fence remains');
 
   const retained = (await resolvePageFileRuntime(ctx, f.source, 'connected'))!;
+  // Prove this exact retained service is healthy before revoking only approval.
+  const retainedGet = () => retained.pages.get(f.source, 'connected', () => {});
+  const retainedBefore = await retainedGet();
+  expect(retainedBefore.persistence).toBe('file_and_database');
+  expect(await state()).toEqual(stable);
   renameSync(f.approvalPath, f.approvalPath + '.revoked');
   try {
     await expect(get()).rejects.toThrow('page_file_bootstrap_invalid');
     await expect(invoke('put_page_checked', { ...request, operation_id: randomUUID(),
       expected_revision: after.revision, file_baseline: after.file.baseline })).rejects.toThrow('page_file_bootstrap_invalid');
-    await expect(Promise.resolve().then(() => retained.pages.get(f.source, 'connected', () => {}))).rejects.toThrow('page_file_bootstrap_invalid');
+    // The retained authority redacts bootstrap revalidation errors at run(),
+    // unlike operation resolution above. Exact API error, not a loose refusal.
+    await expect(retainedGet()).rejects.toMatchObject({ message: 'page_file_authority_unavailable' });
+    expect(await state()).toEqual(stable);
+    // A-B-A control: restore the SAME approval inode and prove the SAME service
+    // works again. This rules out a dead pool/dirty root/unrelated generic error.
+    renameSync(f.approvalPath + '.revoked', f.approvalPath);
+    try {
+      expect(await retainedGet()).toEqual(retainedBefore);
+      expect(await state()).toEqual(stable);
+    } finally { renameSync(f.approvalPath, f.approvalPath + '.revoked'); }
     await expect(f.engine.reconnect()).rejects.toThrow('page_file_bootstrap_invalid');
     expect(await state()).toEqual(stable);
     console.log('PG_CONNECTED_PILOT: revoked approval denies checked read write retained service and reconnect without mutation');

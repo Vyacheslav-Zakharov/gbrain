@@ -14,6 +14,20 @@ export async function exerciseAlreadyV142Replay(f: {
     || process.env.GITHUB_ACTIONS !== 'true' || process.env.PAGE_FILE_CAS_DISPOSABLE !== '1') {
     throw new Error('upgrade replay requires explicit disposable hosted acceptance');
   }
+  // captureFixturePins leaves pg_catalog first on this disposable max:1
+  // migrator pool. initSchema's current_schema() bootstrap would then create
+  // pg_catalog.sources. Runtime verifiers retain their catalog-first path.
+  const manager = f.admin.connectionManager;
+  expect(manager).toBeDefined();
+  expect(manager!.isDualPoolActive()).toBe(false);
+  const ddl = await manager!.ddl();
+  expect(ddl.options.max).toBe(1);
+  const [session] = await ddl.unsafe('SELECT pg_backend_pid() AS pid, current_setting(\'search_path\') AS path');
+  await ddl.unsafe("SELECT set_config('search_path', 'public', false)");
+  try {
+    const [context] = await ddl.unsafe('SELECT pg_backend_pid() AS pid, current_schema() AS schema');
+    expect(context.pid).toBe(session.pid);
+    expect(context.schema).toBe('public');
   expect(LATEST_VERSION).toBe(142); // This is an exact v142 qualification, not an evergreen upgrade test.
   expect(await f.admin.getConfig('version')).toBe('142');
   const [binding] = await f.admin.executeRaw<{ binding_id: string }>(
@@ -59,4 +73,9 @@ export async function exerciseAlreadyV142Replay(f: {
     await preserved();
   }
   console.log('PG_UPGRADE_REPLAY: existing runner replays 141 and 142 twice preserving populated v142 state and original authority pins');
+  } finally {
+    await ddl.unsafe("SELECT set_config('search_path', $1, false)", [session.path]);
+    const [restored] = await ddl.unsafe('SELECT pg_backend_pid() AS pid, current_setting(\'search_path\') AS path');
+    expect(restored).toEqual(session);
+  }
 }
