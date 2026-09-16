@@ -278,7 +278,7 @@ export class PostgresEngine implements BrainEngine {
       await this.disconnectLifecycle();
       this._lifecycleConnected = false;
     } catch (error) {
-      if (this._pageFileStartup?.status === 'offline-verification') this._lifecycleFailure = error;
+      if (this._pageFileStartup && this._pageFileStartup.status !== 'disabled') this._lifecycleFailure = error;
       throw error;
     }
   }
@@ -332,7 +332,7 @@ export class PostgresEngine implements BrainEngine {
   async initSchema(): Promise<void> {
     // Protected catalog has already been admitted against reviewed pins.
     // Migrations/self-healing belong to a separate reviewed release identity.
-    if (this._pageFileStartup?.status === 'offline-verification') {
+    if (this._pageFileStartup && this._pageFileStartup.status !== 'disabled') {
       if (!this._pageFileLifecycle) throw new Error('page_file_bootstrap_start_failed');
       await this._pageFileLifecycle.revalidate();
       return;

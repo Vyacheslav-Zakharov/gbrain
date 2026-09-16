@@ -7,6 +7,7 @@ import { PageFileSync, type FileReadBaseline } from './page-file-sync.ts';
 import type { CheckedPageFields } from './page-checked-store.ts';
 import { transitionPageFileRoot, reconcilePageFileRootTransition } from './page-file-root-transition.ts';
 import type { PageFileCoordinationHost } from './page-file-writer-gate.ts';
+import { requirePageFilePilotAdmission } from './page-file-bootstrap.ts';
 
 export interface PageFileAuthorityRoot extends PageFileCoordinationHost {
   revalidate?(): Promise<void>;
@@ -33,7 +34,8 @@ export interface PageFileAuthorityTarget {
  * operation parameters, DB config, jobs, or a shared config dump.
  */
 export interface PageFileAuthorityOptions {
-  mode: 'offline-verification' | 'production';
+  mode: 'offline-verification' | 'production' | 'production-pilot';
+  admission?: object;
   revalidate?(): Promise<void>;
   sqlAuthority?: import('./page-file-sql-authority.ts').PageFileSqlAuthorityExpectation;
   credentialReference: string;
@@ -44,7 +46,10 @@ class AuthorityError extends Error {}
 const identityFailure = () => new AuthorityError('page_file_authority_identity_mismatch');
 const unavailable = () => new AuthorityError('page_file_authority_unavailable');
 async function openAuthority(options: PageFileAuthorityOptions) {
-  if (options.mode !== 'offline-verification') throw new Error('file_runtime_prerequisites_pending');
+  if (options.mode === 'production-pilot') {
+    const { requirePageFilePilotAdmission } = await import('./page-file-bootstrap.ts');
+    requirePageFilePilotAdmission(options.admission);
+  } else if (options.mode !== 'offline-verification') throw new Error('file_runtime_prerequisites_pending');
   const expected = Object.freeze({ ...options.expected });
   const sqlAuthority = options.sqlAuthority && structuredClone(options.sqlAuthority);
   const revalidate = options.revalidate;
@@ -150,7 +155,8 @@ export interface PageFileEnrollmentTarget {
  * must revalidate the reviewed manifest under its exclusive root through commit.
  */
 export async function createPageFileEnrollmentAuthority(options: PageFileAuthorityOptions & { adapterRole: string }) {
-  if (options.mode !== 'offline-verification') throw new Error('file_runtime_prerequisites_pending');
+  // openAuthority enforces the opaque pilot admission before credential access.
+  if (options.mode !== 'offline-verification' && options.mode !== 'production-pilot') throw new Error('file_runtime_prerequisites_pending');
   if (!options.adapterRole || options.expected.role === options.adapterRole) throw identityFailure();
   const { close, run, engine } = await openAuthority(options);
   return Object.freeze({ close, forPage(target: PageFileEnrollmentTarget) {
@@ -171,6 +177,7 @@ export async function createPageFileEnrollmentAuthority(options: PageFileAuthori
 
 /** Trusted host bootstrap handle: pass only the bound services to request code. */
 export async function createPageFileAuthority(options: PageFileAuthorityOptions) {
+  const pilotAdmission = options.mode === 'production-pilot' ? options.admission : undefined;
   const { close, run, engine } = await openAuthority(options);
   return Object.freeze({ close, revalidate: () => run(async () => {}), forPage(target: PageFileAuthorityTarget) {
     const { source, slug, validate } = target;
@@ -195,7 +202,11 @@ export async function createPageFileAuthority(options: PageFileAuthorityOptions)
       }),
     });
   }, forRoot(target: PageFileAuthorityRoot) {
-    const host = Object.freeze({ ...target });
+    const host = Object.freeze({ ...target, authorizeBindings: pilotAdmission ? (rows: readonly { source_id: string; slug: string }[]) => {
+      const approved = requirePageFilePilotAdmission(pilotAdmission);
+      if (rows.some(row => row.source_id !== approved.source || row.slug !== approved.slug))
+        throw new Error('page_file_pilot_target_unapproved');
+    } : undefined });
     return Object.freeze({
       // Host acquires exclusive root exactly once. The existing transition seam
       // is already locked; ordinary Git/import callbacks never receive engine.

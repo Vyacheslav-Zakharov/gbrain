@@ -4,7 +4,9 @@
 
 The owner selected a single writer channel through GBrain for protected pages: direct external file editing is excluded, canonical Markdown files and existing synchronization remain. This is not permission to freeze mixed roots, move to database-only storage, deploy, migrate, change filesystem permissions or publish business content.
 
-Registered checked operations now have an integrated file-backed path, but trusted runtime configuration accepts only `isolated-integration`, PGLite and temporary local roots. `production` deliberately throws `file_runtime_prerequisites_pending`. No real PostgreSQL acceptance or deployed availability is claimed. The worktree is uncommitted, not an immutable release artifact.
+The verified baseline is `b093e14245c4153d218f7ce3c629f13ed06ee797`, hosted CI run `35070352567`, attempt `1`. It includes real connected PostgreSQL bootstrap, separate executable enrollment and crash/restart recovery evidence in disposable fixtures. Its protected PostgreSQL mode is `offline-verification`; it does not admit production. Subsequent pilot admission changes are under review **HOLD**, including root scope: baseline evidence does not certify those changed bytes. No installed availability or production acceptance is claimed.
+
+**Deployment gate:** never run unrestricted `offline-verification` against production, relabel production as offline, or bypass guards. A pilot requires separately reviewed bounded admission, exact-byte evidence and explicit owner authorization. Mixed-root cohort validation and representative already-v142 upgrade/replay proof remain pending for the new candidate. See the [finite installation/rollback/approval template](page-file-sql-authority-provisioning.md#finite-installation-rollback-and-owner-approval-template-preparation-only).
 
 CAS protects one existing page, not a multi-page package. A revision match is not owner approval of an exact before/after package. Tool allowlists require separate authorization.
 
@@ -24,17 +26,38 @@ With a trusted coordination host, actual root pull uses exclusive root coordinat
 
 The integrated test executes registered CAS → actual source pull against temporary local Git → actual `runImport` → checked reread, including pending-file preservation. This is no longer merely a set of file primitives, but it does not prove every incremental/checkpoint/scheduled caller or production topology.
 
-Derived text chunks are rebuilt transactionally and embeddings remain pending. Identity fences protect late provider results on supported database paths. Enrolled-page ordinary derived writers remain constrained by migration fences; their eventual vector completion and file-route receipt disclosure are not established by database-only embedding tests.
+Derived text chunks are rebuilt transactionally and embeddings remain pending. Identity fences protect late provider results on supported database paths. Enrolled-page ordinary derived writers remain constrained by migration fences; their eventual vector completion is not claimed. File-route receipts explicitly distinguish committed canonical state/chunks from pending embeddings; pending, abort and recovery outcomes are covered by baseline receipt tests.
 
 ## Finite blockers before activation
 
-1. **Writer coverage:** complete shared enrollment/write coordination for remaining direct GBrain writers. The registered legacy `put_page` gate is proven, but an absence check elsewhere does not serialize enrollment. Generated hooks/helpers still contain direct `git pull --rebase`; inventory and replace or drain existing generated instances at authorized cutover. Sole-writer approval does not make these internal paths safe automatically.
-2. **Actual source projection:** enrolled import rejects `activePack`, forced rechunk, explicit inference and code files (`import-file.ts`). File projection uses default `parseMarkdown`. Prove representative intended source/schema fixtures and implement matching custom-pack projection where required; do not silently substitute a default parser or exclude required pages.
-3. **Runtime authority and lifecycle:** production adapter/host validation, stable outside-root coordination directories, ownership, enrollment/recovery and actual runtime-role separation remain unproven. Migration PUBLIC revokes do not establish least privilege; the adapter currently mints authorization through its engine. Keep the production guard closed.
-4. **Frozen acceptance:** obtain independent review and exact-artifact hosted PostgreSQL concurrency, role denial, clean/upgrade/replay, configuration drift and restart recovery evidence. Local PG/container/QEMU testing on the shared host is prohibited. The dedicated workflow includes file adapters, but currently omits root-runtime, root-transition and runtime-coordination suites; its complete-inventory assertion must fail until those are listed. Adapter E2E is not registered production-runtime proof.
-5. **Release approval:** resolve receipt/derived-state limitations and production cohort fit, then separately approve exact artifact, migration, writer safe point, backup and controlled authenticated fixture. Only verified installed runtime availability can justify team/tool-access updates.
+1. **Installed writer inventory:** baseline proof covers named facts, ingest, cycle, legacy writes, enrollment races and the protected generated pull template. Inventory every actually installed helper/external writer and explicitly replace, coordinate or drain it at an authorized safe point. Correct templates are not proof of installed remediation.
+2. **Actual source projection:** baseline shared mapping identity and full import forwarding of the active pack are implemented and tested. Prove the selected source/parser cohort; do not claim arbitrary custom-pack compatibility. For the pilot, require a mixed-root fixture with enrolled and ordinary unenrolled pages, plus sources/roots outside the selected cohort. Prove continuing ordinary writes/sync and no widening of checked-write, enrollment or root-mutation authority outside the approved boundary. This new admission proof is **pending**, not inherited from baseline mixed-writer evidence.
+3. **Target runtime authority:** connected protected startup, actual ordinary/adapter roles, reconnect/per-borrow drift refusal and separate enrollment operator are baseline-proven. Target protected identities/catalog pins, outside-root directories, credentials and bounded pilot admission are not provisioned or approved. Keep admission on **HOLD** pending root-scope correction, independent review and exact-candidate proof.
+4. **Frozen acceptance:** baseline has hosted concurrency, SQL denial, root coordination and crash/restart coverage; the old missing-suite claim is superseded. Require exact new SHA/run/attempt evidence for pilot scope and representative already-v142 upgrade/replay provisioning. Fresh migration through v142 alone is not that proof. Generic CLI recovery execution is a separate qualification. Local PostgreSQL/container testing on the shared host is prohibited.
+5. **Release approval:** approve exact artifact, cohort, installation manifest, migration plan, safe point, consistent backup/restore and controlled authenticated readback separately. Accept explicit chunks-current/embeddings-pending receipts, not completed vectors. Only installed runtime and actual transport discovery can establish availability; candidate schema generation is not live checked-MCP proof.
 
-## Local verification boundary
+## Verified baseline evidence and pending successor proof
+
+The reconciliation ledger `reconciliation-b093e1424.md` (operator evidence directory
+`/home/avers/.hermes/outputs/page-cas-mvp/`) records downloaded-artifact verification
+for [run 35070352567](https://github.com/Vyacheslav-Zakharov/gbrain/actions/runs/35070352567),
+attempt 1, exact SHA above. It reports 58 offline suite entries / 369 passing tests,
+and PostgreSQL suite pass counts of 9 (DB), 5 (file), 5 (runtime authority), and 7
+(SQL authority), with completed summaries and zero failures. Evidence-manifest SHA-256:
+`5a224fa58206a5aec8ff1cfbb77b9b53435b0bc745c96b37e717983928ce2586`.
+The ledger verified 76 evidence hashes and 2,873 source hashes; this documentation
+update does not rerun or extend that attestation. Typecheck completion is supported
+by the successful workflow, not a separate typecheck exit receipt.
+
+Connected completion markers cover executable status/verify/enroll, all four SIGKILL
+boundaries (journal, prepared, rename, commit), fresh protected bootstrap and explicit
+terminal replay, plus dirty-root restart/reconciliation without an automatic winner.
+Fixture catalog pins are explicitly disposable, not production-approved. Neither
+new pilot mixed-root admission nor representative already-v142 upgrade/replay nor
+actual generic `gbrain call` recovery execution is certified by that baseline.
+Those receipts remain **PENDING** until independently verified for the exact successor.
+
+## Historical local verification boundary (not successor acceptance)
 
 Consolidation ran full `tsc --noEmit` with a 90-second wall limit and one CPU. It first failed on nullable file-only configuration at three root callers and a generic transaction test spy; the nullable runtime boundary and spy typing were corrected. The missing-config regression was observed RED before the minimal fix, then GREEN. Production rejection remains intact.
 

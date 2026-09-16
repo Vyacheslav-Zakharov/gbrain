@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PostgresEngine } from '../../../src/core/postgres-engine.ts';
+import type { PageFileBootstrapAnchor } from '../../../src/core/page-file-bootstrap.ts';
+import { enrollPageFileRuntime } from '../../../src/core/page-file-runtime.ts';
 import { loadPageFileOperator, runPageFileOperator } from '../../../src/commands/page-file-operator.ts';
 
 const anchorPath = '/etc/gbrain/page-file-operator-anchor.json';
@@ -12,7 +14,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
  * Only enroll may open the separate credential. No SQL enrollment shortcut. */
 export async function exerciseConnectedOperator(f: {
   admin: PostgresEngine; engine: PostgresEngine; source: string; root: string; directory: string;
-  bootstrap: { mode: 'offline-verification'; bootstrapPath: string; bootstrapSha256: string };
+  bootstrap: PageFileBootstrapAnchor;
   reviewed: { hostManifestSha256: string; source: string; slug: string; pageId: string;
     revision: string; canonicalRoot: string; relativePath: string; rawSha256: string };
   ordinaryUrl: string; enrollmentUrl: string;
@@ -28,7 +30,7 @@ export async function exerciseConnectedOperator(f: {
   const install = (reviewed: typeof f.reviewed) => {
     const reviewedJson = JSON.stringify(reviewed), reviewedPath = join(f.directory, `operator-reviewed-${serial}.json`);
     writeFileSync(reviewedPath, reviewedJson, { flag: 'wx', mode: 0o400 });
-    const contract = JSON.stringify({ version: 1, mode: 'offline-verification', bootstrap: f.bootstrap,
+    const contract = JSON.stringify({ version: 1, mode: f.bootstrap.mode, bootstrap: f.bootstrap,
       enrollmentCredentialPath: secret, enrollmentCredentialSha256: hash(f.enrollmentUrl), reviewedPath, reviewedSha256: hash(reviewedJson) });
     const operatorPath = join(f.directory, `operator-contract-${serial++}.json`);
     writeFileSync(operatorPath, contract, { flag: 'wx', mode: 0o400 });
@@ -72,7 +74,7 @@ export async function exerciseConnectedOperator(f: {
       await invoke('status', 'not_enrolled'); await invoke('verify', 'not_enrolled');
       await invoke('enroll'); expect(await state()).toEqual(before);
     } finally { renameSync(secret + '.withheld', secret); }
-    console.log('PG_CONNECTED_OPERATOR: executable status/verify read-only without enrollment credential; enroll requires separate credential');
+    if (f.bootstrap.mode === 'offline-verification') console.log('PG_CONNECTED_OPERATOR: executable status/verify read-only without enrollment credential; enroll requires separate credential');
     const operator = loadPageFileOperator({ remote: false });
     for (const remote of [true, undefined]) {
       expect(() => loadPageFileOperator({ remote })).toThrow('page_file_operator_denied');
@@ -84,7 +86,18 @@ export async function exerciseConnectedOperator(f: {
     for (const change of [{ revision: 'stale-reviewed-revision' }, { rawSha256: '0'.repeat(64) }]) {
       install({ ...f.reviewed, ...change }); await invoke('enroll'); expect(await state()).toEqual(before);
     }
-    console.log('PG_CONNECTED_OPERATOR: remote/unset rejected; stale exact reviewed revision and bytes rejected without mutation');
+    if (f.bootstrap.mode === 'offline-verification') console.log('PG_CONNECTED_OPERATOR: remote/unset rejected; stale exact reviewed revision and bytes rejected without mutation');
+    if (f.bootstrap.mode === 'production-pilot') {
+      install(f.reviewed);
+      const request = await loadPageFileOperator({ remote: false }).enrollment({ remote: false });
+      for (const change of [{ source: 'unapproved-source' }, { slug: 'unapproved-page' }]) {
+        const reviewed = { ...f.reviewed, ...change };
+        await expect(enrollPageFileRuntime({ engine: f.engine, config: { engine: 'postgres' }, remote: false },
+          reviewed.source, reviewed.slug, { ...request, reviewed })).rejects.toThrow('page_file_pilot_target_unapproved');
+        install({ ...f.reviewed, ...change }); await invoke('enroll'); expect(await state()).toEqual(before);
+      }
+      console.log('PG_CONNECTED_PILOT: unapproved source and page operator enrollment rejected without mutation');
+    }
     install(f.reviewed);
     await invoke('enroll', 'enrolled');
     const enrolled = await state();
@@ -98,6 +111,7 @@ export async function exerciseConnectedOperator(f: {
     try {
       await invoke('status', 'verified'); await invoke('verify', 'verified'); expect(await state()).toEqual(enrolled);
     } finally { renameSync(secret + '.withheld', secret); }
-    console.log('PG_CONNECTED_OPERATOR: executable exact enrollment and idempotent repeat; enrolled status/verify read-only without credential');
+    if (f.bootstrap.mode === 'offline-verification') console.log('PG_CONNECTED_OPERATOR: executable exact enrollment and idempotent repeat; enrolled status/verify read-only without credential');
+    else console.log('PG_CONNECTED_PILOT: protected production-pilot operator exact enrollment and idempotent repeat');
   } finally { if (ownsAnchor) rmSync(anchorPath); }
 }

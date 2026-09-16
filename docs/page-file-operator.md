@@ -1,6 +1,10 @@
 # Bounded offline page-file operator
 
-Production remains disabled. This standalone local executable adds no MCP operation,
+Baseline `b093e14245c4153d218f7ce3c629f13ed06ee797` admits offline verification,
+not production. Pilot admission changes remain **HOLD** pending root-scope review,
+mixed-root cohort validation and exact successor evidence. Never use unrestricted
+`offline-verification` on production or relabel production as an offline fixture.
+This standalone local executable adds no MCP operation,
 worker capability, UI, migrations, automatic enrollment or recovery algorithm.
 It handles exactly one independently reviewed page per protected operator manifest.
 Run from the repository with Bun; it is deliberately not routed through generic CLI
@@ -94,8 +98,17 @@ Recovery already exists and is intentionally not duplicated here:
 - `recover_page_file_checked` is the existing local-only operation: supply original
   `source_id`, `slug`, `operation_id`, `expected_revision`, `file_baseline`, `page`,
   `raw_markdown` and explicit `action` (`resume-exact` or `abort`). Never substitute
-  a newly observed baseline or select unexpected bytes. Use the existing CLI operation
-  argument interface; `gbrain --tools-json` describes its exact parameters.
+  a newly observed baseline or select unexpected bytes. Exact generic CLI grammar:
+
+  ```text
+  gbrain call --source <exact-source> recover_page_file_checked '<original-intent JSON plus explicit action>'
+  ```
+
+  This is a non-runnable template, not an approval or example payload. The JSON
+  must contain all fields above and its `source_id` must match the exact source.
+  `gbrain --tools-json` describes parameters; it does not establish a direct
+  `gbrain recover_page_file_checked` verb. This operation refuses remote/unset
+  callers; the standalone operator has no `recover` action.
 - Root reconciliation's existing invocation is
   `gbrain sources pull source-example --recover-root --yes`. It observes current files,
   does not rerun Git, and still refuses outstanding page intents. Sync afterward is a
@@ -108,10 +121,16 @@ bun test test/page-file-operator.serial.test.ts
 bun run typecheck
 ```
 
-The new tests use real protected filesystem fixtures and mocked DB/runtime boundaries
-(serial quarantine). They prove independent pins, credential-path separation/lazy
-loading, remote denial, exact baseline forwarding, readback, redaction and dirty/pending
-classification. They do **not** claim a real PostgreSQL operator enrollment execution.
-The existing connected PostgreSQL/bootstrap evidence and the parallel crash acceptance
-work remain separate. No live DB/container/provisioning or production activation is
-performed by this change.
+The serial tests use protected filesystem fixtures and mocked DB/runtime boundaries.
+Separately, baseline hosted run `35070352567/1` executed the real PostgreSQL operator:
+status/verify without enrollment credentials, remote/unset and stale-baseline refusal,
+exact enrollment, idempotent repeat and enrolled readback. The baseline also completed
+four crash/fresh-bootstrap recovery boundaries and dirty-root reconciliation. See the
+[baseline evidence ledger summary](page-cas-mvp.md#verified-baseline-evidence-and-pending-successor-proof).
+
+Crash proof called registered handlers in child processes, **not** the generic
+`gbrain call` executable. That exact CLI acceptance remains pending; do not relabel
+handler evidence as CLI execution. New pilot and upgrade/replay evidence is also
+pending. No production installation, credential provisioning or business write is
+authorized by these tests or by this runbook. Use the [owner approval template](page-file-sql-authority-provisioning.md#finite-installation-rollback-and-owner-approval-template-preparation-only)
+for a separately reviewed, finite future window.

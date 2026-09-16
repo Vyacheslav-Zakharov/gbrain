@@ -3,14 +3,14 @@ import { constants, openSync, closeSync, fstatSync, lstatSync, readFileSync, rea
 import { dirname, isAbsolute, normalize } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
-import { loadPageFileBootstrap, loadPageFileStartupBootstrap } from '../core/page-file-bootstrap.ts';
+import { loadPageFileBootstrap, loadPageFileStartupBootstrap, pageFileBootstrapAnchorSchema, requirePageFilePilotAdmission } from '../core/page-file-bootstrap.ts';
 import type { PageFileRuntimeEnrollment } from '../core/page-file-runtime.ts';
 import type { OperationContext } from '../core/operations.ts';
 
 const text = z.string().min(1).max(4096), digest = z.string().regex(/^[a-f0-9]{64}$/);
 const anchorSchema = z.strictObject({ operatorPath: text, operatorSha256: digest });
-const contractSchema = z.strictObject({ version: z.literal(1), mode: z.literal('offline-verification'),
-  bootstrap: z.strictObject({ mode: z.literal('offline-verification'), bootstrapPath: text, bootstrapSha256: digest }),
+const contractSchema = z.strictObject({ version: z.literal(1), mode: z.enum(['offline-verification', 'production-pilot']),
+  bootstrap: pageFileBootstrapAnchorSchema,
   enrollmentCredentialPath: text, enrollmentCredentialSha256: digest, reviewedPath: text, reviewedSha256: digest });
 const reviewedSchema = z.strictObject({ hostManifestSha256: digest, source: text, slug: text, pageId: text,
   revision: text, canonicalRoot: text, relativePath: text, rawSha256: digest });
@@ -50,10 +50,14 @@ export function loadPageFileOperator(ctx: { remote?: unknown }, path = '/etc/gbr
     if (sha(file.bytes) !== anchor.operatorSha256) throw invalid();
     const contract = contractSchema.parse(JSON.parse(file.bytes.toString()));
     const bootstrap = loadPageFileBootstrap(contract.bootstrap);
-    if (bootstrap.status !== 'offline-verification') throw invalid();
+    if (bootstrap.status === 'disabled' || bootstrap.status !== contract.mode) throw invalid();
     const reviewedFile = protectedFile(contract.reviewedPath);
     if (sha(reviewedFile.bytes) !== contract.reviewedSha256) throw invalid();
     const reviewed = Object.freeze(reviewedSchema.parse(JSON.parse(reviewedFile.bytes.toString())));
+    if (bootstrap.status === 'production-pilot') {
+      const approved = requirePageFilePilotAdmission(bootstrap.admission);
+      if (reviewed.source !== approved.source || reviewed.slug !== approved.slug) throw invalid();
+    }
     if (reviewed.hostManifestSha256 !== bootstrap.contract.expected.manifestSha256
       || contract.enrollmentCredentialPath === bootstrap.contract.credentialPath
       || contract.enrollmentCredentialSha256 === bootstrap.contract.credentialSha256) throw invalid();
@@ -72,7 +76,8 @@ export function loadPageFileOperator(ctx: { remote?: unknown }, path = '/etc/gbr
     const loaded = Object.freeze({ reviewed, revalidate,
       verifyStartup() {
         revalidate(); const startup = loadPageFileStartupBootstrap();
-        if (startup.status !== 'offline-verification' || !isDeepStrictEqual(startup.contract,bootstrap.contract)) throw invalid();
+        if (startup.status === 'disabled' || startup.status !== bootstrap.status || !isDeepStrictEqual(startup.contract,bootstrap.contract)) throw invalid();
+        if (startup.status === 'production-pilot' && !isDeepStrictEqual(requirePageFilePilotAdmission(startup.admission), requirePageFilePilotAdmission(bootstrap.admission))) throw invalid();
       },
       async enrollment(caller: { remote?: unknown }): Promise<PageFileRuntimeEnrollment> {
         local(caller);
@@ -83,7 +88,7 @@ export function loadPageFileOperator(ctx: { remote?: unknown }, path = '/etc/gbr
           const fingerprint = secret.fingerprint; secret.bytes.fill(0);
           const roles = bootstrap.contract.sqlAuthority.roles;
           return { reviewed: {...reviewed}, authority: {
-            mode:'offline-verification', adapterRole:roles.adapter, credentialReference:contract.enrollmentCredentialPath,
+            mode:bootstrap.status, admission:bootstrap.admission, adapterRole:roles.adapter, credentialReference:contract.enrollmentCredentialPath,
             expected:{role:roles.enrollment,ordinaryRole:roles.ordinary,database:bootstrap.contract.expected.database},
             sqlAuthority:{...bootstrap.contract.sqlAuthority,role:roles.enrollment,database:bootstrap.contract.expected.database},
             async revalidate() { revalidate(); const s=protectedFile(contract.enrollmentCredentialPath); try { if(s.fingerprint!==fingerprint) throw invalid(); } finally {s.bytes.fill(0);} },

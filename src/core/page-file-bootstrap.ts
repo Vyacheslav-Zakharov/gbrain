@@ -7,7 +7,22 @@ import { validatePageFileHostManifest } from './page-file-host.ts';
 
 const text = z.string().min(1).max(4096);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
-const anchorSchema = z.strictObject({ mode: z.literal('offline-verification'), bootstrapPath: text, bootstrapSha256: digest });
+export const pageFileBootstrapAnchorSchema = z.discriminatedUnion('mode', [
+  z.strictObject({ mode: z.literal('offline-verification'), bootstrapPath: text, bootstrapSha256: digest }),
+  z.strictObject({ mode: z.literal('production-pilot'), bootstrapPath: text, bootstrapSha256: digest, approvalPath: text, approvalSha256: digest }),
+]);
+const anchorSchema = pageFileBootstrapAnchorSchema;
+// One explicit business target. Its independent protected pin binds the complete
+// existing bootstrap contract (host, roles, catalog and credential pins).
+const approvalSchema = z.strictObject({ version: z.literal(1), mode: z.literal('production-pilot'), bootstrapSha256: digest, source: text, slug: text });
+const pilotAdmissions = new WeakMap<object, { revalidate(): void; source: string; slug: string }>();
+/** Opaque in-process capability; serialized config/requests cannot recreate it. */
+export function requirePageFilePilotAdmission(admission: unknown) {
+  const approved = admission && typeof admission === 'object' ? pilotAdmissions.get(admission) : undefined;
+  if (!approved) throw new Error('page_file_pilot_approval_required');
+  approved.revalidate();
+  return { source: approved.source, slug: approved.slug };
+}
 const contractSchema = z.strictObject({
   version: z.literal(1), manifestPath: text, credentialPath: text, credentialSha256: digest, ordinaryRole: text,
   sqlAuthority: z.strictObject({ roles: z.strictObject({ ordinary: text, adapter: text, enrollment: text }), catalogPins: z.record(z.string(), digest) }),
@@ -22,7 +37,8 @@ export type PageFileBootstrapAnchor = z.infer<typeof anchorSchema>;
 const invalid = () => new Error('page_file_bootstrap_invalid');
 
 /** Fixed deployment-owned file, never selected through request/job/DB config.
- * No production-mode anchor is accepted. Absence is disabled, malformed is fatal. */
+ * Only explicit pinned production-pilot approval is admitted. Absence is disabled,
+ * malformed is fatal; generic production mode is never accepted. */
 export function loadPageFileStartupBootstrap() {
   const path = '/etc/gbrain/page-file-bootstrap-anchor.json';
   try { lstatSync(path); }
@@ -74,7 +90,7 @@ function readProtected(path: string, secret = false) {
 
 /** Internal lifecycle constructor: call once per ordinary-engine lifecycle, before
  * serving requests. No env, DB config, OperationContext or job payload is consulted.
- * This is OFFLINE ONLY; it does not remove any production admission guard.
+ * Production pilot requires an independently pinned protected approval file.
  * Actual startup must supply the external anchor and await close before disconnect.
  */
 export function loadPageFileBootstrap(input?: PageFileBootstrapAnchor, revalidateAnchor?: () => void) {
@@ -83,6 +99,10 @@ export function loadPageFileBootstrap(input?: PageFileBootstrapAnchor, revalidat
     const anchor = Object.freeze(anchorSchema.parse(input));
     const bootstrap = readProtected(anchor.bootstrapPath);
     if (sha(bootstrap.bytes) !== anchor.bootstrapSha256) throw invalid();
+    const approvalFile = anchor.mode === 'production-pilot' ? readProtected(anchor.approvalPath) : undefined;
+    const approval = approvalFile ? approvalSchema.parse(JSON.parse(approvalFile.bytes.toString('utf8'))) : undefined;
+    if (anchor.mode === 'production-pilot' && (!approvalFile || !approval
+      || sha(approvalFile.bytes) !== anchor.approvalSha256 || approval.bootstrapSha256 !== anchor.bootstrapSha256)) throw invalid();
     const parsed = contractSchema.parse(JSON.parse(bootstrap.bytes.toString('utf8')));
     Object.freeze(parsed.sqlAuthority.roles); Object.freeze(parsed.sqlAuthority.catalogPins); Object.freeze(parsed.sqlAuthority);
     const contract = Object.freeze({ ...parsed, expected: Object.freeze(parsed.expected) });
@@ -90,11 +110,12 @@ export function loadPageFileBootstrap(input?: PageFileBootstrapAnchor, revalidat
       || new Set(Object.values(contract.sqlAuthority.roles)).size !== 3) throw invalid();
     if (contract.ordinaryRole === contract.expected.adapterRole) throw invalid();
     const manifest = readProtected(contract.manifestPath);
-    const hostOptions = Object.freeze({ mode: 'offline-verification' as const, manifestJson: manifest.bytes.toString('utf8'), expected: contract.expected });
+    const hostOptions = Object.freeze({ mode: anchor.mode, manifestJson: manifest.bytes.toString('utf8'), expected: contract.expected });
     const host = validatePageFileHostManifest(hostOptions);
     if (host.manifest.serviceUid !== process.getuid?.()) throw invalid();
+    if (approval && !host.manifest.roots.some(root => root.sourceId === approval.source)) throw invalid();
     const indexed = [...host.manifest.indexedRoots, ...host.manifest.roots.map(root => root.directory)];
-    for (const path of [anchor.bootstrapPath, contract.manifestPath, contract.credentialPath]) {
+    for (const path of [anchor.bootstrapPath, contract.manifestPath, contract.credentialPath, ...(anchor.mode === 'production-pilot' ? [anchor.approvalPath] : [])]) {
       if (indexed.some(root => path === root.path || path.startsWith(root.path === '/' ? '/' : root.path + '/'))) throw invalid();
     }
     // Keep only a fingerprint, not credential bytes, in the captured descriptor.
@@ -105,20 +126,23 @@ export function loadPageFileBootstrap(input?: PageFileBootstrapAnchor, revalidat
     const revalidate = () => {
       try {
         revalidateAnchor?.();
+        if (anchor.mode === 'production-pilot' && readProtected(anchor.approvalPath).fingerprint !== approvalFile!.fingerprint) throw invalid();
         if (readProtected(anchor.bootstrapPath).fingerprint !== bootstrap.fingerprint
           || readProtected(contract.manifestPath).fingerprint !== manifest.fingerprint
           || readProtected(contract.credentialPath, true).fingerprint !== credentialFingerprint) throw invalid();
         host.revalidate();
       } catch { throw invalid(); }
     };
-    return Object.freeze({ status: 'offline-verification' as const, contract, revalidate,
+    const admission = approval ? Object.freeze({}) : undefined;
+    if (admission && approval) pilotAdmissions.set(admission, { ...approval, revalidate });
+    return Object.freeze({ status: anchor.mode, contract, revalidate, admission,
       async start(engine: BrainEngine) {
         revalidate();
         try {
           const { createPageFileRuntimeCandidate } = await import('./page-file-runtime.ts');
           revalidate();
-          const lifecycle = await createPageFileRuntimeCandidate({ mode: 'offline-verification', engine, host: hostOptions,
-            authority: { mode: 'offline-verification', credentialReference: contract.credentialPath,
+          const lifecycle = await createPageFileRuntimeCandidate({ mode: anchor.mode, admission, engine, host: hostOptions,
+            authority: { mode: anchor.mode, admission, credentialReference: contract.credentialPath,
               async revalidate() { revalidate(); },
               sqlAuthority: { ...contract.sqlAuthority, database: contract.expected.database, role: contract.expected.adapterRole },
               expected: { role: contract.expected.adapterRole, database: contract.expected.database, ordinaryRole: contract.ordinaryRole },

@@ -17,11 +17,13 @@ export async function exerciseConnectedBootstrap(f: {
   admin: PostgresEngine; source: string;
   roles: { ordinary: string; adapter: string; enrollment: string };
   loginUrls: Map<string, string>; pins: Record<string, string>;
+  mode?: 'production-pilot';
 }) {
   if (process.env.REQUIRE_PAGE_FILE_CONNECTED_POSTGRES !== '1' || process.env.GITHUB_ACTIONS !== 'true'
     || process.env.PAGE_FILE_CAS_DISPOSABLE !== '1') throw new Error('connected bootstrap requires explicit disposable hosted acceptance');
+  if (f.mode && process.env.REQUIRE_PAGE_FILE_PILOT_POSTGRES !== '1') throw new Error('pilot requires explicit hosted acceptance');
   // The workflow creates ONLY an empty private fixture directory. Never replace
-  // an existing deployment anchor, and never write any production-mode anchor.
+  // an existing deployment anchor. Pilot approval below authorizes this fixture only.
   expect(existsSync(anchorPath)).toBe(false);
   const directory = mkdtempSync('/etc/gbrain/connected-fixture-');
   const engines: PostgresEngine[] = [];
@@ -48,7 +50,12 @@ export async function exerciseConnectedBootstrap(f: {
     expected: { manifestSha256: hash(manifestJson), deploymentId: manifest.deploymentId, brainId: manifest.brainId,
       database: manifest.database, adapterRole: manifest.adapterRole, generation: '1' } };
   const bootstrap = JSON.stringify(contract);
-  const anchor = JSON.stringify({ mode: 'offline-verification', bootstrapPath: protectedFile('bootstrap.json', bootstrap), bootstrapSha256: hash(bootstrap) });
+  const bootstrapPath = protectedFile('bootstrap.json', bootstrap);
+  const approval = JSON.stringify({ version: 1, mode: 'production-pilot', bootstrapSha256: hash(bootstrap), source: f.source, slug: 'connected' });
+  const approvalPath = f.mode ? protectedFile('pilot-approval.json', approval) : undefined;
+  const anchor = JSON.stringify(f.mode
+    ? { mode: f.mode, bootstrapPath, bootstrapSha256: hash(bootstrap), approvalPath, approvalSha256: hash(approval) }
+    : { mode: 'offline-verification', bootstrapPath, bootstrapSha256: hash(bootstrap) });
   const config = { database_url: f.loginUrls.get(f.roles.ordinary)!, poolSize: 1 };
   const engine = new PostgresEngine(); engines.push(engine);
   const ctx = { engine, config: { engine: 'postgres' as const }, remote: false as const };
@@ -84,7 +91,7 @@ export async function exerciseConnectedBootstrap(f: {
     expect((await engine.executeRaw("SELECT compiled_truth FROM pages WHERE source_id=$1 AND slug='legacy-connected'", [f.source]))[0].compiled_truth).toBe('After');
     await engine.executeRaw("DELETE FROM pages WHERE source_id=$1 AND slug='legacy-connected'", [f.source]);
     expect(await snapshot()).toEqual(pristine);
-    console.log('PG_CONNECTED_BOOTSTRAP: actual ordinary and adapter admission; initSchema no migration or enrollment');
+    if (!f.mode) console.log('PG_CONNECTED_BOOTSTRAP: actual ordinary and adapter admission; initSchema no migration or enrollment');
 
     const [page] = await engine.executeRaw<{ id: string; write_revision: string }>('SELECT id::text,write_revision FROM pages WHERE source_id=$1', [f.source]);
     await expect(enrollPageFileRuntime(ctx, f.source, 'connected')).rejects.toThrow('page_file_candidate_lifecycle_unavailable');
@@ -97,6 +104,14 @@ export async function exerciseConnectedBootstrap(f: {
     });
     let runtime = (await resolvePageFileRuntime(ctx, f.source, 'connected'))!;
     expect((await runtime.pages.get(f.source, 'connected', () => {})).persistence).toBe('file_and_database');
+    if (f.mode) {
+      phase = 'production-pilot';
+      const { exerciseConnectedPilot } = await import('./page-file-connected-pilot.ts');
+      await exerciseConnectedPilot({ admin: f.admin, engine, source: f.source, root,
+        journal: manifest.roots[0].journal.path, approvalPath: approvalPath!, lock: manifest.lock.path,
+        enrollmentUrl: f.loginUrls.get(f.roles.enrollment)!, enrollmentRole: f.roles.enrollment });
+      return; // Separate fixture invocation: offline crash/upgrade proofs stay unchanged.
+    }
     const stable = await snapshot();
     await engine.disconnect();
     // SQL suite's own adapter probe pool is still open; only startup's additional

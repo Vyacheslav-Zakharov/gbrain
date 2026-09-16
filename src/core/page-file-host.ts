@@ -17,7 +17,7 @@ const directory = z.strictObject({ path: text, dev: z.string().regex(/^(0|[1-9][
 const schema = z.strictObject({ version: z.literal(1), deploymentId: text, brainId: z.uuid(), database: text, adapterRole: text, generation: text, topology: z.literal('single-host-local'), serviceUid: z.number().int().nonnegative(), roots: z.array(z.strictObject({ sourceId: text, mappingGeneration: text, directory, journal: directory })).min(1).max(1024), lock: directory, indexedRoots: z.array(directory).max(1024) });
 export type PageFileHostManifest = z.infer<typeof schema>;
 export interface PageFileHostManifestOptions {
-  mode: 'offline-verification';
+  mode: 'offline-verification' | 'production-pilot';
   manifestJson: string;
   /** From an independently protected durable host/DB record, not the manifest itself. */
   expected: { manifestSha256: string; deploymentId: string; brainId: string; database: string; adapterRole: string; generation: string };
@@ -27,9 +27,9 @@ function freeze<T>(value: T): DeepReadonly<T> {
   if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
   return value as DeepReadonly<T>;
 }
-/** Offline primitive only; no runtime registration or production admission. */
+/** Pure host validation; does not itself grant runtime or SQL authority. */
 export function validatePageFileHostManifest(options: PageFileHostManifestOptions) {
-  if (options.mode !== 'offline-verification') throw new Error('file_runtime_prerequisites_pending');
+  if (options.mode !== 'offline-verification' && options.mode !== 'production-pilot') throw new Error('file_runtime_prerequisites_pending');
   if (typeof options.manifestJson !== 'string' || Buffer.byteLength(options.manifestJson) > 1024 * 1024) throw new Error('page_file_host_manifest_invalid');
   const manifestSha256 = createHash('sha256').update(options.manifestJson).digest('hex');
   const manifest = schema.parse(JSON.parse(options.manifestJson));

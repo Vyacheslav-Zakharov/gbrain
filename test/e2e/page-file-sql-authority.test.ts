@@ -9,7 +9,15 @@ import { exerciseConnectedBootstrap } from './helpers/page-file-connected-bootst
 import { pageFileSqlAuthorityQueries, verifyPageFileSqlAuthority, type PageFileSqlAuthorityExpectation } from '../../src/core/page-file-sql-authority.ts';
 
 const url = process.env.DATABASE_URL;
-if (process.env.REQUIRE_PAGE_FILE_SQL_AUTHORITY_POSTGRES === '1' && !url) throw new Error('SQL authority acceptance requires DATABASE_URL');
+if (process.env.REQUIRE_PAGE_FILE_PILOT_POSTGRES === '1' && (process.env.GITHUB_ACTIONS !== 'true'
+  || process.env.REQUIRE_PAGE_FILE_CONNECTED_POSTGRES !== '1' || !url)) {
+  throw new Error('production-pilot acceptance requires explicit disposable hosted connected fixture');
+}
+if (process.env.REQUIRE_PAGE_FILE_UPGRADE_REPLAY_POSTGRES === '1' && process.env.GITHUB_ACTIONS !== 'true') {
+  throw new Error('upgrade replay requires explicit disposable hosted acceptance');
+}
+if ((process.env.REQUIRE_PAGE_FILE_SQL_AUTHORITY_POSTGRES === '1'
+  || process.env.REQUIRE_PAGE_FILE_UPGRADE_REPLAY_POSTGRES === '1') && !url) throw new Error('SQL authority acceptance requires DATABASE_URL');
 if (url) {
   const u = new URL(url);
   if (!['postgres:', 'postgresql:'].includes(u.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)
@@ -182,6 +190,10 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
     await exerciseConnectedBootstrap({ admin, source, roles, loginUrls, pins });
     await allAccepted();
   }, 120_000);
+  (process.env.REQUIRE_PAGE_FILE_PILOT_POSTGRES === '1' ? test : test.skip)('actual production-pilot admission binds explicit page approval and revocation on disposable PostgreSQL', async () => {
+    await exerciseConnectedBootstrap({ admin, source, roles, loginUrls, pins, mode: 'production-pilot' });
+    await allAccepted();
+  }, 120_000);
   test('mixed writer executes legacy DML but enrolled authored state and authority stay fenced', async () => {
     const ordinary = pools.get(roles.ordinary)!;
     await ordinary.unsafe('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [source, `/fixture/${suffix}`]);
@@ -214,6 +226,10 @@ suite('SQL authority — real PostgreSQL with external fixture pins', () => {
     expect(await ordinary.unsafe("SELECT id FROM sources WHERE id='default'")).toHaveLength(0);
     await ordinary.unsafe('DELETE FROM pages WHERE id=$1', [legacy.id]);
     expect(await ordinary.unsafe('SELECT id FROM pages WHERE id=$1', [legacy.id])).toHaveLength(0);
+    if (process.env.REQUIRE_PAGE_FILE_UPGRADE_REPLAY_POSTGRES === '1') {
+      const { exerciseAlreadyV142Replay } = await import('./helpers/page-file-upgrade-replay.ts');
+      await exerciseAlreadyV142Replay({ admin, source, allAccepted });
+    }
     const before = await snapshot();
     // postgres.js Query is a lazy Promise subclass. Bun's rejects matcher can
     // observe it without invoking .then(), so explicitly start every denied

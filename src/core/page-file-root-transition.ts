@@ -10,10 +10,11 @@ type Engine = Pick<BrainEngine, 'executeRaw'>;
 /** Trusted typed services only; never expose the private adapter engine. */
 export interface PageFileRootHost extends PageFileCoordinationHost {
   revalidate?(): Promise<void>;
+  authorizeBindings?(rows: readonly { source_id: string; slug: string }[]): void;
   transition?<T>(mutate: () => Promise<T>): Promise<T>;
   reconcile?(): Promise<void>;
 }
-type Binding = { binding_id:string; canonical_root:string; relative_path:string; pending_op_id:string|null };
+type Binding = { binding_id:string; source_id:string; slug:string; canonical_root:string; relative_path:string; pending_op_id:string|null };
 const digest = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
 function marker(host: PageFileCoordinationHost) {
   return join(realpathSync(host.lockDirectory), digest(realpathSync(host.root) + '\0ROOT') + '.dirty');
@@ -39,7 +40,7 @@ async function bindings(engine:Engine, root:string):Promise<Binding[]> {
   const [schema] = await engine.executeRaw<{present:boolean}>("SELECT to_regclass('public.page_file_bindings') IS NOT NULL AS present");
   if (typeof schema?.present !== 'boolean') throw new Error('page_file_root_gate_unavailable');
   if (!schema.present) return [];
-  const rows = await engine.executeRaw<Binding>('SELECT binding_id, canonical_root, relative_path, pending_op_id FROM public.page_file_bindings');
+  const rows = await engine.executeRaw<Binding>('SELECT * FROM public.page_file_bindings');
   const affected:Binding[] = [];
   for (const b of rows) {
     const canonical = realpathSync(b.canonical_root);
@@ -76,6 +77,8 @@ export async function transitionPageFileRoot<T>(engine:Engine, host:PageFileRoot
   const root = realpathSync(host.root);
   assertPageFileRootClean(host);
   const rows = await bindings(engine,root);
+  // Caller holds exclusive root; approve every affected binding before mutation.
+  host.authorizeBindings?.(rows);
   if (!rows.length) return mutate();
   // Validate before mutation, including deletion/alias and dirty worktree policy.
   capture(rows,root);
@@ -88,7 +91,9 @@ export async function transitionPageFileRoot<T>(engine:Engine, host:PageFileRoot
   const result = await mutate();
   await host.revalidate?.();
   if (realpathSync(host.root) !== root) throw new Error('page_file_binding_changed');
-  finish(await bindings(engine,root),root,host);
+  const current = await bindings(engine,root);
+  host.authorizeBindings?.(current);
+  finish(current,root,host);
   return result;
 }
 /** Recovery classifies actual current files under the same exclusive gate, does
@@ -102,6 +107,8 @@ export async function reconcilePageFileRootTransition(engine:Engine, host:PageFi
     await host.revalidate?.();
     const root = realpathSync(host.root);
     if (!existsSync(marker(host))) return;
-    finish(await bindings(engine,root),root,host);
+    const rows = await bindings(engine,root);
+    host.authorizeBindings?.(rows);
+    finish(rows,root,host);
   } finally { await lock.release(); }
 }

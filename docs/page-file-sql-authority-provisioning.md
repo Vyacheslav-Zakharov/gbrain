@@ -1,7 +1,14 @@
 # Page-file effective SQL authority — offline provisioning contract
 
-Status: read-only validator candidate, **not runtime admission or production authorization**.
-No runtime, migration, existing role, policy or grant is changed by this module.
+Status: the read-only validator is integrated with connected runtime admission in
+verified baseline `b093e14245c4153d218f7ce3c629f13ed06ee797`, hosted run
+`35070352567/1`, for disposable offline verification only. It is **not production
+authorization**. Pilot admission/root-scope changes remain **HOLD** pending independent
+review and exact-candidate mixed-root evidence. Never enable unrestricted
+`offline-verification` on production; neither a label change nor owner approval
+substitutes for reviewed bounded admission and proof. This document is preparation
+only: no installation, provisioning, migration, restart or live write is authorized.
+No runtime, migration, existing role, policy or grant is changed by the validator.
 Reference contract: `test/e2e/page-file-sql-authority.test.ts` mixed-writer role setup;
 identity/session contract: `src/core/page-file-authority.ts`; fences: migration 142.
 
@@ -105,18 +112,23 @@ not establish transactional runtime admission, cache results, repair drift, sele
 credentials, issue DDL, or mutate business data. A verdict is point-in-time evidence,
 not protection against later owner-authorized changes.
 
-Hosted follow-up: execute the probes against the existing disposable role fixture;
-then alter one condition at a time: PUBLIC/direct/column grants, membership chain,
-SET-only membership, grant options, relation/function owner, trigger disabled/body
-changed, extra permissive policy, RLS disabled, missing table/sequence and credential
-identity mismatch. Include fresh schema and representative v142 upgrade/replay.
-Verify rollback and exact target read-back for each fixture mutation. The mixed-writer fixture additionally executes ordinary page/chunk CRUD, enrolls
-through the operator login, and asserts exact unchanged protected rows after
-body/identity/deletion/chunk/root attacks and capability/SET ROLE/DDL denials.
-The dedicated hosted workflow already executes this fixture with its required flag.
-A skipped local run is discovery only, not PostgreSQL acceptance. Do not bypass
-the validator to make integration green. No live/local PostgreSQL or container was
-used for this offline slice.
+Verified baseline: hosted `35070352567/1` completed seven SQL-authority tests,
+real connected ordinary/adapter bootstrap, separate executable operator enrollment,
+reconnect/per-borrow refusal, four crash/restart boundaries and dirty-root recovery.
+The mixed-writer fixture exercises ordinary DML alongside enrolled-page fences.
+Its twelve catalog pins are marked `disposable-fixture-only-not-production-approved`.
+See the [baseline evidence summary](page-cas-mvp.md#verified-baseline-evidence-and-pending-successor-proof).
+
+Pending proof is finite and distinct: representative already-v142 upgrade/replay
+provisioning, exact successor pilot mixed-root scope, actual target role/catalog
+compatibility and installed readback. Fresh migration through v142 does not establish
+upgrade/replay. Seven SQL-authority cases do not certify every catalog mutation:
+map evidence explicitly for PUBLIC/direct/column grants, membership/SET ROLE, grant
+options, owners, triggers/functions, permissive policies, RLS, missing objects and
+credential mismatch; mark uncovered cases pending rather than asserting coverage.
+Each authorized rehearsal needs rollback and exact target readback. Do not bypass
+the validator or promote fixture pins to pass a gate. No local PostgreSQL/container
+or production access is required or authorized by this documentation update.
 
 ## Finite scope and exclusions
 
@@ -127,3 +139,101 @@ SECURITY DEFINER functions, extensions, foreign servers, other schemas, server
 configuration and external DBA powers remain the deployment's separate trust
 boundary; success does not claim their safety. No provisioning DDL is included:
 actual installation/revocation and independent pin approval require operator review.
+
+## Finite installation, rollback and owner approval template (preparation only)
+
+**Decision: HOLD. Authorization: NOT GRANTED. Execution: NOT STARTED.**
+This is a decision record, not executable configuration. `UNRESOLVED` is a blocking
+value, never a wildcard or permission to discover-and-approve a live value automatically.
+Baseline evidence above is known; none of the target-specific values below is inferred
+from it. Keep credentials out of this record; reference protected paths and approved
+hash manifests only. Do not copy the offline operator example onto production.
+
+### 1. Exact target and frozen package
+
+| Required field | Value / receipt |
+|---|---|
+| Brain/database identity, server identifier and PostgreSQL major | UNRESOLVED |
+| Host identifier, service UID and exact affected units/entrypoints | UNRESOLVED |
+| Currently installed SHA, runtime artifact hashes and rollback artifact | UNRESOLVED |
+| Successor full SHA, immutable artifact location and SHA-256 manifest | UNRESOLVED |
+| Exact successor CI run/attempt, evidence manifest hash and independent review verdict | UNRESOLVED |
+| Bounded admission mode/contract and root-scope review receipt | UNRESOLVED — HOLD |
+| Explicit source IDs, page IDs/slugs, canonical roots/relative paths, excluded sources/roots | UNRESOLVED |
+| Cohort count, parser/schema-pack identity, mapping generation and reviewed page revisions/raw hashes | UNRESOLVED |
+| Mixed-root pilot acceptance receipt (enrolled + unenrolled + out-of-cohort) | PENDING |
+| Current migration ledger and representative already-v142 upgrade/replay receipt | UNRESOLVED / PENDING |
+| Ordinary/adapter/enrollment principals, approved grants/RLS/catalog pins | UNRESOLVED |
+| Protected bootstrap/operator/host/review manifests, anchor paths and each SHA-256 | UNRESOLVED |
+| Separate credential paths/hash references, directory owners/modes, lock/journal locations | UNRESOLVED |
+| Installed helper/external-writer inventory with replace/coordinate/drain disposition | UNRESOLVED |
+| Consistent DB/files/Git/journal/binding/manifest backup locations, hashes and restore rehearsal receipt | UNRESOLVED |
+| Authorized window start/end, finite deadlines and evidence destination/custodian | UNRESOLVED |
+
+The mixed-root receipt must show continuing sync and ordinary unenrolled writes in
+the selected root, checked/enrollment denial outside the approved cohort, and root
+operations constrained to explicitly approved roots. A selected page must not grant
+implicit authority over every source/root on the host. Include negative out-of-cohort
+cases and unchanged-target readbacks. Baseline mixed-writer tests do not close this
+new pilot admission gate. No generic production/offline-mode escape hatch is allowed.
+
+### 2. Finite future installation sequence — gated, not authorized here
+
+1. Freeze the exact package and complete every field above. Obtain independent review
+   of root scope and exact-candidate hosted proof. Any mismatch or missing receipt stops.
+2. Record owner approval below for a finite installation/acceptance window. Separately
+   identify the provisioning owner and enrollment/recovery operator; approval of an
+   architecture or a passing CI run is not this authorization.
+3. At an authorized safe point, drain only the enumerated writers/jobs. Capture and
+   validate the consistent backup set and prove the rollback boundary before mutation.
+4. Install only reviewed runtime, protected inputs and enumerated helper replacements;
+   apply only the approved migration/grant plan. Read back exact hashes, owners/modes,
+   roles/catalog and target identities. Do not re-pin drift or expose enrollment secrets
+   to ordinary CLI/MCP/workers. Any unexpected difference leaves the service held.
+5. Start/restart only explicitly approved units. Verify protected admission, then use
+   the separate operator for exact approved enrollment and readback. Status exit zero
+   alone is not readiness. No automatic enrollment or recovery is permitted.
+6. Perform only the approved controlled fixture/readbacks: file/DB/revision agreement,
+   stale rejection, truthful derived state, ordinary writes/continuing sync and mixed-root
+   confinement. Capture authenticated tools/list with checked schemas and no remote
+   recovery. If required, execute exact generic CLI recovery under its own approved
+   original intent; baseline handler proof does not substitute for that receipt.
+7. Preserve the evidence and request final owner acceptance. Publish availability or
+   change tool allowlists only after separately authorized installed readback. Business
+   content writes still require exact before/after approval; no automatic continuation.
+
+### 3. Rollback and stop record
+
+- Trigger: identity/hash/catalog/scope mismatch, failed readiness, unexpected bytes,
+  uncoordinated writer, expired window or failed acceptance. Stop new checked writes;
+  preserve pending intent, journals and diagnostic evidence without choosing a winner.
+- Rollback executor, authority/window, exact prior artifact and hashes: **UNRESOLVED**.
+- Previous-runtime compatibility with the resulting schema/bindings: **PENDING**.
+  If absent, an application-only downgrade is forbidden; use an explicitly approved,
+  rehearsed consistent DB + canonical files + Git + journal + manifest restore plan.
+- Backup set, restore order, permitted data-loss boundary, timeout and target readback:
+  **UNRESOLVED**. Do not delete bindings/journals, disable fences or run raw SQL to
+  force recovery. Exact page recovery and root reconciliation are separate authorized
+  operations; see the [operator runbook](page-file-operator.md#outcomes-and-existing-recovery).
+- Terminal outcome receipt: **PENDING**. Record installed version/hashes, DB/file
+  consistency, pending intents, ordinary service state and any continued HOLD. An exit
+  code or restored binary alone does not prove rollback of data or operational safety.
+
+### 4. Explicit owner decisions — all unresolved
+
+```text
+Package full SHA / artifact-manifest SHA-256: UNRESOLVED
+Target/cohort manifest SHA-256: UNRESOLVED
+Independent reviewer and accepted evidence/qualifications: UNRESOLVED
+Release approver / provisioning owner / enrollment-recovery operator: UNRESOLVED
+Allowed actions, exact fixture/original-intent hash, forbidden actions: UNRESOLVED
+Window start/end, deadlines, rollback authority and plan hash: UNRESOLVED
+Installation + controlled acceptance decision: HOLD — NOT AUTHORIZED
+Approver identity / dated decision / immutable approval record: UNRESOLVED
+Final installed acceptance and tool-publication decision: PENDING — NOT AUTHORIZED
+Business-page before/after approval: NOT GRANTED
+```
+
+Any change of bytes, target, cohort, root scope or window invalidates the corresponding
+approval and requires an explicit new decision. Documentation completion never flips
+HOLD to GO. This task performs no deployment, provisioning, restart or live write.

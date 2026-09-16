@@ -107,6 +107,7 @@ jobs:
             test/page-file-bootstrap.serial.test.ts test/page-file-sql-authority.test.ts \
             test/page-file-connected-lifecycle.serial.test.ts test/page-file-lifecycle-races.serial.test.ts \
             test/page-file-connected-candidate.serial.test.ts test/page-file-operator.serial.test.ts \
+            test/page-file-pilot-admission.serial.test.ts test/page-file-pilot-root-scope.serial.test.ts \
             test/page-file-crash-supervision.serial.test.ts test/page-file-dirty-root-supervision.serial.test.ts \
             test/page-file-fixture-cleanup.test.ts \
             test/postgres-engine-singleton-ownership.test.ts test/postgres-engine.test.ts \
@@ -172,12 +173,14 @@ jobs:
           test "$GITHUB_ACTIONS" = true
           test ! -e /etc/gbrain
           sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /etc/gbrain
-      - name: Real PostgreSQL SQL authority and actual connected protected bootstrap
+      - name: Real PostgreSQL SQL authority and connected offline plus production-pilot admission (disposable only)
         if: ${{ !cancelled() }}
         env:
           DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
           REQUIRE_PAGE_FILE_SQL_AUTHORITY_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_UPGRADE_REPLAY_POSTGRES: '1'
           REQUIRE_PAGE_FILE_CONNECTED_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_PILOT_POSTGRES: '1'
           PAGE_FILE_CAS_DISPOSABLE: '1'
           PAGE_FILE_SQL_EVIDENCE_DIR: cas-evidence
         run: |
@@ -210,6 +213,12 @@ jobs:
           for name in ('postgres-db', 'postgres-file', 'postgres-runtime-authority', 'postgres-sql-authority'):
               assert pathlib.Path(f'cas-evidence/{name}-exit.txt').read_text().strip() == '0', name
           sql_log = pathlib.Path('cas-evidence/postgres-sql-authority.log').read_text()
+          for marker in (
+              'already-v142 initSchema and no-pending runner preserve rows revisions receipts and original authority pins',
+              'existing runner replays 141 and 142 twice preserving populated v142 state and original authority pins',
+          ):
+              assert sql_log.count(f'PG_UPGRADE_REPLAY: {marker}') == 1, ('missing/duplicate upgrade replay completion', marker)
+          assert sql_log.count('PG_SQL_AUTHORITY: mixed ordinary DML accepted; enrolled page chunk root and capability fences preserved') == 1, 'missing/duplicate post-replay fence completion'
           for marker in ('all three actual logins accepted; every SQL probe executed', 'wrong login rejected and baseline preserved', 'membership drift rejected and restored', 'table column grant-option drift rejected and restored', 'disabled and enabled trigger drift rejected and restored'):
               assert f'PG_SQL_AUTHORITY: {marker}' in sql_log, marker
           for marker in ('actual ordinary and adapter admission; initSchema no migration or enrollment', 'operator-only enrollment; disconnect tombstone and same-engine reconnect', 'per-borrow ordinary and adapter drift denied; no catalog self-repair', 'protected fixed anchor drift denied without mutation'):
@@ -226,6 +235,16 @@ jobs:
           ):
               assert sql_log.count(f'PG_CONNECTED_OPERATOR: {marker}') == 1, ('missing/duplicate operator completion', marker)
           assert not pathlib.Path('/etc/gbrain/page-file-operator-anchor.json').exists(), 'operator anchor leaked'
+          for marker in (
+              'unapproved source and page operator enrollment rejected without mutation',
+              'protected production-pilot operator exact enrollment and idempotent repeat',
+              'actual checked write and read commit file database and receipt',
+              'approved-only root transition and dirty reconciliation succeed',
+              'late mixed-cohort root transition and recovery refuse preserving DB files Git journal and markers',
+              'ordinary unenrolled DML coexists and enrolled SQL fence remains',
+              'revoked approval denies checked read write retained service and reconnect without mutation',
+          ):
+              assert sql_log.count(f'PG_CONNECTED_PILOT: {marker}') == 1, ('missing/duplicate production-pilot completion', marker)
           assert not pathlib.Path('/etc/gbrain/page-file-bootstrap-anchor.json').exists(), 'fixture anchor leaked'
           assert not list(pathlib.Path('/etc/gbrain').glob('connected-fixture-*')), 'protected fixture or credential leaked'
           import json, hashlib
@@ -247,7 +266,7 @@ jobs:
         run: |
           mkdir -p cas-evidence
           printf '%s\n' "$JOB_STATUS" > cas-evidence/job-status.txt
-          printf '%s\n' 'Hosted disposable SQL-authority and actual connected protected bootstrap acceptance; offline-verification anchor only, production runtime remains disabled.' > cas-evidence/scope.txt
+          printf '%s\n' 'Hosted disposable SQL-authority and connected bootstrap acceptance: separate offline-verification crash proofs and actual production-pilot admission with fixture-only pinned one-page approval. No production deployment or production approval.' > cas-evidence/scope.txt
           python3 - <<'PY'
           import hashlib, pathlib
           root = pathlib.Path('cas-evidence')
