@@ -12,9 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - label: baseline
-          ref: 378ac62e80e6f78f307b358e4b82d59de3d1e334
-        - label: candidate
+        - label: candidate-predecessors
           ref: 7f251c76eccc7a06f737c6c89de455fccec32b7f
     env:
       EVIDENCE: ${{ github.workspace }}/timeout-control-evidence
@@ -32,7 +30,7 @@ jobs:
         printf '%s\n' "$GITHUB_RUN_ID" > "$EVIDENCE/run-id.txt"
         printf '%s\n' "$GITHUB_RUN_ATTEMPT" > "$EVIDENCE/run-attempt.txt"
         printf '%s\n' 'not-started' > "$EVIDENCE/exit-status.txt"
-        printf '%s\n' "timeout --signal=TERM --kill-after=5s 90s bun test test/source-ingest-executor.test.ts --test-name-pattern 'failed rows are retried on next transform run'" > "$EVIDENCE/command.txt"
+        printf '%s\n' "timeout --signal=TERM --kill-after=5s 150s bun test ./test/storage-pglite.test.ts ./test/phantom-redirect.test.ts ./test/source-ingest-executor.test.ts --test-name-pattern 'Storage tiering on PGLite.*engine.kind is pglite|phantom-audit module.*write failure does not throw|failed rows are retried on next transform run'" > "$EVIDENCE/command.txt"
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
         repository: Vyacheslav-Zakharov/gbrain
@@ -103,12 +101,12 @@ jobs:
         PY
         "$bun_path" --version > "$evidence/sandbox-bun-version.txt"
         test "$("$bun_path" --version)" = '1.3.13'
-        # Exactly one original test invocation. Its explicit 30000ms cap is unchanged.
+        # Three unchanged cases; retry retains its explicit 30000ms cap.
         set +e
         /usr/bin/time -v -o "$evidence/resource-usage.txt" \
-          timeout --signal=TERM --kill-after=5s 90s \
-          "$bun_path" test test/source-ingest-executor.test.ts \
-          --test-name-pattern 'failed rows are retried on next transform run' \
+          timeout --signal=TERM --kill-after=5s 150s \
+          "$bun_path" test ./test/storage-pglite.test.ts ./test/phantom-redirect.test.ts ./test/source-ingest-executor.test.ts \
+          --test-name-pattern 'Storage tiering on PGLite.*engine.kind is pglite|phantom-audit module.*write failure does not throw|failed rows are retried on next transform run' \
           > "$evidence/test-output.txt" 2>&1
         rc=$?
         set -e
