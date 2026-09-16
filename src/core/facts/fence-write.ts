@@ -38,6 +38,7 @@ import { join, dirname } from 'node:path';
 
 import type { BrainEngine, NewFact, FactVisibility } from '../engine.ts';
 import { withPageLock } from '../page-lock.ts';
+import { withFactsFileWrite } from './with-file-write.ts';
 import { gbrainPath } from '../config.ts';
 import { upsertFactRow, parseFactsFence } from '../facts-fence.ts';
 import { extractFactsFromFenceText } from './extract-from-fence.ts';
@@ -169,7 +170,7 @@ export async function writeFactsToFence(
   const filePath = join(target.localPath, `${target.slug}.md`);
   const tmpPath = `${filePath}.tmp`;
 
-  return withPageLock(
+  return withFactsFileWrite(engine, target.sourceId, target.slug, target.localPath, filePath, () => withPageLock(
     target.slug,
     async () => {
       // 1. Read existing body or stub-create.
@@ -272,7 +273,7 @@ export async function writeFactsToFence(
       return { inserted: result.inserted, ids: result.ids };
     },
     { timeoutMs: 5_000 },
-  );
+  ));
 }
 
 /**

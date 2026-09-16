@@ -50,6 +50,7 @@ import {
   type RepoState,
 } from './git-remote.ts';
 import { gbrainPath } from './config.ts';
+import { withLegacyPageFileRootMutation } from './page-file-root-gate.ts';
 import { isValidSourceId } from './source-id.ts';
 import { resolveSourceWithTier, type SourceTier } from './source-resolver.ts';
 
@@ -778,80 +779,83 @@ export async function recloneIfMissing(
     throw new SourceOpError('unmanaged_path', unownedHint(src, state));
   }
 
-  // EXDEV-safe atomic reclone. Clone into a SIBLING temp of local_path (not the
-  // shared clones/.tmp, which can be on a different mount than a --clone-dir
-  // target → EXDEV → "deleted but not recloned"). Then swap: move old aside →
-  // move new in → drop old, so local_path is never left missing-and-unrecoverable.
-  const parent = dirname(src.local_path);
-  mkdirSync(parent, { recursive: true });
-  const rand = randomBytes(6).toString('hex');
-  const tempDir = join(parent, `.gbrain-reclone-${basename(src.local_path)}-${rand}`);
-  try {
-    cloneRepo(remoteUrl, tempDir);
-  } catch (e) {
-    rmSync(tempDir, { recursive: true, force: true });
-    if (e instanceof GitOperationError) {
-      throw new SourceOpError('clone_failed', e.message, e);
+  const rootPath = src.local_path;
+  return withLegacyPageFileRootMutation(engine, rootPath, () => {
+    // EXDEV-safe atomic reclone. Clone into a SIBLING temp of local_path (not the
+    // shared clones/.tmp, which can be on a different mount than a --clone-dir
+    // target → EXDEV → "deleted but not recloned"). Then swap: move old aside →
+    // move new in → drop old, so local_path is never left missing-and-unrecoverable.
+    const parent = dirname(rootPath);
+    mkdirSync(parent, { recursive: true });
+    const rand = randomBytes(6).toString('hex');
+    const tempDir = join(parent, `.gbrain-reclone-${basename(rootPath)}-${rand}`);
+    try {
+      cloneRepo(remoteUrl, tempDir);
+    } catch (e) {
+      rmSync(tempDir, { recursive: true, force: true });
+      if (e instanceof GitOperationError) {
+        throw new SourceOpError('clone_failed', e.message, e);
+      }
+      throw e;
     }
-    throw e;
-  }
 
-  // TOCTOU re-check immediately before the destructive move: re-confirm
-  // ownership AND reject a symlink leaf swapped in after the entry check (never
-  // rm-rf / rename through a symlink).
-  if (!isOwnedClone(src)) {
-    rmSync(tempDir, { recursive: true, force: true });
-    throw new SourceOpError('unmanaged_path', unownedHint(src, state));
-  }
-  let aside: string | null = null;
-  try {
-    if (existsSync(src.local_path)) {
-      // Symlink leaf guard: never rename/rm *through* a symlinked leaf — that's
-      // the TOCTOU swap-in vector (an attacker plants a symlink at local_path
-      // between the entry ownership check and this rename). An owned clone's leaf
-      // is a real dir gbrain created; a symlink here means tamper, so fail closed.
-      // (Symlinked ANCESTORS are intentionally NOT rejected here: for an owned
-      // clone gbrain created the dir at this path — cloneRepo refuses a non-empty
-      // dest, so a pre-existing user tree can never become an owned clone — and a
-      // realpath-chain check false-positives on ubiquitous system symlinks like
-      // macOS /var -> /private/var. The residual DB-trust risk, a forged
-      // managed_clone marker on an arbitrary path, is tracked as a TODO and is
-      // not closable by a path check.)
-      if (lstatSync(src.local_path).isSymbolicLink()) {
-        rmSync(tempDir, { recursive: true, force: true });
-        throw new SourceOpError(
-          'symlink_escape',
-          `Refusing to re-clone "${id}": local_path ${src.local_path} is a symlink.`,
-        );
-      }
-      aside = `${src.local_path}.old-${rand}`;
-      renameSync(src.local_path, aside); // same fs (sibling) — no EXDEV
+    // TOCTOU re-check immediately before the destructive move: re-confirm
+    // ownership AND reject a symlink leaf swapped in after the entry check (never
+    // rm-rf / rename through a symlink).
+    if (!isOwnedClone(src)) {
+      rmSync(tempDir, { recursive: true, force: true });
+      throw new SourceOpError('unmanaged_path', unownedHint(src, state));
     }
-    renameSync(tempDir, src.local_path); // same fs — no EXDEV
-  } catch (e) {
-    // Best-effort restore of the original if the swap left local_path missing.
-    if (aside && !existsSync(src.local_path)) {
-      try {
-        renameSync(aside, src.local_path);
-      } catch {
-        /* original kept at `aside`; surfaced via the thrown error below */
+    let aside: string | null = null;
+    try {
+      if (existsSync(rootPath)) {
+        // Symlink leaf guard: never rename/rm *through* a symlinked leaf — that's
+        // the TOCTOU swap-in vector (an attacker plants a symlink at local_path
+        // between the entry ownership check and this rename). An owned clone's leaf
+        // is a real dir gbrain created; a symlink here means tamper, so fail closed.
+        // (Symlinked ANCESTORS are intentionally NOT rejected here: for an owned
+        // clone gbrain created the dir at this path — cloneRepo refuses a non-empty
+        // dest, so a pre-existing user tree can never become an owned clone — and a
+        // realpath-chain check false-positives on ubiquitous system symlinks like
+        // macOS /var -> /private/var. The residual DB-trust risk, a forged
+        // managed_clone marker on an arbitrary path, is tracked as a TODO and is
+        // not closable by a path check.)
+        if (lstatSync(rootPath).isSymbolicLink()) {
+          rmSync(tempDir, { recursive: true, force: true });
+          throw new SourceOpError(
+            'symlink_escape',
+            `Refusing to re-clone "${id}": local_path ${rootPath} is a symlink.`,
+          );
+        }
+        aside = `${rootPath}.old-${rand}`;
+        renameSync(rootPath, aside); // same fs (sibling) — no EXDEV
       }
+      renameSync(tempDir, rootPath); // same fs — no EXDEV
+    } catch (e) {
+      // Best-effort restore of the original if the swap left local_path missing.
+      if (aside && !existsSync(rootPath)) {
+        try {
+          renameSync(aside, rootPath);
+        } catch {
+          /* original kept at `aside`; surfaced via the thrown error below */
+        }
+      }
+      rmSync(tempDir, { recursive: true, force: true });
+      if (e instanceof SourceOpError) throw e;
+      // If the original is still parked at `aside` (restore failed), tell the user
+      // exactly where it is — otherwise a "cleanup the failed reclone" reflex would
+      // delete their only copy.
+      const asideNote =
+        aside && existsSync(aside)
+          ? ` Your original clone is preserved at ${aside} — restore it manually; do not delete it.`
+          : '';
+      throw new SourceOpError(
+        'rename_failed',
+        `Could not move re-cloned repo to ${rootPath}: ${(e as Error).message}.${asideNote}`,
+        e,
+      );
     }
-    rmSync(tempDir, { recursive: true, force: true });
-    if (e instanceof SourceOpError) throw e;
-    // If the original is still parked at `aside` (restore failed), tell the user
-    // exactly where it is — otherwise a "cleanup the failed reclone" reflex would
-    // delete their only copy.
-    const asideNote =
-      aside && existsSync(aside)
-        ? ` Your original clone is preserved at ${aside} — restore it manually; do not delete it.`
-        : '';
-    throw new SourceOpError(
-      'rename_failed',
-      `Could not move re-cloned repo to ${src.local_path}: ${(e as Error).message}.${asideNote}`,
-      e,
-    );
-  }
-  if (aside) rmSync(aside, { recursive: true, force: true });
-  return true;
+    if (aside) rmSync(aside, { recursive: true, force: true });
+    return true;
+  });
 }

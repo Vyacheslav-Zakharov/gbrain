@@ -44,7 +44,7 @@ import { SPEND_CAP_CONFIG_KEY } from '../core/embed-backfill-submit.ts';
 import type { SyncManifest } from '../core/sync.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
-import { loadConfig } from '../core/config.ts';
+import { loadConfig, loadConfigFileOnly } from '../core/config.ts';
 import {
   autoConcurrency,
   shouldRunParallel,
@@ -1482,6 +1482,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // importFile call below. Codex perf finding #7: per-file loadActivePack adds
   // disk/YAML/hash overhead × thousands of files. Best-effort: pack load
   // failure falls through to legacy inferType (parity preserved).
+  const syncRuntimeConfig = loadConfigFileOnly() ?? undefined;
   let syncActivePack: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string> }> } | undefined;
   try {
     // v0.41.37.0 #1569: --no-schema-pack escape hatch. Skip pack load entirely so
@@ -1619,18 +1620,28 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   if (!opts.noPull && !detachedHead && originRemotePresent) {
     const _t0 = Date.now();
     serr(`[gbrain phase] sync.git_pull start`);
+    const { resolvePageFileRootHost } = await import('../core/page-file-runtime.ts');
+    const { loadConfigFileOnly } = await import('../core/config.ts');
+    const runtimeRootHost = await resolvePageFileRootHost({engine,config:loadConfigFileOnly()},repoPath);
     try {
       const { pullRepo } = await import('../core/git-remote.ts');
+      const { withLegacyPageFileRootMutation } = await import('../core/page-file-root-gate.ts');
       // v0.41.13.0 (T3 / D-V4-mech-7): if the operator set --timeout,
       // bound the pull subprocess to a fraction of the remaining budget.
       // We pass a safe default (the operator's full --timeout if set, else
       // pullRepo's own 300s default). The catch below distinguishes
       // timeout (ETIMEDOUT / SIGTERM on err.cause) from ordinary pull
       // failure.
-      pullRepo(repoPath);
+      await withLegacyPageFileRootMutation(engine, repoPath,
+        rootPermit => pullRepo(repoPath, { rootPermit }), runtimeRootHost);
       serr(`[gbrain phase] sync.git_pull done ${Date.now() - _t0}ms`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
+      // A missing enrollment proof or enrolled root is not an ordinary git
+      // outage: never acknowledge it by continuing the sync/bookmark path.
+      // Coordinated failures can leave a durable dirty marker. Never turn
+      // interruption/pending state into successful sync or bookmark advancement.
+      if (runtimeRootHost || (e as { code?: string })?.code?.startsWith('page_file_')) throw e;
       serr(`[gbrain phase] sync.git_pull error ${Date.now() - _t0}ms (${msg.slice(0, 80)})`);
       // v0.41.13.0 (T3 / D-V4-mech-7): pullRepo wraps execFileSync errors
       // in GitOperationError, so `error.code === 'ETIMEDOUT'` and
@@ -2194,6 +2205,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
           // gone); checkpoint every path so a resume skips it.
           for (const p of batch) await markCompleted(p);
         } catch (err) {
+          if (err && typeof err === 'object' && 'acknowledgeable' in err && err.acknowledgeable === false) throw err;
           // D7 decompose: a transient blip on this batch shouldn't lose all
           // 500 deletes. Fall back to per-slug deletePage for THIS batch
           // only; unrecoverable per-slug failures land in failedFiles
@@ -2204,6 +2216,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
               pagesAffected.push(slugs[j]);
               await markCompleted(batch[j]);
             } catch (perSlugErr) {
+              if (perSlugErr && typeof perSlugErr === 'object' && 'acknowledgeable' in perSlugErr && perSlugErr.acknowledgeable === false) throw perSlugErr;
               failedFiles.push({
                 path: batch[j],
                 error: `delete failed: ${perSlugErr instanceof Error ? perSlugErr.message : String(perSlugErr)} (batch error: ${err instanceof Error ? err.message : String(err)})`,
@@ -2231,6 +2244,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
           pagesAffected.push(slug);
           await markCompleted(path);
         } catch (err) {
+          if (err && typeof err === 'object' && 'acknowledgeable' in err && err.acknowledgeable === false) throw err;
           failedFiles.push({
             path,
             error: `delete failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -2303,7 +2317,8 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       const newSlug = resolveSlugForPath(to);
       try {
         await engine.updateSlug(oldSlug, newSlug, renameOpts);
-      } catch {
+      } catch (err) {
+        if (err && typeof err === 'object' && 'acknowledgeable' in err && err.acknowledgeable === false) throw err;
         // Slug doesn't exist or collision, treat as add
       }
       // Reimport at new path (picks up content changes)
@@ -2499,7 +2514,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         // 'default' was applied even for non-default sources, fabricating
         // duplicate rows that crashed bare-slug subqueries with Postgres 21000.
         const result = await observed(pacer, () =>
-          importFile(eng, filePath, path, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack }));
+          importFile(eng, filePath, path, { noEmbed, sourceId: opts.sourceId, activePack: syncActivePack, config: syncRuntimeConfig }));
         if (result.status === 'imported') {
           chunksCreated += result.chunks;
           pagesAffected.push(result.slug);
@@ -2521,6 +2536,9 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
           await markCompleted(path);
         }
       } catch (e: unknown) {
+        // Safety refusals are not malformed-file failures: never feed them to
+        // the skip-failed/auto-aging ledger or mark their path completed.
+        if (e && typeof e === 'object' && 'acknowledgeable' in e && e.acknowledgeable === false) throw e;
         const msg = e instanceof Error ? e.message : String(e);
         serr(`  Warning: skipped ${path}: ${msg}`);
         failedFiles.push({ path, error: msg });
@@ -3027,7 +3045,56 @@ async function performFullSync(
   const fullSucceeded = loadSyncFailures()
     .filter(e => e.source_id === fullSourceId && isSkippablePath(e.path) && !fullFailureSet.has(e.path))
     .map(e => e.path);
+  let reconciledDeletes = 0;
   const advanceFull = async (): Promise<void> => {
+    // Reconcile before the authoritative bookmark AND failure acknowledgement.
+    // A typed safety refusal must leave this run unresolved.
+    if (opts.sourceId) {
+      const sid = opts.sourceId;
+      const reconcileSyncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
+      // collectSyncableFiles returns ABSOLUTE paths; source_path is stored
+      // repo-relative (importFile uses `relative(dir, filePath)`), so relativize
+      // to the same form before membership-testing — otherwise every page looks
+      // stale and the reconcile would wrongly delete live pages.
+      const current = new Set(
+        collectSyncableFiles(repoPath, { strategy: opts.strategy ?? 'markdown' })
+          .map(abs => relative(repoPath, abs)),
+      );
+      const rows = await engine.executeRaw<{ slug: string; source_path: string | null }>(
+        `SELECT slug, source_path FROM pages WHERE source_id = $1 AND source_path IS NOT NULL AND deleted_at IS NULL`,
+        [sid],
+      );
+      const staleSlugs = rows
+        .filter(r => r.source_path != null
+          && isSyncable(r.source_path, reconcileSyncOpts)
+          && !current.has(r.source_path))
+        .map(r => r.slug);
+      if (staleSlugs.length > 0) {
+        const deleteScopedOpts = { sourceId: sid };
+        for (let i = 0; i < staleSlugs.length; i += DELETE_BATCH_SIZE) {
+          const batch = staleSlugs.slice(i, i + DELETE_BATCH_SIZE);
+          try {
+            const deleted = await engine.deletePages(batch, deleteScopedOpts);
+            reconciledDeletes += deleted.length;
+          } catch (err) {
+            if (err && typeof err === 'object' && 'acknowledgeable' in err && err.acknowledgeable === false) throw err;
+            // Per-slug fallback on a batch blip (mirrors the incremental delete
+            // loop). A stale page that won't delete is best-effort, not fatal.
+            for (const slug of batch) {
+              try { await engine.deletePage(slug, deleteScopedOpts); reconciledDeletes++; }
+              catch (err) {
+                if (err && typeof err === 'object' && 'acknowledgeable' in err && err.acknowledgeable === false) throw err;
+                /* Ordinary delete failures remain best-effort. */
+              }
+            }
+          }
+        }
+        if (reconciledDeletes > 0) {
+          slog(`  Reconciled ${reconciledDeletes} stale page(s) whose source file was removed.`);
+        }
+      }
+    }
+
     // Persist sync state so the next sync is incremental. Routed through
     // writeSyncAnchor so --source pins the right sources row.
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit, newestCommitMs(repoPath));
@@ -3080,68 +3147,6 @@ async function performFullSync(
       `${resolveAutoSkipThreshold()} consecutive syncs. These pages are NOT indexed; ` +
       `'gbrain doctor' will warn until they're fixed.`,
     );
-  }
-
-  // #1970 (F-A): runImport is import-only — it never purges pages whose backing
-  // file was deleted since the last sync. A full re-import is authoritative for
-  // the whole tree, so reconcile deletes here too (this is what makes the
-  // object-absent fallback at performSyncInner correct for deletes, not just
-  // imports). Runs only on an advancing full sync (we're past the
-  // !fullGate.advanced early-return).
-  //
-  // SAFETY — must NOT re-introduce the #1433 stale-page data loss. A page is
-  // deleted ONLY when ALL three hold:
-  //   1. source_path != null      → file-backed pages only; put_page/manual
-  //      pages (null source_path) are never swept.
-  //   2. isSyncable(source_path)  → excludes metafiles (README/log.md, the
-  //      #1433 class) AND the wrong strategy (a markdown sync can't delete a
-  //      code page, and vice versa).
-  //   3. source_path ∉ current    → the backing file is genuinely gone from the
-  //      working tree (collectSyncableFiles == the same enumeration runImport
-  //      used, so paths are in the identical relative form as source_path).
-  // Skipped on the legacy no-sourceId path (the batch delete primitives require
-  // a sourceId; matches every other source-scoped feature).
-  let reconciledDeletes = 0;
-  if (opts.sourceId) {
-    const sid = opts.sourceId;
-    const reconcileSyncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
-    // collectSyncableFiles returns ABSOLUTE paths; source_path is stored
-    // repo-relative (importFile uses `relative(dir, filePath)`), so relativize
-    // to the same form before membership-testing — otherwise every page looks
-    // stale and the reconcile would wrongly delete live pages.
-    const current = new Set(
-      collectSyncableFiles(repoPath, { strategy: opts.strategy ?? 'markdown' })
-        .map(abs => relative(repoPath, abs)),
-    );
-    const rows = await engine.executeRaw<{ slug: string; source_path: string | null }>(
-      `SELECT slug, source_path FROM pages WHERE source_id = $1 AND source_path IS NOT NULL AND deleted_at IS NULL`,
-      [sid],
-    );
-    const staleSlugs = rows
-      .filter(r => r.source_path != null
-        && isSyncable(r.source_path, reconcileSyncOpts)
-        && !current.has(r.source_path))
-      .map(r => r.slug);
-    if (staleSlugs.length > 0) {
-      const deleteScopedOpts = { sourceId: sid };
-      for (let i = 0; i < staleSlugs.length; i += DELETE_BATCH_SIZE) {
-        const batch = staleSlugs.slice(i, i + DELETE_BATCH_SIZE);
-        try {
-          const deleted = await engine.deletePages(batch, deleteScopedOpts);
-          reconciledDeletes += deleted.length;
-        } catch {
-          // Per-slug fallback on a batch blip (mirrors the incremental delete
-          // loop). A stale page that won't delete is best-effort, not fatal.
-          for (const slug of batch) {
-            try { await engine.deletePage(slug, deleteScopedOpts); reconciledDeletes++; }
-            catch { /* best-effort */ }
-          }
-        }
-      }
-      if (reconciledDeletes > 0) {
-        slog(`  Reconciled ${reconciledDeletes} stale page(s) whose source file was removed.`);
-      }
-    }
   }
 
   // Full sync doesn't track pagesAffected, so fall back to embed --stale.

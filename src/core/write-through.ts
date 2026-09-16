@@ -4,8 +4,9 @@
  * After a page row lands in the DB (via importFromContent / putPage), this
  * renders the row to markdown via `serializePageToMarkdown` and writes it to
  * `sync.repo_path` so the brain repo has a committable `.md` artifact that
- * round-trips cleanly through `gbrain sync`. The file is rendered FROM the DB
- * row, so the two sinks cannot diverge.
+ * round-trips cleanly through `gbrain sync`. This legacy DB-first path is not
+ * cross-store atomic. Enrolled file-CAS targets are refused before filesystem
+ * mutation; their preceding DB writes require independent engine fencing.
  *
  * Extracted from the v0.38 `put_page` write-through (operations.ts) so the
  * `put_page` op AND `gbrain brainstorm/lsd --save` share one implementation
@@ -21,11 +22,12 @@
  * only does "row exists + repo is a real dir → render + atomic write".
  */
 
-import { existsSync, statSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from 'fs';
+import { existsSync, statSync, mkdirSync, writeFileSync, renameSync, unlinkSync, realpathSync } from 'fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'path';
 import { randomBytes } from 'crypto';
 import type { BrainEngine } from './engine.ts';
 import { serializePageToMarkdown, resolvePageFilePath } from './markdown.ts';
+import { withLegacyPageFileWrite, type PageFileCoordinationHost } from './page-file-writer-gate.ts';
 
 /** Minimal logger surface — structurally compatible with operations.ts `Logger`. */
 export interface WriteThroughLogger {
@@ -53,6 +55,8 @@ export interface WriteThroughResult {
 
 export interface WritePageThroughOpts {
   sourceId?: string;
+  /** Trusted host injection only, never operation params. Omitted = disabled compatibility. */
+  coordinationHost?: PageFileCoordinationHost;
   /** Merged over the page's own frontmatter at render time (e.g. provenance). */
   frontmatterOverrides?: Record<string, unknown>;
   logger?: WriteThroughLogger;
@@ -94,12 +98,14 @@ export async function writePageThrough(
     //      `local_path`, nesting this page there would pollute that sibling's
     //      git repo (the reported bug). Skip instead.
     let filePath: string;
+    let sourceRoot: string;
     const srcRows = await engine.executeRaw<{ local_path: string | null }>(
       `SELECT local_path FROM sources WHERE id = $1`,
       [sourceId],
     );
     const sourceLocalPath = srcRows[0]?.local_path ?? null;
     if (sourceLocalPath) {
+      sourceRoot = sourceLocalPath;
       if (!existsSync(sourceLocalPath) || !statSync(sourceLocalPath).isDirectory()) {
         return { written: false, skipped: 'repo_not_found' };
       }
@@ -113,6 +119,7 @@ export async function writePageThrough(
       if (!repoPath) {
         return { written: false, skipped: 'no_repo_configured' };
       }
+      sourceRoot = repoPath;
       if (!existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
         return { written: false, skipped: 'repo_not_found' };
       }
@@ -128,36 +135,41 @@ export async function writePageThrough(
       filePath = resolvePageFilePath(repoPath, slug, sourceId);
     }
 
-    const writtenPage = await engine.getPage(slug, { sourceId });
-    if (!writtenPage) {
-      return { written: false, skipped: 'page_not_found_after_write' };
+    if (opts.coordinationHost && realpathSync(opts.coordinationHost.root) !== realpathSync(sourceRoot)) {
+      throw new Error('page_file_binding_changed');
     }
-
-    const tags = await engine.getTags(slug, { sourceId });
-    const md = serializePageToMarkdown(writtenPage, tags, {
-      frontmatterOverrides: opts.frontmatterOverrides,
-    });
-
-    mkdirSync(dirname(filePath), { recursive: true });
-
-    // Atomic write: unique temp sibling + rename. Unique name (pid + random)
-    // so two concurrent saves to the same target can't clobber each other's
-    // temp file. Clean up the temp on any failure so we never leak a stray
-    // `.tmp` next to the real file.
-    const tmpPath = `${filePath}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
-    try {
-      writeFileSync(tmpPath, md, 'utf8');
-      renameSync(tmpPath, filePath);
-    } catch (writeErr) {
-      try {
-        if (existsSync(tmpPath)) unlinkSync(tmpPath);
-      } catch {
-        // best-effort cleanup; surface the original write error below
+    return await withLegacyPageFileWrite(engine, sourceId, slug, filePath, async (): Promise<WriteThroughResult> => {
+      const writtenPage = await engine.getPage(slug, { sourceId });
+      if (!writtenPage) {
+        return { written: false, skipped: 'page_not_found_after_write' };
       }
-      throw writeErr;
-    }
 
-    return { written: true, path: filePath };
+      const tags = await engine.getTags(slug, { sourceId });
+      const md = serializePageToMarkdown(writtenPage, tags, {
+        frontmatterOverrides: opts.frontmatterOverrides,
+      });
+
+      mkdirSync(dirname(filePath), { recursive: true });
+
+      // Atomic write: unique temp sibling + rename. Unique name (pid + random)
+      // so two concurrent saves to the same target can't clobber each other's
+      // temp file. Clean up the temp on any failure so we never leak a stray
+      // `.tmp` next to the real file.
+      const tmpPath = `${filePath}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`;
+      try {
+        writeFileSync(tmpPath, md, 'utf8');
+        renameSync(tmpPath, filePath);
+      } catch (writeErr) {
+        try {
+          if (existsSync(tmpPath)) unlinkSync(tmpPath);
+        } catch {
+          // best-effort cleanup; surface the original write error below
+        }
+        throw writeErr;
+      }
+
+      return { written: true, path: filePath };
+    }, opts.coordinationHost);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     opts.logger?.warn(`[write-through] failed for ${slug}: ${msg}`);

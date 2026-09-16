@@ -1,3 +1,4 @@
+import { commitCheckedEmbeddings, readEmbeddingBaseline, withEmbeddingBaseline } from '../core/embedding-checked-write.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { embedBatch, currentEmbeddingSignature } from '../core/embedding.ts';
 import type { ChunkInput } from '../core/types.ts';
@@ -533,14 +534,20 @@ async function embedPage(
   // embedded — but we never write chunks or call the embedding model.
   let chunks = await engine.getChunks(slug, opts);
   if (chunks.length === 0) {
+    // The empty read can race a checked replacement. Re-read the actual
+    // chunking input and empty-set identity together before preparing writes.
+    const baseline = dryRun ? null : await readEmbeddingBaseline(engine, slug, page.source_id ?? 'default');
+    if (!dryRun && !baseline) return;
+    const initialPage = baseline?.page ?? page;
+    if (baseline) chunks = baseline.chunks;
     const inputs: ChunkInput[] = [];
-    if (page.compiled_truth.trim()) {
-      for (const c of chunkText(page.compiled_truth)) {
+    if (initialPage.compiled_truth.trim()) {
+      for (const c of chunkText(initialPage.compiled_truth)) {
         inputs.push({ chunk_index: inputs.length, chunk_text: c.text, chunk_source: 'compiled_truth' });
       }
     }
-    if (page.timeline.trim()) {
-      for (const c of chunkText(page.timeline)) {
+    if (initialPage.timeline.trim()) {
+      for (const c of chunkText(initialPage.timeline)) {
         inputs.push({ chunk_index: inputs.length, chunk_text: c.text, chunk_source: 'timeline' });
       }
     }
@@ -553,9 +560,11 @@ async function embedPage(
       return;
     }
 
-    if (inputs.length > 0) {
-      await engine.upsertChunks(slug, inputs, opts);
-      chunks = await engine.getChunks(slug, opts);
+    if (inputs.length > 0 && chunks.length === 0) {
+      if (!await withEmbeddingBaseline(engine, baseline!, async tx => {
+        await tx.upsertChunks(slug, inputs, { sourceId: baseline!.sourceId });
+        chunks = await tx.getChunks(slug, { sourceId: baseline!.sourceId });
+      })) return;
     }
   }
 
@@ -576,30 +585,11 @@ async function embedPage(
     return;
   }
 
+  const signature = currentEmbeddingSignature();
   const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text), { abortSignal: signal });
-  const embeddingMap = new Map<number, Float32Array>();
-  for (let j = 0; j < toEmbed.length; j++) {
-    embeddingMap.set(toEmbed[j].chunk_index, embeddings[j]);
-  }
-  const updated: ChunkInput[] = chunks.map(c => ({
-    chunk_index: c.chunk_index,
-    chunk_text: c.chunk_text,
-    chunk_source: c.chunk_source,
-    embedding: embeddingMap.get(c.chunk_index),
-    token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
-  }));
-
-  await engine.upsertChunks(slug, updated, opts);
-  // v0.41.31: stamp provenance so a later model/dims swap is detectable as
-  // stale. embedPage is the per-slug path used by `gbrain embed <slug>` AND
-  // by `gbrain sync`'s post-import embed step (runEmbedCore({slugs})).
-  // Guard: only stamp when EVERY chunk was (re)embedded this pass. If some
-  // chunks were preserved from a prior embed (unknown/old provenance), the
-  // page is mixed — don't claim it's current. `embed --all` fully re-embeds
-  // such a page and then stamps it.
-  if (toEmbed.length === chunks.length) {
-    await engine.setPageEmbeddingSignature(slug, { sourceId, signature: currentEmbeddingSignature() });
-  }
+  if (!await commitCheckedEmbeddings(engine, {
+    slug, sourceId: page.source_id ?? 'default', chunks: toEmbed, embeddings, signature,
+  })) return;
   result.embedded += toEmbed.length;
   result.pages_processed++;
   slog(`${slug}: embedded ${toEmbed.length} chunks`);
@@ -712,25 +702,10 @@ async function embedAll(
 
     try {
       const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text));
-      // Build a map of new embeddings by chunk_index
-      const embeddingMap = new Map<number, Float32Array>();
-      for (let j = 0; j < toEmbed.length; j++) {
-        embeddingMap.set(toEmbed[j].chunk_index, embeddings[j]);
-      }
-      // Preserve ALL chunks, only update embeddings for stale ones
-      const updated: ChunkInput[] = chunks.map(c => ({
-        chunk_index: c.chunk_index,
-        chunk_text: c.chunk_text,
-        chunk_source: c.chunk_source,
-        embedding: embeddingMap.get(c.chunk_index) ?? undefined,
-        token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
+      const committed = await observed(pacer, () => commitCheckedEmbeddings(engine, {
+        slug: page.slug, sourceId: pageSourceId ?? 'default', chunks: toEmbed, embeddings, signature,
       }));
-      await observed(pacer, () => engine.upsertChunks(page.slug, updated, pageOpts));
-      // v0.41.31: stamp embedding provenance so a later model swap is
-      // detectable as stale.
-      await observed(pacer, () =>
-        engine.setPageEmbeddingSignature(page.slug, { sourceId: pageSourceId, signature }),
-      );
+      if (!committed) return;
       result.embedded += toEmbed.length;
     } catch (e: unknown) {
       serr(`\n  Error embedding ${page.slug}: ${e instanceof Error ? e.message : e}`);
@@ -1005,31 +980,14 @@ async function embedAllStale(
         const keySourceId = stale[0]?.source_id ?? 'default';
         const slug = stale[0].slug;
         try {
-          const embeddings = await embedBatchWithBackoff(stale.map(c => c.chunk_text), { abortSignal: effectiveSignal });
-          // Re-fetch existing chunks and merge to avoid deleting non-stale chunks.
           const existing = await observed(pacer, () => engine.getChunks(slug, { sourceId: keySourceId }));
-          const staleIdxToEmbedding = new Map<number, Float32Array>();
-          for (let j = 0; j < stale.length; j++) {
-            staleIdxToEmbedding.set(stale[j].chunk_index, embeddings[j]);
-          }
-          const merged: ChunkInput[] = existing.map(c => ({
-            chunk_index: c.chunk_index,
-            chunk_text: c.chunk_text,
-            chunk_source: c.chunk_source,
-            embedding: staleIdxToEmbedding.get(c.chunk_index) ?? undefined,
-            token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
+          const snapshot = stale.map(row => existing.find(c => c.page_id === row.page_id && c.chunk_index === row.chunk_index && c.chunk_text === row.chunk_text));
+          if (snapshot.some(c => !c)) return;
+          const embeddings = await embedBatchWithBackoff(stale.map(c => c.chunk_text), { abortSignal: effectiveSignal });
+          const committed = await observed(pacer, () => commitCheckedEmbeddings(engine, {
+            slug, sourceId: keySourceId, chunks: snapshot.filter(c => c !== undefined), embeddings, signature,
           }));
-          await observed(pacer, () => engine.upsertChunks(slug, merged, { sourceId: keySourceId }));
-          // v0.41.31: stamp provenance after the page's chunks are embedded —
-          // but only when EVERY chunk was stale (fully re-embedded this pass).
-          // A partially-stale page keeps preserved chunks of unknown/old
-          // provenance, so don't claim it's current. (After invalidate, a
-          // signature-drifted page IS fully stale → this stamps it.)
-          if (signature && stale.length === existing.length) {
-            await observed(pacer, () =>
-              engine.setPageEmbeddingSignature(slug, { sourceId: keySourceId, signature }),
-            );
-          }
+          if (!committed) return;
           result.embedded += stale.length;
         } catch (e: unknown) {
           // Budget/abort-fired cancellations are expected on the way out; don't

@@ -34,6 +34,7 @@ import { normalizeModelId } from '../model-id.ts';
 import { hasAnthropicKey } from '../ai/anthropic-key.ts';
 import { join, dirname, isAbsolute, resolve } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
+import { withCycleFileWrites } from './with-file-writes.ts';
 import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { MinionQueue } from '../minions/queue.ts';
 import { waitForCompletion, TimeoutError } from '../minions/wait-for-completion.ts';
@@ -1082,22 +1083,28 @@ async function reverseWriteRefs(
     const page = await engine.getPage(slug, { sourceId: source_id });
     if (!page) continue;
     const tags = await engine.getTags(slug, { sourceId: source_id });
-    try {
-      const md = renderPageToMarkdown(page, tags);
-      // v0.32.8 F6: non-default sources land at brainDir/.sources/<id>/<slug>.md
-      // so same-slug-different-source pages don't collide. Default-source
-      // pages stay at brainDir/<slug>.md so single-source brains see no change.
-      const filePath = source_id === 'default'
-        ? join(brainDir, `${slug}.md`)
-        : join(brainDir, '.sources', source_id, `${slug}.md`);
-      mkdirSync(dirname(filePath), { recursive: true });
-      writeFileSync(filePath, md, 'utf8');
-      count++;
-    } catch (e) {
-      // Per-slug failures are non-fatal — phase continues.
-      const msg = e instanceof Error ? e.message : String(e);
-      process.stderr.write(`[dream] reverse-write ${slug}@${source_id} failed: ${msg}\n`);
-    }
+    const targetPath = source_id === 'default'
+      ? join(brainDir, `${slug}.md`)
+      : join(brainDir, '.sources', source_id, `${slug}.md`);
+    // Outside best-effort catch: safety refusals must abort the phase.
+    await withCycleFileWrites(engine, brainDir, [{ sourceId: source_id, slug, filePath: targetPath }], async () => {
+      try {
+        const md = renderPageToMarkdown(page, tags);
+        // v0.32.8 F6: non-default sources land at brainDir/.sources/<id>/<slug>.md
+        // so same-slug-different-source pages don't collide. Default-source
+        // pages stay at brainDir/<slug>.md so single-source brains see no change.
+        const filePath = source_id === 'default'
+          ? join(brainDir, `${slug}.md`)
+          : join(brainDir, '.sources', source_id, `${slug}.md`);
+        mkdirSync(dirname(filePath), { recursive: true });
+        writeFileSync(filePath, md, 'utf8');
+        count++;
+      } catch (e) {
+        // Per-slug failures are non-fatal — phase continues.
+        const msg = e instanceof Error ? e.message : String(e);
+        process.stderr.write(`[dream] reverse-write ${slug}@${source_id} failed: ${msg}\n`);
+      }
+    });
   }
   return count;
 }
@@ -1171,23 +1178,25 @@ async function writeSummaryPage(
   // unnecessarily; we go straight to the engine.
   const { parseMarkdown } = await import('../markdown.ts');
   const parsed = parseMarkdown(fullMarkdown);
-  await engine.putPage(summarySlug, {
-    type: parsed.type,
-    title: parsed.title,
-    compiled_truth: parsed.compiled_truth,
-    timeline: parsed.timeline,
-    frontmatter: parsed.frontmatter,
-  });
+  await withCycleFileWrites(engine, brainDir, [{ sourceId: 'default', slug: summarySlug, filePath: join(brainDir, `${summarySlug}.md`) }], async () => {
+    await engine.putPage(summarySlug, {
+      type: parsed.type,
+      title: parsed.title,
+      compiled_truth: parsed.compiled_truth,
+      timeline: parsed.timeline,
+      frontmatter: parsed.frontmatter,
+    });
 
-  // Also write to disk (orchestrator dual-write).
-  try {
-    const filePath = join(brainDir, `${summarySlug}.md`);
-    mkdirSync(dirname(filePath), { recursive: true });
-    writeFileSync(filePath, fullMarkdown, 'utf8');
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    process.stderr.write(`[dream] summary file-write failed: ${msg}\n`);
-  }
+    // Also write to disk (orchestrator dual-write).
+    try {
+      const filePath = join(brainDir, `${summarySlug}.md`);
+      mkdirSync(dirname(filePath), { recursive: true });
+      writeFileSync(filePath, fullMarkdown, 'utf8');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      process.stderr.write(`[dream] summary file-write failed: ${msg}\n`);
+    }
+  });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -1241,5 +1250,7 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
 // behavior at function granularity (e.g., #745 collectChildPutPageSlugs
 // double-encoded jsonb regression). Not part of the runtime contract.
 export const __testing = {
+  reverseWriteRefs,
+  writeSummaryPage,
   collectChildPutPageSlugs,
 };

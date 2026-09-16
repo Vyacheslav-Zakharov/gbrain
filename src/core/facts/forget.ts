@@ -37,6 +37,7 @@ import { join } from 'node:path';
 
 import type { BrainEngine } from '../engine.ts';
 import { withPageLock } from '../page-lock.ts';
+import { withFactsFileWrite } from './with-file-write.ts';
 import { parseFactsFence, renderFactsTable, type ParsedFact } from '../facts-fence.ts';
 
 export interface ForgetFactResult {
@@ -129,15 +130,13 @@ export async function forgetFactInFence(
   const filePath = join(localPath, `${slug}.md`);
   const tmpPath = `${filePath}.tmp`;
 
-  if (!existsSync(filePath)) {
-    // File deleted out from under us — only the DB has the row.
-    // Legacy path is the safe behavior; the operator can fix the
-    // tree mismatch separately.
-    const ok = await engine.expireFact(factId); // gbrain-allow-direct-insert: legacy fallback path inside forgetFactInFence — fence rewrite not possible (pre-v51 row / missing local_path / file deleted / row_num drift)
-    return { ok, path: 'legacy_db', reason };
-  }
+  return withFactsFileWrite(engine, row.source_id, slug, localPath, filePath, () => withPageLock(slug, async () => {
+    if (!existsSync(filePath)) {
+      // Keep missing-file fallback inside the enrollment gate too.
+      const ok = await engine.expireFact(factId); // gbrain-allow-direct-insert: legacy fallback path inside forgetFactInFence — fence rewrite not possible (pre-v51 row / missing local_path / file deleted / row_num drift)
+      return { ok, path: 'legacy_db', reason };
+    }
 
-  return withPageLock(slug, async () => {
     const body = readFileSync(filePath, 'utf-8');
     const parsed = parseFactsFence(body);
 
@@ -206,5 +205,5 @@ export async function forgetFactInFence(
     );
 
     return { ok: true, path: 'fence', reason };
-  }, { timeoutMs: 5_000 });
+  }, { timeoutMs: 5_000 }));
 }

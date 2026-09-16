@@ -57,24 +57,40 @@ describe('postgres-engine / module-singleton ownership (#1471)', () => {
   });
 
   test('connect() stores the ownership token from db.connect() — no separate pre-sample (TOCTOU guard)', () => {
-    const connect = stripComments(extractMethod(ENGINE_SRC, 'connect'));
+    const connect = traceLifecycle('connect', 'connectTransition', 'connectLifecycle');
     // Ownership is the RETURN of db.connect(), assigned to the flag.
     expect(/_ownsModuleSingleton\s*=\s*await\s+db\.connect\s*\(/.test(connect)).toBe(true);
     // Regression guard against the original TOCTOU shape: no separate
     // db.isConnected() probe sampled before db.connect().
     expect(/db\.isConnected\s*\(/.test(connect)).toBe(false);
+    const instanceBranch = extractBranch(connect, 'if (config.poolSize)');
+    expect(/this\._sql\s*=\s*postgres\(url, opts\)/.test(instanceBranch)).toBe(true);
+    expect(/this\._connectionStyle\s*=\s*'instance'/.test(instanceBranch)).toBe(true);
+    expect(/db\.connect\s*\(|this\._ownsModuleSingleton\s*=/.test(instanceBranch)).toBe(false);
+    const modulePath = connect.slice(connect.indexOf(instanceBranch) + instanceBranch.length);
+    expect(/_ownsModuleSingleton\s*=\s*await\s+db\.connect\s*\(/.test(modulePath)).toBe(true);
+    expect(/this\._connectionStyle\s*=\s*'module'/.test(modulePath)).toBe(true);
   });
 
   test('disconnect() calls db.disconnect() ONLY when this engine owns the singleton', () => {
-    const disconnect = stripComments(extractMethod(ENGINE_SRC, 'disconnect'));
+    const disconnect = traceLifecycle('disconnect', 'disconnectTransition', 'disconnectLifecycle');
     // The shared-singleton teardown must be guarded by the ownership flag — a
     // borrower clears its marker without nulling the owner's connection.
-    const guarded = /if\s*\(\s*this\._ownsModuleSingleton\s*\)\s*\{[\s\S]*?db\.disconnect\s*\(\s*\)/.test(disconnect);
+    const moduleBranch = extractBranch(disconnect, "if (this._connectionStyle === 'module')");
+    const ownerBranch = extractBranch(moduleBranch, 'if (this._ownsModuleSingleton)');
+    const guarded = /await\s+db\.disconnect\s*\(\s*\)/.test(ownerBranch);
     expect(guarded).toBe(true);
     // And the only db.disconnect() in the method is the guarded one (no
     // unconditional clobber survives).
     const calls = [...disconnect.matchAll(/db\.disconnect\s*\(\s*\)/g)];
     expect(calls.length).toBe(1);
+    expect(/this\._ownsModuleSingleton\s*=\s*false/.test(ownerBranch)).toBe(true);
+    expect(/this\._connectionStyle\s*=\s*null/.test(moduleBranch)).toBe(true);
+    const instanceBranch = extractBranch(disconnect, 'if (this._sql)');
+    expect(/await db\.endPoolBounded\(this\._sql\)/.test(instanceBranch)).toBe(true);
+    expect(/this\._sql\s*=\s*null/.test(instanceBranch)).toBe(true);
+    expect(/return\s*;\s*}$/.test(instanceBranch)).toBe(true);
+    expect(/db\.disconnect\s*\(/.test(instanceBranch)).toBe(false);
   });
 
   test('db.disconnect() snapshots + nulls the singleton BEFORE awaiting end() (codex #6)', () => {
@@ -94,7 +110,7 @@ describe('postgres-engine / module-singleton ownership (#1471)', () => {
   });
 
   test('reconnect() is connection-style aware: module-singleton path never tears down the shared pool (#1745)', () => {
-    const reconnect = stripComments(extractMethod(ENGINE_SRC, 'reconnect'));
+    const reconnect = traceLifecycle('reconnect', 'reconnectLifecycle');
     // Module-singleton engines must NOT route through this.disconnect()/db.disconnect()
     // on reconnect — they recover idempotently via db.connect() + setReadPool, so a
     // transient blip can't null the shared singleton other phases are using.
@@ -103,8 +119,40 @@ describe('postgres-engine / module-singleton ownership (#1471)', () => {
     expect(/setReadPool\(db\.getConnection\(\)\)/.test(reconnect)).toBe(true);
     // The instance path keeps the `_reconnecting` re-entrancy guard.
     expect(/this\._reconnecting\s*=\s*true/.test(reconnect)).toBe(true);
+    const moduleBranch = extractBranch(reconnect, "if (this._connectionStyle !== 'instance')");
+    expect(/db\.connect\(this\._savedConfig\)/.test(moduleBranch)).toBe(true);
+    expect(/setReadPool\(db\.getConnection\(\)\)/.test(moduleBranch)).toBe(true);
+    expect(/(?:disconnect\w*|endPoolBounded)\s*\(/.test(moduleBranch)).toBe(false);
+    expect(/return\s*;\s*}$/.test(moduleBranch)).toBe(true);
+    const instancePath = reconnect.slice(reconnect.indexOf(moduleBranch) + moduleBranch.length);
+    expect(/await this\.disconnectTransition\(\)/.test(instancePath)).toBe(true);
+    expect(/await this\.connectTransition\(this\._savedConfig\)/.test(instancePath)).toBe(true);
+    expect(/this\._reconnecting\s*=\s*false/.test(instancePath)).toBe(true);
   });
 });
+
+// Follow the public entry point rather than accepting an orphaned private method
+// containing the right strings. Wrappers must queue the next actual transition;
+// transitions must await the lifecycle body. Inspect each link for direct DB
+// ownership operations too, so moving an unsafe call into a wrapper cannot hide it.
+function traceLifecycle(...names: string[]): string {
+  for (let i = 0; i < names.length - 1; i++) {
+    const body = stripComments(extractMethod(ENGINE_SRC, names[i]));
+    const next = names[i + 1];
+    expect(new RegExp(i === 0
+      ? `this\\.queueLifecycle\\(\\(\\) => this\\.${next}\\(`
+      : `await this\\.${next}\\(`).test(body)).toBe(true);
+    expect(/db\.(?:connect|disconnect|isConnected|endPoolBounded)\s*\(/.test(body)).toBe(false);
+    expect(/this\._ownsModuleSingleton\s*=/.test(body)).toBe(false);
+  }
+  return stripComments(extractMethod(ENGINE_SRC, names[names.length - 1]));
+}
+
+function extractBranch(source: string, condition: string): string {
+  const index = source.indexOf(condition);
+  if (index < 0) throw new Error(`branch ${condition} not found`);
+  return balanceBodyFrom(source, index, condition);
+}
 
 function stripComments(s: string): string {
   return s
@@ -141,7 +189,7 @@ function balanceBodyFrom(source: string, headerIdx: number, what: string): strin
 
 // Class method body by name (async or not).
 function extractMethod(source: string, name: string): string {
-  const openRe = new RegExp(`^\\s+(?:async\\s+)?${name}\\s*\\(`, 'm');
+  const openRe = new RegExp(`^\\s+(?:private\\s+)?(?:async\\s+)?${name}\\s*\\(`, 'm');
   const match = openRe.exec(source);
   if (!match) throw new Error(`method ${name} not found`);
   return balanceBodyFrom(source, match.index, name);

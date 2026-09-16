@@ -6248,7 +6248,146 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 141,
+    name: 'page_write_revision',
+    idempotent: true,
+    sql: `
+      ALTER TABLE pages ADD COLUMN IF NOT EXISTS write_revision UUID NOT NULL DEFAULT gen_random_uuid();
+      CREATE OR REPLACE FUNCTION advance_page_write_revision() RETURNS trigger AS $func$
+      BEGIN
+        -- Retrieval read-back is not editable state. Identical row writes also
+        -- preserve the token; explicit revision changes (tags) still advance it.
+        IF TG_OP = 'UPDATE' AND
+           (to_jsonb(NEW) - 'last_retrieved_at') IS NOT DISTINCT FROM
+           (to_jsonb(OLD) - 'last_retrieved_at') THEN
+          RETURN NEW;
+        END IF;
+        NEW.write_revision := gen_random_uuid();
+        RETURN NEW;
+      END;
+      $func$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS page_write_revision_trg ON pages;
+      CREATE TRIGGER page_write_revision_trg BEFORE INSERT OR UPDATE ON pages
+        FOR EACH ROW EXECUTE FUNCTION advance_page_write_revision();
+
+      CREATE OR REPLACE FUNCTION advance_tag_page_write_revision() RETURNS trigger AS $func$
+      DECLARE old_page_id INTEGER; new_page_id INTEGER;
+      BEGIN
+        IF TG_OP <> 'INSERT' THEN old_page_id := OLD.page_id; END IF;
+        IF TG_OP <> 'DELETE' THEN new_page_id := NEW.page_id; END IF;
+        -- Lock parents before the tag mutation; the same row lock gates CAS.
+        -- Ordered locks cover direct SQL that moves a tag between pages.
+        PERFORM id FROM pages WHERE id IN (old_page_id, new_page_id)
+          ORDER BY id FOR UPDATE;
+        UPDATE pages SET write_revision = gen_random_uuid()
+          WHERE id IN (old_page_id, new_page_id);
+        IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+        RETURN NEW;
+      END;
+      $func$ LANGUAGE plpgsql;
+      DROP TRIGGER IF EXISTS tag_page_write_revision_trg ON tags;
+      CREATE TRIGGER tag_page_write_revision_trg BEFORE INSERT OR UPDATE OR DELETE ON tags
+        FOR EACH ROW EXECUTE FUNCTION advance_tag_page_write_revision();
+    `,
+  },
 ];
+
+// Shared DDL runs through both engines' normal migration path; no activation flag.
+MIGRATIONS.push({ version: 142, name: 'page_file_coordination', idempotent: true, sql: `
+  CREATE TABLE IF NOT EXISTS page_file_bindings (
+    binding_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    source_id TEXT NOT NULL REFERENCES sources(id), slug TEXT NOT NULL,
+    page_id INTEGER NOT NULL REFERENCES pages(id), binding_key TEXT NOT NULL,
+    canonical_root TEXT NOT NULL, relative_path TEXT NOT NULL,
+    indexed_raw_sha256 TEXT NOT NULL, file_generation BIGINT NOT NULL DEFAULT 0,
+    pending_op_id UUID, UNIQUE(source_id, slug), UNIQUE(canonical_root, relative_path)
+  );
+  CREATE TABLE IF NOT EXISTS page_file_operations (
+    operation_id UUID PRIMARY KEY, binding_id UUID NOT NULL REFERENCES page_file_bindings(binding_id),
+    request_digest TEXT NOT NULL, record JSONB NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('prepared','committed','conflict','aborted')),
+    revision UUID
+  );
+  -- Internal transaction capability, never a caller-supplied GUC. Application
+  -- roles must not own tables/triggers or receive access to this relation.
+  CREATE TABLE IF NOT EXISTS page_file_write_authorizations (
+    transaction_id BIGINT NOT NULL, page_id INTEGER NOT NULL,
+    operation_id UUID NOT NULL, expected_revision UUID NOT NULL,
+    PRIMARY KEY(transaction_id, page_id)
+  );
+  REVOKE ALL ON page_file_write_authorizations, page_file_bindings, page_file_operations FROM PUBLIC;
+  CREATE OR REPLACE FUNCTION fence_file_config_write() RETURNS trigger
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  BEGIN
+    IF ((TG_OP<>'INSERT' AND OLD.key='sync.repo_path') OR
+        (TG_OP<>'DELETE' AND NEW.key='sync.repo_path'))
+      AND EXISTS(SELECT 1 FROM public.page_file_bindings)
+    THEN RAISE EXCEPTION 'file_page_fenced: enrolled global root configuration'; END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+  END $$;
+  DROP TRIGGER IF EXISTS aa_file_config_write_fence ON config;
+  CREATE TRIGGER aa_file_config_write_fence BEFORE INSERT OR UPDATE OR DELETE ON config
+    FOR EACH ROW EXECUTE FUNCTION fence_file_config_write();
+  CREATE OR REPLACE FUNCTION fence_file_page_write() RETURNS trigger
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  DECLARE b public.page_file_bindings%ROWTYPE;
+  BEGIN
+    SELECT * INTO b FROM public.page_file_bindings WHERE page_id=OLD.id;
+    IF NOT FOUND THEN
+      IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+    END IF;
+    IF TG_OP='UPDATE' THEN
+      IF NEW.id=OLD.id AND NEW.source_id=OLD.source_id AND NEW.slug=OLD.slug
+        AND NEW.source_path IS NOT DISTINCT FROM OLD.source_path
+        AND NEW.deleted_at IS NOT DISTINCT FROM OLD.deleted_at
+        AND EXISTS (SELECT 1 FROM public.page_file_write_authorizations a
+          JOIN public.page_file_operations o ON o.operation_id=a.operation_id
+          WHERE a.transaction_id=txid_current() AND a.page_id=OLD.id
+            AND a.expected_revision=OLD.write_revision
+            AND a.operation_id=b.pending_op_id AND o.binding_id=b.binding_id
+            AND o.state='prepared') THEN RETURN NEW; END IF;
+    END IF;
+    RAISE EXCEPTION 'file_page_fenced: enrolled page requires checked file protocol';
+  END $$;
+  CREATE OR REPLACE FUNCTION fence_file_chunk_write() RETURNS trigger
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  DECLARE target INTEGER;
+  BEGIN
+    FOR target IN SELECT DISTINCT x FROM unnest(ARRAY[
+      CASE WHEN TG_OP<>'INSERT' THEN OLD.page_id END,
+      CASE WHEN TG_OP<>'DELETE' THEN NEW.page_id END]) AS x WHERE x IS NOT NULL
+    LOOP
+      IF EXISTS(SELECT 1 FROM public.page_file_bindings b WHERE b.page_id=target
+        AND NOT EXISTS(SELECT 1 FROM public.page_file_write_authorizations a
+          JOIN public.page_file_operations o ON o.operation_id=a.operation_id
+          WHERE a.transaction_id=txid_current() AND a.page_id=target
+          AND a.operation_id=b.pending_op_id AND o.binding_id=b.binding_id AND o.state='prepared'))
+      THEN RAISE EXCEPTION 'file_page_fenced: enrolled page chunks'; END IF;
+    END LOOP;
+    IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+  END $$;
+  DROP TRIGGER IF EXISTS aa_file_chunk_write_fence ON content_chunks;
+  CREATE TRIGGER aa_file_chunk_write_fence BEFORE INSERT OR UPDATE OR DELETE ON content_chunks
+    FOR EACH ROW EXECUTE FUNCTION fence_file_chunk_write();
+  CREATE OR REPLACE FUNCTION fence_file_source_write() RETURNS trigger
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public AS $$
+  BEGIN
+    IF EXISTS(SELECT 1 FROM public.page_file_bindings WHERE source_id=OLD.id) THEN
+      IF TG_OP='DELETE' THEN RAISE EXCEPTION 'file_page_fenced: enrolled source'; END IF;
+      IF (to_jsonb(NEW) - ARRAY['last_sync_at','last_commit','newest_content_at'])
+        IS DISTINCT FROM (to_jsonb(OLD) - ARRAY['last_sync_at','last_commit','newest_content_at'])
+      THEN RAISE EXCEPTION 'file_page_fenced: enrolled source configuration'; END IF;
+    END IF;
+    IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF;
+  END $$;
+  DROP TRIGGER IF EXISTS aa_file_source_write_fence ON sources;
+  CREATE TRIGGER aa_file_source_write_fence BEFORE UPDATE OR DELETE ON sources
+    FOR EACH ROW EXECUTE FUNCTION fence_file_source_write();
+  DROP TRIGGER IF EXISTS aa_file_page_write_fence ON pages;
+  CREATE TRIGGER aa_file_page_write_fence BEFORE UPDATE OR DELETE ON pages
+    FOR EACH ROW EXECUTE FUNCTION fence_file_page_write();
+` });
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
   ? Math.max(...MIGRATIONS.map(m => m.version))

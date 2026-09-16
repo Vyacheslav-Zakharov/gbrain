@@ -1,0 +1,291 @@
+name: Page CAS MVP
+on:
+  push:
+    branches: [feat/page-cas-mvp]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: page-cas-mvp-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  postgres-cas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: disposable-test-only
+          POSTGRES_DB: gbrain_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Prepare isolated configuration and exact-source evidence
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/cas-home" cas-evidence
+          printf 'GBRAIN_HOME=%s\n' "$RUNNER_TEMP/cas-home" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git rev-parse HEAD > cas-evidence/source-sha.txt
+          printf '%s/%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > cas-evidence/run.txt
+          printf '%s\n' "$GITHUB_WORKFLOW_REF" "$GITHUB_WORKFLOW_SHA" > cas-evidence/workflow.txt
+          git ls-files -z | sort -z | xargs -0 sha256sum > cas-evidence/source-files.sha256
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.13
+      - name: Install locked dependencies without host postinstall
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Typecheck
+        run: |
+          set -o pipefail
+          timeout --signal=TERM --kill-after=10s 180s bun run typecheck 2>&1 | tee cas-evidence/typecheck.log
+      # Each explicit file is a fresh process, sequentially. No mock registry leaks,
+      # no large PGLite heap accumulation, no broad runner or parallel fanout.
+      - name: Offline checked operations and embedding group
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          failed=0
+          for file in \
+            test/page-cas-mvp.test.ts test/page-cas-security.test.ts test/page-cas-store.test.ts \
+            test/embedding-checked-write.test.ts test/embedding-followup.test.ts \
+            test/contextual-retrieval-service-pure.test.ts test/schema-bootstrap-coverage.test.ts \
+            test/embedding-contextual-fence.serial.test.ts
+          do
+            set +e
+            env -u DATABASE_URL timeout --signal=TERM --kill-after=10s 180s bun test --timeout 60000 "$file" 2>&1 | tee "cas-evidence/$(basename "$file").log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            printf '%s %s\n' "$file" "$rc" >> cas-evidence/offline-exits.txt
+            if [ "$rc" -ne 0 ]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Offline file primitives and adapter group
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          failed=0
+          for file in \
+            test/page-file-binding.test.ts test/page-file-coordination.test.ts \
+            test/page-file-db.test.ts test/page-file-journal.test.ts test/page-file-lock.test.ts \
+            test/page-file-recovery.test.ts test/page-file-root-gate.test.ts test/page-file-root-transition.test.ts \
+            test/page-file-store.test.ts test/page-file-writer-gate.test.ts
+          do
+            set +e
+            env -u DATABASE_URL timeout --signal=TERM --kill-after=10s 180s bun test --timeout 60000 "$file" 2>&1 | tee "cas-evidence/$(basename "$file").log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            printf '%s %s\n' "$file" "$rc" >> cas-evidence/offline-exits.txt
+            if [ "$rc" -ne 0 ]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Offline actual operation handlers and source writer group
+        if: ${{ !cancelled() }}
+        run: |
+          set -o pipefail
+          failed=0
+          for file in \
+            test/page-file-runtime.test.ts test/page-file-runtime-recovery.test.ts test/page-file-enrollment.test.ts \
+            test/page-file-runtime-coordination.test.ts test/page-file-root-runtime.serial.test.ts \
+            test/page-file-dirty-root-refusal.serial.test.ts test/page-file-dirty-root-pull.serial.test.ts \
+            test/page-file-frozen-sync.serial.test.ts test/page-file-cyclic-sync.serial.test.ts \
+            test/page-file-sync.test.ts test/page-file-sync-failure.test.ts \
+            test/page-file-import.test.ts test/page-file-import-failure.test.ts \
+            test/page-file-import-command.serial.test.ts test/page-file-pull-callers.serial.test.ts \
+            test/sources-pull-arguments.serial.test.ts \
+            test/page-file-direct-writers.test.ts test/page-file-cycle-gates.test.ts \
+            test/page-file-authority.serial.test.ts test/page-file-host.test.ts \
+            test/page-file-bootstrap.serial.test.ts test/page-file-sql-authority.test.ts \
+            test/page-file-connected-lifecycle.serial.test.ts test/page-file-lifecycle-races.serial.test.ts \
+            test/page-file-connected-candidate.serial.test.ts test/page-file-operator.serial.test.ts \
+            test/page-file-pilot-admission.serial.test.ts test/page-file-pilot-root-scope.serial.test.ts \
+            test/page-file-crash-supervision.serial.test.ts test/page-file-dirty-root-supervision.serial.test.ts \
+            test/page-file-fixture-cleanup.test.ts test/page-file-tag-fence.test.ts \
+            test/page-file-source-operator.serial.test.ts test/page-file-source-runtime-enrollment.serial.test.ts \
+            test/page-file-ordinary-preparation.serial.test.ts test/page-file-ordinary-put-compat.serial.test.ts \
+            test/page-file-ordinary-writer-vertical.serial.test.ts test/page-file-created-enrollment.serial.test.ts \
+            test/postgres-engine-singleton-ownership.test.ts test/postgres-engine.test.ts \
+            test/postgres-engine-getter-selfheal.test.ts test/postgres-disconnect-bounded.test.ts \
+            test/page-file-runtime-authority.serial.test.ts test/page-file-runtime-enrollment.serial.test.ts \
+            test/import-file-runtime-authority.serial.test.ts \
+            test/page-file-runtime-receipt.test.ts test/brain-durability-pull-template.test.ts \
+            test/page-file-facts-coordination.serial.test.ts test/page-file-ingest-coordination.serial.test.ts \
+            test/page-file-cycle-coordination.serial.test.ts
+          do
+            set +e
+            env -u DATABASE_URL timeout --signal=TERM --kill-after=10s 180s bun test --timeout 60000 "$file" 2>&1 | tee "cas-evidence/$(basename "$file").log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            printf '%s %s\n' "$file" "$rc" >> cas-evidence/offline-exits.txt
+            if [ "$rc" -ne 0 ]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Real PostgreSQL DB-only conditional-write acceptance
+        if: ${{ !cancelled() }}
+        env:
+          DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
+          REQUIRE_PAGE_CAS_POSTGRES: '1'
+        run: |
+          set -o pipefail
+          set +e
+          timeout --signal=TERM --kill-after=10s 240s bun test --timeout 120000 test/e2e/page-cas-mvp.test.ts 2>&1 | tee cas-evidence/postgres-db.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" > cas-evidence/postgres-db-exit.txt
+          exit "$rc"
+      - name: Real PostgreSQL file-plane adapter acceptance (not production activation)
+        if: ${{ !cancelled() }}
+        env:
+          DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
+          REQUIRE_PAGE_FILE_CAS_POSTGRES: '1'
+          PAGE_FILE_CAS_DISPOSABLE: '1'
+        run: |
+          set -o pipefail
+          set +e
+          timeout --signal=TERM --kill-after=10s 300s bun test --timeout 120000 test/e2e/page-file-cas.test.ts 2>&1 | tee cas-evidence/postgres-file.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" > cas-evidence/postgres-file-exit.txt
+          exit "$rc"
+      - name: Real PostgreSQL registered runtime authority (offline factory only)
+        if: ${{ !cancelled() }}
+        env:
+          DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
+          REQUIRE_PAGE_FILE_RUNTIME_AUTHORITY_POSTGRES: '1'
+          PAGE_FILE_CAS_DISPOSABLE: '1'
+        run: |
+          set -o pipefail
+          set +e
+          env -u GBRAIN_DIRECT_DATABASE_URL timeout --signal=TERM --kill-after=10s 240s bun test --timeout 120000 test/e2e/page-file-runtime-authority.test.ts 2>&1 | tee cas-evidence/postgres-runtime-authority.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" > cas-evidence/postgres-runtime-authority-exit.txt
+          exit "$rc"
+      - name: Prepare disposable protected bootstrap directory (hosted runner only)
+        if: ${{ !cancelled() }}
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test ! -e /etc/gbrain
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /etc/gbrain
+      - name: Real PostgreSQL SQL authority and connected offline plus production-pilot admission (disposable only)
+        if: ${{ !cancelled() }}
+        env:
+          DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
+          REQUIRE_PAGE_FILE_SQL_AUTHORITY_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_UPGRADE_REPLAY_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_CONNECTED_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_PILOT_POSTGRES: '1'
+          PAGE_FILE_CAS_DISPOSABLE: '1'
+          PAGE_FILE_SQL_EVIDENCE_DIR: cas-evidence
+        run: |
+          set -o pipefail
+          set +e
+          env -u GBRAIN_DIRECT_DATABASE_URL timeout --signal=TERM --kill-after=10s 420s bun test --timeout 120000 test/e2e/page-file-sql-authority.test.ts 2>&1 | tee cas-evidence/postgres-sql-authority.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" > cas-evidence/postgres-sql-authority-exit.txt
+          exit "$rc"
+      - name: Verify tracked source and complete explicit file inventory
+        if: always()
+        run: |
+          git diff --exit-code && git diff --cached --exit-code
+          sha256sum --check cas-evidence/source-files.sha256 > cas-evidence/source-verification.txt
+          python3 - <<'PY'
+          import pathlib
+          expected = {str(p) for p in pathlib.Path('test').glob('page-file-*.test.ts')}
+          expected.update({
+              'test/postgres-engine-singleton-ownership.test.ts',
+              'test/postgres-engine.test.ts',
+              'test/postgres-engine-getter-selfheal.test.ts',
+              'test/postgres-disconnect-bounded.test.ts',
+          })
+          rows = [r.split() for r in pathlib.Path('cas-evidence/offline-exits.txt').read_text().splitlines()]
+          observed = [r[0] for r in rows]
+          assert len(observed) == len(set(observed)), 'duplicate suite'
+          assert expected <= set(observed), ('missing file suites', expected - set(observed))
+          assert all(r[1] == '0' for r in rows), 'offline suite failures'
+          for name in ('postgres-db', 'postgres-file', 'postgres-runtime-authority', 'postgres-sql-authority'):
+              assert pathlib.Path(f'cas-evidence/{name}-exit.txt').read_text().strip() == '0', name
+          sql_log = pathlib.Path('cas-evidence/postgres-sql-authority.log').read_text()
+          for marker in (
+              'already-v142 initSchema and no-pending runner preserve rows revisions receipts and original authority pins',
+              'existing runner replays 141 and 142 twice preserving populated v142 state and original authority pins',
+          ):
+              assert sql_log.count(f'PG_UPGRADE_REPLAY: {marker}') == 1, ('missing/duplicate upgrade replay completion', marker)
+          assert sql_log.count('PG_SQL_AUTHORITY: mixed ordinary DML accepted; enrolled page chunk root and capability fences preserved') == 1, 'missing/duplicate post-replay fence completion'
+          for marker in ('all three actual logins accepted; every SQL probe executed', 'wrong login rejected and baseline preserved', 'membership drift rejected and restored', 'table column grant-option drift rejected and restored', 'disabled and enabled trigger drift rejected and restored'):
+              assert f'PG_SQL_AUTHORITY: {marker}' in sql_log, marker
+          for marker in ('actual ordinary and adapter admission; initSchema no migration or enrollment', 'operator-only enrollment; disconnect tombstone and same-engine reconnect', 'per-borrow ordinary and adapter drift denied; no catalog self-repair', 'protected fixed anchor drift denied without mutation'):
+              assert f'PG_CONNECTED_BOOTSTRAP: {marker}' in sql_log, marker
+          for boundary in ('journal', 'prepared', 'rename', 'commit'):
+              marker = f'PG_CONNECTED_CRASH: SIGKILL {boundary}; fresh protected bootstrap; no auto-publish; exact authorized terminal replay'
+              assert sql_log.count(marker) == 1, ('missing/duplicate crash completion', boundary)
+          dirty_root_marker = 'PG_CONNECTED_DIRTY_ROOT: SIGKILL after Git before reconciliation; fresh protected bootstrap denies writes; explicit reconciliation preserves DB files Git and page intent; no automatic winner'
+          assert sql_log.count(dirty_root_marker) == 1, 'missing/duplicate dirty-root crash completion'
+          for marker in (
+              'executable status/verify read-only without enrollment credential; enroll requires separate credential',
+              'remote/unset rejected; stale exact reviewed revision and bytes rejected without mutation',
+              'executable exact enrollment and idempotent repeat; enrolled status/verify read-only without credential',
+          ):
+              assert sql_log.count(f'PG_CONNECTED_OPERATOR: {marker}') == 1, ('missing/duplicate operator completion', marker)
+          assert not pathlib.Path('/etc/gbrain/page-file-operator-anchor.json').exists(), 'operator anchor leaked'
+          for marker in (
+              'unapproved source and page operator enrollment rejected without mutation',
+              'protected production-pilot operator exact enrollment and idempotent repeat',
+              'actual checked write and read commit file database and receipt',
+              'approved-only root transition and dirty reconciliation succeed',
+              'late mixed-cohort root transition and recovery refuse preserving DB files Git journal and markers',
+              'ordinary unenrolled DML coexists and enrolled SQL fence remains',
+              'revoked approval denies checked read write retained service and reconnect without mutation',
+          ):
+              assert sql_log.count(f'PG_CONNECTED_PILOT: {marker}') == 1, ('missing/duplicate production-pilot completion', marker)
+          for marker in (
+              'executable paginated inventory and enrollment; two existing pages; separate login; idempotent readback',
+              'registered ordinary enrolled put preserves tags metadata file and DB; stale checked baseline refuses without mutation',
+              'ordinary-created future page enrolled by fresh paginated sweep without repinning; cross-source inventory and reconcile denied',
+          ):
+              assert sql_log.count(f'PG_CONNECTED_SOURCE_V2: {marker}') == 1, ('missing/duplicate source-v2 completion', marker)
+          assert not pathlib.Path('/etc/gbrain/page-file-bootstrap-anchor.json').exists(), 'fixture anchor leaked'
+          assert not list(pathlib.Path('/etc/gbrain').glob('connected-fixture-*')), 'protected fixture or credential leaked'
+          import json, hashlib
+          fixtures = list(pathlib.Path('cas-evidence').glob('fixture-catalog-*.json'))
+          assert len(fixtures) == 1, 'missing/ambiguous external fixture catalog'
+          fixture = json.loads(fixtures[0].read_text())
+          assert fixture['scope'] == 'disposable-fixture-only-not-production-approved'
+          assert len(fixture['catalogPins']) == 12
+          assert fixture['catalogPins'] == {k: hashlib.sha256(v.encode()).hexdigest() for k, v in fixture['definitions'].items()}
+          runtime_log = pathlib.Path('cas-evidence/postgres-runtime-authority.log').read_text()
+          assert 'PG_RUNTIME_AUTHORITY: registered get/put' in runtime_log
+          assert 'PG_RUNTIME_AUTHORITY: explicit candidate enrollment, enrollment-only login' in runtime_log
+          assert 'PG_RUNTIME_AUTHORITY: actual login mismatch denied' in runtime_log
+          PY
+      - name: Bind final evidence
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          mkdir -p cas-evidence
+          printf '%s\n' "$JOB_STATUS" > cas-evidence/job-status.txt
+          printf '%s\n' 'Hosted disposable SQL-authority and connected bootstrap acceptance: separate offline-verification crash proofs and actual production-pilot admission with fixture-only pinned one-page approval. No production deployment or production approval.' > cas-evidence/scope.txt
+          python3 - <<'PY'
+          import hashlib, pathlib
+          root = pathlib.Path('cas-evidence')
+          rows = [hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name for p in sorted(root.iterdir()) if p.is_file() and p.name != 'evidence.sha256']
+          (root / 'evidence.sha256').write_text('\n'.join(rows) + '\n')
+          PY
+      - name: Upload exact-run evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: page-cas-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: cas-evidence/
+          if-no-files-found: error

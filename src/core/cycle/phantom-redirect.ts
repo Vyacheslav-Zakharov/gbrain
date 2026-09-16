@@ -40,6 +40,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 
 import type { BrainEngine } from '../engine.ts';
+import { withCycleFileWrites } from './with-file-writes.ts';
 import type { Page } from '../types.ts';
 import {
   resolvePhantomCanonical,
@@ -439,77 +440,91 @@ export async function tryRedirectPhantom(
 
   // ─── Commit phase (codex #3/#4/#6/#7) ─────────────────────────────
   const canonicalPath = path.join(brainDir, `${canonical}.md`);
-  await materializeCanonicalToDisk(engine, canonical, sourceId, canonicalPath);
+  // Hold both endpoints through materialization, DB migration and unlink.
+  // No nested write/import gate: all tails run under this single acquisition.
+  try {
+    return await withCycleFileWrites(engine, brainDir, [
+      { sourceId, slug: page.slug, filePath: path.join(brainDir, `${page.slug}.md`) },
+      { sourceId, slug: canonical, filePath: canonicalPath },
+    ], async (): Promise<RedirectResult> => {
+      await materializeCanonicalToDisk(engine, canonical, sourceId, canonicalPath);
 
-  // Disk-side first: parse phantom's fence and append to canonical's
-  // disk fence (dedup-guarded). If this throws, no DB state has moved
-  // and the cycle can retry next run.
-  const phantomFence = parseFactsFence(page.compiled_truth ?? '');
-  appendPhantomFenceRowsToCanonical(canonicalPath, phantomFence.facts);
+      // Disk-side first: parse phantom's fence and append to canonical's
+      // disk fence (dedup-guarded). If this throws, no DB state has moved
+      // and the cycle can retry next run.
+      const phantomFence = parseFactsFence(page.compiled_truth ?? '');
+      appendPhantomFenceRowsToCanonical(canonicalPath, phantomFence.facts);
 
-  // Codex #7: refresh canonical's compiled_truth + content_hash so the
-  // next `gbrain sync` sees the canonical as unchanged. We re-parse the
-  // disk body and recompute the hash with the same shape import-file
-  // uses, so the idempotency check round-trips byte-for-byte.
-  const newCanonicalBody = fs.readFileSync(canonicalPath, 'utf-8');
-  const reparsed = parseMarkdown(newCanonicalBody, `${canonical}.md`);
-  const canonicalTags = await engine.getTags(canonical, { sourceId });
-  const newContentHash = computePageContentHash({
-    title: reparsed.title,
-    type: reparsed.type,
-    compiled_truth: reparsed.compiled_truth,
-    timeline: reparsed.timeline,
-    frontmatter: reparsed.frontmatter,
-    tags: canonicalTags,
-  });
-  await engine.refreshPageBody(
-    canonical,
-    sourceId,
-    reparsed.compiled_truth,
-    reparsed.timeline,
-    newContentHash,
-  );
+      // Codex #7: refresh canonical's compiled_truth + content_hash so the
+      // next `gbrain sync` sees the canonical as unchanged. We re-parse the
+      // disk body and recompute the hash with the same shape import-file
+      // uses, so the idempotency check round-trips byte-for-byte.
+      const newCanonicalBody = fs.readFileSync(canonicalPath, 'utf-8');
+      const reparsed = parseMarkdown(newCanonicalBody, `${canonical}.md`);
+      const canonicalTags = await engine.getTags(canonical, { sourceId });
+      const newContentHash = computePageContentHash({
+        title: reparsed.title,
+        type: reparsed.type,
+        compiled_truth: reparsed.compiled_truth,
+        timeline: reparsed.timeline,
+        frontmatter: reparsed.frontmatter,
+        tags: canonicalTags,
+      });
+      await engine.refreshPageBody(
+        canonical,
+        sourceId,
+        reparsed.compiled_truth,
+        reparsed.timeline,
+        newContentHash,
+      );
 
-  // Codex #3/#4/#12: lossless DB migration. Re-runs return migrated=0.
-  const migrated = await engine.migrateFactsToCanonical(page.slug, canonical, sourceId);
+      // Codex #3/#4/#12: lossless DB migration. Re-runs return migrated=0.
+      const migrated = await engine.migrateFactsToCanonical(page.slug, canonical, sourceId);
 
-  // D6: DB FK rewrite for the links table (wiki-link text rewrite is a
-  // documented follow-up — codex #5).
-  await engine.rewriteLinks(page.slug, canonical);
+      // D6: DB FK rewrite for the links table (wiki-link text rewrite is a
+      // documented follow-up — codex #5).
+      await engine.rewriteLinks(page.slug, canonical);
 
-  // Round 19/20: soft-delete + unlink. Order matters — softDelete first
-  // so a concurrent sync that observes the phantom .md gone treats it as
-  // a normal deletion (not a regression).
-  await engine.softDeletePage(page.slug, { sourceId });
-  // Wipe any stale phantom DB facts that may have escaped the migration
-  // (e.g. expired rows that the migration WHERE clause skipped).
-  await engine.deleteFactsForPage(page.slug, sourceId);
-  const phantomPath = path.join(brainDir, `${page.slug}.md`);
-  if (fs.existsSync(phantomPath)) {
-    try {
-      fs.unlinkSync(phantomPath);
-    } catch (err) {
-      // ENOENT is fine (someone else got there first). Anything else
-      // is logged but doesn't unwind the redirect — the next sync will
-      // notice the dangling .md and soft-delete-on-disk-miss it.
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT') {
-        const msg = err instanceof Error ? err.message : String(err);
-        process.stderr.write(
-          `[gbrain] phantom-redirect: unlink ${phantomPath} failed (${msg}); cycle continues\n`,
-        );
+      // Round 19/20: soft-delete + unlink. Order matters — softDelete first
+      // so a concurrent sync that observes the phantom .md gone treats it as
+      // a normal deletion (not a regression).
+      await engine.softDeletePage(page.slug, { sourceId });
+      // Wipe any stale phantom DB facts that may have escaped the migration
+      // (e.g. expired rows that the migration WHERE clause skipped).
+      await engine.deleteFactsForPage(page.slug, sourceId);
+      const phantomPath = path.join(brainDir, `${page.slug}.md`);
+      if (fs.existsSync(phantomPath)) {
+        try {
+          fs.unlinkSync(phantomPath);
+        } catch (err) {
+          // ENOENT is fine (someone else got there first). Anything else
+          // is logged but doesn't unwind the redirect — the next sync will
+          // notice the dangling .md and soft-delete-on-disk-miss it.
+          const code = (err as NodeJS.ErrnoException).code;
+          if (code !== 'ENOENT') {
+            const msg = err instanceof Error ? err.message : String(err);
+            process.stderr.write(
+              `[gbrain] phantom-redirect: unlink ${phantomPath} failed (${msg}); cycle continues\n`,
+            );
+          }
+        }
       }
-    }
-  }
 
-  logPhantomEvent({
-    phantom_slug: page.slug,
-    canonical_slug: canonical,
-    outcome: 'redirected',
-    fact_count: migrated.migrated,
-    source_id: sourceId,
-  });
-  return { outcome: 'redirected', canonical };
+      logPhantomEvent({
+        phantom_slug: page.slug,
+        canonical_slug: canonical,
+        outcome: 'redirected',
+        fact_count: migrated.migrated,
+        source_id: sourceId,
+      });
+      return { outcome: 'redirected', canonical };
+    });
+  } catch (cause) {
+    if (cause instanceof Error && cause.message.startsWith('page_file_')) {
+      throw Object.assign(cause, { code: cause.message });
+    }
+    throw cause;
+  }
 }
 
 /**
@@ -571,6 +586,7 @@ export async function runPhantomRedirectPass(
       try {
         redirectResult = await tryRedirectPhantom(engine, page, sourceId, brainDir, dryRun);
       } catch (err) {
+        if ((err as { code?: string })?.code?.startsWith('page_file_')) throw err;
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[gbrain] phantom-redirect: ${slug} failed (${msg}); skipping\n`);
         logPhantomEvent({

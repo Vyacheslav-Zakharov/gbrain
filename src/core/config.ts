@@ -26,6 +26,8 @@ function getConfigDir() { return configDir(); }
 function getConfigPath() { return configPath(); }
 
 export interface GBrainConfig {
+  /** Trusted file-plane host configuration; production activation remains gated. */
+  page_file_runtime?: import('./page-file-runtime.ts').PageFileRuntimeConfig;
   engine: 'postgres' | 'pglite';
   database_url?: string;
   database_path?: string;
