@@ -119,7 +119,9 @@ describe('portal SPA contract', () => {
     const resolveStart = serveSource.indexOf('app.get("/portal/api/resolve-link"');
     const resolveEnd = serveSource.indexOf('app.get("/portal/download"', resolveStart);
     const resolveRoute = serveSource.slice(resolveStart, resolveEnd);
-    expect(resolveRoute).toContain('engine.resolveSlugWithAlias(normalizedTarget, source.id)');
+    // Keep exact stored paths intact; normalize only the extensionless alias lookup.
+    expect(resolveRoute).toContain('engine.resolveSlugWithAlias(targetLink, source.id)');
+    expect(resolveRoute).toContain('const aliasNorm = normalizeAlias(targetLink)');
     expect(resolveRoute).toContain('engine.resolveAliases([aliasNorm], { sourceId: source.id })');
     expect(resolveRoute).not.toContain('readFileSync(fullPath');
     expect(resolveRoute).toContain('requestedSourceId');

@@ -10,7 +10,7 @@ let root: string;
 beforeEach(() => { root = mkdtempSync(path.join(tmpdir(), 'portal-db-reader-')); });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-function harness(pages: any[], localPath: string | null = root) {
+function harness(pages: any[], localPath: string | null = root, engineOverrides: Record<string, (...args: any[]) => any> = {}) {
   const routes = new Map<string, Function>();
   const source = readFileSync(new URL('../src/commands/serve-http.ts', import.meta.url), 'utf8');
   const region = source.slice(source.indexOf('  // Canonical article locator'), source.indexOf('app.get("/admin/access-requests"'));
@@ -38,6 +38,7 @@ function harness(pages: any[], localPath: string | null = root) {
     // actual route still has to enforce its read-side identity and ACL checks.
     searchKeyword: async (q: string) => pages.filter(p => `${p.slug} ${p.title} ${p.compiled_truth}`.toLowerCase().includes(q.toLowerCase())).map(p => ({ ...p, chunk_text: p.compiled_truth, score: 1 })),
     getLinks: async () => [], getBacklinks: async () => [],
+    ...engineOverrides,
   };
   const bindings = { ...security, ...usability, serializePageToMarkdown,
     resolvePortalPath: security.resolvePortalPathSecure, path, require,
@@ -75,6 +76,33 @@ test('search and explicit links open canonical DB identities without source or e
   expect((await call('/portal/api/resolve-link', { link: 'literal.md' })).body).toMatchObject({ found: true, path: 'literal.md.md' });
   expect((await call('/portal/api/resolve-link', { link: 'denied:virtual/article' })).body.found).toBe(false);
   expect((await call('/portal/api/resolve-link', { link: 'missing.md' })).body.found).toBe(false);
+});
+
+test('extensionless aliases normalize within the granted source but never rewrite exact stored paths', async () => {
+  const calls: any[] = [];
+  const call = harness([page('canonical'), page('foreign-target'), page('stored', { source_path: 'legacy/Original.markdown' })], null, {
+    resolveSlugWithAlias: async (target: string, sourceId: string) => {
+      calls.push(['slug', target, sourceId]);
+      return target;
+    },
+    resolveAliases: async (targets: string[], options: any) => {
+      calls.push(['aliases', targets, options]);
+      return new Map([[targets[0], targets[0] === 'legacy name'
+        ? [{ source_id: 'allowed', slug: 'canonical' }]
+        : [{ source_id: 'denied', slug: 'foreign-target' }]]]);
+    },
+  });
+  expect((await call('/portal/api/resolve-link', { link: 'allowed:Legacy Name' })).body).toMatchObject({ found: true, source: 'allowed', path: 'canonical.md' });
+  expect(calls).toEqual([
+    ['slug', 'Legacy Name', 'allowed'],
+    ['aliases', ['legacy name'], { sourceId: 'allowed' }],
+  ]);
+  expect((await call('/portal/api/resolve-link', { link: 'allowed:Foreign Name' })).body.found).toBe(false);
+  calls.length = 0;
+  expect((await call('/portal/api/resolve-link', { link: 'denied:Legacy Name' })).body.found).toBe(false);
+  expect((await call('/portal/api/resolve-link', { link: 'allowed:legacy/Original.markdown' })).body.path).toBe('stored.md');
+  expect((await call('/portal/api/resolve-link', { link: 'allowed:legacy/original.markdown' })).body.found).toBe(false);
+  expect(calls).toEqual([]);
 });
 
 test('11 DB articles, 3 mirrors and README remain distinct; tombstones cannot fall back through any route', async () => {

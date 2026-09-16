@@ -2337,7 +2337,6 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
     const article = await portalArticle(source.id, String(req.query.path || ''));
     if (article === 'blocked') return res.status(404).json({ error: 'Not found' });
     if (article?.deleted_at) return res.status(404).json({ error: 'Not found' });
-    let slug = article?.slug;
     if (!article) {
       if (await portalMirror(source.id, String(req.query.path || ''))) return res.status(404).json({ error: 'Not found' });
       const target = resolvePortalPath(source.local_path, req.query.path);
@@ -2345,6 +2344,7 @@ app.get("/portal/api/sources", async (req: any, res: any) => {
       // Filesystem support documents are not article identities.
       return res.json({ source: source.id, slug: null, backlinks: [], meetings: [] });
     }
+    const slug = article.slug;
     let backlinks: Array<{ source: string; slug: string; title: string; type: string; context: string }> = [];
     let meetings: Array<{ source: string; slug: string; title: string; type: string; context: string }> = [];
     try {
