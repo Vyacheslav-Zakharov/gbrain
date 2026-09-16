@@ -34,6 +34,8 @@ export interface PageFileAuthorityTarget {
  */
 export interface PageFileAuthorityOptions {
   mode: 'offline-verification' | 'production';
+  revalidate?(): Promise<void>;
+  sqlAuthority?: import('./page-file-sql-authority.ts').PageFileSqlAuthorityExpectation;
   credentialReference: string;
   resolveCredential(reference: string): Promise<string>;
   expected: { role: string; database: string; ordinaryRole: string };
@@ -44,6 +46,8 @@ const unavailable = () => new AuthorityError('page_file_authority_unavailable');
 async function openAuthority(options: PageFileAuthorityOptions) {
   if (options.mode !== 'offline-verification') throw new Error('file_runtime_prerequisites_pending');
   const expected = Object.freeze({ ...options.expected });
+  const sqlAuthority = options.sqlAuthority && structuredClone(options.sqlAuthority);
+  const revalidate = options.revalidate;
   if (!expected.role || !expected.database || !expected.ordinaryRole || expected.role === expected.ordinaryRole) throw identityFailure();
   let pool: ReturnType<typeof postgres>;
   try {
@@ -56,6 +60,16 @@ async function openAuthority(options: PageFileAuthorityOptions) {
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => closing ??= pool.end({ timeout: 5 });
   const verify = async (session: postgres.ReservedSql) => {
+    await revalidate?.();
+    if (sqlAuthority) {
+      const { verifyPageFileSqlAuthority } = await import('./page-file-sql-authority.ts');
+      await session.unsafe('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      try {
+        if (!(await verifyPageFileSqlAuthority(async (sql, params) => Array.from(await session.unsafe(sql, params)), sqlAuthority)).ok) throw identityFailure();
+        await session.unsafe('COMMIT');
+      } catch (error) { await session.unsafe('ROLLBACK'); throw error; }
+      await revalidate?.();
+    }
     const rows = await session.unsafe(`SELECT session_user, current_user,
       current_database() AS database_name, rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
       FROM pg_catalog.pg_roles WHERE rolname = current_user`);
@@ -67,7 +81,7 @@ async function openAuthority(options: PageFileAuthorityOptions) {
     const session = await pool.reserve();
     try { await verify(session); } finally { session.release(); }
   } catch (error) {
-    try { await close(); } catch { /* Do not expose connection strings in driver errors. */ }
+    try { await close(); } catch { throw new AuthorityError('page_file_authority_shutdown_failed'); }
     throw error instanceof AuthorityError ? error : unavailable();
   }
   // Each operation owns one reserved physical session. A reconnect/new borrow
@@ -158,7 +172,7 @@ export async function createPageFileEnrollmentAuthority(options: PageFileAuthori
 /** Trusted host bootstrap handle: pass only the bound services to request code. */
 export async function createPageFileAuthority(options: PageFileAuthorityOptions) {
   const { close, run, engine } = await openAuthority(options);
-  return Object.freeze({ close, forPage(target: PageFileAuthorityTarget) {
+  return Object.freeze({ close, revalidate: () => run(async () => {}), forPage(target: PageFileAuthorityTarget) {
     const { source, slug, validate } = target;
     const host = Object.freeze({ ...target.host });
     const pages = new PageFileDatabase(engine, host);

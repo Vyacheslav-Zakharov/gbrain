@@ -276,7 +276,7 @@ suite('registered runtime authority — disposable real PostgreSQL, production d
   test('registered get/put use independent private adapter pool; ordinary cannot mint capability; close tombstones shared contexts', async () => {
     const lifecycle = await install();
     try {
-    expect(Object.keys(lifecycle)).toEqual(['close']);
+    expect(Object.keys(lifecycle).sort()).toEqual(['close', 'revalidate']);
     const sessions = await adapterSessions(); expect(sessions).toHaveLength(1);
     const [ordinaryPid] = await ordinary.executeRaw<{ pid: number }>('SELECT pg_backend_pid() AS pid');
     expect(sessions[0].pid).not.toBe(ordinaryPid.pid);

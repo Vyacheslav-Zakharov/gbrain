@@ -9,6 +9,7 @@ let ended = 0;
 let released = 0;
 let statements: string[] = [];
 let failConnect = false;
+let failEnd = false;
 let nextSession = 0;
 let events: { session: number; query: string }[] = [];
 let queryFailure: (query: string) => void = () => {};
@@ -28,7 +29,7 @@ function reserved() {
 // ReservedSql deliberately has no begin/reserve/end: those belong to the pool.
 const pool = Object.assign(() => { throw new Error('ordinary pool query forbidden'); }, {
   reserve: async () => { if (failConnect) throw new Error('transport contains secret'); return reserved(); },
-  end: async () => { ended++; },
+  end: async () => { ended++; if (failEnd) throw new Error('transport close secret'); },
 });
 mock.module('postgres', () => ({ default: Object.assign((url: string, options: Record<string, any>) => {
   calls.push({ url, options }); return pool;
@@ -41,7 +42,7 @@ const options = () => ({
   expected: { role: 'file_adapter', database: 'fixture', ordinaryRole: 'ordinary' },
 });
 beforeEach(() => {
-  calls.length = 0; statements = []; ended = 0; released = 0; failConnect = false;
+  calls.length = 0; statements = []; ended = 0; released = 0; failConnect = false; failEnd = false;
   nextSession = 0; events = []; queryFailure = () => {}; commitRolledBack = false;
   identity = { session_user: 'file_adapter', current_user: 'file_adapter', database_name: 'fixture', rolsuper: false, rolcreatedb: false, rolcreaterole: false, rolbypassrls: false };
 });
@@ -65,6 +66,13 @@ async function probeTransactions(fn: (tx: BrainEngine, parent: BrainEngine) => P
 }
 
 describe('private page-file authority', () => {
+  test('startup validation cleanup failure is explicit and redacted', async () => {
+    identity.rolsuper = true; failEnd = true;
+    await expect((await load()).createPageFileAuthority(options()))
+      .rejects.toThrow('page_file_authority_shutdown_failed');
+    expect(ended).toBe(1);
+    expect(released).toBe(1);
+  });
   test('rejects nested transactions before SQL without committing the outer transaction early', async () => {
     await probeTransactions(async (tx, parent) => {
       for (const engine of [tx, parent]) {
@@ -148,7 +156,7 @@ describe('private page-file authority', () => {
     expect(calls[0].options.prepare).toBe(false);
     expect(statements.some(q => q.includes('session_user') && q.includes('current_user'))).toBe(true);
     expect(released).toBe(1);
-    expect(Object.keys(authority).sort()).toEqual(['close', 'forPage', 'forRoot']);
+    expect(Object.keys(authority).sort()).toEqual(['close', 'forPage', 'forRoot', 'revalidate']);
     await authority.close();
     await authority.close();
     expect(ended).toBe(1);

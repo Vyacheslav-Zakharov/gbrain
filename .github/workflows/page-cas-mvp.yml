@@ -103,6 +103,11 @@ jobs:
             test/sources-pull-arguments.serial.test.ts \
             test/page-file-direct-writers.test.ts test/page-file-cycle-gates.test.ts \
             test/page-file-authority.serial.test.ts test/page-file-host.test.ts \
+            test/page-file-bootstrap.serial.test.ts test/page-file-sql-authority.test.ts \
+            test/page-file-connected-lifecycle.serial.test.ts test/page-file-lifecycle-races.serial.test.ts \
+            test/page-file-connected-candidate.serial.test.ts \
+            test/postgres-engine-singleton-ownership.test.ts test/postgres-engine.test.ts \
+            test/postgres-engine-getter-selfheal.test.ts test/postgres-disconnect-bounded.test.ts \
             test/page-file-runtime-authority.serial.test.ts test/page-file-runtime-enrollment.serial.test.ts \
             test/import-file-runtime-authority.serial.test.ts \
             test/page-file-runtime-receipt.test.ts test/brain-durability-pull-template.test.ts \
@@ -158,6 +163,28 @@ jobs:
           set -e
           printf '%s\n' "$rc" > cas-evidence/postgres-runtime-authority-exit.txt
           exit "$rc"
+      - name: Prepare disposable protected bootstrap directory (hosted runner only)
+        if: ${{ !cancelled() }}
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test ! -e /etc/gbrain
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /etc/gbrain
+      - name: Real PostgreSQL SQL authority and actual connected protected bootstrap
+        if: ${{ !cancelled() }}
+        env:
+          DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
+          REQUIRE_PAGE_FILE_SQL_AUTHORITY_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_CONNECTED_POSTGRES: '1'
+          PAGE_FILE_CAS_DISPOSABLE: '1'
+          PAGE_FILE_SQL_EVIDENCE_DIR: cas-evidence
+        run: |
+          set -o pipefail
+          set +e
+          env -u GBRAIN_DIRECT_DATABASE_URL timeout --signal=TERM --kill-after=10s 420s bun test --timeout 120000 test/e2e/page-file-sql-authority.test.ts 2>&1 | tee cas-evidence/postgres-sql-authority.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$rc" > cas-evidence/postgres-sql-authority-exit.txt
+          exit "$rc"
       - name: Verify tracked source and complete explicit file inventory
         if: always()
         run: |
@@ -166,13 +193,33 @@ jobs:
           python3 - <<'PY'
           import pathlib
           expected = {str(p) for p in pathlib.Path('test').glob('page-file-*.test.ts')}
+          expected.update({
+              'test/postgres-engine-singleton-ownership.test.ts',
+              'test/postgres-engine.test.ts',
+              'test/postgres-engine-getter-selfheal.test.ts',
+              'test/postgres-disconnect-bounded.test.ts',
+          })
           rows = [r.split() for r in pathlib.Path('cas-evidence/offline-exits.txt').read_text().splitlines()]
           observed = [r[0] for r in rows]
           assert len(observed) == len(set(observed)), 'duplicate suite'
           assert expected <= set(observed), ('missing file suites', expected - set(observed))
           assert all(r[1] == '0' for r in rows), 'offline suite failures'
-          for name in ('postgres-db', 'postgres-file', 'postgres-runtime-authority'):
+          for name in ('postgres-db', 'postgres-file', 'postgres-runtime-authority', 'postgres-sql-authority'):
               assert pathlib.Path(f'cas-evidence/{name}-exit.txt').read_text().strip() == '0', name
+          sql_log = pathlib.Path('cas-evidence/postgres-sql-authority.log').read_text()
+          for marker in ('all three actual logins accepted; every SQL probe executed', 'wrong login rejected and baseline preserved', 'membership drift rejected and restored', 'table column grant-option drift rejected and restored', 'disabled and enabled trigger drift rejected and restored'):
+              assert f'PG_SQL_AUTHORITY: {marker}' in sql_log, marker
+          for marker in ('actual ordinary and adapter admission; initSchema no migration or enrollment', 'operator-only enrollment; disconnect tombstone and same-engine reconnect', 'per-borrow ordinary and adapter drift denied; no catalog self-repair', 'protected fixed anchor drift denied without mutation'):
+              assert f'PG_CONNECTED_BOOTSTRAP: {marker}' in sql_log, marker
+          assert not pathlib.Path('/etc/gbrain/page-file-bootstrap-anchor.json').exists(), 'fixture anchor leaked'
+          assert not list(pathlib.Path('/etc/gbrain').glob('connected-fixture-*')), 'protected fixture or credential leaked'
+          import json, hashlib
+          fixtures = list(pathlib.Path('cas-evidence').glob('fixture-catalog-*.json'))
+          assert len(fixtures) == 1, 'missing/ambiguous external fixture catalog'
+          fixture = json.loads(fixtures[0].read_text())
+          assert fixture['scope'] == 'disposable-fixture-only-not-production-approved'
+          assert len(fixture['catalogPins']) == 12
+          assert fixture['catalogPins'] == {k: hashlib.sha256(v.encode()).hexdigest() for k, v in fixture['definitions'].items()}
           runtime_log = pathlib.Path('cas-evidence/postgres-runtime-authority.log').read_text()
           assert 'PG_RUNTIME_AUTHORITY: registered get/put' in runtime_log
           assert 'PG_RUNTIME_AUTHORITY: explicit candidate enrollment, enrollment-only login' in runtime_log
@@ -185,7 +232,7 @@ jobs:
         run: |
           mkdir -p cas-evidence
           printf '%s\n' "$JOB_STATUS" > cas-evidence/job-status.txt
-          printf '%s\n' 'Hosted adapter and registered offline-factory runtime proof only; production runtime remains disabled.' > cas-evidence/scope.txt
+          printf '%s\n' 'Hosted disposable SQL-authority and actual connected protected bootstrap acceptance; offline-verification anchor only, production runtime remains disabled.' > cas-evidence/scope.txt
           python3 - <<'PY'
           import hashlib, pathlib
           root = pathlib.Path('cas-evidence')

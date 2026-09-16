@@ -137,6 +137,7 @@ export class PostgresEngine implements BrainEngine {
 
   // Instance connection (for workers) or fall back to module global (backward compat)
   get sql(): ReturnType<typeof postgres> {
+    if (this._lifecycleFailure) throw this._lifecycleFailure;
     if (this._sql) return this._sql;
     // issue #1678: an instance-pool engine whose _sql went null (a mid-process
     // disconnect/reconnect, or a reaped socket) must NOT fall through to the
@@ -157,8 +158,44 @@ export class PostgresEngine implements BrainEngine {
     return db.getConnection();
   }
 
-  // Lifecycle
-  async connect(config: EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }): Promise<void> {
+  // Protected startup is independent of EngineConfig, requests and jobs.
+  private _pageFileLifecycle?: { close(): Promise<void>; revalidate(): Promise<void> };
+  private _pageFileStartup?: ReturnType<typeof import('./page-file-bootstrap.ts').loadPageFileStartupBootstrap>;
+  // Serialize lifecycle transitions, including shutdown requested during startup.
+  private _lifecycleTail: Promise<void> = Promise.resolve();
+  private _lifecycleConnected = false;
+  private _lifecycleFailure: unknown;
+  private queueLifecycle(action: () => Promise<void>): Promise<void> {
+    const result = this._lifecycleTail.then(action);
+    this._lifecycleTail = result.catch(() => {});
+    return result;
+  }
+
+  connect(config: EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }): Promise<void> {
+    return this.queueLifecycle(() => this.connectTransition(config));
+  }
+
+  private async connectTransition(config: EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }): Promise<void> {
+      if (this._lifecycleFailure) throw this._lifecycleFailure;
+      if (this._lifecycleConnected) return;
+      try {
+        await this.connectLifecycle(config);
+        this._lifecycleConnected = true;
+      } catch (error) {
+        // A failed protected admission cannot be retried as an ordinary engine.
+        if (this._pageFileStartup?.status !== 'disabled') this._lifecycleFailure = error;
+        try { await this.disconnectLifecycle(); }
+        catch (cleanupError) {
+          this._lifecycleFailure = cleanupError;
+          throw cleanupError;
+        }
+        throw error;
+      }
+  }
+
+  private async connectLifecycle(config: EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }): Promise<void> {
+    const { loadPageFileStartupBootstrap } = await import('./page-file-bootstrap.ts');
+    this._pageFileStartup ??= loadPageFileStartupBootstrap();
     this._savedConfig = config;
     const url = config.database_url;
     if (config.poolSize) {
@@ -228,9 +265,30 @@ export class PostgresEngine implements BrainEngine {
         this.connectionManager.setReadPool(db.getConnection());
       }
     }
+    this._pageFileLifecycle = await this._pageFileStartup.start(this);
   }
 
-  async disconnect(): Promise<void> {
+  disconnect(): Promise<void> {
+    return this.queueLifecycle(() => this.disconnectTransition());
+  }
+
+  private async disconnectTransition(): Promise<void> {
+    if (this._lifecycleFailure && this._pageFileLifecycle) throw this._lifecycleFailure;
+    try {
+      await this.disconnectLifecycle();
+      this._lifecycleConnected = false;
+    } catch (error) {
+      if (this._pageFileStartup?.status === 'offline-verification') this._lifecycleFailure = error;
+      throw error;
+    }
+  }
+
+  private async disconnectLifecycle(): Promise<void> {
+    // Never continue teardown/reconnect after a rejected protected shutdown.
+    if (this._pageFileLifecycle) {
+      await this._pageFileLifecycle.close();
+      this._pageFileLifecycle = undefined;
+    }
     // v0.41.25.0 (#1570) — instrument disconnect calls to identify the
     // mid-process caller behind the singleton-null bug. The audit log
     // captures connection_style so we can tell instance-pool teardowns
@@ -272,6 +330,13 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async initSchema(): Promise<void> {
+    // Protected catalog has already been admitted against reviewed pins.
+    // Migrations/self-healing belong to a separate reviewed release identity.
+    if (this._pageFileStartup?.status === 'offline-verification') {
+      if (!this._pageFileLifecycle) throw new Error('page_file_bootstrap_start_failed');
+      await this._pageFileLifecycle.revalidate();
+      return;
+    }
     // v0.30.1 (X1): route DDL through the direct pool when ConnectionManager
     // is in dual-pool mode. The pooler's 2-min statement_timeout truncates
     // SCHEMA_SQL replays + migrations on Supabase; the direct pool gets
@@ -5262,8 +5327,19 @@ export class PostgresEngine implements BrainEngine {
    *   e.g. the supervisor's health-check reconnect) is `reconnect_other`. All
    *   audit calls are best-effort and never block the reconnect (CODEX #8).
    */
-  async reconnect(ctx?: { error?: unknown }): Promise<void> {
+  private _reconnectPending?: Promise<void>;
+  reconnect(ctx?: { error?: unknown }): Promise<void> {
+    if (this._reconnectPending) return this._reconnectPending;
+    const pending = this.queueLifecycle(() => this.reconnectLifecycle(ctx));
+    this._reconnectPending = pending;
+    void pending.then(() => { this._reconnectPending = undefined; }, () => { this._reconnectPending = undefined; });
+    return pending;
+  }
+
+  private async reconnectLifecycle(ctx?: { error?: unknown }): Promise<void> {
+    if (this._lifecycleFailure) throw this._lifecycleFailure;
     if (!this._savedConfig || this._reconnecting) return;
+    if (!this._lifecycleConnected) return this.connectTransition(this._savedConfig);
     if (this._connectionStyle !== 'instance') {
       // Module-singleton: never tear down the shared pool. db.connect() is
       // idempotent (no-op when the singleton is alive — the common #1745 path).
@@ -5277,6 +5353,7 @@ export class PostgresEngine implements BrainEngine {
       // ConnectionManager set at connect-time still points at the ended old
       // pool. Refresh it. Idempotent no-op when the singleton was already alive.
       this.connectionManager?.setReadPool(db.getConnection());
+      await this._pageFileLifecycle?.revalidate();
       return;
     }
     this._reconnecting = true;
@@ -5295,8 +5372,9 @@ export class PostgresEngine implements BrainEngine {
 
     try {
       // Instance pool: tear down old pool (best-effort — it may already be dead).
-      try { await this.disconnect(); } catch { /* swallow */ }
-      await this.connect(this._savedConfig);
+      if (this._pageFileStartup?.status !== 'disabled' && this._pageFileStartup) await this.disconnectTransition();
+      else try { await this.disconnectTransition(); } catch { /* legacy best effort */ }
+      await this.connectTransition(this._savedConfig);
       try {
         const { logPoolRecovery } = await import('./audit/pool-recovery-audit.ts');
         logPoolRecovery('reconnect_succeeded');

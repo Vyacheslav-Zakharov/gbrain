@@ -17,6 +17,8 @@ type Candidate = {
   ready: Promise<{ host: ReturnType<typeof validatePageFileHostManifest>; authority: Awaited<ReturnType<typeof createPageFileAuthority>> }>;
   ordinaryRole: string;
   closed: boolean;
+  restartable?: boolean;
+  revalidate(): Promise<void>;
 };
 // Trusted bootstrap association, never a config/operation field. Tombstones stay
 // associated after close/failure so requests cannot fall through to ordinary SQL.
@@ -29,6 +31,7 @@ export async function hasPageFileRuntimeCandidate(engine: BrainEngine): Promise<
   if (!candidate) return false;
   if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
   const { host } = await candidate.ready;
+    await candidate.revalidate();
   if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
   host.revalidate();
   return true;
@@ -44,27 +47,51 @@ export async function createPageFileRuntimeCandidate(options: {
 }) {
   if (options.mode !== 'offline-verification' || options.authority.mode !== 'offline-verification')
     throw new PageFileSyncConflict('file_runtime_prerequisites_pending');
-  if (candidates.has(options.engine)) throw new PageFileSyncConflict('page_file_runtime_already_registered');
-  const candidate: Candidate = { ordinaryRole: options.authority.expected.ordinaryRole, closed: false, ready: Promise.resolve().then(async () => {
+  const previous = candidates.get(options.engine);
+  if (previous && !previous.restartable) throw new PageFileSyncConflict('page_file_runtime_already_registered');
+  const fileRevalidate = options.authority.revalidate;
+  const authorityOptions = { ...options.authority, expected: { ...options.authority.expected }, sqlAuthority: options.authority.sqlAuthority && structuredClone(options.authority.sqlAuthority) };
+  const validateOrdinary = async () => {
+    await fileRevalidate?.();
+    if (authorityOptions.sqlAuthority) {
+      const { verifyPageFileSqlAuthority } = await import('./page-file-sql-authority.ts');
+      const expected = { ...authorityOptions.sqlAuthority, role: authorityOptions.expected.ordinaryRole };
+      await options.engine.transaction(async tx => {
+        await tx.executeRaw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+        if (!(await verifyPageFileSqlAuthority((sql, params) => tx.executeRaw(sql, params), expected)).ok)
+          throw new PageFileSyncConflict('page_file_sql_authority_invalid');
+      });
+    }
+    await fileRevalidate?.();
+  };
+  authorityOptions.revalidate = validateOrdinary;
+  const candidate: Candidate = { revalidate: validateOrdinary, ordinaryRole: options.authority.expected.ordinaryRole, closed: false, ready: Promise.resolve().then(async () => {
     const host = validatePageFileHostManifest(options.host);
     if (options.engine.kind !== 'postgres' || host.manifest.database !== options.authority.expected.database
       || host.manifest.adapterRole !== options.authority.expected.role)
       throw new PageFileSyncConflict('page_file_runtime_identity_mismatch');
-    const authority = await createPageFileAuthority(options.authority);
+    await validateOrdinary();
+    const authority = await createPageFileAuthority(authorityOptions);
     return { host, authority };
   }) };
   candidates.set(options.engine, candidate);
   try { await candidate.ready; } catch (error) { candidate.closed = true; throw error; }
   let closing: Promise<void> | undefined;
-  return Object.freeze({ close(): Promise<void> {
+  return Object.freeze({ async revalidate() {
+    if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
+    await validateOrdinary();
+    const { authority } = await candidate.ready;
+    await authority.revalidate();
+  }, close(): Promise<void> {
     candidate.closed = true;
-    return closing ??= candidate.ready.then(({ authority }) => authority.close());
+    return closing ??= candidate.ready.then(async ({ authority }) => { await authority.close(); candidate.restartable = true; });
   } });
 }
 
 async function resolveCandidate(candidate: Candidate, engine: BrainEngine, source: string, slug: string) {
   if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
   const { host, authority } = await candidate.ready;
+  await candidate.revalidate();
   if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
   host.revalidate();
   const [binding] = await engine.executeRaw<{ canonical_root: string; relative_path: string; binding_id: string }>(
@@ -134,6 +161,7 @@ export async function withRuntimeLegacyPageWrite<T>(ctx: Pick<OperationContext, 
   if (candidate) {
     if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
     const { host } = await candidate.ready;
+    await candidate.revalidate();
     const validate = () => {
       if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
       host.revalidate();
@@ -189,6 +217,7 @@ export async function resolvePageFileRootHost(ctx: { engine: Partial<Pick<BrainE
   if (candidate) {
     if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
     const { host, authority } = await candidate.ready;
+  await candidate.revalidate();
     const validate = () => {
       if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
       host.revalidate();
@@ -255,6 +284,7 @@ export async function enrollPageFileRuntime(ctx: Pick<OperationContext, 'engine'
     const options = { ...request.authority, expected: { ...request.authority.expected } };
     if (candidate.closed) throw new PageFileSyncConflict('page_file_runtime_closed');
     const { host } = await candidate.ready;
+    await candidate.revalidate();
     const root = host.manifest.roots.find(r => r.sourceId === source);
     if (!root || !reviewed || reviewed.source !== source || reviewed.slug !== slug
       || reviewed.hostManifestSha256 !== host.manifestSha256 || reviewed.canonicalRoot !== root.directory.path)
