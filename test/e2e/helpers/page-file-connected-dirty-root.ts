@@ -120,12 +120,26 @@ export async function exerciseConnectedDirtyRoot(f: {
     expect(tree(f.root)).toEqual(frozen.root); // includes index, refs, reflogs, FETCH_HEAD
     expect(tree(f.journal)).toEqual(intent);
   };
-  expect((await get()).error.message).toContain('page_file_root_sync_required');
-  expect((await invoke({ operation: 'put_page_checked', request })).error.message).toContain('page_file_root_sync_required');
-  expect((await invoke({ action: 'pull' })).error.message).toContain('page_file_root_sync_required');
-  expect((await invoke({ action: 'reconcile', approved: false })).error.message).toContain('root_recovery_approval_required');
-  await unchanged();
-  expect(readFileSync(marker, 'utf8')).toBe(frozen.dirty);
+  const refusedUnchanged = async () => {
+    await unchanged();
+    expect(readFileSync(marker, 'utf8')).toBe(frozen.dirty);
+    expect(existsSync(marker + '.observed')).toBe(false);
+  };
+  // Direct guarded read proves the dirty marker is enforced. A generic stale
+  // write refusal alone would not prove this boundary.
+  expect((await get()).error).toMatchObject({
+    message: 'page_file_root_sync_required', code: 'page_file_root_sync_required',
+  });
+  await refusedUnchanged();
+  // Root invalidation incremented generation above. PageFileDatabase.put's
+  // initial inspect/check rejects that stale intent BEFORE its locked root
+  // guard; this is not a sanitized/nested dirty-root error.
+  expect((await invoke({ operation: 'put_page_checked', request })).error.message).toBe('precondition_failed');
+  await refusedUnchanged();
+  expect((await invoke({ action: 'pull' })).error.message).toBe('page_file_root_sync_required');
+  await refusedUnchanged();
+  expect((await invoke({ action: 'reconcile', approved: false })).error.message).toBe('root_recovery_approval_required');
+  await refusedUnchanged();
   expect((await invoke({ action: 'reconcile', approved: true })).result).toEqual({ ok: true });
   expect(existsSync(marker)).toBe(false);
   const observed = JSON.parse(readFileSync(marker + '.observed', 'utf8'));

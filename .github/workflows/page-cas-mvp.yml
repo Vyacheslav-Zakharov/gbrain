@@ -96,6 +96,7 @@ jobs:
           for file in \
             test/page-file-runtime.test.ts test/page-file-runtime-recovery.test.ts test/page-file-enrollment.test.ts \
             test/page-file-runtime-coordination.test.ts test/page-file-root-runtime.serial.test.ts \
+            test/page-file-dirty-root-refusal.serial.test.ts \
             test/page-file-frozen-sync.serial.test.ts test/page-file-cyclic-sync.serial.test.ts \
             test/page-file-sync.test.ts test/page-file-sync-failure.test.ts \
             test/page-file-import.test.ts test/page-file-import-failure.test.ts \
