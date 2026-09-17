@@ -116,6 +116,9 @@ export async function runtimeHosted(db:ReturnType<typeof postgres>,engine:Postgr
  if(scenario==='healthy'){
  if(scheduled){
   await db.unsafe(`GRANT SELECT ON config,markdown_projection_source_status TO ${role};
+   -- config is brain-global (no source_id); RLS remains enabled. Only the
+   -- migration version is needed by the real queue admission guard.
+   CREATE POLICY mp_runtime_config_version ON public.config FOR SELECT TO ${role} USING(key='version');
    GRANT INSERT(source_id,scheduler_seen_at,worker_seen_at,last_error),UPDATE(scheduler_seen_at,worker_seen_at,last_error) ON markdown_projection_source_status TO ${role};
    GRANT SELECT,INSERT,UPDATE,DELETE ON minion_jobs,minion_inbox TO ${role};
    GRANT USAGE,SELECT ON SEQUENCE minion_jobs_id_seq,minion_inbox_id_seq TO ${role};`);

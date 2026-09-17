@@ -32,3 +32,29 @@ test('dual inventory rejects identity collisions and missing independent held/pr
  }
  for(const key of ['database','sourceId','fixtureRoot','root']){const bad=structuredClone(rows),ledgers=bad.filter(r=>r.stage==='runtime.launch-inventory');ledgers[1][key]=ledgers[0][key];expect(()=>verifyRuntimeMarkers(bad)).toThrow();}
 });
+
+import {readFileSync} from 'node:fs';
+import {PostgresEngine} from '../src/core/postgres-engine';
+import {MinionQueue} from '../src/core/minions/queue';
+import {LATEST_VERSION} from '../src/core/migrate';
+test('scheduled fixture exposes only stored version through real getConfig and queue guard (offline SQL model)',async()=>{
+ const fixture=readFileSync(new URL('./markdown-projection-runtime-hosted.ts',import.meta.url),'utf8');
+ const policy=/CREATE POLICY mp_runtime_config_version ON public\.config FOR SELECT TO \$\{role\} USING\(key='version'\)/.test(fixture);
+ // Model RLS default-deny, not a database execution claim. Real engine method and
+ // queue guard execute unchanged; no getConfig/ensureSchema overrides.
+ const stored=new Map([['version',String(LATEST_VERSION)],['private-fixture-setting','hidden']]);
+ let admitted=false;
+ const engine=new PostgresEngine();
+ Object.defineProperty(engine,'sql',{get:()=>async(strings:TemplateStringsArray,key:string)=>{
+  expect(strings.join('?')).toBe('SELECT value FROM config WHERE key = ?');
+  return admitted&&key==='version'?[{value:stored.get(key)}]:[];
+ }});
+ expect(await engine.getConfig('version')).toBeNull();
+ await expect(new MinionQueue(engine).ensureSchema()).rejects.toThrow('schema version 1, need 7');
+ admitted=policy;
+ expect(await engine.getConfig('version')).toBe(stored.get('version')!);
+ expect(await engine.getConfig('private-fixture-setting')).toBeNull();
+ await new MinionQueue(engine).ensureSchema();
+ stored.set('version','1');
+ await expect(new MinionQueue(engine).ensureSchema()).rejects.toThrow('schema version 1, need 7');
+});

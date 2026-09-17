@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import {dirname} from 'node:path';
 import {PostgresEngine} from '../src/core/postgres-engine';
+import {LATEST_VERSION} from '../src/core/migrate';
 import {MinionQueue} from '../src/core/minions/queue';
 import {makeProjectionProducer} from '../src/core/minions/markdown-projection-scheduler';
 import {markdownProjectionJobStatus} from '../src/core/minions/handlers/markdown-projection';
@@ -16,6 +17,11 @@ export async function scheduledHosted(database:string,role:string,password:strin
   emit({stage:`scheduled.status.${stage}`,value:await markdownProjectionJobStatus(engine,source)});
  };
  try{
+  const version=await engine.getConfig('version');
+  assert.equal(version,String(LATEST_VERSION),'runtime must see the stored migrated schema version');
+  const visible=await engine.executeRaw(`SELECT key,value FROM public.config ORDER BY key`);
+  assert.deepEqual(visible,[{key:'version',value:version}],'runtime config visibility is version-only');
+  emit({stage:'scheduled.schema-version',status:'passed',version,latestVersion:LATEST_VERSION,visible});
   // Real registered worker with attached invalid producer: no projection enqueue,
   // durable exact error, and an unrelated ordinary job still completes.
   const refusedOrdinary=await new MinionQueue(engine).add('scheduled-fixture-ordinary',{});
