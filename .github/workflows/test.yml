@@ -1,282 +1,308 @@
-name: Test
-
-# Manual-only in this private fork: the full 17-job suite bills ~70 GitHub
-# Actions minutes per run, so push/PR triggers are removed. Run the suite
-# locally via `bun run ci:local`, or trigger it here on demand from the
-# Actions tab (Run workflow) / `gh workflow run test.yml`.
+# TEMPORARY: install ONLY as .github/workflows/test.yml on a diagnostics branch.
+# Never merge this workflow into product. Bind SOURCE_SHA after exact-byte review.
+# workflow_dispatch uses the already registered test.yml; new filenames may 404.
+name: Markdown projection isolated recovery diagnostic
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
-# Cancel a superseded run when a newer commit lands on the same PR/branch.
-# Keyed on the PR number for pull_request events (unique per PR, so two PRs
-# from forks sharing a branch name don't cancel each other) and falls back to
-# github.ref for push/scheduled runs. Mirrors heavy-tests.yml; frees runners
-# and stops a stale-SHA run from reporting a flaky failure on an obsolete commit.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+  group: markdown-projection-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  # ──────────────────────────────────────────────────────────────────────
-  # cache-check: runs first, computes the content hash of every tracked
-  # file EXCEPT the deny-list (CHANGELOG.md, README.md, docs/**/*.md, etc.
-  # — see scripts/ci-cache-hash.sh for the full list). Looks up
-  # `ci-pass-<hash>` in actions/cache; if hit, the test matrix + verify
-  # + serial jobs all skip and test-status reports green immediately.
-  # If miss, the full suite runs and cache-write seals it on success.
-  #
-  # Hit rate covers re-pushes (same SHA twice), branch rebases that
-  # don't touch tracked code, and any branch update that touches only
-  # the deny-listed doc files.
-  # ──────────────────────────────────────────────────────────────────────
-  cache-check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      hit: ${{ steps.lookup.outputs.cache-hit }}
-      hash: ${{ steps.compute.outputs.hash }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - name: Compute content hash
-        id: compute
-        run: |
-          # --verbose writes the "X/Y files in hash" diagnostic to stderr;
-          # stdout carries the 16-char hash. Capture both.
-          HASH=$(bash scripts/ci-cache-hash.sh --verbose 2>/tmp/cache-diag)
-          cat /tmp/cache-diag
-          echo "Computed cache hash: $HASH"
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
-      - name: Lookup actions/cache for ci-pass-<hash>
-        id: lookup
-        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          key: ci-pass-${{ steps.compute.outputs.hash }}
-          path: .ci-cache-marker
-          # `lookup-only: true` means we only probe whether the cache
-          # entry exists — we don't download it (the marker contents
-          # don't matter, only the key match does). `cache-hit` returns
-          # true only on EXACT key match (per actions/cache docs); a
-          # restore-keys prefix fallback would set cache-hit=false, so
-          # it's deliberately omitted here. Cross-branch scoping works
-          # naturally: PR branches can read default-branch (master)
-          # cache entries via exact key match when the content hash
-          # matches, which happens whenever the tree is doc-only
-          # different from a green master run.
-          lookup-only: true
-      - name: Cache status
-        run: |
-          if [ "${{ steps.lookup.outputs.cache-hit }}" = "true" ]; then
-            echo "✓ cache HIT for hash ${{ steps.compute.outputs.hash }} — test jobs will skip"
-          else
-            echo "✗ cache MISS for hash ${{ steps.compute.outputs.hash }} — full suite will run"
-          fi
-
-  gitleaks:
-    needs: cache-check
-    if: needs.cache-check.outputs.hit != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc  # v2
+  diagnostic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ github.workspace }}
+    env:
+      SOURCE_SHA: 4c721cd88f1ff9947b77c050d9c81c2b6383f182
+      EVIDENCE: ${{ github.workspace }}/markdown-projection-evidence
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  verify:
-    # Pre-test gates: privacy/jsonb/source-id/etc + typecheck + admin-build.
-    # Lives in its own runner so the matrix shards aren't carrying ~2-3min
-    # of verify work in addition to their test files (the old shape stuffed
-    # this into `test (1)` via `if: matrix.shard == 1`, which made shard 1
-    # the slowest matrix worker). scripts/run-verify-parallel.sh fans out
-    # the 20 checks via & + wait (~5s vs ~15-25s sequential).
-    needs: cache-check
-    if: needs.cache-check.outputs.hit != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 12
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: 1.3.13
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          path: ~/.bun/install/cache
-          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-      - run: bun install
-      - run: bun run verify
-
-  serial-tests:
-    # *.serial.test.ts at --max-concurrency=1. Lives in its own runner so
-    # the matrix shards aren't carrying the serial-pass tail (the old shape
-    # stuffed this into `test (1)` after the matrix work, which compounded
-    # shard 1's overload).
-    needs: cache-check
-    if: needs.cache-check.outputs.hit != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: 1.3.13
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          path: ~/.bun/install/cache
-          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-      - run: bun install
-      - run: bun run test:serial
-
-  slow-eval-longmemeval:
-    # Dedicated runner for the LongMemEval end-to-end test file. The file
-    # was originally 359s. TODO #1 (engine-sharing in runEvalLongMemEval
-    # via RunOpts.engine) cut it to ~200s by amortizing PGLite cold-create
-    # across all 13 runEvalLongMemEval calls in one beforeAll-shared brain.
-    # Pulled out of the matrix (see scripts/test-shard.sh) so a single 200s
-    # atom doesn't dominate a shard's wallclock. Companion file
-    # test/eval-longmemeval.slow.test.ts (the pure-bucket half) stays in
-    # the matrix because it's light (~42s).
-    needs: cache-check
-    if: needs.cache-check.outputs.hit != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: 1.3.13
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          path: ~/.bun/install/cache
-          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-      - run: bun install
-      - run: bun test test/eval-longmemeval-e2e.slow.test.ts --timeout=60000
-
-  slow-entity-resolve-perf:
-    # Dedicated runner for the entity-resolve perf test (~159s, single perf
-    # describe with one test that builds 5000+ pages and asserts the NEW
-    # tryPrefixExpansion shape is 5x faster than the OLD shape — not
-    # subdivisible without weakening the perf guarantee). Pulled out of the
-    # matrix (see scripts/test-shard.sh) so a single 159s atom doesn't
-    # dominate a shard's wallclock. Runs in parallel with the matrix.
-    needs: cache-check
-    if: needs.cache-check.outputs.hit != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: 1.3.13
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          path: ~/.bun/install/cache
-          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-      - run: bun install
-      - run: bun test test/entity-resolve-perf.slow.test.ts --timeout=300000
-
-  test:
-    # Pure matrix shard — no verify, no serial. Each shard runs its slice
-    # of the unit test set under one `bun test` invocation.
-    #
-    # 10 shards (was 6) drops per-shard total from 532s → 287s. With the two
-    # dedicated jobs (slow-eval-longmemeval, slow-entity-resolve-perf) also
-    # pulled out, the matrix is bounded by ~287s ≈ 4.8 min. Total CI ≈ max
-    # of matrix + slow-eval (~3.3 min after engine-sharing in TODO #1) +
-    # slow-entity-resolve-perf (~2.6 min) ≈ 4.8 min.
-    #
-    # Concurrency budget: 10 shards + verify + serial + slow-eval +
-    # slow-entity-resolve-perf + gitleaks + cache-check + cache-write +
-    # test-status = ~18 jobs × 2 concurrent PRs = 36. GitHub free-tier
-    # caps at ~20 concurrent jobs, so multi-PR days will see some queue
-    # pressure. Single-PR runs are unaffected.
-    #
-    # Partition policy is weight-aware LPT bin-packing via scripts/sharding.ts
-    # (replaces FNV-1a path hash). Weights live in scripts/test-weights.json,
-    # mined from real CI logs via scripts/mine-shard-weights.ts. Missing
-    # weights fall back to corpus median — new test files work immediately.
-    needs: cache-check
-    if: needs.cache-check.outputs.hit != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
-        with:
-          bun-version: 1.3.13
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          path: ~/.bun/install/cache
-          key: bun-cache-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-      - run: bun install
-      - name: Run test shard ${{ matrix.shard }}/10
-        run: scripts/test-shard.sh ${{ matrix.shard }} 10
-
-  # ──────────────────────────────────────────────────────────────────────
-  # cache-write: ONLY runs when every gated job succeeded. Writes the
-  # cache entry under `ci-pass-<hash>` so future runs at the same hash
-  # hit cache. Codex's load-bearing correctness point: writing the
-  # cache before the matrix completes would permanently bless bad states
-  # (a future run at the same hash would skip tests because of a cache
-  # entry written when tests hadn't actually passed).
-  # ──────────────────────────────────────────────────────────────────────
-  cache-write:
-    needs: [cache-check, gitleaks, verify, serial-tests, slow-eval-longmemeval, slow-entity-resolve-perf, test]
-    if: success() && needs.cache-check.outputs.hit != 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Create cache marker
+      - name: Initialize evidence and refuse unbound source
+        timeout-minutes: 1
+        env:
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          mkdir -p .ci-cache-marker
-          echo "${{ needs.cache-check.outputs.hash }}" > .ci-cache-marker/hash
-          echo "$GITHUB_SHA" > .ci-cache-marker/sha
-          echo "$GITHUB_REF" > .ci-cache-marker/ref
-      - uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684  # v4.2.3
-        with:
-          key: ci-pass-${{ needs.cache-check.outputs.hash }}
-          path: .ci-cache-marker
-
-  # ──────────────────────────────────────────────────────────────────────
-  # test-status: the single user-visible "did CI pass?" check.
-  # Runs always (if: always()), succeeds when EITHER cache-check.hit==true
-  # OR all gated jobs (gitleaks, verify, serial-tests, test) succeeded.
-  # Branch protection (when configured) gates on this single job name.
-  # ──────────────────────────────────────────────────────────────────────
-  test-status:
-    needs: [cache-check, gitleaks, verify, serial-tests, slow-eval-longmemeval, slow-entity-resolve-perf, test]
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Aggregate result
-        run: |
-          HIT="${{ needs.cache-check.outputs.hit }}"
-          GITLEAKS="${{ needs.gitleaks.result }}"
-          VERIFY="${{ needs.verify.result }}"
-          SERIAL="${{ needs.serial-tests.result }}"
-          SLOW_EVAL="${{ needs.slow-eval-longmemeval.result }}"
-          SLOW_PERF="${{ needs.slow-entity-resolve-perf.result }}"
-          TEST="${{ needs.test.result }}"
-          echo "cache-check.hit=$HIT"
-          echo "gitleaks=$GITLEAKS  verify=$VERIFY  serial-tests=$SERIAL  slow-eval-longmemeval=$SLOW_EVAL  slow-entity-resolve-perf=$SLOW_PERF  test=$TEST"
-          if [ "$HIT" = "true" ]; then
-            echo "✓ cache HIT for hash ${{ needs.cache-check.outputs.hash }} — CI green"
-            exit 0
-          fi
-          # Cache miss: every gated job must have succeeded.
-          for r in "$GITLEAKS" "$VERIFY" "$SERIAL" "$SLOW_EVAL" "$SLOW_PERF" "$TEST"; do
-            if [ "$r" != "success" ]; then
-              echo "✗ gated job did not succeed (got $r) — CI fail"
-              exit 1
-            fi
+          set -euo pipefail
+          mkdir -p "$EVIDENCE"
+          for phase in red candidate engine; do
+            printf 'not-run\n' > "$EVIDENCE/$phase.exit"
+            printf 'not-run\n' > "$EVIDENCE/$phase.output"
           done
-          echo "✓ all gated jobs succeeded — CI green"
+          printf 'pending\n' > "$EVIDENCE/cleanup.status"
+          printf 'source=%s\nworkflow=%s\nrun=%s\nattempt=%s\n' "$SOURCE_SHA" "$WORKFLOW_SHA" "$RUN_ID" "$RUN_ATTEMPT" > "$EVIDENCE/identity.txt"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$GITHUB_ACTIONS" = true
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        timeout-minutes: 2
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          path: source
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        timeout-minutes: 2
+        with:
+          bun-version: 1.3.13
+      - name: Verify bytes and install frozen dependencies
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          unset DATABASE_URL
+          cd source
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git status --porcelain > "$EVIDENCE/source-status.txt"
+          test ! -s "$EVIDENCE/source-status.txt"
+          sha256sum scripts/markdown-projection-scheduled-*.ts scripts/markdown-projection-runtime-verify.ts src/core/minions/markdown-projection-scheduler.ts src/core/minions/handlers/markdown-projection.ts src/core/minions/worker.ts src/commands/jobs.ts scripts/markdown-projection-runtime-hosted.ts scripts/markdown-projection-engine-hosted.ts docs/architecture/sql/markdown-projection-worker-candidate.sql scripts/markdown-projection-hosted-acceptance.ts docs/architecture/sql/markdown-projection-candidate.sql src/schema.sql bun.lock > "$EVIDENCE/source-sha256.txt"
+          env -i PATH="$PATH" HOME="$HOME" CI=true timeout -k 5s 150s bun install --frozen-lockfile > "$EVIDENCE/install.output" 2>&1
+      - name: Bounded offline worker regressions and typecheck
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          cd source
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test --config=/dev/null test/postgres-transaction-lifetime.test.ts > "$EVIDENCE/transaction-lifetime.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test --config=/dev/null test/postgres-transaction-facade.test.ts > "$EVIDENCE/transaction-facade.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test test/markdown-projection-worker-blockers.serial.test.ts > "$EVIDENCE/worker-blockers.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 2s 30s bun test scripts/markdown-projection-race-safety.test.ts test/markdown-projection-worker.test.ts test/markdown-projection.test.ts > "$EVIDENCE/worker-regression.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 5s 120s bun x --no-install tsc --noEmit > "$EVIDENCE/worker-typecheck.output" 2>&1
+          timeout -k 3s 30s python3 -B scripts/markdown-projection-worker-crash-offline.py > "$EVIDENCE/crash-offline.output" 2>&1
+          timeout -k 3s 30s python3 -B scripts/markdown-projection-adopted-child.test.py > "$EVIDENCE/adopted-child.output" 2>&1
+          timeout -k 3s 30s python3 -B scripts/markdown-projection-fixture-parent.test.py > "$EVIDENCE/fixture-parent.output" 2>&1
+          timeout -k 3s 30s python3 -B scripts/markdown-projection-engine-supervisor-offline.py > "$EVIDENCE/supervisor-offline.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 3s 30s bun test --config=/dev/null test/minions-markdown-projection.test.ts test/minions-markdown-projection-scheduler.test.ts test/minions-projection-containment.test.ts test/minions-projection-admission.test.ts scripts/markdown-projection-scheduled-markers.test.ts test/markdown-projection-worker-blockers.serial.test.ts test/markdown-projection-worker.test.ts scripts/markdown-projection-containment-healthy.test.ts scripts/markdown-projection-containment.test.ts scripts/markdown-projection-entrypoint.test.ts scripts/markdown-projection-receipt-validation.test.ts scripts/markdown-projection-clean-source.test.ts scripts/markdown-projection-fixture-fault.test.ts scripts/markdown-projection-isolated-recovery.test.ts scripts/markdown-projection-engine-offline.test.ts scripts/markdown-projection-runtime.test.ts scripts/markdown-projection-runtime-hosted.test.ts scripts/markdown-projection-runtime-cleanup.test.ts scripts/markdown-projection-race-safety.test.ts > "$EVIDENCE/isolated-regressions.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 3s 30s python3 -B scripts/markdown-projection-isolated-offline.py > "$EVIDENCE/isolated-process.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 3s 30s python3 -B scripts/markdown-projection-containment-offline.py > "$EVIDENCE/isolated-containment.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 3s 30s python3 -B scripts/markdown-projection-entrypoint-offline.py > "$EVIDENCE/isolated-wrapper.output" 2>&1
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-offline-home" timeout -k 5s 120s bun x --no-install tsc --noEmit --strict --esModuleInterop --skipLibCheck --module esnext --target esnext --moduleResolution bundler --allowImportingTsExtensions src/types/image-decoders.d.ts test/minions-projection-containment.test.ts test/minions-projection-admission.test.ts scripts/markdown-projection-scheduled-hosted.ts scripts/markdown-projection-scheduled-child.ts scripts/markdown-projection-scheduled-markers.ts scripts/markdown-projection-runtime-verify.ts src/core/minions/markdown-projection-scheduler.ts test/minions-markdown-projection.test.ts test/minions-markdown-projection-scheduler.test.ts test/minions-projection-containment.test.ts test/minions-projection-admission.test.ts scripts/markdown-projection-scheduled-markers.test.ts src/core/minions/handlers/markdown-projection.ts scripts/markdown-projection-containment-healthy.test.ts scripts/markdown-projection-containment.test.ts scripts/markdown-projection-engine-hosted.ts scripts/markdown-projection-entrypoint.test.ts scripts/markdown-projection-isolated-caller.ts scripts/markdown-projection-isolated-child-fixture.ts scripts/markdown-projection-isolated-worker.ts scripts/markdown-projection-receipt-validation.test.ts scripts/markdown-projection-clean-source.test.ts scripts/markdown-projection-fixture-fault.test.ts scripts/markdown-projection-isolated-recovery.test.ts scripts/markdown-projection-engine-offline.test.ts scripts/markdown-projection-runtime.test.ts scripts/markdown-projection-runtime-hosted.test.ts scripts/markdown-projection-runtime-cleanup.test.ts scripts/markdown-projection-race-safety.test.ts scripts/markdown-projection-fixture-fault.ts scripts/markdown-projection-isolated-recovery.ts scripts/markdown-projection-runtime.ts scripts/markdown-projection-runtime-worker.ts scripts/markdown-projection-runtime-admission.ts scripts/markdown-projection-runtime-hosted.ts > "$EVIDENCE/isolated-scripts-typecheck.output" 2>&1
+          printf 'passed\n' > "$EVIDENCE/worker-offline.status"
+      - name: Service identity and empty fixture baseline
+        timeout-minutes: 1
+        env:
+          SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          [[ "$SERVICE_ID" =~ ^[0-9a-f]{64}$ ]]
+          timeout -k 5s 20s docker inspect --format '{{json .NetworkSettings.Networks}}' "$SERVICE_ID" > "$EVIDENCE/service-networks.json"
+          python3 - <<'PY'
+          import os, json, pathlib, ipaddress
+          p = pathlib.Path(os.environ['EVIDENCE'])
+          networks = json.loads((p/'service-networks.json').read_text())
+          assert isinstance(networks, dict) and len(networks) == 1, 'missing or ambiguous service network'
+          network, data = next(iter(networks.items()))
+          address = data['IPAddress']
+          assert str(ipaddress.IPv4Address(address)) == address, 'missing or noncanonical service IP'
+          receipt = dict(service_id=os.environ['SERVICE_ID'], network=network, expected_service_ip=address, expected_service_port=5432, caller_endpoint='127.0.0.1:5432', provenance='docker inspect Actions service ID')
+          (p/'topology-receipt.json').write_text(json.dumps(receipt, indent=2)+'\n')
+          (p/'expected-service-ip').write_text(address+'\n')
+          PY
+          timeout -k 5s 20s docker exec "$SERVICE_ID" psql -U postgres -d postgres -X -v ON_ERROR_STOP=1 -Atc 'SELECT version()' > "$EVIDENCE/postgres-version.txt"
+          timeout -k 5s 20s docker exec "$SERVICE_ID" psql -U postgres -d postgres -X -v ON_ERROR_STOP=1 -Atc "SELECT (SELECT count(*) FROM pg_database WHERE datname ~ '^mp_accept_[0-9a-f]{16}$'), (SELECT count(*) FROM pg_roles WHERE rolname ~ '^mp_accept_[0-9a-f]{16}_(ordinary|runtime)$')" > "$EVIDENCE/baseline.catalog"
+          test "$(< "$EVIDENCE/baseline.catalog")" = '0|0'
+      - name: RED missing-table proof and cleanup gate
+        id: red
+        timeout-minutes: 3
+        env:
+          SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          cd source
+          set +e
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-home" GITHUB_ACTIONS="$GITHUB_ACTIONS" MARKDOWN_PROJECTION_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP="$(< "$EVIDENCE/expected-service-ip")" MARKDOWN_PROJECTION_DISPOSABLE=CREATE_AND_DROP_DATABASE MARKDOWN_PROJECTION_PHASE=red timeout -k 5s 120s bun run scripts/markdown-projection-hosted-acceptance.ts > "$EVIDENCE/red.output" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "$EVIDENCE/red.exit"
+          timeout -k 5s 20s docker exec "$SERVICE_ID" psql -U postgres -d postgres -X -v ON_ERROR_STOP=1 -Atc "SELECT (SELECT count(*) FROM pg_database WHERE datname ~ '^mp_accept_[0-9a-f]{16}$'), (SELECT count(*) FROM pg_roles WHERE rolname ~ '^mp_accept_[0-9a-f]{16}_(ordinary|runtime)$')" > "$EVIDENCE/red-cleanup.catalog"
+          test "$(< "$EVIDENCE/red-cleanup.catalog")" = '0|0'
+          python3 - <<'PY'
+          import os, pathlib, re, json
+          p = pathlib.Path(os.environ['EVIDENCE'])
+          out = (p/'red.output').read_text()
+          receipts = []
+          for line in out.splitlines():
+              try: receipts.append(json.loads(line))
+              except ValueError: pass
+          cleanups = [r for r in receipts if isinstance(r, dict) and 'cleanup' in r]
+          assert len(cleanups) == 1 and cleanups[0]['cleanup'] == 'passed' and cleanups[0]['cleanupErrors'] == [], 'RED fixture cleanup failed'
+          assert (p/'red.exit').read_text().strip() == '1', 'RED must be assertion exit 1, not timeout/signal'
+          assert re.search(r'(?:AssertionError[^\n]*|error:)\s*atomic obligation table missing', out), 'wrong RED error'
+          assert 'ERR_ASSERTION' in out, 'not an assertion'
+          assert re.search(r'actual:\s*null', out), 'actual must be null'
+          assert re.search(r'''expected:\s*['"]markdown_projection_obligations['"]''', out), 'wrong expected table'
+          (p/'red-verdict.txt').write_text('expected missing-table assertion; cleanup verified\n')
+          PY
+          printf 'expected=true\n' >> "$GITHUB_OUTPUT"
+      - name: Candidate only after verified exact RED
+        if: success() && steps.red.outputs.expected == 'true'
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          cd source
+          set +e
+          env -i PATH="$PATH" HOME="$RUNNER_TEMP/mp-home" GITHUB_ACTIONS="$GITHUB_ACTIONS" MARKDOWN_PROJECTION_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP="$(< "$EVIDENCE/expected-service-ip")" MARKDOWN_PROJECTION_DISPOSABLE=CREATE_AND_DROP_DATABASE MARKDOWN_PROJECTION_PHASE=candidate timeout -k 5s 120s bun run scripts/markdown-projection-hosted-acceptance.ts > "$EVIDENCE/candidate.output" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "$EVIDENCE/candidate.exit"
+          test "$rc" -eq 0
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path(os.environ['EVIDENCE'])
+          receipts = []
+          for line in (p/'candidate.output').read_text().splitlines():
+              try: receipts.append(json.loads(line))
+              except ValueError: pass
+          passed = [r for r in receipts if isinstance(r, dict) and r.get('status') == 'passed' and r.get('phase') == 'candidate' and r.get('filesystemWorkerConnected') is False]
+          assert len(passed) == 1, 'missing or ambiguous candidate final receipt'
+          (p/'candidate-receipt.json').write_text(json.dumps(passed[0], indent=2)+'\n')
+          PY
+      - name: Install bounded namespace relay dependencies
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          timeout -k 5s 60s sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 update > "$EVIDENCE/relay-install.output" 2>&1
+          timeout -k 5s 90s sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=15 install -y --no-install-recommends socat util-linux iproute2 python3 >> "$EVIDENCE/relay-install.output" 2>&1
+          for tool in socat sudo unshare setpriv ip timeout bun python3; do command -v "$tool"; done > "$EVIDENCE/relay-tools.txt"
+      - name: Real engine only inside bounded no-egress namespace
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          cd source
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git status --porcelain --untracked-files=all | tee "$EVIDENCE/engine-source-status-$(date +%s%N).txt"
+          test -z "$(git status --porcelain)"
+          sha256sum scripts/markdown-projection-engine-* > "$EVIDENCE/engine-source-sha256.txt"
+          set +e
+          env -i PATH="$PATH" HOME="$HOME" GITHUB_ACTIONS=true MARKDOWN_PROJECTION_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP="$(< "$EVIDENCE/expected-service-ip")" MARKDOWN_PROJECTION_DISPOSABLE=CREATE_AND_DROP_DATABASE MARKDOWN_PROJECTION_WORKER_MODE=isolated timeout -k 10s 210s bash scripts/markdown-projection-engine-hosted.sh > "$EVIDENCE/engine.output" 2>&1
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "$EVIDENCE/engine.exit"
+          test "$rc" -eq 0
+          python3 - <<'PY'
+          import json, os, pathlib
+          p = pathlib.Path(os.environ['EVIDENCE'])
+          receipts = []
+          for line in (p/'engine.output').read_text().splitlines():
+              try: receipts.append(json.loads(line))
+              except ValueError: pass
+          receipts = [r for r in receipts if isinstance(r, dict)]
+          for stage in ['namespace.admission','service.identity','baseline.catalog','candidate.catalog','baseline.complete','candidate.complete','worker.complete']:
+              assert sum(r.get('stage') == stage for r in receipts) == 1, stage
+          assert sum(r.get('stage') == 'worker.complete' and r.get('status') == 'passed' and r.get('filesystemWorkerConnected') is True and r.get('applicationAuthProven') is False for r in receipts) == 1
+          assert sum(r.get('phase') == 'engine' and r.get('status') == 'passed' and r.get('filesystemWorkerConnected') is True and r.get('applicationAuthProven') is False for r in receipts) == 1
+          final = [r for r in receipts if r.get('phase') == 'engine' and r.get('status') == 'passed']
+          assert len(final) == 1 and final[0]['workerMode'] == 'isolated' and final[0]['isolatedHealthyCompletion'] is True
+          assert final[0]['legacyRaces'] == 'excluded-not-passed' and final[0]['isolatedBackendLoss'] == 'passed'
+          isolated = [r for r in receipts if r.get('stage') == 'worker.isolated' and r.get('status') == 'passed']
+          assert len(isolated) == 1 and isolated[0]['connectionLossRecoveryProven'] is False
+          receipt = isolated[0]['receipt']
+          assert receipt['protocol'] == 'markdown-projection-reaping-v1' and receipt['final'] is True and receipt['status'] == 'passed' and receipt['copyStatus'] == 'materialized'
+          assert 1 <= len(receipt['attempts']) <= 3
+          assert all(a['reaped'] is True and a['exitCode'] == 0 and a['errors'] == [] and a['pid'] > 0 and a['runId'] == receipt['runId'] for a in receipt['attempts'])
+          assert not any(r.get('stage') in ['worker.backend-race','worker.process-crash'] for r in receipts)
+          acceptance = [r for r in receipts if r.get('stage') == 'worker.isolated.acceptance']
+          assert len(acceptance) == 1 and acceptance[0]['status'] == 'passed'
+          assert acceptance[0]['backendLoss'] == acceptance[0]['processCrash'] == acceptance[0]['newerGeneration'] == 'passed'
+          recovery = [r for r in receipts if r.get('stage') == 'worker.isolated.recovery' and r.get('status') == 'passed']
+          failures = [r for r in receipts if r.get('stage') == 'worker.isolated.failure' and r.get('status') == 'passed']
+          expected = {('backend-loss','before_write'),('backend-loss','after_write'),('crash','after_write')}
+          assert len(recovery) == len(failures) == 3
+          assert {(r['mode'],r['seam']) for r in recovery} == {(r['mode'],r['seam']) for r in failures} == expected
+          for r in recovery:
+              failed, fresh = r['failedReceipt'], r['retryReceipt']
+              assert r['reapedBeforeRetry'] is True and r['manualFilesUntouched'] is True
+              assert failed['final'] is True and failed['status'] == 'failed' and len(failed['attempts']) == 1
+              a = failed['attempts'][0]
+              assert a['reaped'] is True and a['exitCode'] != 0 and a['pid'] > 0
+              assert a['runId'] == failed['runId'] and a['errors']
+              if r['mode'] == 'crash': assert a['exitCode'] == -9
+              else: assert 'connection_closed' in a['errors'] or 'unhandled_error' in a['errors']
+              assert fresh['final'] is True and fresh['status'] == 'passed' and fresh['copyStatus'] == 'materialized'
+              assert fresh['runId'] != failed['runId'] and 1 <= len(fresh['attempts']) <= 3
+              assert all(b['reaped'] is True and b['exitCode'] == 0 and b['errors'] == [] and b['pid'] > 0 and b['pid'] != a['pid'] and b['runId'] == fresh['runId'] for b in fresh['attempts'])
+              matching = [f for f in failures if (f['mode'],f['seam']) == (r['mode'],r['seam'])]
+              assert len(matching) == 1 and matching[0]['receipt'] == failed and matching[0]['currentAbsent'] is True
+              assert r['currentPath'] and len(r['currentHash']) == 64
+          (p/'isolated-recovery-receipts.json').write_text(json.dumps(recovery, indent=2)+'\n')
+          cleanup = [r for r in receipts if 'cleanup' in r]
+          assert len(cleanup) == 1 and cleanup[0]['cleanup'] == 'passed' and cleanup[0]['errors'] == []
+          groups = [r for r in receipts if r.get('stage') == 'process.cleanup']
+          # Sync healthy caller forwards supervisor stderr; async recovery captures it.
+          # Every recovery child is covered by its validated final receipt, not a
+          # fictional external cleanup line. Relay wrappers emit four other groups.
+          starts = [r for r in receipts if r.get('stage') == 'worker.isolated.recovery' and r.get('status') == 'started']
+          assert len(starts) == 3 and {(r['mode'], r['seam']) for r in starts} == expected
+          finals = [receipt] + [f for r in recovery for f in (r['failedReceipt'], r['retryReceipt'])]
+          assert len({f['runId'] for f in finals}) == len(finals), 'duplicate supervisor run'
+          attempted = []
+          for f in finals:
+              assert f['protocol'] == 'markdown-projection-reaping-v1' and f['final'] is True
+              assert isinstance(f['runId'], str) and f['runId']
+              assert 1 <= len(f['attempts']) <= 3
+              for number, a in enumerate(f['attempts'], 1):
+                  assert a['attempt'] == number and a['runId'] == f['runId']
+                  assert type(a['pid']) is int and a['pid'] > 0 and a['reaped'] is True
+                  assert 'reaping_failed' not in a['errors']
+                  attempted.append((f['runId'], a['pid']))
+          assert len(set(attempted)) == len(attempted), 'duplicate child/run'
+          assert len({pid for _, pid in attempted}) == len(attempted), 'duplicate child PID'
+          assert all(r['status'] == 'passed' and r['members'] == [] and r['sessionMembers'] == [] for r in groups), 'unreaped external group'
+          group_ids = [r['pgid'] for r in groups]
+          assert all(type(pid) is int and pid > 0 for pid in group_ids)
+          assert len(set(group_ids)) == len(group_ids), 'duplicate external group'
+          healthy_ids = {a['pid'] for a in receipt['attempts']}
+          recovery_ids = {pid for _, pid in attempted} - healthy_ids
+          assert healthy_ids <= set(group_ids), 'missing healthy child group'
+          assert not recovery_ids.intersection(group_ids), 'unexpected forwarded async group'
+          relay_ids = set(group_ids) - healthy_ids
+          assert len(relay_ids) == 4 and len(groups) == len(healthy_ids) + 4, 'relay group inventory'
+          (p/'reaping-inventory.json').write_text(json.dumps(dict(attempted=attempted, externalGroups=group_ids, relayGroups=sorted(relay_ids)), indent=2)+'\n')
+          (p/'engine-receipts.json').write_text(json.dumps(receipts, indent=2)+'\n')
+          PY
+          git status --porcelain --untracked-files=all | tee "$EVIDENCE/engine-source-status-$(date +%s%N).txt"
+          test -z "$(git status --porcelain)"
+      - name: Runtime exact marker inventory
+        run: |
+          cd source
+          # Requires both distinct healthy and unknown-ownership ledgers, exact 14/16 CLI receipts, held-no-worker proof.
+          bun scripts/markdown-projection-runtime-verify.ts "$EVIDENCE/engine.output"
+      - name: Always verify fixture cleanup and remove service
+        if: always()
+        timeout-minutes: 2
+        env:
+          SERVICE_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$EVIDENCE"
+          timeout -k 5s 20s docker exec "$SERVICE_ID" psql -U postgres -d postgres -X -v ON_ERROR_STOP=1 -Atc "SELECT (SELECT count(*) FROM pg_database WHERE datname ~ '^mp_accept_[0-9a-f]{16}$'), (SELECT count(*) FROM pg_roles WHERE rolname ~ '^mp_accept_[0-9a-f]{16}_(ordinary|runtime)$')" > "$EVIDENCE/final-cleanup.catalog" 2> "$EVIDENCE/final-cleanup.error"
+          probe=$?
+          timeout -k 5s 15s docker logs "$SERVICE_ID" > "$EVIDENCE/service.log" 2>&1
+          timeout -k 5s 30s docker rm -f "$SERVICE_ID" > "$EVIDENCE/service-remove.output" 2>&1
+          removed=$?
+          timeout -k 5s 10s docker ps -a --filter "id=$SERVICE_ID" --format '{{.ID}}' > "$EVIDENCE/service-remaining.txt" 2> "$EVIDENCE/service-remaining.error"
+          listed=$?
+          printf 'catalog_exit=%s\nremove_exit=%s\nlist_exit=%s\n' "$probe" "$removed" "$listed" > "$EVIDENCE/cleanup.status"
+          test "$probe" -eq 0 && test "$(< "$EVIDENCE/final-cleanup.catalog")" = '0|0' && test "$removed" -eq 0 && test "$listed" -eq 0 && test ! -s "$EVIDENCE/service-remaining.txt"
+      - name: Always retain diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        timeout-minutes: 2
+        with:
+          name: markdown-projection-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 14
