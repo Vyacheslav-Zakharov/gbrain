@@ -214,7 +214,7 @@ try {
       const runtimeURL=new URL(rawUrl);runtimeURL.pathname=`/${runtimeDatabase}`;
       await runtimeEngine.connect({engine:'postgres',database_url:runtimeURL.href,poolSize:1});await runtimeEngine.initSchema();
       for(const sql of ['markdown-projection-candidate.sql','markdown-projection-worker-candidate.sql'])await runtimeDB.unsafe(await readFile(new URL(`../docs/architecture/sql/${sql}`,import.meta.url),'utf8'));
-      await runtimeHosted(runtimeDB,runtimeEngine,runtimeDatabase,expectedServiceIP,runtimeRoot,emit,scenario,`runtime-${scenario}`);
+      await runtimeHosted(runtimeDB,runtimeEngine,runtimeDatabase,expectedServiceIP,runtimeRoot,emit,scenario,`runtime-${scenario}`,true);
     }finally{
       const cleanupErrors:unknown[]=[];
       for(const cleanup of [()=>runtimeEngine.disconnect(),()=>runtimeDB?.end({timeout:2}),async()=>{if(runtimeCreated)await admin.unsafe(`DROP DATABASE ${runtimeDatabase} WITH (FORCE)`);},async()=>assert.equal((await admin`SELECT datname FROM pg_database WHERE datname=${runtimeDatabase}`).length,0)]){try{await cleanup();}catch(error){cleanupErrors.push(error);}}

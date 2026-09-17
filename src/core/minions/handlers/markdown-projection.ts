@@ -1,4 +1,5 @@
-import {existsSync,readFileSync} from 'node:fs';
+import {readFileSync} from 'node:fs';
+import {admitRuntimeConfiguration} from '../../../../scripts/markdown-projection-runtime-admission';
 import {hostname} from 'node:os';
 import {randomUUID} from 'node:crypto';
 import type {BrainEngine} from '../../engine';
@@ -12,7 +13,13 @@ const validSource = (s: unknown): s is string => typeof s === 'string' && /^[A-Z
 export type ProjectionTickDependencies = {
   configPath?: (source: string) => string | undefined;
   run?: typeof runIsolatedAsync;
+  admit?: typeof admitRuntimeConfiguration;
 };
+export function requireProjectionConfiguration(source:string,path:string,admit=admitRuntimeConfiguration):void {
+  try {
+    if(!admit({admission:'PROTECTED_RUNTIME_V1',action:'drain',configPath:path,sourceId:source}))throw Error();
+  } catch {throw new UnrecoverableError('projection_configuration_failed');}
+}
 function processStart(pid:number):string {
   const stat=readFileSync(`/proc/${pid}/stat`,'utf8');
   const start=stat.slice(stat.lastIndexOf(')')+2).split(' ')[19];
@@ -25,9 +32,23 @@ export function makeMarkdownProjectionHandler(engine: BrainEngine, deps: Project
     if (!validSource(source) || Object.keys(job.data).some(k => k !== 'sourceId'))
       throw new UnrecoverableError('projection_payload_refused');
     const path = deps.configPath ? deps.configPath(source) : `/etc/gbrain/markdown-projection/${source}.json`;
-    if (!path || (!deps.configPath && !existsSync(path))) return {status: 'not_required'};
-    const receipt=await runMarkdownProjectionAttempt(engine,source,path,job,deps);
-    return {status:receipt.copyStatus, reaped:true, durableOutcome:'ledger_consulted'};
+    if (!path) return {status: 'not_required'};
+    try { requireProjectionConfiguration(source,path,deps.admit); }
+    catch(error) {
+      await engine.executeRaw(`INSERT INTO public.markdown_projection_source_status(source_id,worker_seen_at,last_error) VALUES ($1,now(),'projection_configuration_failed') ON CONFLICT(source_id) DO UPDATE SET worker_seen_at=now(),last_error='projection_configuration_failed'`,[source]);
+      throw error;
+    }
+    await engine.executeRaw(`INSERT INTO public.markdown_projection_source_status(source_id,worker_seen_at) VALUES ($1,now()) ON CONFLICT(source_id) DO UPDATE SET worker_seen_at=now()`,[source]);
+    try {
+      const receipt=await runMarkdownProjectionAttempt(engine,source,path,job,deps);
+      if(receipt.copyStatus==='not_required')throw new UnrecoverableError('projection_configuration_failed');
+      await engine.executeRaw(`UPDATE public.markdown_projection_source_status SET worker_seen_at=now(),last_error=NULL WHERE source_id=$1`,[source]);
+      return {status:receipt.copyStatus, reaped:true, durableOutcome:'ledger_consulted'};
+    } catch(error) {
+      // No raw child/configuration errors are copied into durable source telemetry.
+      await engine.executeRaw(`UPDATE public.markdown_projection_source_status SET worker_seen_at=now(),last_error='projection_attempt_failed' WHERE source_id=$1`,[source]);
+      throw error;
+    }
   };
 }
 /** Shared CLI/dispatcher admission. Only the private transport writes worker stdin. */
@@ -87,5 +108,7 @@ export async function markdownProjectionJobStatus(engine: BrainEngine, sourceId:
   if (!validSource(sourceId)) throw new Error('projection_source_refused');
   const ownership=await engine.executeRaw(`SELECT source_id,run_id,job_id,host_id,boot_id,owner_pid,owner_start,supervisor_pid,supervisor_start,state,created_at FROM public.markdown_projection_attempts WHERE source_id=$1 AND released_at IS NULL`,[sourceId]);
   const jobs = await engine.executeRaw(`SELECT id,status,attempts_made,delay_until,lock_until,updated_at,error_text,result,progress FROM minion_jobs WHERE name=$1 AND data->>'sourceId'=$2 ORDER BY id DESC LIMIT 20`, [PROJECTION_JOB,sourceId]);
-  return {jobs,ownership, recovery:ownership.length?'operator_blocked_no_automatic_recovery':'none',perPageError:'unavailable', projectionHeartbeat:'unavailable', schedulerLiveness:'unavailable'};
+  const telemetry=await engine.executeRaw(`SELECT scheduler_seen_at,worker_seen_at,last_error FROM public.markdown_projection_source_status WHERE source_id=$1`,[sourceId]);
+  const obligations=await engine.executeRaw(`SELECT count(*) FILTER(WHERE status='pending')::text AS pending,count(*) FILTER(WHERE status='materialized' AND materialized_generation=generation)::text AS materialized,min(first_pending_at) FILTER(WHERE status='pending') AS first_pending_at,COALESCE(bool_or(status='pending' AND first_pending_at < now()-interval '300 seconds'),false) AS lag_alert FROM public.markdown_projection_obligations WHERE source_id=$1`,[sourceId]);
+  return {jobs,ownership,telemetry,obligations,recovery:ownership.length?'operator_blocked_no_automatic_recovery':'none',perPageError:'unavailable', projectionHeartbeat:telemetry[0]?.worker_seen_at??'unavailable', schedulerLiveness:'not_inferred_from_last_seen'};
 }

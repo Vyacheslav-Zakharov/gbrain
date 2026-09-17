@@ -33,6 +33,9 @@ export function verifyRuntimeMarkers(rows:any[]){
 }
 export function runtimeCLI(action:string,path?:string,binding={scenario:'offline',root:process.cwd()},inventory:any[]=[]){
  const argv=[process.execPath,'scripts/markdown-projection-runtime.ts',action,...(path?['--config',path]:[])];
+ return supervisedFixtureCLI(argv,binding,inventory);
+}
+export function supervisedFixtureCLI(argv:string[],binding:{scenario:string;root:string},inventory:any[]=[]){
  const runId=randomUUID();const entry={runId,...binding,argv,verified:false,proof:undefined as any};inventory.push(entry);
  const child=spawnSync('python3',['-B','scripts/markdown-projection-fixture-parent.py','--run-id',runId,'--scenario',binding.scenario,'--root',binding.root,'--',...argv],{cwd:process.cwd(),env:{PATH:'/usr/bin:/bin',HOME:'/nonexistent',PYTHONDONTWRITEBYTECODE:'1'},timeout:35000,killSignal:'SIGKILL',encoding:'utf8',maxBuffer:2*1024*1024});
  try{
@@ -45,7 +48,7 @@ export function runtimeCLI(action:string,path?:string,binding={scenario:'offline
  return {exit:proof.exit as number,output:proof.stdout+proof.stderr,stdout:proof.stdout as string,parentProof:proof};
  }catch(cause){throw Object.assign(new Error('runtime CLI stop unverified',{cause}),{unsafeFilesystemCleanup:true,entry,primaryError:child.error??child.status});}
 }
-export async function runtimeHosted(db:ReturnType<typeof postgres>,engine:PostgresEngine,database:string,address:string,base:string,emit:(v:unknown)=>void,scenario:'healthy'|'unknown-ownership',sourceId:string){
+export async function runtimeHosted(db:ReturnType<typeof postgres>,engine:PostgresEngine,database:string,address:string,base:string,emit:(v:unknown)=>void,scenario:'healthy'|'unknown-ownership',sourceId:string,scheduled=false){
  assert.equal(process.env.GITHUB_ACTIONS,'true');assert.equal(process.env.MARKDOWN_PROJECTION_DISPOSABLE,'CREATE_AND_DROP_DATABASE');
  assert(/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(sourceId));
  const publish=emit;emit=(v:unknown)=>publish({...v as object,scenario,database,sourceId,fixtureRoot:base});
@@ -110,7 +113,19 @@ export async function runtimeHosted(db:ReturnType<typeof postgres>,engine:Postgr
  invoke('drain',configPath,'idle');emit({stage:'runtime.healthy',status:'passed',ordinaryWriterProven:false,ambiguousCommitProven:false});
  // Healthy cleanup requires both reaped CLI receipts above and no held reservation.
  assert.equal((await db`SELECT * FROM public.markdown_projection_attempts WHERE source_id=${sourceId} AND released_at IS NULL`).length,0);
- if(scenario==='healthy'){emit({stage:'runtime.containment',status:'passed',held:0});completed=true;}else{
+ if(scenario==='healthy'){
+ if(scheduled){
+  await db.unsafe(`GRANT SELECT ON config,markdown_projection_source_status TO ${role};
+   GRANT INSERT(source_id,scheduler_seen_at,worker_seen_at,last_error),UPDATE(scheduler_seen_at,worker_seen_at,last_error) ON markdown_projection_source_status TO ${role};
+   GRANT SELECT,INSERT,UPDATE,DELETE ON minion_jobs,minion_inbox TO ${role};
+   GRANT USAGE,SELECT ON SEQUENCE minion_jobs_id_seq,minion_inbox_id_seq TO ${role};`);
+  await engine.putPage('runtime-page',{type:'note',title:'Scheduled fixture',compiled_truth:'Automatic persisted tick',timeline:'',frontmatter:{}},opts);
+  const {scheduledHosted}=await import('./markdown-projection-scheduled-hosted');
+  await scheduledHosted(database,role,password,sourceId,configPath,emit);
+  const [latest]=await db`SELECT * FROM markdown_projection_current WHERE source_id=${sourceId}`;
+  assert.equal(await readFile(`${root}/${latest.current_path}`,'utf8'),serializePageToMarkdown((await engine.getPage('runtime-page',opts))!,[]));
+ }
+ emit({stage:'runtime.containment',status:'passed',held:0});completed=true;}else{
  // Extend this existing disposable fixture; independent physical nonowner logins.
  const {default:connect}=await import('postgres');
  const clients=[0,1].map(()=>connect({host:'127.0.0.1',port:5432,database,username:role,password,max:1,prepare:false,connect_timeout:5}));
@@ -127,6 +142,17 @@ export async function runtimeHosted(db:ReturnType<typeof postgres>,engine:Postgr
   // Neither telemetry operation is authority to release source ownership.
   assert.equal(await queue.removeJob(job.id),false);assert.equal(await queue.prune(),0);
   assert.deepEqual(Array.from(await db`SELECT * FROM public.markdown_projection_attempts WHERE source_id=${sourceId} AND released_at IS NULL`),held);
+  if(scheduled){
+  // Real terminal deletion: cancellation/removal never confer projection ownership.
+  await queue.cancelJob(job.id);assert.equal(await queue.removeJob(job.id),true);
+  assert.equal(await queue.getJob(job.id),null);
+  const {markdownProjectionJobStatus}=await import('../src/core/minions/handlers/markdown-projection');
+  const retainedStatus=await markdownProjectionJobStatus(engine,sourceId);
+  assert.equal(retainedStatus.ownership.length,1);
+  assert.equal(retainedStatus.recovery,'operator_blocked_no_automatic_recovery');
+  assert.deepEqual(Array.from(await db`SELECT * FROM public.markdown_projection_attempts WHERE source_id=${sourceId} AND released_at IS NULL`),held);
+  emit({stage:'scheduled.terminal-deleted-held',jobId:job.id,jobs:Array.from(await db`SELECT * FROM minion_jobs WHERE id=${job.id}`),attempts:held,status:retainedStatus});
+  }
   const refusal=invoke('drain',configPath);assert.equal(JSON.parse(refusal.output.trim()).code,'projection_reservation_unavailable_operator_required'); // reserve-before-input refusal
   assert.deepEqual(Array.from(await db`SELECT * FROM public.markdown_projection_attempts WHERE source_id=${sourceId} AND released_at IS NULL`),held);
   await assert.rejects(()=>makeMarkdownProjectionHandler(adapters[1] as any,{configPath:()=>configPath,...fault})({...context,data:{sourceId}} as any));

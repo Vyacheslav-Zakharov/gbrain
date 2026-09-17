@@ -220,6 +220,12 @@ HANDLER TYPES (built in)
   const queue = new MinionQueue(engine);
 
   switch (sub) {
+    case 'projection-status': {
+      if(args.length!==2)throw new Error('Usage: gbrain jobs projection-status <source>');
+      const {markdownProjectionJobStatus}=await import('../core/minions/handlers/markdown-projection');
+      console.log(JSON.stringify(await markdownProjectionJobStatus(engine,args[1])));
+      return;
+    }
     case 'submit': {
       const name = args[1];
       if (!name) {
@@ -909,6 +915,13 @@ HANDLER TYPES (built in)
         queue: queueName, concurrency, maxRssMb, healthCheckInterval,
       });
       await registerBuiltinHandlers(worker, engine);
+
+      // Subscribe to self-health failures emitted by the worker. Library code
+      const {readProjectionSchedule,makeProjectionProducer} = await import('../core/minions/markdown-projection-scheduler');
+      const projectionSources = readProjectionSchedule();
+      if (projectionSources.length && queueName === 'default') {
+        worker.setProjectionProducer(makeProjectionProducer(engine, projectionSources));
+      }
 
       // Subscribe to self-health failures emitted by the worker. Library code
       // (worker.ts) never calls process.exit directly so it stays embeddable;

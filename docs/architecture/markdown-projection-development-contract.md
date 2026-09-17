@@ -2,7 +2,15 @@
 
 Status: **Development only; owner-approved process-isolated copy-worker pivot.** Bounded isolated recovery accepted at source `4844c2f45b4b615530524ccc88fc22cfd527fb2d`, hosted run `35152934953` attempt 1; see external recovery acceptance closure. The runtime admission delta below is NOT covered by that hosted proof. No activation authorization.
 
-## Protected runtime one-shot preparation (current delta)
+## Scheduled publication preparation (uncommitted; not hosted-accepted)
+
+`gbrain jobs work` now reads the private, default-absent `/etc/gbrain/markdown-projection/schedule.json` (version 1, enabled boolean, bounded unique source names only). Its existing default-queue worker poll invokes the finite producer; existing protected handler and isolated supervisor remain the publication path. No timer installation, startup DDL, config writing, migration registration or activation is performed.
+
+`gbrain jobs projection-status <source>` reports retained source telemetry, queue errors/retries/leases, ownership and obligation lag (>300 seconds), without treating completed jobs or generation maxima as page success. Candidate-only source telemetry has no job FK; unknown ownership remains blocked. Last-seen timestamps are not asserted to prove liveness.
+
+A9/A10 are **PARTIALLY IMPLEMENTED, NOT CLOSED**. Offline actual worker-start/registered-dispatch and duplicate-producer tests use a SQL-boundary double, not PostgreSQL. The existing hosted healthy fixture now has a prepared nonowner persisted waiting-job reconnect, actual worker/producer, ordinary-job coexistence, canonical publication and raw job/attempt/status receipts. It has NOT executed. Safe reaped delayed-retry/restart, actual producer/worker process death, held terminal-job deletion under PostgreSQL, controlled >300s lag assertion, complete source-crossing/coexistence acceptance and exact hosted inventory/validator extension remain pending. The prepared latency assertion currently times producer submission, not the mutation commit; it is not accepted A10 evidence. Tombstones, manual recovery and ambiguous COMMIT remain separate.
+
+## Protected runtime one-shot preparation (historical delta)
 
 Acceptance rows selected from the closure: **A5/A6/A11 production executable admission** and the bounded local drain/read-only subset of **A9-status**. A8 ambiguous-COMMIT is still a hosted gate. A9-scheduler/A10 and A9-tombstone remain separate, unimplemented. Earlier pending recovery statements below describe historical evidence, superseded by the closure, not this new runtime candidate.
 

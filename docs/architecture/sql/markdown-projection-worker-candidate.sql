@@ -68,4 +68,20 @@ CREATE POLICY mp_attempt_source ON public.markdown_projection_attempts
 -- Never DELETE/TRUNCATE, identity UPDATE, table-wide INSERT/UPDATE, role membership,
 -- or authority-table writes. Direct DML login is trusted; RLS is not stop proof.
 -- No operator reset routine, TTL, or automatic enrollment.
+-- Finite scheduler diagnostics survive generic job deletion. Not stop authority.
+CREATE TABLE public.markdown_projection_source_status (
+ source_id text PRIMARY KEY,
+ scheduler_seen_at timestamptz,
+ worker_seen_at timestamptz,
+ last_error text,
+ CHECK(last_error IS NULL OR last_error IN ('projection_attempt_failed','projection_schedule_failed'))
+);
+REVOKE ALL ON public.markdown_projection_source_status FROM PUBLIC;
+ALTER TABLE public.markdown_projection_source_status ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.markdown_projection_source_status FORCE ROW LEVEL SECURITY;
+CREATE POLICY mp_status_source ON public.markdown_projection_source_status
+ USING(EXISTS(SELECT 1 FROM public.markdown_projection_attempt_authority a WHERE a.login_name=session_user AND a.source_id=markdown_projection_source_status.source_id))
+ WITH CHECK(EXISTS(SELECT 1 FROM public.markdown_projection_attempt_authority a WHERE a.login_name=session_user AND a.source_id=markdown_projection_source_status.source_id));
+-- Separately reviewed login grants: SELECT, INSERT(source_id,scheduler_seen_at,
+-- worker_seen_at,last_error), UPDATE(scheduler_seen_at,worker_seen_at,last_error).
 COMMIT;

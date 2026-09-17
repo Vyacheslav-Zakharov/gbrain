@@ -13,8 +13,12 @@ function protectedPath(p:string,privateDirectory=false){
 }
 /** No discovery, credentials from argv/env, implicit enablement or fixture overrides. */
 export function admitRuntime(request:any){
- if(!exact(request,['admission','action','configPath','supervisionRunId','sourceId'])||request.admission!=='PROTECTED_RUNTIME_V1'||!['status','drain'].includes(request.action))fail();
  if(Object.keys(process.env).some(k=>k.startsWith('PG')||k==='DATABASE_URL'||k.startsWith('MARKDOWN_PROJECTION_')))fail();
+ return admitRuntimeConfiguration(request);
+}
+/** Read-only parent admission; credentials remain file-authoritative. Child environment admission is unchanged. */
+export function admitRuntimeConfiguration(request:any){
+ if(!exact(request,['admission','action','configPath','supervisionRunId','sourceId'])||request.admission!=='PROTECTED_RUNTIME_V1'||!['status','drain'].includes(request.action))fail();
  if(request.configPath===undefined)return undefined;
  pathName(request.configPath); protectedPath(dirname(request.configPath));
  const fd=openSync(request.configPath,constants.O_RDONLY|constants.O_NOFOLLOW);

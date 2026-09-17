@@ -65,7 +65,7 @@ async function harness(deps: ProjectionTickDependencies, fault?:'reserve'|'recor
   if(sql.includes('WHERE id = $1'))return [{id:1}];
   return [];
  }};
- const worker=new MinionWorker(engine);await registerBuiltinHandlers(worker,engine,{quiet:true,projectionTick:deps});
+ const worker=new MinionWorker(engine);await registerBuiltinHandlers(worker,engine,{quiet:true,projectionTick:{admit:()=>({worker:{enabled:true,sourceId:'source-a',root:'/protected',inputRoots:[]},connection:{}}),...deps}});
  const q=(worker as any).queue;
  q.isActive=async()=>true;q.getJob=async()=>({status:'active',lock_token:'token'});
  q.failJob=async(...args:any[])=>{failures.push(args);return true;};
@@ -96,7 +96,7 @@ test('payload override rejected before launch and protected submission before DB
  const h=await harness({configPath:()=>undefined});await h.execute({sourceId:'source-a',configPath:'/evil'});expect(h.failures[0][2]).toBe('projection_payload_refused');
  await expect(new MinionQueue(h.engine).add(PROJECTION_JOB,{sourceId:'source-a'})).rejects.toThrow('protected job name');
  await expect(submitMarkdownProjectionTick(h.engine,'source-a','1',true)).rejects.toThrow('projection_submit_refused');
- expect(await markdownProjectionJobStatus(h.engine,'source-a')).toMatchObject({perPageError:'unavailable',projectionHeartbeat:'unavailable',schedulerLiveness:'unavailable'});
+ expect(await markdownProjectionJobStatus(h.engine,'source-a')).toMatchObject({perPageError:'unavailable',projectionHeartbeat:'unavailable',schedulerLiveness:'not_inferred_from_last_seen'});
 });
 for(const action of ['remove','prune'] as const)test(`retained ownership survives real queue ${action} and fresh dispatcher`,async()=>{
  let runs=0;const h=await harness({configPath:()=>'/protected/config',run:async()=>{runs++;throw Error('unknown stop');}});
