@@ -16,6 +16,28 @@ function fixture(){
  Object.assign(get('scheduled.terminal-deleted-held'),{scenario:'unknown-ownership',database:'mp_accept_1111111111111111',jobId:2,jobs:[],attempts:[{job_id:2,run_id:'held',released_at:null}],status:{ownership:[{run_id:'held'}],recovery:'operator_blocked_no_automatic_recovery'}});
  return rows;
 }
+test('retained pre-scheduler CLI attempts and PostgreSQL bigint job ids preserve exact new-attempt proof',()=>{
+ const rows=fixture();
+ const get=(s:string)=>rows.find(r=>r.stage===s);
+ const prior=[0,1].map(i=>({source_id:'runtime-healthy',job_id:'0',run_id:`prior-${i}`,state:'reaped',released_at:'earlier'}));
+ get('scheduled.attempts.waiting').rows=structuredClone(prior);
+ const attempts=get('scheduled.attempts.completed').rows.map((a:any)=>({...a,source_id:'runtime-healthy',job_id:'1'}));
+ get('scheduled.attempts.delayed').rows=[...structuredClone(prior),attempts[0]];
+ get('scheduled.attempts.completed').rows=[...structuredClone(prior),...attempts];
+ get('scheduled.terminal-deleted-held').attempts[0].job_id='2';
+ expect(()=>verifyScheduledMarkers(rows)).not.toThrow();
+ for(const mutate of [
+  (r:any[])=>{r.find(x=>x.stage==='scheduled.attempts.completed').rows[0].released_at='changed';},
+  (r:any[])=>{r.find(x=>x.stage==='scheduled.attempts.completed').rows.pop();},
+  (r:any[])=>{r.find(x=>x.stage==='scheduled.attempts.completed').rows.push({...attempts[0],run_id:'extra'});},
+  (r:any[])=>{r.find(x=>x.stage==='scheduled.attempts.completed').rows[2].job_id='01';},
+  (r:any[])=>{r.find(x=>x.stage==='scheduled.attempts.completed').rows[2].job_id='other';},
+  (r:any[])=>{r.find(x=>x.stage==='scheduled.attempts.completed').rows[2].job_id=['1'];},
+  (r:any[])=>{r.find(x=>x.stage==='scheduled.attempts.delayed').rows[0].state='reserved';},
+  (r:any[])=>{r.find(x=>x.stage==='scheduled.terminal-deleted-held').attempts[0].job_id='02';},
+  (r:any[])=>{r.find(x=>x.stage==='scheduled.attempts.completed').rows[2].run_id='prior-0';},
+ ]){const bad=structuredClone(rows);mutate(bad);expect(()=>verifyScheduledMarkers(bad)).toThrow();}
+});
 test('exact scheduled validator rejects missing, duplicated, wrong identity and fictional restart',()=>{
  const rows=fixture();expect(()=>verifyScheduledMarkers(rows)).not.toThrow();
  for(const stage of scheduledStages){expect(()=>verifyScheduledMarkers(rows.filter(r=>r.stage!==stage))).toThrow();expect(()=>verifyScheduledMarkers([...rows,rows.find(r=>r.stage===stage)])).toThrow();}
