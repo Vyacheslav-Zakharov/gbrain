@@ -36,16 +36,24 @@ export function makeProjectionProducer(engine:BrainEngine,sources:readonly strin
   const slot=String(Math.floor(now()/30000));
   if(slot===lastSlot)return;
   for(const source of sources){
-   try {requireProjectionConfiguration(source,deps.configPath?.(source)??`/etc/gbrain/markdown-projection/${source}.json`,deps.admit);}
-   catch(error){
-    await engine.executeRaw(`INSERT INTO public.markdown_projection_source_status(source_id,scheduler_seen_at,last_error) VALUES ($1,now(),'projection_configuration_failed') ON CONFLICT(source_id) DO UPDATE SET scheduler_seen_at=now(),last_error='projection_configuration_failed'`,[source]);
-    throw error;
+   let failure='projection_configuration_failed';
+   try {
+    requireProjectionConfiguration(source,deps.configPath?.(source)??`/etc/gbrain/markdown-projection/${source}.json`,deps.admit);
+    failure='projection_schedule_failed';
+    await engine.executeRaw(`INSERT INTO public.markdown_projection_source_status(source_id,scheduler_seen_at) VALUES ($1,now()) ON CONFLICT(source_id) DO UPDATE SET scheduler_seen_at=now()`,[source]);
+    const held=await engine.executeRaw(`SELECT run_id FROM public.markdown_projection_attempts WHERE source_id=$1 AND released_at IS NULL`,[source]);
+    if(held.length)continue;
+    const pending=await engine.executeRaw(`SELECT id FROM minion_jobs WHERE name='markdown-projection-tick' AND data->>'sourceId'=$1 AND status IN ('waiting','active','delayed') LIMIT 1`,[source]);
+    if(!pending.length)await submitMarkdownProjectionTick(engine,source,slot,false);
+   } catch {
+    // Refuse this source, not unrelated sources or the shared worker claim loop.
+    // Never expose raw configuration/SQL errors (which may contain credentials).
+    try {
+     await engine.executeRaw(`INSERT INTO public.markdown_projection_source_status(source_id,scheduler_seen_at,last_error) VALUES ($1,now(),$2) ON CONFLICT(source_id) DO UPDATE SET scheduler_seen_at=now(),last_error=$2`,[source,failure]);
+    } catch {
+     console.error('[markdown-projection]',source,failure,'projection_schedule_status_unavailable');
+    }
    }
-   await engine.executeRaw(`INSERT INTO public.markdown_projection_source_status(source_id,scheduler_seen_at) VALUES ($1,now()) ON CONFLICT(source_id) DO UPDATE SET scheduler_seen_at=now()`,[source]);
-   const held=await engine.executeRaw(`SELECT run_id FROM public.markdown_projection_attempts WHERE source_id=$1 AND released_at IS NULL`,[source]);
-   if(held.length)continue;
-   const pending=await engine.executeRaw(`SELECT id FROM minion_jobs WHERE name='markdown-projection-tick' AND data->>'sourceId'=$1 AND status IN ('waiting','active','delayed') LIMIT 1`,[source]);
-   if(!pending.length)await submitMarkdownProjectionTick(engine,source,slot,false);
   }
   lastSlot=slot;
  };

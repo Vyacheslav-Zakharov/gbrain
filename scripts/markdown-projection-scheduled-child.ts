@@ -6,8 +6,9 @@ import {MinionWorker} from '../src/core/minions/worker';
 import {MinionQueue} from '../src/core/minions/queue';
 import {registerBuiltinHandlers} from '../src/commands/jobs';
 import {runIsolatedAsync} from './markdown-projection-isolated-caller';
+import {makeProjectionProducer} from '../src/core/minions/markdown-projection-scheduler';
 const [path,mode,idText,ordinaryText]=process.argv.slice(2);
-assert(['die-delayed','complete'].includes(mode));
+assert(['die-delayed','complete','config-refused'].includes(mode));
 const c=JSON.parse(readFileSync(path,'utf8'));
 assert(/^mp_accept_[0-9a-f]{16}$/.test(c.connection.database));
 assert.equal(c.connection.host,'127.0.0.1');
@@ -23,10 +24,12 @@ await registerBuiltinHandlers(worker,engine,{quiet:true,projectionTick:{configPa
  catch(error){emit({stage:'scheduled.isolated-failure',receipt:(error as any).receipt});throw error;}
 }}});
 worker.register('scheduled-fixture-ordinary',async()=>({ordinary:true}));
+worker.setProjectionProducer(makeProjectionProducer(engine,[c.worker.sourceId],Date.now,{configPath:()=>mode==='config-refused'?'/nonexistent/scheduled-refused.json':path}));
 const running=worker.start();
 try{
  const deadline=Date.now()+20000;
  while(Date.now()<deadline){
+  if(mode==='config-refused'&&(await queue.getJob(Number(ordinaryText)))?.status==='completed')break;
   const job=await queue.getJob(Number(idText));
   if(mode==='die-delayed'&&job?.status==='delayed'){
    emit({stage:'scheduled.child-delayed',pid:process.pid,job});
@@ -38,6 +41,7 @@ try{
   }
   await new Promise(r=>setTimeout(r,20));
  }
- if(mode==='complete')assert.equal((await queue.getJob(Number(idText)))?.status,'completed');
+ if(mode==='config-refused')assert.equal((await queue.getJob(Number(ordinaryText)))?.status,'completed');
+ else if(mode==='complete')assert.equal((await queue.getJob(Number(idText)))?.status,'completed');
  else throw Error('delayed state not reached');
 }finally{worker.stop();await running;await engine.disconnect();}

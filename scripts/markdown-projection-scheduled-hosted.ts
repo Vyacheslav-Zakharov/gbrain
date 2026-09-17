@@ -16,8 +16,19 @@ export async function scheduledHosted(database:string,role:string,password:strin
   emit({stage:`scheduled.status.${stage}`,value:await markdownProjectionJobStatus(engine,source)});
  };
  try{
+  // Real registered worker with attached invalid producer: no projection enqueue,
+  // durable exact error, and an unrelated ordinary job still completes.
+  const refusedOrdinary=await new MinionQueue(engine).add('scheduled-fixture-ordinary',{});
+  const refused=supervisedFixtureCLI([process.execPath,'scripts/markdown-projection-scheduled-child.ts',configPath,'config-refused','0',String(refusedOrdinary.id)],{scenario:'scheduled-config-refused',root:dirname(configPath)});
+  assert(!refused.output.includes(password));assert.equal(refused.exit,0);
+  assert.equal((await new MinionQueue(engine).getJob(refusedOrdinary.id))?.status,'completed');
+  assert.equal((await engine.executeRaw(`SELECT id FROM minion_jobs WHERE name='markdown-projection-tick' AND data->>'sourceId'=$1`,[source])).length,0);
+  assert.equal((await markdownProjectionJobStatus(engine,source)).telemetry[0].last_error,'projection_configuration_failed');
+  await snapshot('configuration-refused');
+  emit({stage:'scheduled.configuration-contained',status:'passed',proof:refused.parentProof});
   const started=Date.now();const slotTime=()=>started;
-  await Promise.all([makeProjectionProducer(engine,[source],slotTime)(),makeProjectionProducer(engine,[source],slotTime)()]);
+  const deps={configPath:()=>configPath};
+  await Promise.all([makeProjectionProducer(engine,[source],slotTime,deps)(),makeProjectionProducer(engine,[source],slotTime,deps)()]);
   const rows=await engine.executeRaw<any>(`SELECT * FROM minion_jobs WHERE name='markdown-projection-tick' AND data->>'sourceId'=$1`,[source]);
   assert.equal(rows.length,1);const id=rows[0].id;assert.equal(rows[0].status,'waiting');
   assert.equal(rows[0].backoff_delay,30000);
@@ -34,7 +45,7 @@ export async function scheduledHosted(database:string,role:string,password:strin
   const dead=launch('die-delayed');assert.equal(dead.exit,-9);await snapshot('delayed');
   const delayed=await new MinionQueue(engine).getJob(id);assert.equal(delayed?.status,'delayed');assert.equal(delayed?.attempts_made,1);
   assert.equal((await markdownProjectionJobStatus(engine,source)).ownership.length,0);
-  await makeProjectionProducer(engine,[source],()=>started+30000)();
+  await makeProjectionProducer(engine,[source],()=>started+30000,deps)();
   assert.equal((await engine.executeRaw(`SELECT id FROM minion_jobs WHERE name='markdown-projection-tick' AND data->>'sourceId'=$1`,[source])).length,1);
   const restarted=launch('complete');assert.equal(restarted.exit,0);assert.notEqual(dead.parentProof.pid,restarted.parentProof.pid);
   assert.equal((await new MinionQueue(engine).getJob(id))?.status,'completed');

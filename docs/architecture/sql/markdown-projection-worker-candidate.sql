@@ -74,7 +74,7 @@ CREATE TABLE public.markdown_projection_source_status (
  scheduler_seen_at timestamptz,
  worker_seen_at timestamptz,
  last_error text,
- CHECK(last_error IS NULL OR last_error IN ('projection_attempt_failed','projection_schedule_failed'))
+ CHECK(last_error IS NULL OR last_error IN ('projection_attempt_failed','projection_schedule_failed','projection_configuration_failed'))
 );
 REVOKE ALL ON public.markdown_projection_source_status FROM PUBLIC;
 ALTER TABLE public.markdown_projection_source_status ENABLE ROW LEVEL SECURITY;
