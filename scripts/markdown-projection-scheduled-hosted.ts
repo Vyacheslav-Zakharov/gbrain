@@ -24,10 +24,13 @@ export async function scheduledHosted(database:string,role:string,password:strin
   emit({stage:'scheduled.schema-version',status:'passed',version,latestVersion:LATEST_VERSION,visible});
   const queue=new MinionQueue(engine);
   assert.equal(deniedIds.length,2);
-  const denied=(fn:()=>Promise<unknown>)=>assert.rejects(fn,(e:any)=>e.code==='42501'&&/row-level security/.test(e.message));
+  const denied=(fn:()=>Promise<unknown>)=>assert.rejects(Promise.resolve().then(fn),(e:any)=>e.code==='42501'&&/row-level security/.test(e.message));
+  // Application authorization and database source isolation are separate gates.
+  await assert.rejects(Promise.resolve().then(()=>queue.add('markdown-projection-tick',{sourceId:source})),/protected job name 'markdown-projection-tick' requires CLI or operation-local submitter/);
+  // Trusted local fixture submission must reach SQL; RLS still rejects its source.
+  await denied(()=>queue.add('markdown-projection-tick',{sourceId:source+'-wrong'},undefined,{allowProtectedSubmit:true}));
   // Actual physical login, SQLSTATE checks, and seeded invisible rows, not mocks.
   for(const [name,data] of [
-   ['markdown-projection-tick',{sourceId:source+'-wrong'}],
    ['scheduled-fixture-wrong',{sourceId:source}],
    ['scheduled-fixture-ordinary',{sourceId:source+'-wrong'}],
   ] as const)await denied(()=>queue.add(name,data));
