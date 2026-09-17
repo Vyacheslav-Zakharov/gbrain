@@ -122,9 +122,29 @@ export async function runtimeHosted(db:ReturnType<typeof postgres>,engine:Postgr
    GRANT INSERT(source_id,scheduler_seen_at,worker_seen_at,last_error),UPDATE(scheduler_seen_at,worker_seen_at,last_error) ON markdown_projection_source_status TO ${role};
    GRANT SELECT,INSERT,UPDATE,DELETE ON minion_jobs,minion_inbox TO ${role};
    GRANT USAGE,SELECT ON SEQUENCE minion_jobs_id_seq,minion_inbox_id_seq TO ${role};`);
+  // Disposable login only: ordinary payload is empty, so source alone cannot scope it.
+  // SELECT is required by INSERT/UPDATE RETURNING *, claim's self-subquery and inbox joins.
+  await db.unsafe(`ALTER TABLE public.minion_jobs ENABLE ROW LEVEL SECURITY;
+   ALTER TABLE public.minion_jobs FORCE ROW LEVEL SECURITY;
+   ALTER TABLE public.minion_inbox ENABLE ROW LEVEL SECURITY;
+   ALTER TABLE public.minion_inbox FORCE ROW LEVEL SECURITY;
+   CREATE POLICY mp_runtime_jobs ON public.minion_jobs FOR ALL TO ${role}
+    USING((name='scheduled-fixture-ordinary' AND data='{}'::jsonb) OR (name='markdown-projection-tick' AND data->>'sourceId'='${sourceId}'))
+    WITH CHECK((name='scheduled-fixture-ordinary' AND data='{}'::jsonb) OR (name='markdown-projection-tick' AND data->>'sourceId'='${sourceId}'));
+   CREATE POLICY mp_runtime_inbox ON public.minion_inbox FOR ALL TO ${role}
+    USING(EXISTS(SELECT 1 FROM public.minion_jobs j WHERE j.id=minion_inbox.job_id))
+    WITH CHECK(EXISTS(SELECT 1 FROM public.minion_jobs j WHERE j.id=minion_inbox.job_id));`);
+  const denied=Array.from(await db`INSERT INTO minion_jobs(name,data) VALUES
+   ('markdown-projection-tick',jsonb_build_object('sourceId',${sourceId+'-wrong'}::text)),
+   ('scheduled-fixture-wrong',jsonb_build_object('sourceId',${sourceId}::text)) RETURNING *`);
+  for(const job of denied)await db`INSERT INTO minion_inbox(job_id,sender,payload) VALUES (${job.id},'admin','{}'::jsonb)`;
+  const deniedInbox=Array.from(await db`SELECT * FROM minion_inbox WHERE job_id=ANY(${denied.map(j=>j.id)}) ORDER BY id`);
   await engine.putPage('runtime-page',{type:'note',title:'Scheduled fixture',compiled_truth:'Automatic persisted tick',timeline:'',frontmatter:{}},opts);
   const {scheduledHosted}=await import('./markdown-projection-scheduled-hosted');
-  await scheduledHosted(database,role,password,sourceId,configPath,emit);
+  await scheduledHosted(database,role,password,sourceId,configPath,emit,denied.map(j=>Number(j.id)));
+  assert.deepEqual(Array.from(await db`SELECT * FROM minion_jobs WHERE id=ANY(${denied.map(j=>j.id)}) ORDER BY id`),denied);
+  assert.deepEqual(Array.from(await db`SELECT * FROM minion_inbox WHERE job_id=ANY(${denied.map(j=>j.id)}) ORDER BY id`),deniedInbox);
+  emit({stage:'scheduled.queue-rls-owner-readback',status:'passed'});
   const [latest]=await db`SELECT * FROM markdown_projection_current WHERE source_id=${sourceId}`;
   assert.equal(await readFile(`${root}/${latest.current_path}`,'utf8'),serializePageToMarkdown((await engine.getPage('runtime-page',opts))!,[]));
  }

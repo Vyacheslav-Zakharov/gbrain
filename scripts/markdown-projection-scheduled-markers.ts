@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-export const scheduledStages=['scheduled.complete','scheduled.process.die-delayed','scheduled.process.complete','scheduled.child-delayed','scheduled.child-completed','scheduled.isolated-failure','scheduled.isolated-receipt',...['waiting','delayed','completed'].flatMap(s=>['jobs','attempts','status'].map(k=>`scheduled.${k}.${s}`)),'scheduled.terminal-deleted-held'];
+export const scheduledStages=['scheduled.queue-rls','scheduled.queue-rls-owner-readback','scheduled.complete','scheduled.process.die-delayed','scheduled.process.complete','scheduled.child-delayed','scheduled.child-completed','scheduled.isolated-failure','scheduled.isolated-receipt',...['waiting','delayed','completed'].flatMap(s=>['jobs','attempts','status'].map(k=>`scheduled.${k}.${s}`)),'scheduled.terminal-deleted-held'];
 export function verifyScheduledMarkers(rows:any[]){
  const one=(stage:string)=>{const found=rows.filter(r=>r.stage===stage);assert.equal(found.length,1,stage);return found[0];};
  scheduledStages.forEach(one);
+ for(const stage of ['scheduled.queue-rls','scheduled.queue-rls-owner-readback'])assert.equal(one(stage).status,'passed');
  const final=one('scheduled.complete');assert.equal(final.status,'passed');
  for(const stage of scheduledStages){const r=one(stage);if(stage==='scheduled.terminal-deleted-held')continue;for(const key of ['database','sourceId','fixtureRoot','scenario'])assert(r[key]&&r[key]===final[key]);}
  const dead=one('scheduled.process.die-delayed').proof,fresh=one('scheduled.process.complete').proof;

@@ -3,6 +3,7 @@ import {scheduledStages,verifyScheduledMarkers} from './markdown-projection-sche
 function fixture(){
  const rows:any[]=scheduledStages.map(stage=>({stage,database:'mp_accept_0000000000000000',sourceId:'runtime-healthy',fixtureRoot:'/private/healthy',scenario:'healthy'}));
  const get=(s:string)=>rows.find(r=>r.stage===s);
+ for(const stage of ['scheduled.queue-rls','scheduled.queue-rls-owner-readback'])get(stage).status='passed';
  Object.assign(get('scheduled.complete'),{status:'passed',jobId:1});
  for(const [i,mode] of ['die-delayed','complete'].entries()){
   const pid=100+i,runId=`process-${i}`;
