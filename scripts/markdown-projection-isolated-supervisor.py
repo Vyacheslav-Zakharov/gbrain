@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Development-only bounded one-shot caller. JSON config on stdin, never argv.
-Success requires a completion receipt AND zero exit AND verified group reaping.
+Success requires completion AND zero exit AND kernel child/group/session closure.
+Linux dedicated single-thread/exclusive-child supervisor; not OS-wide containment.
 No database, Portal engine or shared pool exists in this supervisor.
 """
 import ctypes
@@ -26,6 +27,7 @@ def run(command, config, seconds=20, attempts=1):
         raise ValueError('invalid bounded lifetime/attempts')
     if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:
         raise RuntimeError('cannot enable subreaper')
+    reaper.admit_owned_supervisor()
     receipts = []
     run_id = config.get('supervisionRunId') or str(uuid.uuid4())
     def final(status, **extra):
@@ -59,7 +61,7 @@ def run(command, config, seconds=20, attempts=1):
                 try:
                     import contextlib
                     with contextlib.redirect_stdout(sys.stderr):
-                        reaper.cleanup_group(proc)
+                        reaper.cleanup_owned(proc)
                     receipt['reaped'] = True
                 except BaseException:
                     receipt['errors'].append('reaping_failed')

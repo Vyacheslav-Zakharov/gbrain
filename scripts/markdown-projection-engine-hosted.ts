@@ -202,7 +202,25 @@ try {
     await isolatedRecovery(engine,observer,isolatedConfig,emit);
   }
   const {runtimeHosted}=await import('./markdown-projection-runtime-hosted');
-  await runtimeHosted(observer,engine,name,expectedServiceIP,process.env.MARKDOWN_PROJECTION_RUNTIME_ROOT!,emit);
+  // Independent disposable identities; neither scenario reuses the main engine DB.
+  for(const scenario of ['healthy','unknown-ownership'] as const){
+    const runtimeDatabase=`mp_accept_${randomBytes(8).toString('hex')}`;
+    const runtimeRoot=await mkdtemp(`${process.env.MARKDOWN_PROJECTION_RUNTIME_ROOT!}/${scenario}-`);
+    const runtimeEngine=new PostgresEngine();let runtimeDB:ReturnType<typeof postgres>|undefined;
+    let runtimeCreated=false;
+    try{
+      await admin.unsafe(`CREATE DATABASE ${runtimeDatabase}`);runtimeCreated=true;
+      runtimeDB=postgres(connectionArgs(runtimeDatabase));await verifyTarget(runtimeDB,runtimeDatabase,url.username);
+      const runtimeURL=new URL(rawUrl);runtimeURL.pathname=`/${runtimeDatabase}`;
+      await runtimeEngine.connect({engine:'postgres',database_url:runtimeURL.href,poolSize:1});await runtimeEngine.initSchema();
+      for(const sql of ['markdown-projection-candidate.sql','markdown-projection-worker-candidate.sql'])await runtimeDB.unsafe(await readFile(new URL(`../docs/architecture/sql/${sql}`,import.meta.url),'utf8'));
+      await runtimeHosted(runtimeDB,runtimeEngine,runtimeDatabase,expectedServiceIP,runtimeRoot,emit,scenario,`runtime-${scenario}`);
+    }finally{
+      const cleanupErrors:unknown[]=[];
+      for(const cleanup of [()=>runtimeEngine.disconnect(),()=>runtimeDB?.end({timeout:2}),async()=>{if(runtimeCreated)await admin.unsafe(`DROP DATABASE ${runtimeDatabase} WITH (FORCE)`);},async()=>assert.equal((await admin`SELECT datname FROM pg_database WHERE datname=${runtimeDatabase}`).length,0)]){try{await cleanup();}catch(error){cleanupErrors.push(error);}}
+      if(cleanupErrors.length)throw new AggregateError(cleanupErrors,'runtime scenario cleanup failed');
+    }
+  }
 } catch(e) { failed=true; failure=e; emit({stage,status:'failed',message:String(e),code:(e as any)?.code}); }
 finally {
   const errors:unknown[]=[];

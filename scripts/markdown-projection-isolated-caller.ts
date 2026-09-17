@@ -6,6 +6,18 @@ import {accessSync,constants,realpathSync,statSync} from 'node:fs';
 import {isAbsolute} from 'node:path';
 type Attempt = {attempt:number;runId:string;pid:number;reaped:true;exitCode:number;errors:string[]};
 type Receipt = {protocol:string;final:true;runId:string;status:'passed'|'failed';attempts:Attempt[];copyStatus?:string};
+// Process-local capability: a boolean/property or copied JSON is not stop authority.
+const verifiedStops = new WeakMap<object, string>();
+export function authenticatedProjectionStop(value: unknown, runId: string): boolean {
+ return typeof value === 'object' && value !== null && verifiedStops.get(value) === runId;
+}
+export function authenticatedProjectionDiagnostics(value:unknown){
+ if(typeof value!=='object'||value===null||!verifiedStops.has(value))return undefined;
+ const receipt=(value as any).receipt;
+ if(!receipt||receipt.status!=='failed')return undefined;
+ return {status:'failed',attempts:receipt.attempts.map((a:Attempt)=>({attempt:a.attempt,exitCode:a.exitCode,errors:a.errors.filter(e=>codes.has(e))}))};
+}
+export type ProjectionSupervision = {runId: string; beforeInput: (pid: number) => Promise<void>};
 const record=(value:unknown):value is Record<string,unknown> => typeof value==='object' && value!==null && !Array.isArray(value);
 const codes=new Set(['lifetime_deadline','output_limit','supervisor_interrupted','child_unstructured_error_redacted','child_protocol_error','connection_closed','unhandled_error','worker_failed','admission_failed','child_exit_failure','missing_unique_completion']);
 // Total over JSON values: narrow each container before touching its members.
@@ -50,25 +62,38 @@ function finishIsolated(output:string,runId:string,primary:unknown):Receipt {
   // Admission happens only after full validation and result construction.
   const result:Receipt={...receipt,attempts:receipt.attempts.map(a=>({...a,errors:[...a.errors]}))};
   verified=true;
-  if(result.status==='passed')return result;
+  if(result.status==='passed'){verifiedStops.set(result,runId);return result;}
  }catch(e){validationError=e;verified=false;}
- throw Object.assign(new Error('isolated worker failed',{cause:primary??validationError}),{
+ const failure = Object.assign(new Error('isolated worker failed',{cause:primary??validationError}),{
   unsafeFilesystemCleanup:!verified,receipt,primaryError:primary,validationError,
   cleanupErrors:verified?[]:['process stop unverified'],
  });
+ if(verified)verifiedStops.set(failure,runId);
+ throw failure;
 }
 // Async transport uses the identical executable, supervisor and receipt validator.
-export async function runIsolatedAsync(config:object):Promise<Receipt> {
- const runId=randomUUID();
+export async function runIsolatedAsync(config:object, supervision?:ProjectionSupervision, command=['python3','-B',new URL('./markdown-projection-isolated-supervisor.py',import.meta.url).pathname]):Promise<Receipt> {
+ const runId=supervision?.runId ?? randomUUID();
  return new Promise((resolve,reject)=>{
-  const child=execFile('python3',['-B',new URL('./markdown-projection-isolated-supervisor.py',import.meta.url).pathname,'--bun',process.execPath],
+  const child=execFile(command[0],[...command.slice(1),'--bun',process.execPath],
    {encoding:'utf8',timeout:27000,maxBuffer:65536},(error,stdout)=>{
     try{
      const primary=error?Object.assign(error,{status:typeof error.code==='number'?error.code:undefined}):undefined;
      resolve(finishIsolated(stdout,runId,primary));
     }catch(e){reject(e);}
    });
-  child.stdin!.end(JSON.stringify({...config,supervisionRunId:runId}));
+  void (async()=>{
+   try {
+    if(supervision){
+     if(!child.pid)throw new Error('supervisor identity unavailable');
+     await supervision.beforeInput(child.pid);
+    }
+    child.stdin!.end(JSON.stringify({...config,supervisionRunId:runId}));
+   } catch(error) {
+    // No worker input is delivered. Never infer reaping from kill success.
+    child.stdin?.destroy();child.kill('SIGKILL');reject(error);
+   }
+  })();
  });
 }
 export async function removeHostedHome(home:string,failure:unknown){

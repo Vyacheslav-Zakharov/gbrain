@@ -13,7 +13,7 @@ function protectedPath(p:string,privateDirectory=false){
 }
 /** No discovery, credentials from argv/env, implicit enablement or fixture overrides. */
 export function admitRuntime(request:any){
- if(!exact(request,['admission','action','configPath','supervisionRunId'])||request.admission!=='PROTECTED_RUNTIME_V1'||!['status','drain'].includes(request.action))fail();
+ if(!exact(request,['admission','action','configPath','supervisionRunId','sourceId'])||request.admission!=='PROTECTED_RUNTIME_V1'||!['status','drain'].includes(request.action))fail();
  if(Object.keys(process.env).some(k=>k.startsWith('PG')||k==='DATABASE_URL'||k.startsWith('MARKDOWN_PROJECTION_')))fail();
  if(request.configPath===undefined)return undefined;
  pathName(request.configPath); protectedPath(dirname(request.configPath));
@@ -29,6 +29,7 @@ export function admitRuntime(request:any){
  typeof b?.host!=='string'||!b.host||typeof b.database!=='string'||!b.database||! /^[A-Za-z_][A-Za-z0-9_]*$/.test(b.username??'')||typeof b.password!=='string'||
  typeof b.expectedServerAddress!=='string'||!Number.isInteger(b.port)||b.port<1||b.port>65535||!Number.isInteger(b.expectedServerPort)||b.expectedServerPort<1||b.expectedServerPort>65535||
  !['verify-full','local-only'].includes(b.tls)||(b.tls==='local-only'&&!['127.0.0.1','::1'].includes(b.host)))fail();
+ if(request.sourceId!==undefined && request.sourceId!==w.sourceId)fail();
  pathName(w.root);
  // Validate every lexical field before touching any output/input root.
  for(const p of w.inputRoots)pathName(p);

@@ -223,3 +223,62 @@ Finite remaining gates (none inferred from offline green):
   and source/ACL coexistence; pending. No install or production readiness approval.
 - V1: independent scoped patch review, then separate commit/push/dispatch authority
   and exact source/workflow SHA hosted proof; pending. Prior run covers baseline only.
+
+## Bounded Minions tick candidate (offline preparation)
+
+`registerBuiltinHandlers` registers protected `markdown-projection-tick`. The
+provider-free handler derives `/etc/gbrain/markdown-projection/<source>.json`
+from a validated source; the job may contain only `sourceId`. Missing mapping
+is disabled. The fresh isolated runtime re-admits protected config, matches
+the requested source, validates roots, and reads policy/obligations before one
+upsert. No Minions database credentials enter that child.
+
+The trusted `submitMarkdownProjectionTick` composition uses the actual worker's
+`default` queue, source/slot idempotency, three attempts, exponential backoff and
+retained results. It is not a recurring scheduler or installed cron. Generic CLI
+submission does not automatically apply those tick options; host scheduling
+wiring remains pending.
+
+Before supervisor launch, the registered dispatcher atomically inserts a unique
+unreleased source/run reservation into `markdown_projection_attempts`, an additive
+projection-ledger candidate in the existing worker SQL draft. No job/source FK,
+TTL, expiry takeover, progress dependency, or startup migration exists. Queue
+remove/prune and telemetry replacement cannot clear this ownership. Linux host,
+boot UUID, owner PID/start and run UUID are recorded before spawn; supervisor
+PID/start must persist before its stdin is delivered (hence before worker launch).
+Missing schema, failed/ambiguous reservation, recording failure, crash and unknown
+stop all fail closed. Records remain independently source-visible via the status
+helper even after generic jobs disappear. Ordinary Minions lifecycle is unchanged.
+
+Release requires the process-local capability issued only by the existing trusted
+supervisor receipt validator, matching the exact run; an error's boolean flag or
+copied JSON cannot authorize it. The UPDATE is source/run-fenced and requires a
+recorded supervisor. Failed release retains a blocked reservation unless the
+verified-stop UPDATE actually committed, which is safe because stop was proven.
+No PID-based kill inference or automatic reconciliation is implemented. Unknown
+ownership is operator-blocked indefinitely: **safe manual recovery procedure is
+pending**, not an invitation to delete the row or retry after a guessed stop.
+
+The original actual-dispatch/remove/prune reproduction failed with two launches
+where one was required. The corrected registered-dispatch regressions keep one
+launch, including concurrent same-source admission and independent other sources.
+These tests model SQL, not PostgreSQL uniqueness, durability, RLS or privilege
+qualification. Success/failure release tests use the real Python supervisor and
+reaper with inert children. Do not enable or schedule without exact-source hosted
+DB/role/crash/concurrency proof and CLI/scheduler composition.
+
+`markdownProjectionJobStatus` reads independent source ownership plus source-filtered
+job status, error, retry delay, lease and progress. Per-page error, projection
+heartbeat and scheduler liveness explicitly remain unavailable; this helper is
+not yet composed into runtime CLI status. Job lease renewal is not publication proof.
+
+Finite acceptance delta:
+- A9/A10: registered caller and offline durable-contract tests implemented;
+  real hosted Minions SQL, restart/stall, concurrency, tick submission and status
+  composition remain pending. Mocked SQL is not durable database acceptance.
+- A8 ambiguous COMMIT: separately pending externally controlled near-COMMIT
+  failure and fresh CLI reconciliation; no false ACK inferred from child exit.
+- T1 tombstones/obsolete-file GC: separately pending, unchanged.
+- H2 statement audit/raw runtime snapshots, H3 coexistence and R1 production
+  admission remain pending. Hosted run 35156173439 covers prior bytes only.
+- Production, DB execution, configuration writes, commit and dispatch not done.

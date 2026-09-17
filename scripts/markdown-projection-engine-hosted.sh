@@ -17,7 +17,8 @@ hostns=$(readlink /proc/self/ns/net)
 trap 'rc=$?; rm -rf -- "$relay" || { [[ $rc != 0 ]] || rc=1; }; exit "$rc"' EXIT
 runtime=$(mktemp -d "$(dirname "$base")/mp-runtime-XXXXXXXX")
 chmod 700 "$runtime"
-trap 'rc=$?; rm -rf -- "$relay" "$runtime" || { [[ $rc != 0 ]] || rc=1; }; exit "$rc"' EXIT
+# Never erase retained ownership/failure evidence in a blanket EXIT trap.
+trap 'rc=$?; printf "runtime evidence retained: %s\n" "$runtime" >&2; rmdir -- "$runtime" 2>/dev/null || { [[ $rc != 0 ]] || rc=1; }; exit "$rc"' EXIT
 export base bun uid gid relay hostns runtime
 python3 scripts/markdown-projection-engine-supervisor.py outer "$relay" \
  timeout -k 10s 170s sudo --preserve-env=base,bun,uid,gid,relay,hostns,runtime,MARKDOWN_PROJECTION_EXPECTED_SERVICE_IP,MARKDOWN_PROJECTION_WORKER_MODE unshare --net bash -c '

@@ -1312,7 +1312,7 @@ HANDLER TYPES (built in)
 export async function registerBuiltinHandlers(
   worker: MinionWorker,
   engine: BrainEngine,
-  opts?: { quiet?: boolean },
+  opts?: { quiet?: boolean; projectionTick?: import('../core/minions/handlers/markdown-projection').ProjectionTickDependencies },
 ): Promise<void> {
   // `quiet` suppresses the informational startup stderr lines. The supervisor
   // (issue #1801) runs this against a throwaway worker purely to read
@@ -1320,6 +1320,8 @@ export async function registerBuiltinHandlers(
   // terminal with "shell handler registered…" lines. The real `jobs work` path
   // omits opts and prints as before.
   const quiet = opts?.quiet === true;
+  const {makeMarkdownProjectionHandler, PROJECTION_JOB} = await import('../core/minions/handlers/markdown-projection');
+  worker.register(PROJECTION_JOB, makeMarkdownProjectionHandler(engine, opts?.projectionTick));
   worker.register('sync', async (job) => {
     const { performSync } = await import('./sync.ts');
     const repoPath = typeof job.data.repoPath === 'string' ? job.data.repoPath : undefined;

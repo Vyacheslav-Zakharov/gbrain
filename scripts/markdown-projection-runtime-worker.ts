@@ -39,10 +39,17 @@ try{
     COALESCE(max(generation)::text,'') AS desiredGeneration,
     COALESCE(max(materialized_generation)::text,'') AS materializedGeneration
     FROM public.markdown_projection_obligations WHERE source_id=${config.worker.sourceId}`;
-   return {...counts,enabled:String(policy.enabled&&policy.alive),lastError:'unavailable',heartbeat:'unavailable'};
+   const [containment]=await tx`SELECT count(*)::text AS held FROM public.markdown_projection_attempts WHERE source_id=${config.worker.sourceId} AND released_at IS NULL`;
+   return {...counts,enabled:String(policy.enabled&&policy.alive),lastError:'unavailable',heartbeat:'unavailable',containment:containment.held==='0'?'clear':'operator_blocked_no_automatic_recovery'};
   });
   result={status:'idle',projectionStatus:rows as Record<string,string>};
  }else{
+  // A user-supplied run ID alone is not authority: only the recorded live parent
+  // supervisor may deliver this private stdin request. Never reserve/spawn here.
+  const parentStat=readFileSync(`/proc/${process.ppid}/stat`,'utf8');
+  const parentStart=parentStat.slice(parentStat.lastIndexOf(')')+2).split(' ')[19];
+  const [attempt]=await sql`SELECT run_id FROM public.markdown_projection_attempts WHERE source_id=${config.worker.sourceId} AND run_id=${request.supervisionRunId} AND supervisor_pid=${process.ppid} AND supervisor_start=${parentStart} AND released_at IS NULL AND state='running'`;
+  if(!attempt)fatal('admission_failed');
   const db:ProjectionWorkerDB={transaction:async fn=>await sql.begin(async tx=>fn({executeRaw:async <T=any>(text:string,params?:unknown[])=>Array.from(await tx.unsafe(text,params as any)) as T[]})) as Awaited<ReturnType<typeof fn>>};
   // Each fresh invocation rereads policy and durable obligations, including after uncertain COMMIT.
   result=await drainMarkdownProjectionOnce(config.worker,db);

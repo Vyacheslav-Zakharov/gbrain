@@ -28,18 +28,24 @@ console.log(JSON.stringify({{refused,unsafe:failure?.unsafeFilesystemCleanup,rec
    try:
     r=subprocess.run(['bun',str(bridge)],capture_output=True,text=True,timeout=10,cwd=REPO)
     self.assertEqual(r.returncode,0,r.stderr);e=json.loads(r.stdout);pid=int(pidfile.read_text())
-    os.kill(pid,0)
+    # Termination may succeed despite failed postcondition accounting. That
+    # still MUST NOT authorize removal or retry.
+    with self.assertRaises(ProcessLookupError):os.kill(pid,0)
     self.assertTrue(e['refused']);self.assertTrue(e['unsafe']);self.assertTrue(e['primary']);self.assertTrue(e['cleanup'])
     self.assertEqual((home/'manual').read_text(),'manual sentinel')
     receipt=e['receipt'];self.assertEqual(receipt['status'],'failed');self.assertTrue(receipt['final'])
     self.assertEqual(len(receipt['attempts']),1);a=receipt['attempts'][0]
     self.assertEqual(a['pid'],pid);self.assertEqual(a['runId'],receipt['runId']);self.assertFalse(a['reaped'])
     self.assertIn('lifetime_deadline',a['errors']);self.assertIn('reaping_failed',a['errors'])
-    print(json.dumps({'containment':'passed','failedEvidence':e,'manualPreserved':True,'aliveBeforeFixtureCleanup':True}))
+    print(json.dumps({'containment':'passed','failedEvidence':e,'manualPreserved':True,'aliveBeforeFixtureCleanup':False}))
    finally:
     if pid is None and pidfile.exists():pid=int(pidfile.read_text())
     if pid:
-     os.killpg(pid,signal.SIGKILL);os.waitpid(pid,0)
+     try:os.killpg(pid,signal.SIGKILL)
+     except ProcessLookupError:pass
+     try:os.waitpid(pid,0)
+     except ChildProcessError:pass
      with self.assertRaises(ProcessLookupError):os.kill(pid,0)
-     print(json.dumps({'fixtureCleanup':'killed-and-reaped','pid':pid}))
+     with self.assertRaises(ChildProcessError):os.waitpid(-1,os.WNOHANG)
+     print(json.dumps({'fixtureCleanup':'kernel-no-children','pid':pid}))
 if __name__=='__main__':unittest.main()

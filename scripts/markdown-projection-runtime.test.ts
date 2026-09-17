@@ -21,6 +21,9 @@ test('private disabled file unchanged; missing, public, malformed and fixture co
   for(const data of [{version:1,enabled:false,fixtureFault:{}},{version:1,enabled:true,worker:{root:'/must-not-touch'}}]){
    writeFileSync(configPath,JSON.stringify(data));const r=run([child],{admission:'PROTECTED_RUNTIME_V1',action:'drain',configPath});expect(r.status).toBe(1);expect(r.stderr).toContain('admission_failed');
   }
+  writeFileSync(configPath,JSON.stringify({version:1,enabled:true,connection:{host:'127.0.0.1',port:1,database:'offline',username:'offline',password:'not-a-real-secret',expectedServerAddress:'127.0.0.1',expectedServerPort:1,tls:'local-only'},worker:{sourceId:'source-a',root:home,inputRoots:[],inventoryComplete:true}}));
+  const mismatch=run([child],{admission:'PROTECTED_RUNTIME_V1',action:'drain',configPath,sourceId:'source-b'});
+  expect(mismatch.status).toBe(1);expect(mismatch.stderr).toContain('admission_failed');
   for(const hook of ['fixtureFault','connection','worker','command']){
    const r=run([child],{admission:'PROTECTED_RUNTIME_V1',action:'status',[hook]:{}});expect(r.status).toBe(1);expect(r.stderr).toContain('admission_failed');
   }

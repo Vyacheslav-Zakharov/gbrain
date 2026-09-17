@@ -48,6 +48,88 @@ def cleanup_group(proc):
     raise RuntimeError(f'process group/session residue: {members(proc.pid)}')
 
 
+def owned_children():
+    # Kernel-owned direct children, including adopted children in new sessions.
+    # Inventory is for signalling ONLY; an empty snapshot is never stop proof.
+    text = Path(f'/proc/self/task/{os.getpid()}/children').read_text()
+    children = [int(value) for value in text.split()]
+    if any(pid <= 0 for pid in children) or len(set(children)) != len(children):
+        raise RuntimeError('invalid kernel child inventory')
+    return children
+
+
+def admit_owned_supervisor():
+    # This helper is ONLY for the dedicated, single-thread, exclusive launcher.
+    # No concurrent fork/wait, SIGCHLD auto-reaping, ptrace or external reparenting.
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise RuntimeError('unsupported SIGCHLD disposition')
+    if len(list(Path('/proc/self/task').iterdir())) != 1 or owned_children():
+        raise RuntimeError('supervisor must exclusively own its child lifetime')
+    try:
+        os.waitpid(-1, os.WNOHANG)
+    except ChildProcessError:
+        return
+    raise RuntimeError('supervisor already owns children')
+
+
+def cleanup_owned(proc):
+    """Bounded Linux subreaper closure, not universal OS containment.
+
+    Live descendants retain a chain to a live owned child. Killing/reaping that
+    child causes adoption before waitpid can report ECHILD. Re-enumerate after
+    each drain to catch exit/adoption/fork races. Only ECHILD proves closure;
+    no inventory snapshot can authorize it. Uninterruptible children or any
+    accounting uncertainty fail closed. Do not use for the multi-child relay.
+    """
+    start = time.monotonic()
+    end = start + 4
+    errors = []
+    while time.monotonic() < end:
+        sig = signal.SIGTERM if time.monotonic() < start + 2 else signal.SIGKILL
+        try:
+            # Do not reap between inventory and kill: owned zombie PIDs cannot
+            # be reused. Exclusive single-thread ownership is required above.
+            for pid in owned_children():
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    pass
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                pass
+        except Exception as error:
+            errors.append(f'inventory/signal: {type(error).__name__}')
+        empty = False
+        try:
+            while time.monotonic() < end:
+                try:
+                    pid, status = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    empty = True
+                    break
+                if pid == 0:
+                    break
+                if pid == proc.pid:
+                    proc.returncode = os.waitstatus_to_exitcode(status)
+        except Exception as error:
+            errors.append(f'wait: {type(error).__name__}')
+        if empty:
+            try:
+                if members(proc.pid) or owned_children() or proc.returncode is None:
+                    raise RuntimeError('inconsistent child/group/session closure')
+            except Exception as error:
+                errors.append(f'postcondition: {type(error).__name__}')
+            if errors:
+                raise RuntimeError(f'child accounting unproven: {sorted(set(errors))}')
+            print(json.dumps({'stage':'process.cleanup','pgid':proc.pid,
+                              'members':[], 'sessionMembers':[],
+                              'childAccounting':'ECHILD', 'status':'passed'}), flush=True)
+            return
+        time.sleep(.01)
+    raise RuntimeError(f'child accounting deadline: {sorted(set(errors))}')
+
+
 def finish(primary, errors):
     if primary is not None:
         for error in errors:
