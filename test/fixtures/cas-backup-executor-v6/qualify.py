@@ -2,16 +2,101 @@
 """HOSTED ONLY. Real disposable PG16 -> candidate CLI -> CMS -> second isolated cluster.
 Never run on a workstation. Failure retains scratch; ephemeral runner is teardown.
 """
-import hashlib,json,os,pathlib,pwd,re,shutil,socket,subprocess,sys,tarfile,uuid
+import hashlib,json,os,pathlib,pwd,re,shutil,socket,subprocess,sys,tarfile,uuid,selectors,time
 import capture
 HERE=pathlib.Path(__file__).resolve().parent
 PG='/usr/lib/postgresql/16/bin/'
 ENV={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LC_ALL':'C'}
+# Deliberately small exact-code allowlist; never infer a cause from message text.
+SQLSTATES={'42710':'duplicateobject','42501':'insufficientprivilege',
+ '42704':'undefinedobject','42601':'syntax','22023':'invalidparametervalue',
+ '0A000':'featurenotsupported','42P01':'undefinedtable','42703':'undefinedcolumn'}
+DIAGNOSTIC_LIMIT=65536
+
+def globals_diagnostic(stderr, script):
+ unknown={'sqlstate':'unknown','servercategory':'unknown','scriptline':None}
+ if type(stderr) is not bytes or len(stderr)>DIAGNOSTIC_LIMIT:return unknown
+ if type(script) is not str or not script or '\n' in script or '\r' in script:return unknown
+ # Match only psql's complete verbose ERROR header for this exact input file.
+ prefix=b'psql:'+script.encode('utf-8')+b':'
+ pattern=re.compile(re.escape(prefix)+rb'([1-9][0-9]{0,8}): ERROR:  ([0-9A-Z]{5}): [^\r\n]*')
+ matches=[]
+ for line in stderr.split(b'\n'):
+  match=pattern.fullmatch(line)
+  if match:matches.append(match)
+ if len(matches)!=1:return unknown
+ code=matches[0][2].decode('ascii')
+ if code not in SQLSTATES:return unknown
+ return {'sqlstate':code,'servercategory':SQLSTATES[code],'scriptline':int(matches[0][1])}
+
+def bounded_globals_run(argv):
+ # Keep raw diagnostics in bounded memory, not capture.bounded's on-disk sinks.
+ # Adapt that helper's finite TERM/KILL pattern; never enter a Popen context.
+ output=[bytearray(),bytearray()];deadline=time.monotonic()+60
+ sel=selectors.DefaultSelector() # Fallible setup before any child exists.
+ child=None;primary=None;secondary=None
+ try:
+  child=subprocess.Popen(argv,env=ENV,stdin=subprocess.DEVNULL,
+   stdout=subprocess.PIPE,stderr=subprocess.PIPE,bufsize=0)
+  for index,pipe in enumerate((child.stdout,child.stderr)):
+   os.set_blocking(pipe.fileno(),False)
+   sel.register(pipe,selectors.EVENT_READ,index)
+  while sel.get_map():
+   if time.monotonic()>=deadline:raise subprocess.TimeoutExpired([],60)
+   for key,_ in sel.select(min(0.1,max(0,deadline-time.monotonic()))):
+    try:chunk=os.read(key.fileobj.fileno(),4096)
+    except BlockingIOError:continue
+    if not chunk:sel.unregister(key.fileobj);continue
+    if sum(map(len,output))+len(chunk)>DIAGNOSTIC_LIMIT:
+     raise subprocess.SubprocessError('output limit')
+    output[key.data].extend(chunk)
+  rc=child.wait(timeout=max(0,deadline-time.monotonic()))
+  if time.monotonic()>=deadline:raise subprocess.TimeoutExpired([],60)
+  if rc:raise subprocess.CalledProcessError(rc,[],stderr=bytes(output[1]))
+  return bytes(output[0]).decode('utf-8','replace').strip()
+ except BaseException as exc:
+  primary=exc
+  raise
+ finally:
+  if child is not None:
+   # Direct child only. Attempt KILL/reap even after TERM or wait OSError.
+   reaped=False
+   for method,grace in ((child.terminate,.25),(child.kill,1)):
+    try:
+     if child.poll() is None:method()
+    except ProcessLookupError:pass
+    except BaseException as exc:
+     if secondary is None:secondary=exc
+    try:
+     child.wait(timeout=grace);reaped=True
+     break
+    except subprocess.TimeoutExpired:pass
+    except BaseException as exc:
+     if secondary is None:secondary=exc
+   if not reaped and secondary is None:
+    secondary=subprocess.SubprocessError('child reap unconfirmed')
+   for pipe in (child.stdout,child.stderr):
+    try:
+     if pipe is not None:pipe.close()
+    except BaseException as exc:
+     if secondary is None:secondary=exc
+  try:sel.close()
+  except BaseException as exc:
+   if secondary is None:secondary=exc
+  if secondary is not None:
+   # Retain secondary separately in memory; never copy its text to receipts.
+   if primary is not None:primary.globals_cleanup_failure=secondary
+   else:raise subprocess.SubprocessError('globals cleanup failed; diagnostics withheld') from None
+
 def run(argv):
- try:return subprocess.run(argv,env=ENV,check=True,capture_output=True,text=True,timeout=60).stdout.strip()
+ globals_only=(argv[:5]==['/usr/sbin/runuser','--user','postgres','--',PG+'psql'] and
+  'VERBOSITY=verbose' in argv and len([a for a in argv if a.startswith('--file=')])==1)
+ try:
+  if globals_only:return bounded_globals_run(argv)
+  return subprocess.run(argv,env=ENV,check=True,capture_output=True,text=True,timeout=60).stdout.strip()
  except (subprocess.SubprocessError,OSError) as exc:
   refusal=capture.Refusal('hosted command failed; command and diagnostics withheld')
-  # Fixed labels only: never inspect stderr, stdout, argv suffix, or exception text.
+  # All public values are fixed labels or validated numeric line numbers.
   if argv[:5]==['/usr/sbin/runuser','--user','postgres','--',PG+'psql']:
    category='psql-unclassified'
    if isinstance(exc,subprocess.CalledProcessError):
@@ -19,6 +104,11 @@ def run(argv):
    elif isinstance(exc,subprocess.TimeoutExpired):category='psql-timeout'
    elif isinstance(exc,OSError):category='psql-launch-os-error'
    refusal.safe_psql_category=category
+   if globals_only:
+    diagnostic={'sqlstate':'unknown','servercategory':'unknown','scriptline':None}
+    if isinstance(exc,subprocess.CalledProcessError):
+     diagnostic=globals_diagnostic(exc.stderr,next(a[7:] for a in argv if a.startswith('--file=')))
+    refusal.safe_globals_diagnostic=diagnostic
   raise refusal from None
 def pg(tool,*args):return run(['/usr/sbin/runuser','--user','postgres','--',PG+tool,*args])
 
@@ -36,6 +126,12 @@ def failure_diagnostic(exc, phase):
  category=getattr(exc,'safe_psql_category',None)
  if type(category) is str and category in {'psql-unclassified','psql-client-or-fatal','psql-connection-lost','psql-script-error','psql-timeout','psql-launch-os-error'}:
   result['failurecategory']=category
+ d=getattr(exc,'safe_globals_diagnostic',None)
+ if type(d) is dict:
+  code=d.get('sqlstate');line=d.get('scriptline')
+  if type(code) is str and code in SQLSTATES and type(line) is int and 1<=line<=999999999:
+   result.update(sqlstate=code,servercategory=SQLSTATES[code],scriptline=line)
+  else:result.update(sqlstate='unknown',servercategory='unknown',scriptline=None)
  return result
 def record_failure(receipt, key, exc, phase):
  # Diagnostic construction must never skip cleanup or mask original failure.
@@ -106,7 +202,7 @@ def main():
   def restored(q):return pg('psql','-XAt','-v','ON_ERROR_STOP=1',*restore_conn,'--dbname=cas_backup_restore','--command='+q)
   (base/'globals.sql').chmod(0o600);os.chown(base/'globals.sql',user.pw_uid,user.pw_gid)
   phase='restore-data'
-  pg('psql','-X','-v','ON_ERROR_STOP=1',*restore_conn,'--dbname=postgres','--file='+str(base/'globals.sql'))
+  pg('psql','-X','-v','ON_ERROR_STOP=1','-v','VERBOSITY=verbose',*restore_conn,'--dbname=postgres','--file='+str(base/'globals.sql'))
   pg('createdb',*restore_conn,'--owner=cas_owner','cas_backup_restore')
   pg('pg_restore',*restore_conn,'--exit-on-error','--dbname=cas_backup_restore',str(base/'restore.dump'))
   phase='restore-check'
