@@ -220,6 +220,12 @@ HANDLER TYPES (built in)
   const queue = new MinionQueue(engine);
 
   switch (sub) {
+    case 'projection-status': {
+      if(args.length!==2)throw new Error('Usage: gbrain jobs projection-status <source>');
+      const {markdownProjectionJobStatus}=await import('../core/minions/handlers/markdown-projection');
+      console.log(JSON.stringify(await markdownProjectionJobStatus(engine,args[1])));
+      return;
+    }
     case 'submit': {
       const name = args[1];
       if (!name) {
@@ -911,6 +917,13 @@ HANDLER TYPES (built in)
       await registerBuiltinHandlers(worker, engine);
 
       // Subscribe to self-health failures emitted by the worker. Library code
+      const {readProjectionSchedule,makeProjectionProducer} = await import('../core/minions/markdown-projection-scheduler');
+      const projectionSources = readProjectionSchedule();
+      if (projectionSources.length && queueName === 'default') {
+        worker.setProjectionProducer(makeProjectionProducer(engine, projectionSources));
+      }
+
+      // Subscribe to self-health failures emitted by the worker. Library code
       // (worker.ts) never calls process.exit directly so it stays embeddable;
       // this CLI layer is the right place to terminate the process and let
       // the external PM (systemd, Docker, cron watchdog) restart cleanly.
@@ -1312,7 +1325,7 @@ HANDLER TYPES (built in)
 export async function registerBuiltinHandlers(
   worker: MinionWorker,
   engine: BrainEngine,
-  opts?: { quiet?: boolean },
+  opts?: { quiet?: boolean; projectionTick?: import('../core/minions/handlers/markdown-projection').ProjectionTickDependencies },
 ): Promise<void> {
   // `quiet` suppresses the informational startup stderr lines. The supervisor
   // (issue #1801) runs this against a throwaway worker purely to read
@@ -1320,6 +1333,8 @@ export async function registerBuiltinHandlers(
   // terminal with "shell handler registered…" lines. The real `jobs work` path
   // omits opts and prints as before.
   const quiet = opts?.quiet === true;
+  const {makeMarkdownProjectionHandler, PROJECTION_JOB} = await import('../core/minions/handlers/markdown-projection');
+  worker.register(PROJECTION_JOB, makeMarkdownProjectionHandler(engine, opts?.projectionTick));
   worker.register('sync', async (job) => {
     const { performSync } = await import('./sync.ts');
     const repoPath = typeof job.data.repoPath === 'string' ? job.data.repoPath : undefined;

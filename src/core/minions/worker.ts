@@ -152,6 +152,13 @@ export class MinionWorker extends EventEmitter {
   private queue: MinionQueue;
   private handlers = new Map<string, MinionHandler>();
   private running = false;
+  // Trusted registration only. No job payload can install or configure a producer.
+  private projectionProducer?: () => Promise<void>;
+  setProjectionProducer(producer: () => Promise<void>): void {
+    if (this.running) throw new Error('projection_producer_already_started');
+    if (this.opts.queue !== 'default') throw new Error('projection_requires_default_queue');
+    this.projectionProducer = producer;
+  }
   private inFlight = new Map<number, InFlightJob>();
   private workerId = randomUUID();
 
@@ -503,6 +510,7 @@ export class MinionWorker extends EventEmitter {
 
     try {
       while (this.running) {
+        if (this.projectionProducer) await this.projectionProducer();
         // Promote delayed jobs
         try {
           await this.queue.promoteDelayed();
