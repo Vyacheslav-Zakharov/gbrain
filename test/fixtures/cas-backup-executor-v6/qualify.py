@@ -29,6 +29,23 @@ def globals_diagnostic(stderr, script):
  if code not in SQLSTATES:return unknown
  return {'sqlstate':code,'servercategory':SQLSTATES[code],'scriptline':int(matches[0][1])}
 
+def grantor_detail(stderr, script):
+ # Fixed fixture discriminator only, not a SQL scanner or restore adaptation.
+ # Reuse the bounded exact-file/header parser, then require one complete record.
+ d=globals_diagnostic(stderr,script)
+ if d['sqlstate']!='42501':return 'unknown'
+ header=(b'psql:'+script.encode('utf-8')+b':'+str(d['scriptline']).encode('ascii')+
+  b': ERROR:  42501: permission denied to grant privileges as role "postgres"')
+ detail=b'DETAIL:  The grantor must have the ADMIN option on role "cas_readers".'
+ lines=stderr.split(b'\n')
+ if lines[-1:]==[b'']:lines.pop()
+ # Nothing before/between/after except the optional verbose server location.
+ # Reject duplicate, mismatched and injected headers/details, never echo them.
+ if len(lines)==3:
+  if not re.fullmatch(rb'LOCATION:  check_role_grantor, user\.c:[1-9][0-9]{0,8}',lines[2]):return 'unknown'
+  lines.pop()
+ return 'grantor-admin-required' if lines==[header,detail] else 'unknown'
+
 def bounded_globals_run(argv):
  # Keep raw diagnostics in bounded memory, not capture.bounded's on-disk sinks.
  # Adapt that helper's finite TERM/KILL pattern; never enter a Popen context.
@@ -107,7 +124,9 @@ def run(argv):
    if globals_only:
     diagnostic={'sqlstate':'unknown','servercategory':'unknown','scriptline':None}
     if isinstance(exc,subprocess.CalledProcessError):
-     diagnostic=globals_diagnostic(exc.stderr,next(a[7:] for a in argv if a.startswith('--file=')))
+     script=next(a[7:] for a in argv if a.startswith('--file='))
+     diagnostic=globals_diagnostic(exc.stderr,script)
+     diagnostic['serverdetail']=grantor_detail(exc.stderr,script)
     refusal.safe_globals_diagnostic=diagnostic
   raise refusal from None
 def pg(tool,*args):return run(['/usr/sbin/runuser','--user','postgres','--',PG+tool,*args])
@@ -132,6 +151,9 @@ def failure_diagnostic(exc, phase):
   if type(code) is str and code in SQLSTATES and type(line) is int and 1<=line<=999999999:
    result.update(sqlstate=code,servercategory=SQLSTATES[code],scriptline=line)
   else:result.update(sqlstate='unknown',servercategory='unknown',scriptline=None)
+  detail=d.get('serverdetail')
+  result['serverdetail']=('grantor-admin-required' if result['sqlstate']=='42501' and
+   type(detail) is str and detail=='grantor-admin-required' else 'unknown')
  return result
 def record_failure(receipt, key, exc, phase):
  # Diagnostic construction must never skip cleanup or mask original failure.
