@@ -1039,10 +1039,47 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
-    const conn = this.sql;
-    let active = true;
+    const tx = await this.sql.reserve();
+    let active = true, lost = false, begun = false;
+    let loss: unknown;
+    type Lease = { onclose?: ((error: unknown) => void) | null; end(): Promise<void> };
+    let connection: Lease | undefined;
+    let previousClose: Lease['onclose'];
+    const pending = new Set<any>();
+    const onclose = (error: unknown) => {
+      if (lost) return;
+      lost = true; loss = error; active = false;
+      // reserve() has a private pending queue. Reject and cancel its Queries
+      // as well as the driver's active query, without touching a later owner.
+      for (const query of pending) { query.cancelled = true; query.reject(error); }
+      pending.clear();
+    };
+    const observeError = (error: unknown) => {
+      const e = error as { code?: string; severity?: string; severity_local?: string };
+      if (e?.severity === 'FATAL' || e?.severity === 'PANIC' ||
+          e?.severity_local === 'FATAL' || e?.code?.startsWith('CONNECTION_') ||
+          ['ECONNRESET', 'EPIPE', '57P01', '57P02', '57P03'].includes(e?.code ?? '')) onclose(error);
+    };
+    const control = (text: string) => {
+      const query = tx.unsafe(text);
+      const internal = query as any;
+      const handler = internal.handler;
+      if (typeof handler === 'function') internal.handler = (...args: unknown[]) => {
+        if (lost) { internal.reject(loss); return; }
+        return Reflect.apply(handler, internal, args);
+      };
+      return query;
+    };
     try {
-      return await conn.begin(async (tx) => {
+      // Same internal seam used by postgres.js begin(); pinned in acceptance.
+      // Install synchronously at BEGIN dispatch, not after its await.
+      await tx.unsafe('BEGIN', [], { onexecute(c: Lease) {
+        connection = c; previousClose = c.onclose; c.onclose = onclose;
+      } } as any);
+      begun = true;
+      if (!connection) throw new Error('Transaction close observer was not installed');
+      if (lost) throw loss;
+      const run = async () => {
         const assertActive = () => {
           if (!active) throw new Error('Transaction is no longer active');
         };
@@ -1066,6 +1103,10 @@ export class PostgresEngine implements BrainEngine {
                 const handler = result.handler;
                 result.handler = function (...handlerArgs: unknown[]) {
                   try { assertActive(); } catch (error) { result.reject(error); return; }
+                  pending.add(result);
+                  const reject = result.reject, resolve = result.resolve;
+                  result.reject = (error: unknown) => { pending.delete(result); observeError(error); reject(error); };
+                  result.resolve = (value: unknown) => { pending.delete(result); resolve(value); };
                   return Reflect.apply(handler, this, handlerArgs);
                 };
               }
@@ -1097,12 +1138,35 @@ export class PostgresEngine implements BrainEngine {
         // Explicit transaction routing avoids even inspecting the parent manager.
         Object.defineProperty(txEngine, 'executeRawDirect', { value: txEngine.executeRaw.bind(txEngine) });
         return fn(txEngine);
-      }) as T;
-    } finally {
-      // postgres.js races the callback against connection.onclose. The driver
-      // can settle while the callback is still suspended: expire the adapter
-      // at driver settlement, not callback completion. Never retry on a pool.
+      };
+      const result = await run(); // Join the actual caller, including after loss.
       active = false;
+      if (lost) throw loss;
+      const committed = await control('COMMIT');
+      begun = false;
+      if (committed.command === 'ROLLBACK') throw new Error('Transaction was rolled back before commit');
+      return result;
+    } catch (error) {
+      active = false;
+      observeError(error);
+      const primary = lost && loss !== undefined ? loss : error;
+      if (begun && !lost) {
+        try { await control('ROLLBACK'); }
+        catch (cleanupError) {
+          observeError(cleanupError);
+          // A failed cleanup cannot return an uncertain session to the pool.
+          if (!lost) { lost = true; try { await connection?.end(); } catch { /* preserve primary */ } }
+        }
+      }
+      throw primary;
+    } finally {
+      active = false;
+      if (!lost) {
+        if (connection?.onclose === onclose) connection.onclose = previousClose;
+        tx.release();
+      }
+      // onclose already relinquishes/reassigns a dead reservation. Calling
+      // release here would move a closed (or another owner's) connection open.
     }
   }
 

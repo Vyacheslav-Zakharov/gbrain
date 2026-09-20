@@ -22,20 +22,19 @@ function harness() {
   let rollbacks = 0;
   let callback: Promise<unknown> | undefined;
   const closedDriverError = new Error('closed reserved driver was invoked');
-  const tx = { unsafe: async () => {
+  const connection: any = { onclose: null };
+  death.promise.catch(error => { closed = true; connection.onclose?.(error); connection.onclose = null; });
+  const tx = Object.assign(() => {}, { unsafe: async (text: string, _p?: unknown[], opts?: any) => {
+    if (text === 'BEGIN') { opts.onexecute(connection); return []; }
+    if (text === 'COMMIT') { commits++; return []; }
+    if (text === 'ROLLBACK') { rollbacks++; return []; }
     txCalls++;
     if (closed) { closedCalls++; throw closedDriverError; }
     return [{ via: 'transaction' }];
-  } };
+  }, release() { closed = true; } });
   const pool = {
     unsafe: async () => { poolCalls++; return [{ via: 'pool' }]; },
-    begin: (fn: (sql: typeof tx) => Promise<unknown>) => {
-      callback = fn(tx);
-      const scope = callback.then(value => { commits++; return value; }, error => {
-        rollbacks++; throw error;
-      });
-      return Promise.race([scope, death.promise]).finally(() => { closed = true; });
-    },
+    reserve: async () => tx,
   };
   const engine = new PostgresEngine();
   Object.assign(engine, { _sql: pool, connectionManager: {
@@ -62,14 +61,13 @@ describe('PostgresEngine transaction lifetime (offline reserved-driver seam)', (
     const observed = pending.catch(error => error);
     await entered.promise;
     h.death.reject(failure);
-    expect(await observed).toBe(failure);
+    await Promise.resolve();
     resume.resolve();
-    const callbackFailure = await h.callback().catch(error => error);
+    expect(await observed).toBe(failure);
     // RED explicitly exposes the actual closed-driver call, not just a mismatch
     // in the simulated driver's error text.
     expect(h.counts().closedCalls).toBe(0);
-    expect(callbackFailure).toBeInstanceOf(Error);
-    expect((callbackFailure as Error).message).toBe('Transaction is no longer active');
+
     expect(h.counts().txCalls).toBe(1);
     expect(h.counts().poolCalls).toBe(0);
   });

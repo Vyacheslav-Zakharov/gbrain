@@ -1,5 +1,15 @@
 import { expect, test } from 'bun:test';
 import postgres from 'postgres';
+function reservation(tx: any, connection: any = { onclose: null }) {
+  return new Proxy(tx, { get(target, key) {
+    if (key === 'release') return () => {};
+    if (key === 'unsafe') return (text: string, params?: any, opts?: any) => {
+      if (['BEGIN', 'COMMIT', 'ROLLBACK'].includes(text)) { opts?.onexecute?.(connection); return Promise.resolve([]); }
+      return target.unsafe(text, params);
+    };
+    return Reflect.get(target, key);
+  } });
+}
 import { PostgresEngine } from '../src/core/postgres-engine.ts';
 // Real installed lazy Query implementation, simulated transport; never opens a DB.
 // @ts-ignore postgres does not publish types for its internal Query class
@@ -12,7 +22,7 @@ for (const name of ['sql', 'unsafe', 'json', 'typed'] as const) {
     test(`native nonthenable identity: ${name}, ${expired ? 'expired' : 'active'} facade`, async () => {
       const native = postgres({ max: 1, connect_timeout: 1 });
       const engine = new PostgresEngine();
-      Object.assign(engine, { _sql: { begin: (fn: any) => fn(native) } });
+      Object.assign(engine, { _sql: { reserve: async () => reservation(native) } });
       const original = name === 'sql' ? native : native[name];
       const identity = async (value: any) => {
         expect('then' in value).toBe(false);
@@ -74,9 +84,9 @@ function harness() {
     typed: Object.assign((x: unknown) => x, { bigint: (x: unknown) => x }),
     notify: () => { parents++; },
   });
-  const pool = { unsafe: async () => { parents++; return []; }, begin: (fn: any) => {
-    callback = fn(tx); return Promise.race([callback, death.promise]);
-  } };
+  const connection: any = { onclose: null };
+  death.promise.catch(e => connection.onclose?.(e));
+  const pool = { unsafe: async () => { parents++; return []; }, reserve: async () => reservation(tx, connection) };
   const engine = new PostgresEngine();
   Object.assign(engine, { _sql: pool, connectionManager: {
     peekReadPool: () => { managers++; return pool; },
@@ -93,11 +103,11 @@ test('actual resolveTake: delayed SELECT then expiry issues zero UPDATE calls; c
   await h.entered.promise;
   await h.engine.executeRaw('parent concurrently');
   h.death.reject(original);
-  expect(await result).toBe(original);
+  await Promise.resolve();
   h.select.resolve([{ resolved_at: null }]);
-  const error = await h.callback().catch(e => e);
+  const error = await result;
   expect(h.counts().updates).toBe(0);
-  expect((error as Error).message).toBe('Transaction is no longer active');
+  expect(error).toBe(original);
   expect(h.counts().parents).toBe(1);
 });
 

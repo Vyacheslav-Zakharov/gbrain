@@ -1,7 +1,7 @@
 name: CAS Combined Narrow PostgreSQL
 on:
   push:
-    branches: [acceptance/cas-combined-v2-20260920-0806]
+    branches: [acceptance/cas-combined-safe-tx-v3]
   workflow_dispatch:
 permissions:
   contents: read
@@ -41,7 +41,7 @@ jobs:
           git ls-files -z | sort -z | xargs -0 sha256sum > cas-evidence/source-files.sha256
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
-          bun-version: 1.3.13
+          bun-version: 1.3.14
       - name: Install locked dependencies without host postinstall
         run: bun install --frozen-lockfile --ignore-scripts
       - name: Verify packaged combined bytes
@@ -49,10 +49,19 @@ jobs:
           python3 - <<'PY'
           import hashlib,json,pathlib
           rows=json.loads(pathlib.Path('test/e2e/helpers/cas-combined-source.json').read_text())
-          assert len(rows)==2959
+          assert len(rows)==2960
           assert all(hashlib.sha256(pathlib.Path(k).read_bytes()).hexdigest()==v for k,v in rows.items())
           pathlib.Path('cas-evidence/combined-parity.json').write_text(json.dumps({'files':len(rows),'allEqual':True,'manifestSha256':hashlib.sha256(pathlib.Path('test/e2e/helpers/cas-combined-source.json').read_bytes()).hexdigest()}))
           PY
+      - name: Verify exact driver and offline transaction lifecycle
+        run: |
+          python3 - <<'PY'
+          import hashlib,pathlib
+          expected = {'package.json': '944d492614959389a5739ef2893bc1830fb773ff042159d9b331d43b2f6792e9', 'src/index.js': '4e21f5733e70d79cffc10d10d4ef01031de4a9ac862210e43f8870029fd103ed', 'src/connection.js': 'ee3a218d9aa6a6f2887c1a19da50009335fe84c11a5431d5cab72d6bc528632f', 'src/query.js': '67c45a5151032aa46b587abc15381fe4efd97c696e5c1b53082b8161309c4ee2'}
+          for path, digest in expected.items():
+              assert hashlib.sha256(pathlib.Path('node_modules/postgres', path).read_bytes()).hexdigest() == digest, path
+          PY
+          bun test test/postgres-reservation-lifetime.test.ts test/postgres-transaction-lifetime.test.ts test/postgres-transaction-facade.test.ts
       - name: Prepare disposable protected bootstrap directory
         run: |
           test "$GITHUB_ACTIONS" = true
