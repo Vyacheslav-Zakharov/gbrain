@@ -32,7 +32,9 @@ export async function exerciseCombinedTransaction(engine: PostgresEngine, admin:
   const entered = deferred<{ pid: number; started: string }>();
   const release = deferred<void>(); const joined = deferred<void>();
   let lateError: unknown;
+  let lossFacade!: BrainEngine;
   const running = engine.transaction(async tx => {
+    lossFacade = tx;
     try {
       const [identity] = await tx.executeRaw<{ pid: number; started: string }>("SELECT pg_backend_pid() AS pid, backend_start::text AS started FROM pg_stat_activity WHERE pid=pg_backend_pid()");
       entered.resolve(identity); await release.promise;
@@ -45,8 +47,25 @@ export async function exerciseCombinedTransaction(engine: PostgresEngine, admin:
     const identity = await bounded(entered.promise);
     const rows = await admin.executeRaw<{ stopped: boolean }>(`SELECT pg_terminate_backend(pid) AS stopped FROM pg_stat_activity WHERE pid=$1 AND usename=$2 AND datname=current_database() AND backend_start=$3::text::timestamptz`, [identity.pid, role, identity.started]);
     expect(rows).toEqual([{ stopped: true }]);
+    console.log('CAS_PHASE: await-facade-expiry');
+    // Observe the synchronous guard without issuing SQL or requiring outer
+    // settlement. The outer transaction must join the still-gated callback.
+    const expiresAt = performance.now() + 10000;
+    while (true) {
+      let expiry: unknown;
+      try { void (lossFacade as any).sql; } catch (error) { expiry = error; }
+      if (expiry !== undefined) {
+        expect(expiry).toBeInstanceOf(Error);
+        expect((expiry as Error).message).toBe('Transaction is no longer active');
+        break;
+      }
+      if (performance.now() >= expiresAt) throw new Error('combined facade expiry deadline');
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    release.resolve();
     console.log('CAS_PHASE: await-settlement');
     expect((await bounded(settled)).ok).toBe(false);
+    await bounded(joined.promise);
   } finally { release.resolve(); await bounded(joined.promise); }
   expect(lateError).toBeInstanceOf(Error);
   expect((lateError as Error).message).toBe('Transaction is no longer active');

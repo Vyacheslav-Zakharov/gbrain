@@ -61,7 +61,13 @@ jobs:
           for path, digest in expected.items():
               assert hashlib.sha256(pathlib.Path('node_modules/postgres', path).read_bytes()).hexdigest() == digest, path
           PY
-          bun test test/postgres-reservation-lifetime.test.ts test/postgres-transaction-lifetime.test.ts test/postgres-transaction-facade.test.ts
+          for suite in test/postgres-reservation-lifetime.test.ts test/postgres-transaction-lifetime.test.ts test/postgres-transaction-facade.test.ts test/postgres-engine-getter-selfheal.test.ts test/postgres-engine-singleton-ownership.test.ts test/page-file-connected-lifecycle.serial.test.ts test/page-file-lifecycle-races.serial.test.ts test/cas-combined-transaction-order.test.ts; do
+            timeout --signal=TERM --kill-after=5s 90s bun test "$suite"
+          done
+      - name: Typecheck exact combined candidate
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: timeout --signal=TERM --kill-after=10s 180s bun run typecheck
       - name: Prepare disposable protected bootstrap directory
         run: |
           test "$GITHUB_ACTIONS" = true

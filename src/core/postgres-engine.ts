@@ -1042,13 +1042,15 @@ export class PostgresEngine implements BrainEngine {
     const tx = await this.sql.reserve();
     let active = true, lost = false, begun = false;
     let loss: unknown;
-    type Lease = { onclose?: ((error: unknown) => void) | null; end(): Promise<void> };
+
+    type Lease = { onclose?: ((error: unknown) => void) | null; terminate(): void };
     let connection: Lease | undefined;
     let previousClose: Lease['onclose'];
     const pending = new Set<any>();
     const onclose = (error: unknown) => {
       if (lost) return;
       lost = true; loss = error; active = false;
+
       // reserve() has a private pending queue. Reject and cancel its Queries
       // as well as the driver's active query, without touching a later owner.
       for (const query of pending) { query.cancelled = true; query.reject(error); }
@@ -1060,22 +1062,27 @@ export class PostgresEngine implements BrainEngine {
           e?.severity_local === 'FATAL' || e?.code?.startsWith('CONNECTION_') ||
           ['ECONNRESET', 'EPIPE', '57P01', '57P02', '57P03'].includes(e?.code ?? '')) onclose(error);
     };
-    const control = (text: string) => {
+    const control = async (text: string) => {
       const query = tx.unsafe(text);
       const internal = query as any;
       const handler = internal.handler;
       if (typeof handler === 'function') internal.handler = (...args: unknown[]) => {
-        if (lost) { internal.reject(loss); return; }
+        if (lost) { internal.cancelled = true; internal.reject(loss); return; }
+        pending.add(internal);
+        const reject = internal.reject, resolve = internal.resolve;
+        internal.reject = (error: unknown) => { pending.delete(internal); reject(error); };
+        internal.resolve = (value: unknown) => { pending.delete(internal); resolve(value); };
         return Reflect.apply(handler, internal, args);
       };
-      return query;
+      try { return await query; }
+      catch (error) { observeError(error); throw error; }
     };
     try {
       // Same internal seam used by postgres.js begin(); pinned in acceptance.
       // Install synchronously at BEGIN dispatch, not after its await.
       await tx.unsafe('BEGIN', [], { onexecute(c: Lease) {
         connection = c; previousClose = c.onclose; c.onclose = onclose;
-      } } as any);
+      } } as any).catch(error => { observeError(error); throw error; });
       begun = true;
       if (!connection) throw new Error('Transaction close observer was not installed');
       if (lost) throw loss;
@@ -1139,7 +1146,10 @@ export class PostgresEngine implements BrainEngine {
         Object.defineProperty(txEngine, 'executeRawDirect', { value: txEngine.executeRaw.bind(txEngine) });
         return fn(txEngine);
       };
-      const result = await run(); // Join the actual caller, including after loss.
+      // Loss expires the facade and rejects its queued work immediately, but
+      // settlement must join caller completion, including non-database awaits.
+      // Caller code owns no rollback/commit after ownership is lost.
+      const result = await run();
       active = false;
       if (lost) throw loss;
       const committed = await control('COMMIT');
@@ -1148,14 +1158,19 @@ export class PostgresEngine implements BrainEngine {
       return result;
     } catch (error) {
       active = false;
-      observeError(error);
       const primary = lost && loss !== undefined ? loss : error;
       if (begun && !lost) {
         try { await control('ROLLBACK'); }
         catch (cleanupError) {
           observeError(cleanupError);
           // A failed cleanup cannot return an uncertain session to the pool.
-          if (!lost) { lost = true; try { await connection?.end(); } catch { /* preserve primary */ } }
+          // end() stalls while reserved in postgres.js 3.4.9. terminate()
+          // fences execute synchronously and ends the socket without opening
+          // this uncertain session to another borrower via release().
+          if (!lost && connection?.onclose === onclose) {
+            onclose(cleanupError);
+            connection.terminate();
+          }
         }
       }
       throw primary;
