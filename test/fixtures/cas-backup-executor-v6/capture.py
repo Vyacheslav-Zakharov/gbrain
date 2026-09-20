@@ -362,7 +362,7 @@ def main(argv=None):
         require(os.path.getsize(stage/'payload.tar')<=m['max_bytes'],'tar exceeds bound')
         bounded(['/usr/bin/openssl','cms','-encrypt','-binary','-aes-256-cbc','-stream','-outform','DER','-in',str(stage/'payload.tar'),str(recipient)],stage/'payload.cms',m['timeout_seconds'],m['max_bytes'])
         if m['mode']=='production': require(time.time()<min(auth['expires_epoch'],fence['expires_epoch']),'receipt expired during capture')
-        receipt={'schema':'encrypted-local-capture-v1','manifest_sha256':mh,'ciphertext_sha256':hashfile(stage/'payload.cms'),'ciphertext_bytes':os.path.getsize(stage/'payload.cms'),'simulated_db':m['mode']=='fixture','restore_proof':False,'offhost_custody':False,'cipher':'OpenSSL CMS AES-256-CBC recipient certificate; SHA256 integrity bound externally'}
+        receipt={'schema':'encrypted-local-capture-v1','manifest_sha256':mh,'ciphertext_sha256':hashfile(stage/'payload.cms',max_bytes=m['max_bytes'],seconds=m['timeout_seconds']),'ciphertext_bytes':os.path.getsize(stage/'payload.cms'),'simulated_db':m['mode']=='fixture','restore_proof':False,'offhost_custody':False,'cipher':'OpenSSL CMS AES-256-CBC recipient certificate; SHA256 integrity bound externally'}
         if m['mode']=='hosted-disposable':
             receipt.update(test_only=True,production_authority=False,identity=m['identity'])
         # A hard link creates final ciphertext without overwrite. All metadata/completion follows fsync.
