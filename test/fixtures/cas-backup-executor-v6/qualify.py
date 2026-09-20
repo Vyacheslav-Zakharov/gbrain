@@ -9,7 +9,17 @@ PG='/usr/lib/postgresql/16/bin/'
 ENV={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LC_ALL':'C'}
 def run(argv):
  try:return subprocess.run(argv,env=ENV,check=True,capture_output=True,text=True,timeout=60).stdout.strip()
- except (subprocess.SubprocessError,OSError):raise capture.Refusal('hosted command failed; command and diagnostics withheld') from None
+ except (subprocess.SubprocessError,OSError) as exc:
+  refusal=capture.Refusal('hosted command failed; command and diagnostics withheld')
+  # Fixed labels only: never inspect stderr, stdout, argv suffix, or exception text.
+  if argv[:5]==['/usr/sbin/runuser','--user','postgres','--',PG+'psql']:
+   category='psql-unclassified'
+   if isinstance(exc,subprocess.CalledProcessError):
+    category={1:'psql-client-or-fatal',2:'psql-connection-lost',3:'psql-script-error'}.get(exc.returncode,'psql-unclassified')
+   elif isinstance(exc,subprocess.TimeoutExpired):category='psql-timeout'
+   elif isinstance(exc,OSError):category='psql-launch-os-error'
+   refusal.safe_psql_category=category
+  raise refusal from None
 def pg(tool,*args):return run(['/usr/sbin/runuser','--user','postgres','--',PG+tool,*args])
 
 def failure_diagnostic(exc, phase):
@@ -22,7 +32,11 @@ def failure_diagnostic(exc, phase):
   if code.co_filename==__file__ and code.co_name in {'main','run','pg','sql','restored'}:
    frames.append({'module':'qualify','function':code.co_name,'line':tb.tb_lineno})
   tb=tb.tb_next
- return {'phase':phase if phase in allowed_phases else 'unknown','kind':kind,'frames':frames[-8:]}
+ result={'phase':phase if phase in allowed_phases else 'unknown','kind':kind,'frames':frames[-8:]}
+ category=getattr(exc,'safe_psql_category',None)
+ if type(category) is str and category in {'psql-unclassified','psql-client-or-fatal','psql-connection-lost','psql-script-error','psql-timeout','psql-launch-os-error'}:
+  result['failurecategory']=category
+ return result
 def record_failure(receipt, key, exc, phase):
  # Diagnostic construction must never skip cleanup or mask original failure.
  try:receipt[key]=failure_diagnostic(exc,phase)
