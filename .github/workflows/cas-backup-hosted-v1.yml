@@ -1,0 +1,44 @@
+name: cas-backup-hosted-v1
+on:
+  push:
+    branches: [acceptance/cas-backup-hosted-v1]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    if: github.ref == 'refs/heads/acceptance/cas-backup-hosted-v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Exact source and offline regression gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p evidence/cas-backup-v4
+          git rev-parse HEAD > evidence/cas-backup-v4/source-sha.txt
+          cd test/fixtures/cas-backup-executor-v4
+          timeout -k 3 120 python3 -B -m unittest -v test_capture test_regressions test_output_bounds test_hosted
+      - name: Real disposable PG capture CMS restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x /usr/lib/postgresql/16/bin/initdb
+          test -x /usr/sbin/runuser
+          sudo env -i PATH=/usr/bin:/bin GITHUB_ACTIONS=true \
+            GITHUB_REF="$GITHUB_REF" GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            EVIDENCE="$GITHUB_WORKSPACE/evidence/cas-backup-v4" \
+            timeout -k 5 180 /usr/bin/python3 -B \
+            "$GITHUB_WORKSPACE/test/fixtures/cas-backup-executor-v4/qualify.py"
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cas-backup-v4-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/cas-backup-v4
+          if-no-files-found: error
