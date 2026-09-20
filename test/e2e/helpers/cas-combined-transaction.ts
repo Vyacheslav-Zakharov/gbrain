@@ -42,11 +42,11 @@ export async function exerciseCombinedTransaction(engine: PostgresEngine, admin:
   const settled = running.then(() => ({ ok: true }), error => ({ ok: false, error }));
   try {
     console.log('CAS_PHASE: terminate-backend');
-  const identity = await bounded(entered.promise);
+    const identity = await bounded(entered.promise);
     const rows = await admin.executeRaw<{ stopped: boolean }>(`SELECT pg_terminate_backend(pid) AS stopped FROM pg_stat_activity WHERE pid=$1 AND usename=$2 AND datname=current_database() AND backend_start=$3::text::timestamptz`, [identity.pid, role, identity.started]);
     expect(rows).toEqual([{ stopped: true }]);
     console.log('CAS_PHASE: await-settlement');
-  expect((await bounded(settled)).ok).toBe(false);
+    expect((await bounded(settled)).ok).toBe(false);
   } finally { release.resolve(); await bounded(joined.promise); }
   expect(lateError).toBeInstanceOf(Error);
   expect((lateError as Error).message).toBe('Transaction is no longer active');

@@ -58,6 +58,7 @@ jobs:
           test "$GITHUB_ACTIONS" = true
           test ! -e /etc/gbrain
           sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /etc/gbrain
+          touch "$RUNNER_TEMP/cas-owned-directory"
       - name: Narrow combined PostgreSQL acceptance
         env:
           DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
@@ -92,6 +93,20 @@ jobs:
       - name: Remove empty disposable protected directory
         if: always()
         run: |
+          python3 - <<'PY'
+          import json,os,pathlib,shutil
+          root=pathlib.Path('/etc/gbrain')
+          assert pathlib.Path(os.environ['RUNNER_TEMP'],'cas-owned-directory').exists()
+          entries=list(root.iterdir()) if root.exists() else []
+          assert all(p.name=='page-file-bootstrap-anchor.json' or p.name.startswith('connected-fixture-') for p in entries)
+          receipt={'residueBeforeCleanup':sorted(p.name for p in entries)}
+          for p in entries:
+              if p.is_dir() and not p.is_symlink(): shutil.rmtree(p)
+              else: p.unlink()
+          receipt['remainingEntries']=sorted(p.name for p in root.iterdir()) if root.exists() else []
+          pathlib.Path('cas-evidence/protected-cleanup.json').write_text(json.dumps(receipt))
+          assert receipt['remainingEntries']==[]
+          PY
           if test -d /etc/gbrain; then sudo rmdir /etc/gbrain; fi
           test ! -e /etc/gbrain
       - name: Bind evidence
