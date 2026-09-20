@@ -42,7 +42,8 @@ test('real HTTPS smart Git: private admission, CA refusal, trusted ls-remote/fet
     if (server) {
       await server.stop();
       expect(existsSync(server.directory)).toBe(false);
-      expect(() => process.kill(server.pid, 0)).toThrow();
+      const stoppedPid = server.pid;
+      expect(() => process.kill(stoppedPid, 0)).toThrow();
     }
     rmSync(root, { recursive: true, force: true });
   }
