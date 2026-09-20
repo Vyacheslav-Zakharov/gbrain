@@ -63,6 +63,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:disposable-test-only@localhost:5432/gbrain_test
           REQUIRE_PAGE_FILE_FRESH_CATALOG_POSTGRES: '1'
           REQUIRE_PAGE_FILE_SQL_AUTHORITY_POSTGRES: '1'
+          REQUIRE_PAGE_FILE_UPGRADE_REPLAY_POSTGRES: '1'
           REQUIRE_PAGE_FILE_CONNECTED_POSTGRES: '1'
           PAGE_FILE_CAS_DISPOSABLE: '1'
           PAGE_FILE_SQL_EVIDENCE_DIR: cas-evidence
