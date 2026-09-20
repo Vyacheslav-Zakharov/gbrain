@@ -6,7 +6,7 @@ from unittest.mock import patch
 import qualify
 
 class PrimaryPreservation(unittest.TestCase):
- def invoke(self, primary=True, write=False, chmod=False, cleanup=False, cli=False):
+ def invoke(self, primary=True, write=False, chmod=False, cleanup=False, cli=False, bootstrap='postgres:10:true'):
   Path=pathlib.Path
   secret='SECRET_SQL_PASSWORD_PATH'
   failure=qualify.capture.Refusal(secret)
@@ -17,6 +17,15 @@ class PrimaryPreservation(unittest.TestCase):
    root=Path(td);base=root/'scratch';evidence=root/'evidence'
    def path(v):return base if str(v).startswith('/tmp/cas-backup-hosted-') else Path(v)
    def pg(tool,*args):
+    if tool=='initdb' and 'restore-pgdata' in args[1]:
+     self.assertIn('--username=postgres',args)
+    if tool=='psql' and any(a.startswith('--file=') for a in args):
+     self.assertIn('--username=postgres',args)
+     self.assertIn('ON_ERROR_STOP=1',args)
+     self.assertIn('VERBOSITY=verbose',args)
+     self.assertIn('--file='+str(base/'globals-adapted.sql'),args)
+     self.assertEqual((base/'globals.sql').read_bytes(),glob)
+     self.assertEqual((base/'globals-adapted.sql').read_bytes(),glob.replace(b'CREATE ROLE postgres;',b'',1))
     if tool=='pg_ctl' and args[-1]=='stop':
      stops.append(args[1])
      if cleanup:raise secondary if 'restore-pgdata' in args[1] else source_secondary
@@ -24,7 +33,8 @@ class PrimaryPreservation(unittest.TestCase):
     if tool=='psql' and args[-1].startswith('--command='):
      q=args[-1][10:]
      if 'pg_control_system' in q:return str(base/'restore-pgdata')+'|222'
-     if 'FROM pg_auth_members' in q:return 'cas_readers:cas_member:false'
+     if 'bootstrap_identity' in q:return bootstrap if '--dbname=postgres' in args else 'postgres:10:true'
+     if 'FROM pg_auth_members' in q:return 'cas_readers:cas_member:false:postgres:10:true:true'
      if 'pg_get_userbyid(datdba)' in q or 'pg_get_userbyid(nspowner)' in q:return 'cas_owner'
      if 'has_schema_privilege' in q:return 'true:true:false'
      if 'rolpassword IS NOT NULL' in q:return 'true'
@@ -37,7 +47,7 @@ class PrimaryPreservation(unittest.TestCase):
       return 'schema'
      return 'equal'
     return ''
-   data=b'PGDMPsynthetic';glob=b'synthetic'
+   data=b'PGDMPsynthetic';glob=b'CREATE ROLE postgres;\nALTER ROLE postgres WITH SUPERUSER;\n'
    inventory={'db_sha256':hashlib.sha256(data).hexdigest(),'globals_sha256':hashlib.sha256(glob).hexdigest()}
    class Archive:
     def __enter__(self):return self
@@ -71,6 +81,11 @@ class PrimaryPreservation(unittest.TestCase):
      else:result=qualify.main()
     except Exception as exc:caught=exc
    self.assertEqual(stops,[str(base/'restore-pgdata'),str(base/'pgdata')])
+   if bootstrap!='postgres:10:true':
+    self.assertIsInstance(caught,AssertionError)
+    self.assertNotIn('bootstrap_adapter',receipt_data[0])
+    self.assertFalse(receipt_data[0]['adapted_globals_restore'])
+    return
    if cli:self.assertEqual(result,2)
    else:self.assertIs(caught,failure if primary else secondary if write or chmod or cleanup else None)
    if primary:
@@ -78,6 +93,9 @@ class PrimaryPreservation(unittest.TestCase):
     while tb:chain.append(tb);tb=tb.tb_next
     self.assertIn(original_tb[0],chain)
    if receipt_data:
+    self.assertEqual(receipt_data[0]['restore_mode'],'adapted-bootstrap-restore')
+    self.assertFalse(receipt_data[0]['unmodified_globals_restore'])
+    self.assertEqual(receipt_data[0]['bootstrap_adapter']['change_count'],1)
     self.assertNotIn(secret,json.dumps(receipt_data))
     if cleanup:
      self.assertEqual(receipt_data[0]['cleanup_failure']['phase'],'cleanup')
@@ -92,5 +110,8 @@ class PrimaryPreservation(unittest.TestCase):
  def test_success_chmod_fails(self):self.invoke(primary=False,chmod=True)
  def test_success_cleanup_fails(self):self.invoke(primary=False,cleanup=True)
  def test_success(self):self.invoke(primary=False)
+ def test_wrong_bootstrap_oid_refused(self):self.invoke(primary=False,bootstrap='postgres:99:true')
+ def test_wrong_bootstrap_name_refused(self):self.invoke(primary=False,bootstrap='cas_restore_admin:10:true')
+ def test_non_superuser_bootstrap_refused(self):self.invoke(primary=False,bootstrap='postgres:10:false')
 
 if __name__=='__main__':unittest.main()

@@ -22,7 +22,7 @@ jobs:
           mkdir -p evidence/cas-backup-v6
           git rev-parse HEAD > evidence/cas-backup-v6/source-sha.txt
           cd test/fixtures/cas-backup-executor-v6
-          timeout -k 3 120 python3 -B -m unittest -v test_capture test_regressions test_output_bounds test_hosted test_links test_safe_extract test_globals test_qualification_contract test_diagnostic test_primary_preservation test_psql_failure_categories test_globals_sqlstate test_globals_lifecycle test_grantor_detail
+          timeout -k 3 120 python3 -B -m unittest -v test_capture test_regressions test_output_bounds test_hosted test_links test_safe_extract test_globals test_qualification_contract test_diagnostic test_primary_preservation test_psql_failure_categories test_globals_sqlstate test_globals_lifecycle test_grantor_detail test_bootstrap_adapter test_workflow_inventory
       - name: Real disposable PG capture CMS restore
         shell: bash
         run: |

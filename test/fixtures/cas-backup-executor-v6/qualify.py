@@ -160,6 +160,70 @@ def record_failure(receipt, key, exc, phase):
  try:receipt[key]=failure_diagnostic(exc,phase)
  except Exception:pass
 
+def adapt_bootstrap_globals(original, adapted):
+ # The supported dump dialect is deliberately narrow. Never rewrite capture bytes.
+ data=original.read_bytes()
+ capture.require(original!=adapted and not adapted.exists(),'bootstrap adapter refused')
+ def require(ok):capture.require(ok,'bootstrap adapter refused')
+ require(len(data)<=16000000 and all(c>=32 or c in (9,10) for c in data))
+ # Byte lexer: comments and quoted tokens cannot supply statement boundaries.
+ # Deliberately reject dollar/escape strings, block comments and psql commands.
+ tokens=[];statements=[];i=0;start=None;restriction=None;unrestricted=False
+ while i<len(data):
+  c=data[i:i+1]
+  if c in b' \t\r\n':i+=1;continue
+  if data[i:i+2]==b'--':
+   end=data.find(b'\n',i);i=len(data) if end<0 else end+1;continue
+  if c==b'\\':
+   require(start is None and (i==0 or data[i-1:i]==b'\n'))
+   end=data.find(b'\n',i);require(end>=0)
+   m=re.fullmatch(rb'\\(restrict|unrestrict) ([A-Za-z0-9]{1,128})',data[i:end])
+   require(m is not None)
+   if m[1]==b'restrict':
+    require(restriction is None and not unrestricted and not statements);restriction=m[2]
+   else:
+    require(restriction==m[2] and not unrestricted);unrestricted=True
+   i=end+1;continue
+  require(not unrestricted)
+  require(c!=b'$' and data[i:i+2] not in (b'/*',b'*/'))
+  if start is None:start=i
+  if c in (b"'",b'"'):
+   require(i==0 or not (data[i-1:i].isalnum() or data[i-1:i] in (b'_',b'&')))
+   quote=c;j=i+1
+   while j<len(data):
+    require(data[j:j+1]!=b'\\')
+    if data[j:j+1]==quote:
+     if data[j+1:j+2]==quote:j+=2;continue
+     break
+    j+=1
+   require(j<len(data))
+   tokens.append((b'quoted',data[i:j+1]));i=j+1;continue
+  if c==b';':
+   statements.append((start,i+1,tokens));tokens=[];start=None;i+=1;continue
+  m=re.match(rb'[A-Za-z_][A-Za-z_0-9]*',data[i:])
+  if m:
+   value=m[0];tokens.append((b'word',value.lower()));i+=len(value)
+  else:tokens.append((b'punct',c));i+=1
+ require(start is None and (restriction is None or unrestricted))
+ matches=[]
+ for begin,end,ts in statements:
+  # Changes to lexical string interpretation are unsupported, even if harmless.
+  if any(v==b'standard_conforming_strings' for k,v in ts):
+   require(data[begin:end]==b'SET standard_conforming_strings = on;')
+  if ts[:1]==[(b'word',b'create')]:
+   require(len(ts)==3 and ts[1]==(b'word',b'role') and ts[2][0]==b'word')
+   k,name=ts[2]
+   if name in (b'postgres',b'"postgres"'):
+    require(data[begin:end]==b'CREATE ROLE postgres;')
+    matches.append((begin,end))
+ require(len(matches)==1)
+ begin,end=matches[0];result=data[:begin]+data[end:]
+ with adapted.open('xb') as out:
+  os.chmod(adapted,0o600);out.write(result)
+ return dict(mode='adapted-bootstrap-restore',change_count=1,
+  change='remove-bootstrap-create-role',original_sha256=hashlib.sha256(data).hexdigest(),
+  adapted_sha256=hashlib.sha256(result).hexdigest())
+
 def main():
  capture.require(os.environ.get('GITHUB_ACTIONS')=='true' and os.geteuid()==0,'hosted root only')
  capture.require(socket.gethostname()!='avers-analyst','production host forbidden')
@@ -167,7 +231,7 @@ def main():
  evidence=pathlib.Path(os.environ['EVIDENCE']);evidence.mkdir(parents=True,exist_ok=True)
  base=pathlib.Path('/tmp/cas-backup-hosted-'+uuid.uuid4().hex);base.mkdir(mode=0o755);base.chmod(0o755)
  user=pwd.getpwnam('postgres');started=False;restore_started=False;success=False
- receipt={'test_only':True,'production_authority':False,'real_pg_restore':False,'source_sha':os.environ['GITHUB_SHA'],'run_id':os.environ['GITHUB_RUN_ID'],'run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],'executor_sha256':capture.hashfile(HERE/'capture.py'),'hosted_sha256':capture.hashfile(HERE/'hosted.py')}
+ receipt={'test_only':True,'production_authority':False,'real_pg_restore':False,'restore_mode':'adapted-bootstrap-restore','unmodified_globals_restore':False,'adapted_globals_restore':False,'source_sha':os.environ['GITHUB_SHA'],'run_id':os.environ['GITHUB_RUN_ID'],'run_attempt':os.environ['GITHUB_RUN_ATTEMPT'],'executor_sha256':capture.hashfile(HERE/'capture.py'),'hosted_sha256':capture.hashfile(HERE/'hosted.py')}
  phase='source-init'
  try:
   for name in ['pgdata','socket']:
@@ -211,27 +275,32 @@ def main():
    (base/'globals.sql').write_bytes(globals_data)
   (base/'restore.dump').chmod(0o644)
   phase='restore-init'
-  # SECOND cluster: different bootstrap role avoids CREATE ROLE postgres collision.
+  # SECOND cluster: preserve bootstrap OID/grantor semantics; adapt only its CREATE.
   # Trust is confined to a postgres-owned 0700 Unix socket; TCP remains disabled.
   for name in ['restore-pgdata','restore-socket']:
    p=base/name;p.mkdir(mode=0o700);os.chown(p,user.pw_uid,user.pw_gid)
-  pg('initdb','-D',str(base/'restore-pgdata'),'--username=cas_restore_admin','--auth-local=trust','--auth-host=reject','--no-locale')
+  pg('initdb','-D',str(base/'restore-pgdata'),'--username=postgres','--auth-local=trust','--auth-host=reject','--no-locale')
   with (base/'restore-pgdata/postgresql.conf').open('a') as f:f.write("\nlisten_addresses = ''\nport = 55440\nunix_socket_directories = '"+str(base/'restore-socket')+"'\n")
   pg('pg_ctl','-D',str(base/'restore-pgdata'),'-l',str(base/'restore-pgdata/server.log'),'-w','start');restore_started=True
-  restore_conn=['--host='+str(base/'restore-socket'),'--port=55440','--username=cas_restore_admin','--no-password']
+  restore_conn=['--host='+str(base/'restore-socket'),'--port=55440','--username=postgres','--no-password']
   restore_cluster=re.search(r'^Database system identifier:\s+(\d+)\s*$',pg('pg_controldata',str(base/'restore-pgdata')),re.M)[1]
   assert restore_cluster!=cluster and restore_cluster!='7552810389285094085'
   def restored(q):return pg('psql','-XAt','-v','ON_ERROR_STOP=1',*restore_conn,'--dbname=cas_backup_restore','--command='+q)
-  (base/'globals.sql').chmod(0o600);os.chown(base/'globals.sql',user.pw_uid,user.pw_gid)
+  bootstrap_query="SELECT rolname || ':' || oid::text || ':' || rolsuper::text AS bootstrap_identity FROM pg_roles WHERE rolname='postgres'"
+  bootstrap_before=sql('cas_backup_source',bootstrap_query)
+  bootstrap_restore=pg('psql','-XAt','-v','ON_ERROR_STOP=1',*restore_conn,'--dbname=postgres','--command='+bootstrap_query)
+  assert bootstrap_before==bootstrap_restore=='postgres:10:true'
+  receipt['bootstrap_adapter']=adapt_bootstrap_globals(base/'globals.sql',base/'globals-adapted.sql')
+  os.chown(base/'globals-adapted.sql',user.pw_uid,user.pw_gid)
   phase='restore-data'
-  pg('psql','-X','-v','ON_ERROR_STOP=1','-v','VERBOSITY=verbose',*restore_conn,'--dbname=postgres','--file='+str(base/'globals.sql'))
+  pg('psql','-X','-v','ON_ERROR_STOP=1','-v','VERBOSITY=verbose',*restore_conn,'--dbname=postgres','--file='+str(base/'globals-adapted.sql'))
   pg('createdb',*restore_conn,'--owner=cas_owner','cas_backup_restore')
   pg('pg_restore',*restore_conn,'--exit-on-error','--dbname=cas_backup_restore',str(base/'restore.dump'))
   phase='restore-check'
   assert restored("SELECT current_setting('data_directory') || '|' || system_identifier::text FROM pg_control_system()") == str(base/'restore-pgdata')+'|'+restore_cluster
   role_checks=[
    "SELECT rolname || ':' || rolcanlogin::text || ':' || rolsuper::text FROM pg_roles WHERE rolname IN ('cas_owner','cas_readers','cas_member') ORDER BY rolname",
-   "SELECT r.rolname || ':' || u.rolname || ':' || a.admin_option::text FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.roleid JOIN pg_roles u ON u.oid=a.member WHERE r.rolname='cas_readers' ORDER BY u.rolname",
+   "SELECT r.rolname || ':' || u.rolname || ':' || a.admin_option::text || ':' || pg_get_userbyid(a.grantor) || ':' || a.grantor::text || ':' || a.inherit_option::text || ':' || a.set_option::text FROM pg_auth_members a JOIN pg_roles r ON r.oid=a.roleid JOIN pg_roles u ON u.oid=a.member WHERE r.rolname='cas_readers' ORDER BY u.rolname",
    "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=current_database()",
    "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='qualification'",
    "SELECT pg_get_userbyid(relowner) || ':' || relacl::text FROM pg_class WHERE oid='qualification.items'::regclass",
@@ -241,11 +310,12 @@ def main():
   for query in role_checks:
    before=sql('cas_backup_source',query);after=restored(query)
    assert before and before==after
-  assert restored(role_checks[1])=='cas_readers:cas_member:false'
+  assert restored(role_checks[1])=='cas_readers:cas_member:false:postgres:10:true:true'
   assert restored(role_checks[2])==restored(role_checks[3])=='cas_owner'
   assert restored(role_checks[5])=='true:true:false'
   assert restored(role_checks[6])=='true'
-  receipt.update(real_globals_restore=True,second_cluster=True,restore_cluster=restore_cluster,roles_membership_ownership_grants_equal=True)
+  assert restored(bootstrap_query)==bootstrap_before
+  receipt.update(real_globals_restore=True,adapted_globals_restore=True,bootstrap_identity_equal=True,same_grantor_semantics=True,second_cluster=True,restore_cluster=restore_cluster,roles_membership_ownership_grants_equal=True)
   rows="SELECT id::text || ':' || value FROM qualification.items ORDER BY id"
   schema="SELECT table_schema || '.' || table_name || ':' || column_name || ':' || data_type || ':' || is_nullable FROM information_schema.columns WHERE table_schema='qualification' ORDER BY table_name,ordinal_position"
   before=sql('cas_backup_source',rows);after=restored(rows)
