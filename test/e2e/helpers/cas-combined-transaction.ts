@@ -5,6 +5,7 @@ function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promi
 async function bounded<T>(p: Promise<T>): Promise<T> { let timer: ReturnType<typeof setTimeout>; try { return await Promise.race([p, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('combined lifetime deadline')), 10000); })]); } finally { clearTimeout(timer!); } }
 // Actual postgres.js and PostgresEngine: no transport substitution or mocks.
 export async function exerciseCombinedTransaction(engine: PostgresEngine, admin: PostgresEngine, role: string) {
+  console.log('CAS_PHASE: transaction-start');
   let retained!: BrainEngine;
   let lazy: any;
   expect(await engine.transaction(async tx => {
@@ -23,9 +24,11 @@ export async function exerciseCombinedTransaction(engine: PostgresEngine, admin:
   await expect(retained.executeRaw('SELECT 1')).rejects.toThrow('Transaction is no longer active');
   await expect(retained.executeRawDirect('SELECT 1')).rejects.toThrow('Transaction is no longer active');
   await expect(Promise.resolve(lazy)).rejects.toThrow('Transaction is no longer active');
+  console.log('CAS_PHASE: rollback');
   const original = new Error('synthetic callback rollback');
   expect(await engine.transaction(async tx => { retained = tx; await tx.executeRaw('SELECT 1'); throw original; }).catch(e => e)).toBe(original);
   await expect(retained.executeRaw('SELECT 1')).rejects.toThrow('Transaction is no longer active');
+  console.log('CAS_PHASE: backend-loss');
   const entered = deferred<{ pid: number; started: string }>();
   const release = deferred<void>(); const joined = deferred<void>();
   let lateError: unknown;
@@ -38,10 +41,12 @@ export async function exerciseCombinedTransaction(engine: PostgresEngine, admin:
   });
   const settled = running.then(() => ({ ok: true }), error => ({ ok: false, error }));
   try {
-    const identity = await bounded(entered.promise);
+    console.log('CAS_PHASE: terminate-backend');
+  const identity = await bounded(entered.promise);
     const rows = await admin.executeRaw<{ stopped: boolean }>(`SELECT pg_terminate_backend(pid) AS stopped FROM pg_stat_activity WHERE pid=$1 AND usename=$2 AND datname=current_database() AND backend_start=$3::text::timestamptz`, [identity.pid, role, identity.started]);
     expect(rows).toEqual([{ stopped: true }]);
-    expect((await bounded(settled)).ok).toBe(false);
+    console.log('CAS_PHASE: await-settlement');
+  expect((await bounded(settled)).ok).toBe(false);
   } finally { release.resolve(); await bounded(joined.promise); }
   expect(lateError).toBeInstanceOf(Error);
   expect((lateError as Error).message).toBe('Transaction is no longer active');

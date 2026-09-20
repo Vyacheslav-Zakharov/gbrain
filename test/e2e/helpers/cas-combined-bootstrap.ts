@@ -90,19 +90,23 @@ async function exerciseConnectedBootstrapFixture(f: {
     [f.source, parsed.type, parsed.title, parsed.compiled_truth, parsed.timeline, JSON.stringify(parsed.frontmatter)]);
     writeFileSync(anchorPath, anchor, { flag: 'wx', mode: 0o400 }); ownsAnchor = true;
     await engine.connect(config);
+    console.log('CAS_PHASE: candidate'); phase = 'candidate';
     expect(await hasPageFileRuntimeCandidate(engine)).toBe(true);
     const [identity] = await engine.executeRaw('SELECT session_user,current_user,pg_backend_pid() AS pid');
     expect(identity.session_user).toBe(f.roles.ordinary); expect(identity.current_user).toBe(f.roles.ordinary);
     const adapter = await sessions(); expect(adapter.length).toBeGreaterThan(0);
     expect(adapter.every(row => row.pid !== identity.pid)).toBe(true);
+    console.log('CAS_PHASE: resolve-unenrolled'); phase = 'resolve-unenrolled';
     expect(await resolvePageFileRuntime(ctx, f.source, 'connected')).toBeUndefined();
     expect(await f.admin.executeRaw('SELECT binding_id FROM page_file_bindings WHERE source_id=$1', [f.source])).toEqual([]);
+    console.log('CAS_PHASE: init-schema'); phase = 'init-schema';
     const pristine = await snapshot(); await engine.initSchema(); expect(await snapshot()).toEqual(pristine);
     await engine.executeRaw("INSERT INTO pages(source_id,slug,type,title,compiled_truth) VALUES($1,'legacy-connected','note','Legacy','Before')", [f.source]);
     await engine.executeRaw("UPDATE pages SET compiled_truth='After' WHERE source_id=$1 AND slug='legacy-connected'", [f.source]);
     expect((await engine.executeRaw("SELECT compiled_truth FROM pages WHERE source_id=$1 AND slug='legacy-connected'", [f.source]))[0].compiled_truth).toBe('After');
     await engine.executeRaw("DELETE FROM pages WHERE source_id=$1 AND slug='legacy-connected'", [f.source]);
     expect(await snapshot()).toEqual(pristine);
+    console.log('CAS_PHASE: transaction'); phase = 'transaction';
     await exerciseCombinedTransaction(engine, f.admin, f.roles.ordinary);
     if (!f.mode) console.log('PG_CONNECTED_BOOTSTRAP: actual ordinary and adapter admission; initSchema no migration or enrollment');
 
@@ -118,6 +122,7 @@ async function exerciseConnectedBootstrapFixture(f: {
     const [page] = await engine.executeRaw<{ id: string; write_revision: string }>('SELECT id::text,write_revision FROM pages WHERE source_id=$1', [f.source]);
     await expect(enrollPageFileRuntime(ctx, f.source, 'connected')).rejects.toThrow('page_file_candidate_lifecycle_unavailable');
     const { exerciseConnectedOperator } = await import('./page-file-connected-operator.ts');
+    console.log('CAS_PHASE: operator'); phase = 'operator';
     await exerciseConnectedOperator({ admin: f.admin, engine, source: f.source, root, directory,
       bootstrap: JSON.parse(anchor), ordinaryUrl: config.database_url,
       enrollmentUrl: f.loginUrls.get(f.roles.enrollment)!,
@@ -135,6 +140,7 @@ async function exerciseConnectedBootstrapFixture(f: {
         ordinaryUrl: config.database_url, ordinaryRole: f.roles.ordinary });
       return; // Separate fixture invocation: offline crash/upgrade proofs stay unchanged.
     }
+    console.log('CAS_PHASE: disconnect-reconnect'); phase = 'disconnect-reconnect';
     const stable = await snapshot();
     await engine.disconnect();
     // SQL suite's own adapter probe pool is still open; only startup's additional
