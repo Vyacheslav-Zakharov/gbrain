@@ -2671,14 +2671,34 @@ const run_doctor: Operation = {
 
 const get_versions: Operation = {
   name: 'get_versions',
-  description: 'Page version history',
+  description: 'Page version history. Without source_id, resolves an exact slug within the caller grant; ambiguous or missing pages fail closed.',
   params: {
     slug: { type: 'string', required: true },
+    source_id: { type: 'string', description: 'Read history from one granted source. Omit to resolve across the caller grant.' },
   },
   handler: async (ctx, p) => {
-    // v0.31.8 (D20): thread ctx.sourceId.
-    const sourceOpts = ctx.sourceId ? { sourceId: ctx.sourceId } : {};
-    const versions = await ctx.engine.getVersions(p.slug as string, sourceOpts);
+    const slug = p.slug as string;
+    const scope = resolveRequestedScope(ctx, p.source_id as string | undefined);
+    const sources = scope.sourceIds?.length ? [...new Set(scope.sourceIds)]
+      : scope.sourceId ? [scope.sourceId]
+      : ctx.remote === false && p.source_id === undefined ? ['default'] : [];
+    if (sources.length === 0) {
+      throw new OperationError('permission_denied', 'No source in scope for version history. Specify source_id.');
+    }
+    // getVersions accepts only one source. Probe exact pages within the grant,
+    // never an unscoped getPage (which picks an arbitrary duplicate via LIMIT 1).
+    let sourceId: string | undefined;
+    for (const candidate of sources) {
+      if (!await ctx.engine.getPage(slug, { sourceId: candidate })) continue;
+      if (sourceId !== undefined) {
+        throw new OperationError('ambiguous_slug', `Page exists in multiple granted sources: ${slug}`, 'Specify source_id.');
+      }
+      sourceId = candidate;
+    }
+    if (sourceId === undefined) {
+      throw new OperationError('page_not_found', `Page not found: ${slug}`);
+    }
+    const versions = await ctx.engine.getVersions(slug, { sourceId });
     // Same takes-allow-list privacy boundary as get_page. Snapshots persist
     // historical compiled_truth verbatim, including the takes fence, so
     // a remote token bypassing get_page via /history would re-introduce
