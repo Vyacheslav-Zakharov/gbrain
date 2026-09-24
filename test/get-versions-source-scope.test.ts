@@ -84,7 +84,7 @@ test('scalar-only remote source cannot request a different source', async () => 
 });
 
 test('empty federated grant falls back to scalar, not all sources', async () => {
-  const f = fixture(['personal'], { auth: { allowedSources: [] } as OperationContext['auth'] });
+  const f = fixture(['personal'], { auth: { token: 'fixture-token', clientId: 'fixture-client', scopes: ['read'], allowedSources: [] } });
   expect(await f.run()).toEqual(f.snapshots);
   expect(f.reads).toEqual([['page', 'personal'], ['versions', 'personal']]);
 });
