@@ -44,7 +44,7 @@ const raw = () => [
 
 (databaseUrl ? test : test.skip)('PostgreSQL native directory guard: publication, hidden identity, HOLD and pre-write refusals', async () => {
   const url = admitDatabase(databaseUrl!); // before client creation or any writes
-  const sourceId = `guard-pg-${randomUUID()}`;
+  const sourceId = `guard-pg-${randomUUID().replaceAll('-', '').slice(0, 20)}`;
   const profileId = `${sourceId}-profile`;
   const key = `source_ingest.directory_guard.${sourceId}.${profileId}`;
   const pinKey = `${key}.first_bootstrap`;
