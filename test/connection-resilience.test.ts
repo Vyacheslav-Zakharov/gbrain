@@ -307,11 +307,24 @@ describe('Eng-review D3 — executeRaw has no per-call retry wrapper', () => {
 
   it('PostgresEngine.reconnect() still exists for supervisor-driven recovery', () => {
     const src = readFileSync(resolve('src/core/postgres-engine.ts'), 'utf-8');
-    // v0.42.10.0 (#1685 GAP B): reconnect() gained an optional ctx param so it
-    // can classify the triggering error for the pool-recovery audit. Match the
-    // prefix so both `reconnect()` and `reconnect(ctx?)` satisfy the contract.
-    expect(src).toContain('async reconnect(');
-    expect(src).toContain('await this.disconnect()');
+    // Reconnect is now a promise-returning serialized wrapper. Trace its
+    // delegation and the instance recovery path, not the obsolete async token.
+    const check = (source: string) => {
+      const wrapper = source.match(/\n  reconnect\([^\n]*\n([\s\S]*?)\n  \}/)?.[1] ?? '';
+      const lifecycle = source.match(/private async reconnectLifecycle\([^\n]*\n([\s\S]*?)\n  \}/)?.[1] ?? '';
+      return wrapper.includes('this.queueLifecycle(() => this.reconnectLifecycle(ctx))')
+        && wrapper.includes('return pending;')
+        && lifecycle.includes('await this.disconnectTransition()')
+        && lifecycle.includes('await this.connectTransition(this._savedConfig)');
+    };
+    expect(check(src)).toBe(true);
+    // Disposable string mutations prove that losing dispatch or either half
+    // of pool replacement is caught without modifying production source.
+    for (const token of [
+      'this.queueLifecycle(() => this.reconnectLifecycle(ctx))',
+      'await this.disconnectTransition()',
+      'await this.connectTransition(this._savedConfig)',
+    ]) expect(check(src.replaceAll(token, 'REMOVED'))).toBe(false);
   });
 
   it('Supervisor still has the 3-strikes-then-reconnect path', () => {

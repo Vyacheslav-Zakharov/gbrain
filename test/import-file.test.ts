@@ -16,9 +16,25 @@ function mockEngine(overrides: Partial<Record<string, any>> = {}): BrainEngine {
     return Promise.resolve(null);
   };
 
+  // Admission reads are separate from the existing import-operation trace:
+  // early-skip tests still require zero import operations, not zero gate reads.
+  const catalogCalls: { sql: string; params: unknown[] | undefined }[] = [];
   const engine = new Proxy({} as any, {
     get(_, prop: string) {
       if (prop === '_calls') return calls;
+      if (prop === '_catalogCalls') return catalogCalls;
+      if (prop === 'executeRaw') return async (sql: string, params?: unknown[]) => {
+        const query = sql.replace(/\s+/g, ' ').trim();
+        if (query === "SELECT to_regclass('public.page_file_bindings') IS NOT NULL AS present"
+          || query === 'SELECT binding_id FROM public.page_file_bindings WHERE source_id=$1 AND slug=$2'
+          || query === "SELECT source_id FROM public.page_file_bindings WHERE (source_id=$1 AND slug=$2) OR (canonical_root || '/' || relative_path) IN ($3,$4)") {
+          catalogCalls.push({ sql: query, params });
+          if (overrides.executeRaw) return overrides.executeRaw(sql, params);
+          // Model a supported schema with an empty enrollment catalog.
+          return query.includes('to_regclass') ? [{ present: true }] : [];
+        }
+        return track('executeRaw')(sql, params);
+      };
       if (prop === 'getTags') return overrides.getTags || (() => Promise.resolve([]));
       if (prop === 'getPage') return overrides.getPage || (() => Promise.resolve(null));
       // transaction: just call the fn with the same engine (no real DB transaction in tests)
@@ -35,6 +51,45 @@ beforeAll(() => {
 
 afterAll(() => {
   rmSync(TMP, { recursive: true, force: true });
+});
+
+describe('import enrollment admission', () => {
+  for (const entry of ['file', 'content'] as const) {
+    const invoke = (engine: BrainEngine) => entry === 'file'
+      ? importFile(engine, join(TMP, 'admission.md'), 'admission.md', { noEmbed: true })
+      : importFromContent(engine, 'admission', '---\ntitle: Admission\n---\nBody.', { noEmbed: true });
+
+    test(`${entry}: empty enrollment catalog allows import after both reads`, async () => {
+      writeFileSync(join(TMP, 'admission.md'), '---\ntitle: Admission\n---\nBody.');
+      const engine = mockEngine();
+      expect((await invoke(engine)).status).toBe('imported');
+      const reads = (engine as any)._catalogCalls;
+      expect(reads.length).toBeGreaterThanOrEqual(2);
+      expect(reads[0].sql).toContain('to_regclass');
+      expect(reads[1].params.slice(0, 2)).toEqual(['default', 'admission']);
+    });
+
+    for (const failure of ['probe-error', 'malformed-probe', 'lookup-error', 'enrolled'] as const) {
+      test(`${entry}: ${failure} refuses before import operations`, async () => {
+        writeFileSync(join(TMP, 'admission.md'), '---\ntitle: Admission\n---\nBody.');
+        const engine = mockEngine({ executeRaw: async (sql: string) => {
+          if (sql.includes('to_regclass')) {
+            if (failure === 'probe-error') throw new Error('catalog permission denied');
+            return failure === 'malformed-probe' ? [] : [{ present: true }];
+          }
+          if (failure === 'lookup-error') throw new Error('binding lookup failed');
+          return [{ binding_id: 'enrolled-fixture', source_id: 'default' }];
+        } });
+        await expect(invoke(engine)).rejects.toMatchObject({
+          code: 'unsupported_import_file_baseline', acknowledgeable: false,
+        });
+        expect((engine as any)._calls).toEqual([]);
+        expect((engine as any)._catalogCalls).toHaveLength(
+          failure === 'probe-error' || failure === 'malformed-probe' ? 1 : 2,
+        );
+      });
+    }
+  }
 });
 
 describe('importFile', () => {

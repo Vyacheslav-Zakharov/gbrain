@@ -17,8 +17,15 @@ const page = (body: string) => ({ type: 'note', title: 'Example', compiled_truth
 test('checked replacement atomically rebuilds chunks without old vectors and saves prior body', async () => {
   const slug = 'cas-store/replace';
   await engine.putPage(slug, page('Old searchable text'));
-  await engine.upsertChunks(slug, [{ chunk_index: 0, chunk_text: 'Old searchable text', chunk_source: 'compiled_truth', embedding: new Float32Array(1536).fill(0.01) }]);
+  // Match the actual initialized catalog (snapshot and cold-start dimensions
+  // can differ); this fixture needs a real old vector, not a particular model.
+  const dimensions = Number(await engine.getConfig('embedding_dimensions'));
+  expect(Number.isInteger(dimensions) && dimensions > 0).toBe(true);
+  await engine.upsertChunks(slug, [{ chunk_index: 0, chunk_text: 'Old searchable text', chunk_source: 'compiled_truth', embedding: new Float32Array(dimensions).fill(0.01) }]);
   const old = await engine.getChunks(slug);
+  const stored = await engine.executeRaw<{ dimensions: number }>(
+    'SELECT vector_dims(embedding) AS dimensions FROM content_chunks WHERE id = $1', [old[0].id]);
+  expect(stored[0].dimensions).toBe(dimensions);
   const snapshot = await call('get_page_checked', { slug, source_id: 'default' });
   await call('put_page_checked', { slug, source_id: 'default', expected_revision: snapshot.revision, page: page('New searchable text') });
   const chunks = await engine.getChunks(slug);
@@ -26,6 +33,10 @@ test('checked replacement atomically rebuilds chunks without old vectors and sav
   expect(chunks[0].id).not.toBe(old[0].id);
   expect(chunks[0].embedding).toBeNull();
   expect(chunks[0].embedded_at).toBeNull();
+  expect(await engine.executeRaw(
+    'SELECT embedding IS NULL AS cleared, embedded_at IS NULL AS unstamped FROM content_chunks WHERE id = $1',
+    [chunks[0].id],
+  )).toEqual([{ cleared: true, unstamped: true }]);
   expect((await engine.getVersions(slug, { sourceId: 'default' })).some(v => v.compiled_truth === 'Old searchable text')).toBe(true);
 });
 

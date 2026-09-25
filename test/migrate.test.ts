@@ -4,6 +4,8 @@ import type { IdleBlocker } from '../src/core/migrate.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { readFileSync } from 'fs';
+import { createHash } from 'node:crypto';
+import { withEnv } from './helpers/with-env.ts';
 import { resolve } from 'path';
 
 describe('migrate', () => {
@@ -52,47 +54,32 @@ describe('migrate', () => {
 
   test('v140 upgrades a real v139 PGLite schema, preserves legacy scans, enforces checks, and is idempotent', async () => {
     const engine = new PGLiteEngine();
-    await engine.connect({});
+    await withEnv({ GBRAIN_PGLITE_SNAPSHOT: undefined }, () => engine.connect({}));
     try {
-      await engine.executeRaw(`CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
-      await engine.executeRaw(`CREATE TABLE sources (id TEXT PRIMARY KEY)`);
-      await engine.executeRaw(`
-        CREATE TABLE take_proposal_scans (
-          id BIGSERIAL PRIMARY KEY,
-          source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-          page_slug TEXT NOT NULL,
-          content_hash TEXT NOT NULL,
-          prompt_version TEXT NOT NULL,
-          proposal_run_id TEXT NOT NULL,
-          model_id TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','completed','failed')),
-          proposal_count INTEGER NOT NULL DEFAULT 0,
-          error_text TEXT,
-          started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-          completed_at TIMESTAMPTZ,
-          UNIQUE (source_id, page_slug, content_hash, prompt_version)
-        )
-      `);
-      await engine.executeRaw(`
-        CREATE TABLE take_proposals (
-          id BIGSERIAL PRIMARY KEY,
-          scan_id BIGINT REFERENCES take_proposal_scans(id) ON DELETE SET NULL,
-          source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
-          page_slug TEXT NOT NULL,
-          content_hash TEXT NOT NULL,
-          prompt_version TEXT NOT NULL,
-          proposal_run_id TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'pending',
-          claim_text TEXT NOT NULL,
-          claim_hash TEXT NOT NULL,
-          kind TEXT NOT NULL,
-          holder TEXT NOT NULL,
-          weight REAL NOT NULL,
-          domain TEXT,
-          model_id TEXT NOT NULL
-        )
-      `);
-      await engine.executeRaw(`INSERT INTO sources(id) VALUES ('migration-source')`);
+      // Import a complete historical schema into a genuinely blank engine.
+      // Never initialize today's schema and rewind its version marker.
+      expect(await engine.executeRaw(
+        `SELECT table_name FROM information_schema.tables WHERE table_schema='public'`,
+      )).toHaveLength(0);
+      const historicalSql = readFileSync(new URL('./fixtures/pglite-v139.sql', import.meta.url), 'utf8');
+      expect(createHash('sha256').update(historicalSql).digest('hex'))
+        .toBe('9fc48cd8724e332e2591cd53a891a90ce6c7f51c2d15d2f01b46ec90944b5349');
+      await engine.db.exec(historicalSql);
+      expect(await engine.executeRaw(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND (
+          (table_name='take_proposal_scans' AND column_name IN (
+            'dispatch_status','outcome','actual_model_id','stop_reason','input_tokens',
+            'output_tokens','request_sha256','response_sha256','reserved_call_usd',
+            'actual_call_usd','reservation_released_usd','usage_reconciled',
+            'parsed_count','dropped_count','suppressed_count'))
+          OR (table_name='take_proposals' AND column_name='claim_class'))
+      `)).toHaveLength(0);
+      expect(await engine.executeRaw(`
+        SELECT table_name FROM information_schema.tables
+        WHERE table_schema='public' AND table_name='take_proposal_scan_attempts'
+      `)).toHaveLength(0);
+      await engine.executeRaw(`INSERT INTO sources(id, name) VALUES ('migration-source', 'migration-source')`);
       for (const status of ['running', 'completed', 'failed']) {
         await engine.executeRaw(
           `INSERT INTO take_proposal_scans
@@ -104,8 +91,9 @@ describe('migrate', () => {
       await engine.setConfig('version', '139');
 
       const first = await runMigrations(engine);
-      expect(first).toEqual({ applied: 1, current: 140 });
-      expect(await engine.getConfig('version')).toBe('140');
+      const pendingCount = MIGRATIONS.filter(m => m.version > 139).length;
+      expect(first).toEqual({ applied: pendingCount, current: LATEST_VERSION });
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
       const rows = await engine.executeRaw<{ status: string }>(
         `SELECT status FROM take_proposal_scans ORDER BY status`,
       );
@@ -122,13 +110,13 @@ describe('migrate', () => {
       )).rejects.toThrow();
 
       const second = await runMigrations(engine);
-      expect(second).toEqual({ applied: 0, current: 140 });
+      expect(second).toEqual({ applied: 0, current: LATEST_VERSION });
 
-      // A no-op at version 140 proves only version gating. Rewind the marker in
-      // this disposable engine and execute v140 again to prove DDL idempotency.
+      // A no-op at head proves only version gating. Rewind the marker in
+      // this disposable engine and replay v140 through head for DDL idempotency.
       await engine.setConfig('version', '139');
       const replay = await runMigrations(engine);
-      expect(replay).toEqual({ applied: 1, current: 140 });
+      expect(replay).toEqual({ applied: pendingCount, current: LATEST_VERSION });
       expect(await engine.executeRaw(`SELECT status FROM take_proposal_scans ORDER BY status`)).toEqual([
         { status: 'completed' }, { status: 'failed' }, { status: 'running' },
       ]);

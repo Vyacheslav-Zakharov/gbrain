@@ -14,6 +14,19 @@ import {
   validateRepoState,
 } from '../src/core/git-remote.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { withLegacyPageFileRootMutation, PageFileRootGateError, type PageFileRootPermit } from '../src/core/page-file-root-gate.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+
+// Explicit absent-catalog fixture for the supported unenrolled-root path.
+// Unknown queries still fail; the actual root gate issues and revokes permits.
+const unenrolledRootEngine = {
+  async executeRaw(sql: string) {
+    if (sql === "SELECT to_regclass('public.page_file_bindings') IS NOT NULL AS present") {
+      return [{ present: false }];
+    }
+    throw new Error(`Unexpected root-gate query: ${sql}`);
+  },
+} as Pick<BrainEngine, 'executeRaw'>;
 
 // ---------------------------------------------------------------------------
 // Fake-git harness: write a shell script that records its argv to a log file,
@@ -320,11 +333,32 @@ describe('cloneRepo', () => {
 // ---------------------------------------------------------------------------
 
 describe('pullRepo', () => {
+  test('absent or fabricated root permit refuses before invoking Git', async () => {
+    const repo = join(FAKE_GIT_DIR, 'pull-unadmitted');
+    mkdirSync(repo, { recursive: true });
+    await withEnv({ PATH: fakePath() }, async () => {
+      expect(() => pullRepo(repo)).toThrow(PageFileRootGateError);
+      expect(() => pullRepo(repo, { rootPermit: { root: repo } })).toThrow(PageFileRootGateError);
+    });
+    expect(readArgvLog()).toEqual([]);
+  });
+
+  test('a permit expires when the admitted mutation completes', async () => {
+    const repo = join(FAKE_GIT_DIR, 'pull-expired');
+    mkdirSync(repo, { recursive: true });
+    let retained: PageFileRootPermit | undefined;
+    await withLegacyPageFileRootMutation(unenrolledRootEngine, repo, permit => { retained = permit; });
+    await withEnv({ PATH: fakePath() }, async () => {
+      expect(() => pullRepo(repo, { rootPermit: retained })).toThrow(PageFileRootGateError);
+    });
+    expect(readArgvLog()).toEqual([]);
+  });
+
   test('happy path: invokes git -C path with GIT_SSRF_FLAGS + pull --ff-only', async () => {
     const repo = join(FAKE_GIT_DIR, 'pull-target');
     mkdirSync(repo, { recursive: true });
     await withEnv({ PATH: fakePath() }, async () => {
-      pullRepo(repo);
+      await withLegacyPageFileRootMutation(unenrolledRootEngine, repo, permit => pullRepo(repo, { rootPermit: permit }));
     });
     const argv = readArgvLog()[0];
     expect(argv[0]).toBe('-C');
@@ -347,7 +381,9 @@ describe('pullRepo', () => {
     mkdirSync(repo, { recursive: true });
     setMode('fail');
     await withEnv({ PATH: fakePath() }, async () => {
-      expect(() => pullRepo(repo)).toThrow(GitOperationError);
+      await withLegacyPageFileRootMutation(unenrolledRootEngine, repo, permit => {
+        expect(() => pullRepo(repo, { rootPermit: permit })).toThrow(GitOperationError);
+      });
     });
     rmSync(repo, { recursive: true, force: true });
   });
