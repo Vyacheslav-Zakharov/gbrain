@@ -1,4 +1,5 @@
 import type { BrainEngine } from './engine.ts';
+import { DEFAULT_EMBEDDING_MODEL } from './ai/defaults.ts';
 import type { Chunk, Page } from './types.ts';
 
 export interface EmbeddingBaseline {
@@ -50,7 +51,9 @@ export async function commitCheckedEmbeddings(engine: BrainEngine, input: Embedd
   if (!input.chunks.length || input.embeddings.length !== input.chunks.length) return false;
   const ids = new Set(input.chunks.map(c => c.id));
   if (ids.size !== input.chunks.length) return false;
-  const model = input.signature?.slice(0, input.signature.lastIndexOf(':')) ?? null;
+  // Legacy callers omit provenance; match upsertChunks' default model policy.
+  // Retaining the previous row's model would mislabel newly generated vectors.
+  const model = input.signature?.slice(0, input.signature.lastIndexOf(':')) ?? DEFAULT_EMBEDDING_MODEL;
   return engine.transaction(async tx => {
     const [page] = await tx.executeRaw<{ id: number }>(
       'SELECT id FROM pages WHERE slug = $1 AND source_id = $2 AND deleted_at IS NULL FOR UPDATE',

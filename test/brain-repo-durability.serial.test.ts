@@ -7,6 +7,18 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import type { BrainEngine } from '../src/core/engine.ts';
+
+// Only the absent enrollment catalog is synthetic; permit issuance stays real.
+const unenrolledRootEngine = {
+  async executeRaw(sql: string) {
+    if (sql === "SELECT to_regclass('public.page_file_bindings') IS NOT NULL AS present") {
+      return [{ present: false }];
+    }
+    throw new Error(`Unexpected root-gate query: ${sql}`);
+  },
+} as Pick<BrainEngine, 'executeRaw'>;
+
 import { execFileSync } from 'child_process';
 import {
   hardenBrainRepo, unhardenBrainRepo, acceptPat,
@@ -46,7 +58,7 @@ function makePair(): void {
 }
 
 async function harden(extra: Record<string, unknown> = {}) {
-  return hardenBrainRepo({ repoPath: work, sourceId: 'wiki', pat: PAT, installCron: false, ...extra });
+  return hardenBrainRepo({ engine: unenrolledRootEngine, repoPath: work, sourceId: 'wiki', pat: PAT, installCron: false, ...extra });
 }
 
 beforeEach(() => {

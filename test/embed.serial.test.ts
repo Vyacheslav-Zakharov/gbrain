@@ -50,22 +50,69 @@ const { runEmbed, runEmbedCore } = await import('../src/commands/embed.ts');
 const { __setEmbedTransportForTests } = await import('../src/core/ai/gateway.ts');
 __setEmbedTransportForTests(async () => ({ embeddings: [], usage: { tokens: 0 } } as any));
 
-// Proxy-based mock engine that matches test/import-file.test.ts pattern.
+// Small transactional row store for the checked-write SQL contract. Unknown SQL
+// fails loudly; writes outside a transaction are never silently accepted.
 function mockEngine(overrides: Partial<Record<string, any>> = {}): BrainEngine {
   const calls: { method: string; args: any[] }[] = [];
-  const track = (method: string) => (...args: any[]) => {
-    calls.push({ method, args });
-    if (overrides[method]) return overrides[method](...args);
-    return Promise.resolve(null);
+  const pages = new Map<string, any>();
+  let nextPage = 1;
+  let nextChunk = 1;
+  let queue = Promise.resolve();
+  const getChunks = async (slug: string, opts?: { sourceId?: string }) => {
+    const key = `${opts?.sourceId ?? 'default'}::${slug}`;
+    if (!pages.has(key)) {
+      const rows = await overrides.getChunks?.(slug, opts) ?? [];
+      const id = rows[0]?.page_id ?? nextPage++;
+      pages.set(key, { id, chunks: rows.map((c: any) => ({ id: nextChunk++, page_id: id, ...c })) });
+    }
+    return structuredClone(pages.get(key).chunks);
   };
-  const engine = new Proxy({} as any, {
+  const proxy = (inTransaction: boolean): BrainEngine => new Proxy({} as any, {
     get(_, prop: string) {
       if (prop === '_calls') return calls;
-      if (overrides[prop]) return overrides[prop];
-      return track(prop);
+      if (prop === '_pages') return pages;
+      if (prop === 'getChunks') return getChunks;
+      if (prop === 'transaction') return async (fn: (tx: BrainEngine) => Promise<any>) => {
+        const prior = queue;
+        let release!: () => void;
+        queue = new Promise<void>(resolve => { release = resolve; });
+        await prior;
+        const before = structuredClone(pages);
+        try { return await fn(proxy(true)); }
+        catch (error) { pages.clear(); for (const [k, v] of before) pages.set(k, v); throw error; }
+        finally { release(); }
+      };
+      if (prop === 'executeRaw') return async (sql: string, args: any[]) => {
+        if (!inTransaction) throw new Error('checked SQL requires transaction');
+        calls.push({ method: 'executeRaw', args: [sql, args] });
+        if (sql.startsWith('SELECT id FROM pages WHERE')) {
+          const page = pages.get(`${args[1]}::${args[0]}`);
+          return page && !page.deleted_at ? [{ id: page.id }] : [];
+        }
+        if (sql.startsWith('SELECT id, chunk_index, chunk_text FROM content_chunks')) {
+          const page = [...pages.values()].find(p => p.id === args[0]);
+          return structuredClone(page?.chunks ?? []);
+        }
+        if (sql.startsWith('UPDATE content_chunks SET embedding')) {
+          const page = [...pages.values()].find(p => p.id === args[3]);
+          const row = page?.chunks.find((c: any) => c.id === args[2] && c.page_id === args[3]);
+          if (row) Object.assign(row, { embedding: new Float32Array(JSON.parse(args[0])), model: args[1], embedded_at: 'now' });
+          return [];
+        }
+        if (sql.startsWith('UPDATE pages SET embedding_signature')) {
+          const page = [...pages.values()].find(p => p.id === args[1]);
+          if (page) page.embedding_signature = args[0];
+          return [];
+        }
+        throw new Error(`Unmodeled checked SQL: ${sql}`);
+      };
+      return (...args: any[]) => {
+        calls.push({ method: prop, args });
+        return overrides[prop] ? overrides[prop](...args) : Promise.resolve(null);
+      };
     },
   });
-  return engine;
+  return proxy(false);
 }
 
 beforeEach(() => {
@@ -82,6 +129,36 @@ afterEach(() => {
 });
 
 describe('runEmbed --all (parallel)', () => {
+  test('provider-time row replacement refuses vectors and page provenance', async () => {
+    const engine = mockEngine({
+      listPages: async () => [{ slug: 'raced', source_id: 'default' }],
+      getChunks: async () => [{ id: 11, page_id: 7, chunk_index: 0, chunk_text: 'original', embedded_at: null }],
+    });
+    embedBatchBehavior = async () => {
+      (engine as any)._pages.get('default::raced').chunks[0].id = 12;
+      return [new Float32Array(1536)];
+    };
+    const result = await runEmbedCore(engine, { all: true });
+    expect(totalEmbedCalls).toBe(1);
+    expect(result.embedded).toBe(0);
+    const page = (engine as any)._pages.get('default::raced');
+    expect(page.chunks[0]).toEqual({ id: 12, page_id: 7, chunk_index: 0, chunk_text: 'original', embedded_at: null });
+    expect(page.embedding_signature).toBeUndefined();
+    expect((engine as any)._calls.filter((c: any) => c.method === 'executeRaw' && c.args[0].startsWith('UPDATE'))).toEqual([]);
+  });
+
+  test('mock requires transaction and rolls back failed writes', async () => {
+    const engine = mockEngine({ getChunks: async () => [{ id: 11, page_id: 7, chunk_index: 0, chunk_text: 'original' }] });
+    const before = await engine.getChunks('raced');
+    const sql = 'UPDATE content_chunks SET embedding = $1::vector, embedded_at = now(), model = $2 WHERE id = $3 AND page_id = $4';
+    const args = ['[1]', 'test:model', 11, 7];
+    await expect(engine.executeRaw(sql, args)).rejects.toThrow('requires transaction');
+    await expect(engine.transaction(async tx => {
+      await tx.executeRaw(sql, args);
+      throw new Error('rollback');
+    })).rejects.toThrow('rollback');
+    expect(await engine.getChunks('raced')).toEqual(before);
+  });
   test('runs embedBatch calls concurrently across pages', async () => {
     const NUM_PAGES = 20;
     const pages = Array.from({ length: NUM_PAGES }, (_, i) => ({ slug: `page-${i}` }));
@@ -126,11 +203,14 @@ describe('runEmbed --all (parallel)', () => {
 
     await runEmbed(engine, ['--all']);
 
-    // The wiring gap this pins: embedAll must CALL setPageEmbeddingSignature
-    // after upsertChunks, with the current signature (mocked to test:model:1536).
-    const stampCalls = (engine as any)._calls.filter((c: any) => c.method === 'setPageEmbeddingSignature');
+    // Provenance is now stamped by guarded SQL in the same transaction.
+    const stampCalls = (engine as any)._calls.filter((c: any) => c.method === 'executeRaw' && c.args[0].startsWith('UPDATE pages SET embedding_signature'));
     expect(stampCalls.length).toBe(2); // one per page
-    expect(stampCalls[0].args[1]).toEqual({ sourceId: 'default', signature: 'test:model:1536' });
+    expect(stampCalls.map((c: any) => c.args[1])).toEqual([
+      ['test:model:1536', 1], ['test:model:1536', 2],
+    ]);
+    expect((engine as any)._pages.get('default::a').embedding_signature).toBe('test:model:1536');
+    expect((engine as any)._pages.get('default::b').embedding_signature).toBe('test:model:1536');
   });
 
   // #1737: cooperative abort. A pre-aborted signal must stop the embed loop
@@ -439,18 +519,19 @@ describe('runEmbedCore --stale egress fix (SQL-side filter)', () => {
     expect(result.embedded).toBe(3);
     expect(result.pages_processed).toBe(2);
 
-    // page-b's upsert MUST include the fresh chunk (chunk_index=0) — otherwise
-    // it would be deleted by the upsertChunks != ALL filter. Critical regression check.
-    const pageBUpsert = upsertCalls.find(u => u.slug === 'page-b');
-    expect(pageBUpsert).toBeDefined();
-    const freshChunkInUpsert = pageBUpsert!.chunks.find((c: any) => c.chunk_index === 0);
-    expect(freshChunkInUpsert).toBeDefined();
-    // Fresh chunk has no `embedding` field (preserved via COALESCE in upsertChunks SQL).
-    expect(freshChunkInUpsert.embedding).toBeUndefined();
-    // Previously-stale chunks come through WITH a new embedding.
-    const staleChunkInUpsert = pageBUpsert!.chunks.find((c: any) => c.chunk_index === 1);
-    expect(staleChunkInUpsert.embedding).toBeDefined();
-    expect(staleChunkInUpsert.embedding).toBeInstanceOf(Float32Array);
+    // Checked UPDATE touches only exact stale IDs; no destructive upsert.
+    expect(upsertCalls).toEqual([]);
+    const pageB = (engine as any)._pages.get('default::page-b');
+    expect(pageB).toBeDefined();
+    const freshChunk = pageB.chunks.find((c: any) => c.chunk_index === 0);
+    expect(freshChunk).toEqual({ id: 2, page_id: 2, ...fullChunks['page-b'][0] });
+    expect(freshChunk.embedding).toBeUndefined();
+    const staleChunk = pageB.chunks.find((c: any) => c.chunk_index === 1);
+    expect(staleChunk.embedding).toBeDefined();
+    expect(staleChunk.embedding).toBeInstanceOf(Float32Array);
+    expect(pageB.embedding_signature).toBeUndefined(); // partial batch
+    const updates = (engine as any)._calls.filter((c: any) => c.method === 'executeRaw' && c.args[0].startsWith('UPDATE content_chunks'));
+    expect(updates.map((c: any) => c.args[1].slice(2))).toEqual([[1, 1], [3, 2], [4, 2]]);
   });
 
   test('--stale dry-run: counts stale via countStaleChunks (no listStaleChunks call), no embedBatch or upsertChunks', async () => {
@@ -735,7 +816,7 @@ describe('embedAllStale wall-clock budget end-to-end (D3 + D3a)', () => {
         totalRowsReturned++;
         return [row];
       },
-      getChunks: async () => [],
+      getChunks: async (slug: string) => allRows.filter(r => r.slug === slug).map(r => ({ ...r, id: r.page_id, embedded_at: null })),
       upsertChunks: async () => {},
     });
 
@@ -749,6 +830,7 @@ describe('embedAllStale wall-clock budget end-to-end (D3 + D3a)', () => {
     const result = await runEmbedCore(engine, { stale: true });
     const elapsed = Date.now() - t0;
 
+    expect(totalEmbedCalls).toBeGreaterThan(0);
     // Should not have visited all 10 pages.
     expect(result.pages_processed).toBeLessThan(10);
     // Total wall-clock should be roughly the budget + the time for in-flight

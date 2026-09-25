@@ -8,12 +8,24 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import type { BrainEngine } from '../src/core/engine.ts';
+
+// Only the absent enrollment catalog is synthetic; permit issuance stays real.
+const unenrolledRootEngine = {
+  async executeRaw(sql: string) {
+    if (sql === "SELECT to_regclass('public.page_file_bindings') IS NOT NULL AS present") {
+      return [{ present: false }];
+    }
+    throw new Error(`Unexpected root-gate query: ${sql}`);
+  },
+} as Pick<BrainEngine, 'executeRaw'>;
+
 import { execFileSync } from 'child_process';
 import { hardenBrainRepo } from '../src/core/brain-repo-durability.ts';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-C', cwd, '-c', 'protocol.file.allow=always', ...args], {
-    stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf-8', env: process.env,
   }).trim();
 }
 function originHead(bare: string): string {
@@ -28,10 +40,58 @@ async function waitForOrigin(bare: string, expectSha: string, ms = 8000): Promis
   return false;
 }
 
+// Every fixture commit after `init` runs the real post-commit hook. A remote
+// SHA alone is not a completion signal: harden also pushes synchronously, while
+// its detached hook can still be retrying via our no-host compatibility gate.
+// Wait for each hook's terminal log record AND release of its push lock before
+// another foreground pull or removal of the fixture tree.
+async function drainHookPushes(): Promise<void> {
+  const expected = Number(git(work, 'rev-list', '--count', 'HEAD')) - 1 + foregroundPushes;
+  const log = join(process.env.GBRAIN_HOME!, 'brain-push.log');
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    const text = existsSync(log) ? readFileSync(log, 'utf-8') : '';
+    const completed = text.split('\n').filter(line => /\[push\] (ok |ok-after-retry |LOCAL-ONLY,|lock-timeout )/.test(line)).length;
+    if (completed >= expected) {
+      const lock = join(work, '.git', 'gbrain-push.lock');
+      if (existsSync(lock)) execFileSync('flock', ['-w', '2', lock, 'true'], { timeout: 3000 });
+      return;
+    }
+    await new Promise(r => setTimeout(r, 20));
+  }
+  throw new Error(`Hook did not finish ${expected} pushes: ${existsSync(log) ? readFileSync(log, 'utf-8') : 'no log'}`);
+}
+
 let root: string, work: string, bare: string;
+let foregroundPushes = 0;
 let oldHome: string | undefined, oldGbrainHome: string | undefined;
+let oldPath: string | undefined;
+
+// Offline CLI boundary: strict argv/root routing, real gate and real Git. This
+// deliberately does not claim connected-engine/DB source-route acceptance.
+function installOfflinePullCli(): void {
+  const bin = join(root, 'bin');
+  mkdirSync(bin);
+  const gate = new URL('../src/core/page-file-root-gate.ts', import.meta.url).pathname;
+  const remote = new URL('../src/core/git-remote.ts', import.meta.url).pathname;
+  const script = join(bin, 'pull.ts');
+  writeFileSync(script, `
+import { withLegacyPageFileRootMutation } from ${JSON.stringify(gate)};
+import { divergenceSafePull } from ${JSON.stringify(remote)};
+const args = process.argv.slice(2);
+if (JSON.stringify(args) !== JSON.stringify(['sources', 'pull', 'wiki', '--branch', 'main']) || process.cwd() !== ${JSON.stringify(work)}) process.exit(64);
+const engine = { ${unenrolledRootEngine.executeRaw.toString()} };
+const result = await withLegacyPageFileRootMutation(engine, process.cwd(),
+  rootPermit => divergenceSafePull(process.cwd(), 'main', { rootPermit }));
+if (result.status === 'conflict_aborted') { console.error(result.detail); process.exit(1); }
+`);
+  writeFileSync(join(bin, 'gbrain'), `#!/bin/sh\nexec '${process.execPath.replace(/'/g, "'\\''")}' '${script.replace(/'/g, "'\\''")}' "$@"\n`, { mode: 0o755 });
+  oldPath = process.env.PATH;
+  process.env.PATH = `${bin}:${oldPath ?? ''}`;
+}
 
 beforeEach(async () => {
+  foregroundPushes = 0;
   root = mkdtempSync(join(tmpdir(), 'bdh-'));
   oldHome = process.env.HOME; oldGbrainHome = process.env.GBRAIN_HOME;
   process.env.HOME = mkdtempSync(join(root, 'home-'));
@@ -45,13 +105,21 @@ beforeEach(async () => {
   writeFileSync(join(work, 'README.md'), 'init\n');
   git(work, 'add', 'README.md'); git(work, 'commit', '-qm', 'init'); git(work, 'push', '-q', 'origin', 'main');
   git(work, 'remote', 'set-head', 'origin', 'main');
-  await hardenBrainRepo({ repoPath: work, sourceId: 'wiki', pat: 'ghp_x', installCron: false });
+  installOfflinePullCli();
+  await hardenBrainRepo({ engine: unenrolledRootEngine, repoPath: work, sourceId: 'wiki', pat: 'ghp_x', installCron: false });
+  expect(git(bare, 'rev-parse', '--is-bare-repository')).toBe('true');
+  await drainHookPushes();
 });
-afterEach(() => {
-  if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
-  if (oldGbrainHome === undefined) delete process.env.GBRAIN_HOME; else process.env.GBRAIN_HOME = oldGbrainHome;
-  delete process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT;
-  rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+  try {
+    await drainHookPushes();
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH; else process.env.PATH = oldPath;
+    if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
+    if (oldGbrainHome === undefined) delete process.env.GBRAIN_HOME; else process.env.GBRAIN_HOME = oldGbrainHome;
+    delete process.env.GBRAIN_GIT_ALLOW_FILE_TRANSPORT;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 describe('brain-commit-push.sh (D13 guarantee)', () => {
@@ -59,6 +127,7 @@ describe('brain-commit-push.sh (D13 guarantee)', () => {
     mkdirSync(join(work, 'people'), { recursive: true });
     writeFileSync(join(work, 'people', 'alice.md'), '# alice\n');
     // helper requires explicit path; stages people/alice.md
+    foregroundPushes++;
     execFileSync('bash', [join(work, 'scripts', 'brain-commit-push.sh'), 'add alice', 'people/alice.md'], {
       cwd: work, stdio: ['ignore', 'pipe', 'pipe'], env: process.env,
     });
@@ -72,6 +141,7 @@ describe('brain-commit-push.sh (D13 guarantee)', () => {
   test('refuses success when the push cannot land (exit non-zero)', () => {
     git(work, 'remote', 'set-url', 'origin', join(root, 'gone.git'));
     writeFileSync(join(work, 'x.md'), 'x\n');
+    foregroundPushes++;
     let code = 0;
     try {
       execFileSync('bash', [join(work, 'scripts', 'brain-commit-push.sh'), 'msg', 'x.md'], {

@@ -64,6 +64,51 @@ function fakeEmbedFn(texts: string[]): Promise<Float32Array[]> {
 }
 
 describe('embedStaleForSource', () => {
+  test('checked writes reject identity drift, duplicate rows and wrong source without effects', async () => {
+    const { commitCheckedEmbeddings } = await import('../src/core/embedding-checked-write.ts');
+    await seedPageWithStaleChunks('guarded', 2);
+    const chunks = await engine.getChunks('guarded');
+    const embeddings = await fakeEmbedFn(chunks.map(c => c.chunk_text));
+    const input = { slug: 'guarded', sourceId: 'default', chunks, embeddings, signature: 'test:new-model:1536' };
+    for (const field of ['id', 'page_id', 'chunk_index', 'chunk_text'] as const) {
+      const changed = chunks.map(c => ({ ...c }));
+      (changed[0] as any)[field] = field === 'chunk_text' ? 'different' : 999999;
+      expect(await commitCheckedEmbeddings(engine, { ...input, chunks: changed })).toBe(false);
+    }
+    expect(await commitCheckedEmbeddings(engine, { ...input, sourceId: 'other' })).toBe(false);
+    expect(await commitCheckedEmbeddings(engine, { ...input, chunks: [chunks[0], chunks[0]] })).toBe(false);
+    expect(await commitCheckedEmbeddings(engine, { ...input, embeddings: [] })).toBe(false);
+    expect(await engine.getChunks('guarded')).toEqual(chunks);
+    expect((await engine.executeRaw<{ embedding_signature: string | null }>("SELECT embedding_signature FROM pages WHERE slug = 'guarded'"))[0].embedding_signature).toBeNull();
+    expect(await commitCheckedEmbeddings(engine, input)).toBe(true);
+    expect((await engine.getChunks('guarded')).map(c => c.model)).toEqual(['test:new-model', 'test:new-model']);
+    expect((await engine.executeRaw<{ embedding_signature: string | null }>("SELECT embedding_signature FROM pages WHERE slug = 'guarded'"))[0].embedding_signature).toBe('test:new-model:1536');
+  });
+
+  test('checked writes roll back earlier row updates when a later vector fails', async () => {
+    const { commitCheckedEmbeddings } = await import('../src/core/embedding-checked-write.ts');
+    await seedPageWithStaleChunks('rollback', 2);
+    const chunks = await engine.getChunks('rollback');
+    await expect(commitCheckedEmbeddings(engine, {
+      slug: 'rollback', sourceId: 'default', chunks,
+      embeddings: [new Float32Array(1536), new Float32Array(2)], signature: 'test:new-model:1536',
+    })).rejects.toThrow();
+    expect(await engine.getChunks('rollback')).toEqual(chunks);
+    expect((await engine.executeRaw<{ embedding_signature: string | null }>("SELECT embedding_signature FROM pages WHERE slug = 'rollback'"))[0].embedding_signature).toBeNull();
+  });
+  test('omitted signature uses the legacy default, not a stale model label', async () => {
+    const { DEFAULT_EMBEDDING_MODEL } = await import('../src/core/ai/defaults.ts');
+    await seedPageWithStaleChunks('legacy-model', 1);
+    await engine.executeRaw("UPDATE content_chunks SET model = 'old:wrong-model'");
+    const result = await embedStaleForSource(engine, 'default', { embedFn: fakeEmbedFn });
+    expect(result.embedded).toBe(1);
+    const [chunk] = await engine.getChunks('legacy-model');
+    expect(chunk.model).toBe(DEFAULT_EMBEDDING_MODEL);
+    expect(chunk.embedded_at).not.toBeNull();
+    const [page] = await engine.executeRaw<{ embedding_signature: string | null }>(
+      "SELECT embedding_signature FROM pages WHERE slug = 'legacy-model'");
+    expect(page.embedding_signature).toBeNull();
+  });
   test('empty stale set returns done:true with zero embedded', async () => {
     const result = await embedStaleForSource(engine, 'default', {
       embedFn: fakeEmbedFn,

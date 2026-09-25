@@ -9,10 +9,29 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } fr
 import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import type { BrainEngine } from '../src/core/engine.ts';
+
+// Only the absent enrollment catalog is synthetic; permit issuance stays real.
+const unenrolledRootEngine = {
+  async executeRaw(sql: string) {
+    if (sql === "SELECT to_regclass('public.page_file_bindings') IS NOT NULL AS present") {
+      return [{ present: false }];
+    }
+    throw new Error(`Unexpected root-gate query: ${sql}`);
+  },
+} as Pick<BrainEngine, 'executeRaw'>;
+
 import { execFileSync } from 'child_process';
 import {
   divergenceSafePull, detectDefaultBranch, pushProbe, isWorkingTreeDirty,
 } from '../src/core/git-remote.ts';
+
+import { withLegacyPageFileRootMutation } from '../src/core/page-file-root-gate.ts';
+
+function admittedPull(work: string) {
+  return withLegacyPageFileRootMutation(unenrolledRootEngine, work,
+    rootPermit => divergenceSafePull(work, 'main', { rootPermit }));
+}
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', ['-C', cwd, '-c', 'protocol.file.allow=always', ...args], {
@@ -77,28 +96,28 @@ describe('isWorkingTreeDirty', () => {
 });
 
 describe('divergenceSafePull', () => {
-  test('up_to_date when already current', () => {
+  test('up_to_date when already current', async () => {
     const { work } = makePair();
-    expect(divergenceSafePull(work, 'main').status).toBe('up_to_date');
+    expect((await admittedPull(work)).status).toBe('up_to_date');
   });
 
-  test('advanced when origin has a new commit', () => {
+  test('advanced when origin has a new commit', async () => {
     const { bare, work } = makePair();
     const other = secondClone(bare);
     writeFileSync(join(other, 'b.txt'), 'b\n');
     git(other, 'add', 'b.txt'); git(other, 'commit', '-qm', 'b'); git(other, 'push', '-q', 'origin', 'main');
-    const out = divergenceSafePull(work, 'main');
+    const out = await admittedPull(work);
     expect(out.status).toBe('advanced');
     expect(existsSync(join(work, 'b.txt'))).toBe(true);
   });
 
-  test('skipped_dirty when the working tree is dirty', () => {
+  test('skipped_dirty when the working tree is dirty', async () => {
     const { work } = makePair();
     writeFileSync(join(work, 'README.md'), 'local edit\n');
-    expect(divergenceSafePull(work, 'main').status).toBe('skipped_dirty');
+    expect((await admittedPull(work)).status).toBe('skipped_dirty');
   });
 
-  test('rebases local commits over origin', () => {
+  test('rebases local commits over origin', async () => {
     const { bare, work } = makePair();
     const other = secondClone(bare);
     writeFileSync(join(other, 'remote.txt'), 'r\n');
@@ -106,13 +125,13 @@ describe('divergenceSafePull', () => {
     // local commit on a DIFFERENT file → clean rebase
     writeFileSync(join(work, 'local.txt'), 'l\n');
     git(work, 'add', 'local.txt'); git(work, 'commit', '-qm', 'local');
-    const out = divergenceSafePull(work, 'main');
+    const out = await admittedPull(work);
     expect(out.status).toBe('advanced');
     expect(existsSync(join(work, 'remote.txt'))).toBe(true);
     expect(existsSync(join(work, 'local.txt'))).toBe(true);
   });
 
-  test('conflict_aborted leaves NO rebase state', () => {
+  test('conflict_aborted leaves NO rebase state', async () => {
     const { bare, work } = makePair();
     const other = secondClone(bare);
     writeFileSync(join(other, 'README.md'), 'remote version\n');
@@ -120,7 +139,7 @@ describe('divergenceSafePull', () => {
     // local commit touching the SAME line → rebase conflict
     writeFileSync(join(work, 'README.md'), 'local version\n');
     git(work, 'add', 'README.md'); git(work, 'commit', '-qm', 'local');
-    const out = divergenceSafePull(work, 'main');
+    const out = await admittedPull(work);
     expect(out.status).toBe('conflict_aborted');
     // The "never mid-rebase" invariant:
     expect(existsSync(join(work, '.git', 'rebase-merge'))).toBe(false);

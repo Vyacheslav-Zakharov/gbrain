@@ -1,13 +1,5 @@
-import { test, expect, spyOn, beforeAll, beforeEach, afterAll } from 'bun:test';
+import { test, describe, expect, spyOn, beforeAll, beforeEach, afterAll } from 'bun:test';
 import { resetPgliteState } from './helpers/reset-pglite';
-let engine: PGLiteEngine;
-beforeAll(async () => {
- engine = new PGLiteEngine();
- await engine.connect({});
- await engine.initSchema();
-}, 60000);
-beforeEach(async () => { await resetPgliteState(engine); });
-afterAll(async () => { await engine.disconnect(); });
 import { PGLiteEngine } from '../src/core/pglite-engine';
 import { FakeSourceConnector } from '../src/core/source-ingest/connectors/fake';
 import { putSourceIngestProfile } from '../src/core/source-ingest/store';
@@ -26,7 +18,19 @@ const raw = () => [
  { ID:'parent', Key:'parent', Name:'Parent', Type:'equipment', Created:null, Parent:'root', Site:'A' },
  { ID:'child', Key:'child', Name:'Child', Type:'equipment', Created:null, Parent:'parent', Site:'A' },
 ];
-test('native guard first publish, idempotency, whole-stream STOP and promotion boundaries', async () => {
+// Each scenario gets an independent engine, a fresh Git repo, and restored connector
+// spies. Keep real SQL transforms: their cold PGlite workers dominate runtime.
+// Splitting semantic contracts bounds each test without raising its 60s deadline.
+describe.each(['bootstrap', 'privacy', 'promotion'] as const)('native guard %s', (scenario) => {
+let engine: PGLiteEngine;
+beforeAll(async () => {
+ engine = new PGLiteEngine();
+ await engine.connect({});
+ await engine.initSchema();
+}, 60000);
+beforeEach(async () => { await resetPgliteState(engine); });
+afterAll(async () => { await engine.disconnect(); });
+test('preserves its publication boundaries', async () => {
 
  const repo = mkdtempSync(join(tmpdir(),'native-guard-'));
  const git = (...args:string[]) => execFileSync('git',args,{cwd:repo,encoding:'utf8'});
@@ -43,15 +47,18 @@ test('native guard first publish, idempotency, whole-stream STOP and promotion b
   const profile:SourceIngestProfile = { profile_id:'directory-test',status:'reviewed',source_connector:'fake-source',source_object:'directory',target:{approved_source_id:'shared',gbrain_type:'equipment',slug_template:'equipment/{{ ID }}'}, identity:{external_id_field:'ID',display_name_field:'Name',require_explicit_resolution:true,explicit_create_ids:['parent','child'],nonwriting_bindings:{root:{source_id:'shared',slug:'facilities/root',type:'facility',approved:true}}}, directory_guard:{source_alias:'source',policy,approved_bootstrap_hash:preview.snapshotHash,baseline_promotion:'full'}, links:[{id:'parent',type:'part_of',when:[{field:'Parent',op:'neq',value:'root'},{field:'Parent',op:'exists'}],target:{lookup:'external_id',value_field:'Parent',profile_id:'directory-test',source_id:'shared',type:'equipment'}},{id:'facility',type:'located_at',when:[{field:'Parent',op:'eq',value:'root'}],target:{lookup:'external_id',value_field:'Parent',profile_id:'directory-test',source_id:'shared',type:'facility'}}], update_policy:{mode:'managed_block',preserve_manual_sections:true},security:{classification:'internal',pii:false} };
   const key='source_ingest.directory_guard.shared.directory-test';
   await putSourceIngestProfile(engine,profile);
+  const pinKey=key+'.first_bootstrap';
+  if (scenario === 'bootstrap') {
   await buildProfileSampleRecords(profile,1,{engine,defaultConnector:'fake-source',defaultObject:'directory'});
   expect(await engine.getConfig(key)).toBeNull();
-  const pinKey=key+'.first_bootstrap';
   expect(await engine.getConfig(pinKey)).toBeNull();
+  }
   profile.directory_guard!.baseline_promotion='hold';
   profile.transform={sources:[{alias:'source',object:'directory'}],sql:'SELECT * FROM source',primary_key_field:'ID'};
   await putSourceIngestProfile(engine,profile);
   profile.update_policy.include_external_id_in_content=false;
   await putSourceIngestProfile(engine,profile);
+  if (scenario === 'bootstrap') {
   const validLinks=profile.links;
   profile.links=[{id:'bad',type:'part_of',target:{lookup:'external_id',value_field:'ID',profile_id:'foreign',source_id:'shared',type:'equipment'}}];
   await putSourceIngestProfile(engine,profile);
@@ -80,10 +87,18 @@ test('native guard first publish, idempotency, whole-stream STOP and promotion b
     expect(git('status','--porcelain')).toBe('');
    } finally { pinWrite.mockRestore(); await engine.executeRaw('DELETE FROM config WHERE key=$1',[pinKey]); }
   }
+  }
+  // Rebuild the successful limited SQL pilot through the actual executor in every
+  // scenario; no pages, links, sync records or bootstrap pins are hand-seeded.
   const pilot=await runSourceIngestExecutor(engine,{profile_id:profile.profile_id,limit:1});
+  const pin=await engine.getConfig(pinKey);
+  if (!pilot.ok || pilot.counts.written !== 1 || pin === null) {
+   throw new Error('native guard fixture failed to publish its SQL pilot');
+  }
+  if (scenario === 'bootstrap') {
   expect(pilot.ok).toBe(true); expect(pilot.counts.written).toBe(1);
   expect(await engine.getConfig(key)).toBeNull();
-  const pin=await engine.getConfig(pinKey); expect(pin).not.toBeNull();
+  expect(pin).not.toBeNull();
   const firstHashes=await engine.executeRaw('SELECT slug,content_hash FROM pages ORDER BY slug');
   const firstVersions=await engine.executeRaw('SELECT * FROM page_versions ORDER BY id');
   const repeat=await runSourceIngestExecutor(engine,{profile_id:profile.profile_id,limit:1});
@@ -91,8 +106,10 @@ test('native guard first publish, idempotency, whole-stream STOP and promotion b
   expect(await engine.executeRaw('SELECT slug,content_hash FROM pages ORDER BY slug')).toEqual(firstHashes);
   expect(await engine.executeRaw('SELECT * FROM page_versions ORDER BY id')).toEqual(firstVersions);
   expect(await engine.getConfig(pinKey)).toBe(pin);
+  }
   const pilotPages=await engine.executeRaw('SELECT slug,content_hash FROM pages ORDER BY slug');
   const pilotLinks=await engine.executeRaw('SELECT * FROM links ORDER BY id');
+  if (scenario === 'bootstrap') {
   for (const mutation of [{Created:'01/01/2020 00:00:00'},{Name:'Replaced',Type:'facility'}]) {
    rows=raw().map(r=>r.ID==='parent'?{...r,...mutation}:r) as any;
    const next=prepareDirectorySnapshot({upstreamBinding:preview.candidateBaseline.upstreamBinding,sourceId:'shared',profileId:profile.profile_id,policy,records:rows,complete:true,mode:'preview'});
@@ -114,6 +131,8 @@ test('native guard first publish, idempotency, whole-stream STOP and promotion b
   await expect(buildProfileSampleRecords(profile,1,{engine,defaultConnector:'fake-source',defaultObject:'directory'})).rejects.toThrow('rebaseline_required');
   await expect(runSourceIngestExecutor(engine,{profile_id:profile.profile_id})).rejects.toThrow('rebaseline_required');
   await engine.setConfig(pinKey,pin!);
+  }
+  if (scenario === 'privacy') {
   // The privacy path requires both exact owner profile and successful identity binding.
   await engine.executeRaw(`UPDATE pages SET frontmatter=jsonb_set(frontmatter,'{source_ingest,profile_id}','"foreign"'::jsonb) WHERE source_id='shared' AND slug='equipment/parent'`);
   await expect(runSourceIngestExecutor(engine,{profile_id:profile.profile_id})).rejects.toThrow('guarded_canonical_owner_conflict');
@@ -128,6 +147,8 @@ test('native guard first publish, idempotency, whole-stream STOP and promotion b
    expect(await engine.getConfig(pinKey)).toBe(pin);
   }
   await engine.executeRaw(`UPDATE source_sync_state SET last_result='success' WHERE approved_source_id='shared' AND profile_id=$1`,[profile.profile_id]);
+  }
+  if (scenario === 'promotion') {
   profile.identity.explicit_create_ids=['parent','child']; delete profile.identity.existing_slug_map;
   delete profile.transform; profile.directory_guard!.baseline_promotion='full'; await putSourceIngestProfile(engine,profile);
   const first=await runSourceIngestExecutor(engine,{profile_id:profile.profile_id,changed_since:true});
@@ -197,5 +218,7 @@ test('native guard first publish, idempotency, whole-stream STOP and promotion b
    if(selected==='absent') expect(await engine.executeRaw('SELECT slug,content_hash FROM pages ORDER BY slug')).toEqual(before);
   }
   expect(fullReads).toBeGreaterThan(5);
+  }
  } finally { fetch.mockRestore();sample.mockRestore();changed.mockRestore();rmSync(repo,{recursive:true,force:true}); }
 },60000);
+});
