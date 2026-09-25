@@ -3,6 +3,8 @@ import type { SourceRecord } from './connectors/types.ts';
 import type { SourceIngestProfile } from './profile-schema.ts';
 
 export interface ArticleTemplateMapping {
+  body_template?: string;
+  typed_frontmatter?: boolean;
   frontmatter?: Record<string, string | number | boolean | null>;
   sections?: Record<string, string>;
   section_order?: string[];
@@ -159,12 +161,20 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
   const fallbackTitle = stringifyValue(valueAt(record.data, profile.identity.display_name_field) ?? record.external_id);
   const title = cleanLineValue(renderedFields.title || fallbackTitle);
   const renderedFrontmatter = Object.fromEntries(
-    Object.entries(mapping.frontmatter || {}).map(([key, value]) => [
-      key,
-      typeof value === 'string'
-        ? renderTemplateString(value, record, emptySlots, sourceFields)
-        : value,
-    ]),
+    Object.entries(mapping.frontmatter || {}).map(([key, value]) => {
+      const token = mapping.typed_frontmatter === true && typeof value === 'string'
+        ? value.match(/^{{\s*([^{}|]+?)\s*}}$/) : null;
+      if (token) {
+        const field = token[1].trim();
+        if (sourceFields && !sourceFields.has(field)) throw new Error(`Typed frontmatter ${key}: scalar field ${field} is not selected.`);
+        const raw = valueAt(record.data, field);
+        if (!(raw === null || typeof raw === 'string' || typeof raw === 'boolean' || (typeof raw === 'number' && Number.isFinite(raw)))) {
+          throw new Error(`Typed frontmatter ${key}: ${field} must resolve to a JSON scalar.`);
+        }
+        return [key, raw];
+      }
+      return [key, typeof value === 'string' ? renderTemplateString(value, record, emptySlots, sourceFields) : value];
+    }),
   );
   const frontmatter: Record<string, unknown> = {
     type: profile.target.gbrain_type,
@@ -223,7 +233,9 @@ export function renderArticleTemplate(profile: SourceIngestProfile, record: Sour
       ]),
   ];
 
-  const body = lines.join('\n').replace(/\n{4,}/g, '\n\n\n').trimEnd() + '\n';
+  const body = mapping.body_template !== undefined
+    ? renderTemplateString(mapping.body_template, record, emptySlots, sourceFields)
+    : lines.join('\n').replace(/\n{4,}/g, '\n\n\n').trimEnd() + '\n';
 
   return {
     title,

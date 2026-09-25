@@ -1,3 +1,5 @@
+import { planSourceIngestIdentities, type PlannedIdentity, type CanonicalBinding, type GraphRequirement } from './planned-identities';
+import type { DirectoryBaseline } from './directory-identity-guard';
 import { createHash } from 'crypto';
 import { execFileSync } from 'child_process';
 import { existsSync, lstatSync, readFileSync, readdirSync, rmSync } from 'fs';
@@ -16,7 +18,7 @@ import { validateSourceIngestProfile, type SourceFilterRule, type SourceIngestPr
 import { resolveSourceIngestStorageMode, type SourceIngestStorageMode } from './executor-preflight.ts';
 import { nextStaleAfter } from './freshness.ts';
 import { getSourceConnectorSecretConfig, listSourceConnectorConfigs } from './connector-config.ts';
-import { buildProfileAllRecords } from './source-fetch.ts';
+import { buildProfileAllRecords, firstBootstrapPin, validateFirstBootstrapPin } from './source-fetch.ts';
 import { normalizeTransformConfig } from './transform.ts';
 import { LockUnavailableError, withRefreshingLock, syncLockId } from '../db-lock.ts';
 import { buildSourceTimelineEntries, changeIntelligenceFetchFields, sourceSnapshot } from './change-intelligence.ts';
@@ -185,7 +187,7 @@ function graphTargets(
   if (rule.target.lookup === 'external_id') {
     if (!rule.target.profile_id) return [];
     return values.map(value => {
-      const resolved = resolutions?.get(graphResolutionKey(rule.target.profile_id!, value));
+      const resolved = resolutions?.get(JSON.stringify([rule.target.source_id, rule.target.profile_id, value])) ?? resolutions?.get(graphResolutionKey(rule.target.profile_id!, value));
       if (!resolved) throw new Error(`external_id graph target unresolved for rule ${rule.id}`);
       return resolved;
     });
@@ -562,9 +564,13 @@ function renderMarkdown(
     title: explicitAdoption && typeof preservedFrontmatter.title === 'string' ? preservedFrontmatter.title : article.title,
     source_id: profile.target.approved_source_id,
   };
+  // Guarded profiles require DB hash/version idempotence across JSONB key reordering.
+  // Leave legacy rendering bytes unchanged for profiles outside this opt-in path.
+  const frontmatterEntries = Object.entries(frontmatter);
+  if (profile.directory_guard) frontmatterEntries.sort(([a], [b]) => a.localeCompare(b));
   const fm = [
     '---',
-    ...Object.entries(frontmatter).map(([k, v]) => `${k}: ${yamlScalar(v)}`),
+    ...frontmatterEntries.map(([k, v]) => `${k}: ${profile.directory_guard && v !== null && typeof v === 'object' ? stableJson(v) : yamlScalar(v)}`),
     'source_ingest:',
     `  profile_id: ${yamlScalar(profile.profile_id)}`,
     `  external_ref: ${yamlScalar(externalRef)}`,
@@ -766,9 +772,12 @@ export async function runSourceIngestExecutor(
   const connector = getSourceConnector(profile.source_connector, connectorConfig);
   if (!connector) throw new Error(`connector not found: ${profile.source_connector}`);
   const records: SourceRecord[] = [];
+  let guardReceipt: { snapshotHash: string; candidateBaseline: DirectoryBaseline; key: string; prior: string | null } | undefined;
   const transformedRecords = await buildProfileAllRecords(profile, {
     engine,
     connectorConfigOverride: connectorConfig,
+    guardMode: 'run',
+    onGuardPrepared: (r, key, prior) => { guardReceipt = { snapshotHash: r.snapshotHash, candidateBaseline: r.candidateBaseline, key, prior }; },
     defaultConnector: profile.source_connector,
     defaultObject: profile.source_object,
   });
@@ -833,20 +842,20 @@ export async function runSourceIngestExecutor(
       if (opts.limit && records.length >= opts.limit) break;
     }
   }
-  const rawLimited = opts.limit ? records.slice(0, opts.limit) : records;
-  const graphTargetResolutions = await prefetchGraphTargetResolutions(engine, profile, rawLimited);
+  const rawLimited = profile.directory_guard ? records : opts.limit ? records.slice(0, opts.limit) : records;
+  let graphTargetResolutions = profile.directory_guard ? new Map<string, GraphTargetResolution>() : await prefetchGraphTargetResolutions(engine, profile, rawLimited);
   const rawRecordsByExternalId = new Map(rawLimited.map(record => [record.external_id, record]));
-  const limited = rawLimited.map(record => enrichSourceIngestLinkedCollections(profile, record, graphTargetResolutions));
+  let limited = profile.directory_guard ? rawLimited : rawLimited.map(record => enrichSourceIngestLinkedCollections(profile, record, graphTargetResolutions));
   const resolvedTargets = new Map<string, { identitySlug?: string; adoptionSlug?: string; explicitCreate: boolean; targetSlug: string }>();
   const claimedTargets = new Map<string, string>();
   for (const record of limited) {
-    if (!includeRecord(profile, record).include) continue;
+    if (!includeRecord(profile, record).include || profile.identity.nonwriting_bindings?.[record.external_id]) continue;
     const priorIdentityRows = await engine.executeRaw<{ slug: string }>(
       `SELECT s.slug
          FROM source_sync_state s
          JOIN pages p ON p.slug = s.slug AND p.source_id = $4 AND p.deleted_at IS NULL
-        WHERE s.profile_id = $1 AND s.connector_id = $2 AND s.source_object = $3 AND s.external_id = $5
-          AND s.last_result <> 'failed'
+        WHERE s.profile_id = $1 AND s.connector_id = $2 AND s.source_object = $3 AND s.external_id = $5 AND s.approved_source_id = $4
+          AND s.last_result IN ('success','unchanged')
         LIMIT 1`,
       [profile.profile_id, profile.source_connector, profile.source_object, sourceId, record.external_id],
     );
@@ -884,11 +893,88 @@ export async function runSourceIngestExecutor(
     claimedTargets.set(targetSlug, record.external_id);
     resolvedTargets.set(record.external_id, { identitySlug, adoptionSlug, explicitCreate, targetSlug });
   }
+  const verifiedNonwritingIds = new Set<string>();
+  if (profile.directory_guard) {
+    // Collection rendering and slug/field-value lookup are explicitly held until qualified.
+    if (profile.mapping?.linked_collections?.length) throw Error('guarded_linked_collections_not_supported');
+    const existingBindings: CanonicalBinding[] = [];
+    const planned: PlannedIdentity[] = [];
+    const requirements: GraphRequirement[] = [];
+    const bindingKey = (x: {sourceId: string; profileId: string; externalId: string}) => JSON.stringify([x.sourceId,x.profileId,x.externalId]);
+    const existingKeys = new Set<string>();
+    const addExisting = (b: CanonicalBinding) => { if (!existingKeys.has(bindingKey(b))) { existingBindings.push(b); existingKeys.add(bindingKey(b)); } };
+    for (const [externalId, binding] of Object.entries(profile.identity.nonwriting_bindings || {})) {
+      if (!guardReceipt?.candidateBaseline.knownIdentityRecords.some(r => r.id === externalId)) throw Error('nonwriting_identity_not_in_snapshot');
+      const page = await engine.getPage(binding.slug, { sourceId: binding.source_id });
+      if (!page || page.type !== binding.type || binding.approved !== true) throw Error('invalid_nonwriting_canonical_binding');
+      verifiedNonwritingIds.add(externalId);
+      addExisting({ sourceId: binding.source_id, profileId: profile.profile_id, externalId, slug: binding.slug, type: page.type });
+    }
+    for (const [externalId, target] of resolvedTargets) {
+      const page = await engine.getPage(target.targetSlug, { sourceId });
+      if (page) {
+        const owner = page.frontmatter?.source_ingest as Record<string, unknown> | undefined;
+        const hiddenBound = owner?.external_ref === 'hidden' && owner.profile_id === profile.profile_id && target.identitySlug === target.targetSlug;
+        if ((owner?.profile_id && owner.profile_id !== profile.profile_id)
+          || (owner?.external_ref && owner.external_ref !== `${profile.source_connector}:${profile.source_object}:${externalId}` && !hiddenBound)) throw Error('guarded_canonical_owner_conflict');
+        addExisting({sourceId, profileId: profile.profile_id, externalId, slug: target.targetSlug, type: page.type});
+      }
+      planned.push({sourceId, profileId: profile.profile_id, externalId, slug: target.targetSlug, type: profile.target.gbrain_type, mode: target.identitySlug ? 'existing' : target.adoptionSlug ? 'adopt' : 'create'});
+    }
+    for (const record of rawLimited) {
+      if (!resolvedTargets.has(record.external_id)) continue;
+      for (const rule of profile.links || []) {
+        if ((rule.when || []).some(f => !filterMatches(f, record.data))) continue;
+        if (rule.target.lookup !== 'external_id' || !rule.target.source_id || !rule.target.profile_id) throw Error('guard_requires_source_qualified_external_targets');
+        const raw = valueAt(record.data, rule.target.value_field!);
+        const values = Array.isArray(raw) ? raw : [raw];
+        for (const value of values) {
+          if (value === null || value === undefined || value === '') continue;
+          if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(value)) throw Error('unsafe_graph_identity');
+          const ref = {fromExternalId:record.external_id,sourceId:rule.target.source_id,profileId:rule.target.profile_id,externalId:value,expectedType:rule.target.type};
+          requirements.push(ref);
+          if (existingKeys.has(bindingKey(ref)) || (ref.sourceId === sourceId && ref.profileId === profile.profile_id && resolvedTargets.has(value))) continue;
+          const matches = await engine.executeRaw<{slug:string; type:string}>(`SELECT s.slug,p.type FROM source_sync_state s JOIN pages p ON p.source_id=s.approved_source_id AND p.slug=s.slug AND p.deleted_at IS NULL WHERE s.profile_id=$1 AND s.external_id=$2 AND s.approved_source_id=$3 AND s.last_result IN ('success','unchanged')`,[ref.profileId,value,ref.sourceId]);
+          if (matches.length !== 1) throw Error('guarded_graph_target_missing_or_ambiguous');
+          addExisting({...ref,slug:matches[0].slug,type:matches[0].type});
+        }
+      }
+    }
+    const plan = planSourceIngestIdentities({sourceId,profileId:profile.profile_id,planned,existing:existingBindings,requirements});
+    plan.targets.forEach((target,i) => graphTargetResolutions.set(bindingKey(requirements[i]),target));
+    // Validate ownership and persisted graph reachability before the first page write.
+    const graph = new Map<string, Set<string>>();
+    const edges = await engine.executeRaw<{a:string;b:string}>(`SELECT a.source_id || ':' || a.slug AS a,b.source_id || ':' || b.slug AS b FROM links l JOIN pages a ON a.id=l.from_page_id JOIN pages b ON b.id=l.to_page_id WHERE l.link_type = ANY($1::text[]) AND a.deleted_at IS NULL AND b.deleted_at IS NULL`, [[...new Set((profile.links || []).map(r=>r.type))]]);
+    const addEdge = (a:string,b:string) => { const s=graph.get(a)||new Set<string>();s.add(b);graph.set(a,s); };
+    edges.forEach(e=>addEdge(e.a,e.b));
+    for (const candidate of plan.writeOrder) {
+      const record = rawRecordsByExternalId.get(candidate.externalId)!;
+      const links = buildSourceGraphLinks(profile,record.data,candidate.slug,sourceId,graphTargetResolutions);
+      await assertSourceGraphOwnershipAvailable(engine,profile,candidate.slug,sourceId,links);
+      for (const link of links) addEdge(`${sourceId}:${candidate.slug}`,`${link.to_source_id}:${link.to_slug}`);
+    }
+    for (const candidate of plan.writeOrder) {
+      const origin=`${sourceId}:${candidate.slug}`; const todo=[...(graph.get(origin)||[])]; const visited=new Set<string>();
+      while(todo.length) { const node=todo.pop()!; if(node===origin) throw Error('cycle_in_persisted_graph'); if(visited.has(node)) continue;visited.add(node);todo.push(...(graph.get(node)||[])); }
+    }
+    limited = plan.writeOrder.map(p=>rawRecordsByExternalId.get(p.externalId)!);
+    // Canary is applied only after complete identity + graph preflight and parent-first ordering.
+    if (opts.limit !== undefined) limited = limited.slice(0, opts.limit);
+  }
+  if (guardReceipt) {
+    if (await engine.getConfig(guardReceipt.key) !== guardReceipt.prior) throw Error('directory_baseline_concurrent_change');
+    const existingPin = await validateFirstBootstrapPin(engine, guardReceipt.key, guardReceipt.prior, guardReceipt.candidateBaseline);
+    if (guardReceipt.prior === null && existingPin === null && limited.length > 0) {
+      await engine.setConfig(`${guardReceipt.key}.first_bootstrap`, firstBootstrapPin(guardReceipt.candidateBaseline));
+      const persistedPin = await validateFirstBootstrapPin(engine, guardReceipt.key, guardReceipt.prior, guardReceipt.candidateBaseline);
+      if (persistedPin === null) throw Error('directory_bootstrap_pin_readback_missing');
+    }
+  }
   const key: OpCheckpointKey = {
     op: 'source_ingest',
-    fingerprint: fingerprint({ profile_id: profile.profile_id, profile_hash: hash, source_id: sourceId, connector: profile.source_connector, object: profile.source_object, mode: 'stage3a' }),
+    fingerprint: fingerprint({ profile_id: profile.profile_id, profile_hash: hash, source_id: sourceId, connector: profile.source_connector, object: profile.source_object, mode: 'stage3a', ...(guardReceipt ? { snapshot_hash: guardReceipt.snapshotHash } : {}) }),
   };
-  const completed = new Set(await loadOpCheckpoint(engine, key));
+  const completed = new Set(profile.directory_guard ? [] : await loadOpCheckpoint(engine, key));
   const results: SourceIngestRecordResult[] = [];
   const writtenPaths: string[] = [];
   let graphLinksCreated = 0;
@@ -1078,6 +1164,16 @@ export async function runSourceIngestExecutor(
     else if (writtenPaths.length > 0 || results.some(r => r.status === 'unchanged')) gitCommit = { committed: false, reason: 'no_changes' };
     else gitCommit = { committed: false, reason: 'no_files' };
     await clearOpCheckpoint(engine, key);
+    // Positive receipt tied to this prepared snapshot, not a caller's "full" flag.
+    // SQL output scope is unqualified: every transformed run stays HOLD.
+    const acceptedIds = new Set(results.filter(r => r.status === 'written' || r.status === 'unchanged').map(r => r.external_id));
+    const requiredIds = guardReceipt?.candidateBaseline.knownIdentityRecords.filter(r => !verifiedNonwritingIds.has(r.id)).map(r => r.id) ?? [];
+    const fullScopeAccepted = requiredIds.length > 0 && results.length === requiredIds.length
+      && acceptedIds.size === requiredIds.length && requiredIds.every(id => acceptedIds.has(id));
+    if (guardReceipt && !profile.transform && fullScopeAccepted && opts.limit === undefined && profile.directory_guard?.baseline_promotion === 'full') {
+      if (await engine.getConfig(guardReceipt.key) !== guardReceipt.prior) throw Error('directory_baseline_concurrent_change');
+      await engine.setConfig(guardReceipt.key, JSON.stringify(guardReceipt.candidateBaseline));
+    }
   }
   return {
     ok: failed === 0,
