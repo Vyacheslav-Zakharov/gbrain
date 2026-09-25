@@ -935,7 +935,7 @@ export async function projectContentImportCodeRefs(
     const codeSlug = slugifyCodePath(ref.path);
     // Forward: markdown guide → code page (this guide documents that code)
     try {
-      await engine.addLink(
+      await engine.addLink( // gbrain-allow-direct-insert: import reconciles same-source edges derived from Markdown code references
         slug, codeSlug,
         ref.line ? `cited at ${ref.path}:${ref.line}` : ref.path,
         'documents', 'markdown', slug, 'compiled_truth',
@@ -944,7 +944,7 @@ export async function projectContentImportCodeRefs(
     } catch { /* code page not yet imported — reconcile-links will catch it */ }
     // Reverse: code page → markdown guide (this code is documented by the guide)
     try {
-      await engine.addLink(
+      await engine.addLink( // gbrain-allow-direct-insert: import reconciles same-source edges derived from Markdown code references
         codeSlug, slug,
         ref.path, 'documented_by', 'markdown', slug, 'compiled_truth',
         linkOpts,
