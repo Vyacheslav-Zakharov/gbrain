@@ -35,9 +35,10 @@ describe('PostgresSourceConnector.fetchAll', () => {
     expect(resumed[0]?.records[0]?.external_id).toBe('employment-0500');
   });
 
-  test('does not emit an empty terminal batch for an exact page multiple', async () => {
+  test('emits explicit completion for an exact page multiple without adding records', async () => {
     const batches = await collect(connectorWithRows(1000));
-    expect(batches.map(batch => batch.records.length)).toEqual([500, 500]);
+    expect(batches.map(batch => batch.records.length)).toEqual([500, 500, 0]);
+    expect(batches.map(batch => batch.cursor)).toEqual(['500', '1000', null]);
     expect(batches.flatMap(batch => batch.records)).toHaveLength(1000);
   });
 });

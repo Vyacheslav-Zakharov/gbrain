@@ -156,9 +156,10 @@ export async function validateFirstBootstrapPin(engine: BrainEngine, key: string
 async function buildGuardedProfileRecords(profile: SourceIngestProfile, ctx: SourceFetchContext): Promise<SourceRecord[]> {
   const guard = profile.directory_guard!;
   const transform = normalizeTransformConfig(profile.transform);
-  if (transform && (transform.sources.length !== 1 || transform.sources[0].alias !== guard.source_alias)) throw Error('guard_requires_single_explicit_source');
+  if (transform && transform.sources.filter(s => s.alias === guard.source_alias).length !== 1) throw Error('guard_requires_unique_explicit_source');
+  if (transform && new Set(transform.sources.map(s => s.alias)).size !== transform.sources.length) throw Error('guard_duplicate_source_alias');
   if (!transform && guard.source_alias !== 'source') throw Error('invalid_guard_alias');
-  const source = transform?.sources[0] ?? { alias: 'source', connector: profile.source_connector, object: profile.source_object };
+  const source = transform?.sources.find(s => s.alias === guard.source_alias) ?? { alias: 'source', connector: profile.source_connector, object: profile.source_object };
   const resolved = await resolveSourceConnectorConfig(ctx, source);
   const connector = getSourceConnector(resolved.connectorId, resolved.config);
   if (!connector?.fetchAll) throw Error('guard_requires_complete_fetchAll');
@@ -186,7 +187,24 @@ async function buildGuardedProfileRecords(profile: SourceIngestProfile, ctx: Sou
   ctx.onGuardPrepared?.(prepared, baselineKey, prior);
   const projected = prepared.records.map(data => Object.freeze({ external_id: data[guard.policy.fields.id] as string, data }));
   if (!transform) return projected;
-  const result = await executeSourceTransform(transform, async () => projected);
+  const result = await executeSourceTransform(transform, async input => {
+    if (input.alias === guard.source_alias) return projected;
+    const auxiliary = await resolveSourceConnectorConfig(ctx, input);
+    const reader = getSourceConnector(auxiliary.connectorId, auxiliary.config);
+    if (!reader) throw Error(`connector not found: ${auxiliary.connectorId}`);
+    if (!reader.fetchAll) throw Error('guard_requires_complete_fetchAll');
+    const records: SourceRecord[] = [];
+    let cursor: string | null | undefined;
+    let fetched = false;
+    for await (const batch of reader.fetchAll(auxiliary.objectName, input.fields?.length ? { fields: input.fields } : {})) {
+      fetched = true;
+      records.push(...batch.records);
+      cursor = batch.cursor;
+    }
+    if (!fetched) throw Error('missing_source_fetch');
+    if (cursor) throw Error('incomplete_snapshot_cursor');
+    return records;
+  });
   const seen = new Set<string>();
   for (const record of result.records) {
     if (seen.has(record.external_id) || !prepared.identities.some(i => i.id === record.external_id) || record.external_id !== record.data[profile.identity.external_id_field]) throw Error('guard_transform_identity_mismatch');

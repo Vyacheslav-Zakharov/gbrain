@@ -72,7 +72,12 @@ export class PostgresSourceConnector implements SourceConnector {
     let offset = typeof cursorOrOpts === 'string' ? Number(cursorOrOpts) || 0 : 0;
     while (true) {
       const rows = await this.fetchPage(object, { offset, fields: effectiveOpts.fields });
-      if (rows.length === 0) break;
+      if (rows.length === 0) {
+        // Explicit completion for empty tables and exact page multiples. Only
+        // signal this after a successful fetch; transport failures still throw.
+        yield { records: [], cursor: null };
+        break;
+      }
       const nextOffset = offset + rows.length;
       const cursor = rows.length >= this.batchSize ? String(nextOffset) : null;
       yield { records: rows.map(row => this.toSourceRecord(object, row)), cursor };

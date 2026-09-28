@@ -386,7 +386,8 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
       if (g.approved_bootstrap_hash !== undefined && (typeof g.approved_bootstrap_hash !== 'string' || !/^[a-f0-9]{64}$/.test(g.approved_bootstrap_hash))) throw Error('invalid_bootstrap_hash');
       if (g.baseline_promotion !== undefined && !['hold','full'].includes(String(g.baseline_promotion))) throw Error('invalid_baseline_promotion');
       const sources = isObject(p.transform) ? p.transform.sources : undefined;
-      if (sources !== undefined ? !Array.isArray(sources) || sources.length !== 1 || !isObject(sources[0]) || sources[0].alias !== g.source_alias : g.source_alias !== 'source') throw Error('guard_requires_single_explicit_source');
+      if (sources !== undefined ? !Array.isArray(sources) || sources.filter(s => isObject(s) && s.alias === g.source_alias).length !== 1 : g.source_alias !== 'source') throw Error('guard_requires_unique_explicit_source');
+      if (Array.isArray(sources) && new Set(sources.map(s => isObject(s) ? s.alias : undefined)).size !== sources.length) throw Error('guard_duplicate_source_alias');
       if (!isObject(p.identity) || p.identity.require_explicit_resolution !== true) throw Error('guard_requires_explicit_resolution');
     } catch (e) { issues.push(issue('directory_guard','invalid_directory_guard', String(e))); }
   }
