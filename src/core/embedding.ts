@@ -59,6 +59,9 @@ export async function embedQuery(
 }
 
 export interface EmbedBatchOptions {
+  /** Selected content_chunks embedding space; does not change global gateway. */
+  embeddingModel?: string;
+  dimensions?: number;
   /**
    * Optional callback fired after each sub-batch completes. CLI wrappers
    * tick a reporter; Minion handlers can call job.updateProgress here.
@@ -96,6 +99,8 @@ export async function embedBatch(
   // Build the gateway-call passthrough once; undefined fields stay undefined
   // so non-opt-in callers see unchanged pre-v0.33.4 behavior.
   const gwOpts = {
+    ...(options.embeddingModel !== undefined && { embeddingModel: options.embeddingModel }),
+    ...(options.dimensions !== undefined && { dimensions: options.dimensions }),
     ...(options.abortSignal !== undefined && { abortSignal: options.abortSignal }),
     ...(options.maxRetries !== undefined && { maxRetries: options.maxRetries }),
   };

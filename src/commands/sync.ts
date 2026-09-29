@@ -577,7 +577,8 @@ async function runInlineCostGate(
   // never blocks the sync. Signature-aware (model/dims swap surfaces here).
   let staleChars = 0;
   try {
-    staleChars = await engine.sumStaleChunkChars({ signature: currentEmbeddingSignature() });
+    const { selectedTextEngine } = await import('../core/selected-text-embedding.ts');
+    staleChars = await (await selectedTextEngine(engine)).sumStaleChunkChars({ signature: currentEmbeddingSignature() });
   } catch {
     staleChars = 0;
   }

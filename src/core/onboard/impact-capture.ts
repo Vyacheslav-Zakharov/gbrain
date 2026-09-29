@@ -16,7 +16,8 @@
 // idempotency_key so concurrent onboard/autopilot/manual runs can't
 // misattribute deltas to the wrong remediation.
 
-import type { BrainEngine } from './../engine.ts';
+import type { BrainEngine } from '../engine.ts';
+import { selectedTextEngine } from '../selected-text-embedding.ts';
 
 export type MetricName =
   | 'orphan_count'
@@ -46,10 +47,7 @@ export async function captureMetric(
   try {
     switch (metric) {
       case 'stale_count': {
-        const rows = await engine.executeRaw<{ count: string | number }>(
-          `SELECT COUNT(*) AS count FROM content_chunks WHERE embedding IS NULL`,
-        );
-        return rows.length > 0 ? Number(rows[0].count) : 0;
+        return await (await selectedTextEngine(engine)).countStaleChunks();
       }
       case 'orphan_count': {
         const rows = await engine.executeRaw<{ count: string | number }>(

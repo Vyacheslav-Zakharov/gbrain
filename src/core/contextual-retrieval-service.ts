@@ -41,7 +41,7 @@
 
 import { createHash } from 'crypto';
 import * as fs from 'node:fs';
-import { embedBatch } from './embedding.ts';
+import { selectedTextEngine, embedTextBatch, preflightSelectedText } from './selected-text-embedding.ts';
 import { resolveContextualRetrievalMode } from './contextual-retrieval-resolver.ts';
 import {
   buildContextualPrefix,
@@ -209,6 +209,7 @@ const DEFAULT_HAIKU_MODEL = 'anthropic:claude-haiku-4-5-20251001';
 export async function reembedPageWithContextualRetrieval(
   args: ReembedPageArgs,
 ): Promise<ReembedPageResult> {
+  args = { ...args, engine: await selectedTextEngine(args.engine) };
   // ── Load page + source + chunks ────────────────────────────────────
   const page = await args.engine.getPage(args.pageSlug, { sourceId: args.sourceId });
   if (!page) {
@@ -398,7 +399,8 @@ async function tryBuildPhase1(opts: {
     );
 
     try {
-      const embeddings = await embedBatch(wrappedTexts, { abortSignal: args.abortSignal });
+      await preflightSelectedText(args.engine);
+      const embeddings = await embedTextBatch(args.engine, wrappedTexts, { abortSignal: args.abortSignal });
       return {
         kind: 'success',
         embeddedChunks: chunks.map((c, i) => ({
@@ -495,7 +497,8 @@ async function tryBuildPhase1(opts: {
 
   // All chunks synthesized successfully. Single batch embed (D27 P2-2).
   try {
-    const embeddings = await embedBatch(wrappedTexts, { abortSignal: args.abortSignal });
+    await preflightSelectedText(args.engine);
+    const embeddings = await embedTextBatch(args.engine, wrappedTexts, { abortSignal: args.abortSignal });
     return {
       kind: 'success',
       embeddedChunks: chunks.map((c, i) => ({

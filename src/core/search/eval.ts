@@ -10,7 +10,7 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
-import { embed } from '../embedding.ts';
+import { searchSelectedText } from '../selected-text-embedding.ts';
 import { hybridSearch } from './hybrid.ts';
 import type { HybridSearchOpts } from './hybrid.ts';
 
@@ -234,8 +234,7 @@ async function runQuery(
   }
 
   if (strategy === 'vector') {
-    const embedding = await embed(query);
-    const results = await engine.searchVector(embedding, { limit });
+    const results = await searchSelectedText(engine, query, { limit });
     return results.map(r => r.slug);
   }
 

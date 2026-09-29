@@ -1,3 +1,4 @@
+import { selectedTextEngine, selectedTextColumn, preflightSelectedText, embedTextBatch, applySelectedTextEmbeddings } from '../core/selected-text-embedding.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { embedBatch, currentEmbeddingSignature } from '../core/embedding.ts';
 import type { ChunkInput } from '../core/types.ts';
@@ -216,6 +217,7 @@ async function preflightDimMismatch(engine: BrainEngine, dryRun: boolean): Promi
 }
 
 export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promise<EmbedResult> {
+  engine = await selectedTextEngine(engine);
   // v0.37.10.0 T7 (D9): refuse cleanly when init persisted the deferred-setup
   // sentinel. Skipped in dryRun mode so plan-mode introspection still works.
   if (!opts.dryRun) {
@@ -232,13 +234,17 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
   // wrapper at src/commands/embed.ts:runEmbed catches and exits.
   if (!opts.dryRun) {
     const { validateEmbeddingCreds } = await import('../core/embed-preflight.ts');
-    validateEmbeddingCreds();
+    if (!selectedTextColumn(engine)) validateEmbeddingCreds();
   }
 
   // v0.37.11.0 (Lane D.2): pre-flight dim-mismatch check. Catches the headline
   // fresh-install bug class before the worker pool spends 20 parallel calls
   // hitting raw Postgres dimension errors.
-  await preflightDimMismatch(engine, !!opts.dryRun);
+  if (selectedTextColumn(engine)) {
+    if (!opts.dryRun) await preflightSelectedText(engine);
+  } else {
+    await preflightDimMismatch(engine, !!opts.dryRun);
+  }
 
   const result: EmbedResult = {
     embedded: 0,
@@ -576,7 +582,7 @@ async function embedPage(
     return;
   }
 
-  const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text), { abortSignal: signal });
+  const embeddings = await embedTextBatch(engine, toEmbed.map(c => c.chunk_text), { abortSignal: signal });
   const embeddingMap = new Map<number, Float32Array>();
   for (let j = 0; j < toEmbed.length; j++) {
     embeddingMap.set(toEmbed[j].chunk_index, embeddings[j]);
@@ -711,7 +717,7 @@ async function embedAll(
     }
 
     try {
-      const embeddings = await embedBatch(toEmbed.map(c => c.chunk_text));
+      const embeddings = await embedTextBatch(engine, toEmbed.map(c => c.chunk_text));
       // Build a map of new embeddings by chunk_index
       const embeddingMap = new Map<number, Float32Array>();
       for (let j = 0; j < toEmbed.length; j++) {
@@ -1005,7 +1011,10 @@ async function embedAllStale(
         const keySourceId = stale[0]?.source_id ?? 'default';
         const slug = stale[0].slug;
         try {
-          const embeddings = await embedBatchWithBackoff(stale.map(c => c.chunk_text), { abortSignal: effectiveSignal });
+          const embeddings = await embedBatchWithBackoff(stale.map(c => c.chunk_text), { abortSignal: effectiveSignal }, engine);
+          if (selectedTextColumn(engine)) {
+            result.embedded += await observed(pacer, () => applySelectedTextEmbeddings(engine, stale, embeddings));
+          } else {
           // Re-fetch existing chunks and merge to avoid deleting non-stale chunks.
           const existing = await observed(pacer, () => engine.getChunks(slug, { sourceId: keySourceId }));
           const staleIdxToEmbedding = new Map<number, Float32Array>();
@@ -1031,6 +1040,7 @@ async function embedAllStale(
             );
           }
           result.embedded += stale.length;
+          }
         } catch (e: unknown) {
           // Budget/abort-fired cancellations are expected on the way out; don't
           // spam per-page "Error embedding" lines when we're shutting down.
@@ -1200,6 +1210,7 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
 export async function embedBatchWithBackoff(
   texts: string[],
   opts: EmbedBatchWithBackoffOpts = {},
+  engine?: BrainEngine,
 ): Promise<Float32Array[]> {
   const signal = opts.abortSignal;
   for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
@@ -1208,7 +1219,8 @@ export async function embedBatchWithBackoff(
       // D4a + D8: maxRetries:0 disables the SDK's stacked retries (so this
       // wrapper is the single source of truth) and abortSignal threads
       // through to the gateway so an in-flight HTTP request cancels mid-fetch.
-      return await embedBatch(texts, { maxRetries: 0, ...(signal && { abortSignal: signal }) });
+      const batchOptions = { maxRetries: 0, ...(signal && { abortSignal: signal }) };
+      return await (engine ? embedTextBatch(engine, texts, batchOptions) : embedBatch(texts, batchOptions));
     } catch (e: unknown) {
       // If the budget fired we may have been aborted mid-fetch; bubble out.
       if (signal?.aborted) throw e;

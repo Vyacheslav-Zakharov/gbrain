@@ -1030,10 +1030,8 @@ export async function hybridSearch(
   // round-trip to read DB-plane config (mirrors loadSearchModeConfig).
   // Resolver throws on unknown name with a paste-ready hint; let it
   // propagate — a misconfig should be loud, not silently fall back.
-  // Failing cfg load (pre-config brain, mid-migration, no engine.getConfig)
-  // falls through to the file-plane sync loadConfig() — same shape, just
-  // misses DB-plane overrides.
-  const mergedCfg = await loadConfigWithEngine(engine).catch(() => null);
+  // Do not downgrade unavailable selector/registry authority to file defaults.
+  const mergedCfg = await loadConfigWithEngine(engine);
   const cfgForColumn = mergedCfg ?? ((await import('../config.ts')).loadConfig()) ?? null;
   const resolvedCol = cfgForColumn
     ? resolveEmbeddingColumn(opts, cfgForColumn)
@@ -1869,7 +1867,7 @@ export async function hybridSearchCached(
   // provider/dim. isCacheSafe compares the resolved column's full
   // embedding space (name + dim + model) against cfg and returns true
   // only when ALL match. Otherwise skip.
-  const mergedCfgCached = await loadConfigWithEngine(engine).catch(() => null);
+  const mergedCfgCached = await loadConfigWithEngine(engine);
   const cfgCached = mergedCfgCached ?? ((await import('../config.ts')).loadConfig()) ?? { engine: 'pglite' as const };
   const resolvedColCached = resolveEmbeddingColumn(opts, cfgCached);
   const isNonDefaultColumn = !isCacheSafe(resolvedColCached, cfgCached);

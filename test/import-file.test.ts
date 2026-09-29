@@ -18,6 +18,7 @@ function mockEngine(overrides: Partial<Record<string, any>> = {}): BrainEngine {
 
   const engine = new Proxy({} as any, {
     get(_, prop: string) {
+      if (prop === 'then') return undefined; // Engine values are not Promise-like.
       if (prop === '_calls') return calls;
       if (prop === 'getTags') return overrides.getTags || (() => Promise.resolve([]));
       if (prop === 'getPage') return overrides.getPage || (() => Promise.resolve(null));

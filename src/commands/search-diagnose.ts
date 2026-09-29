@@ -59,13 +59,14 @@ export async function runSearchDiagnose(engine: BrainEngine, args: string[]): Pr
 
   // Vector layer (skip if no embedding provider).
   let vector: LayerProbe;
-  const { isAvailable, embedQuery } = await import('../core/ai/gateway.ts');
-  if (!isAvailable('embedding')) {
+  const { isAvailable } = await import('../core/ai/gateway.ts');
+  const { selectedTextEngine, selectedTextColumn, searchSelectedText } = await import('../core/selected-text-embedding.ts');
+  const column = selectedTextColumn(await selectedTextEngine(engine));
+  if (!isAvailable('embedding', column?.embeddingModel)) {
     vector = { rank: null, score: null, top_slug: null, note: 'skipped — no embedding provider configured' };
   } else {
     try {
-      const qvec = await embedQuery(query);
-      const vec = await engine.searchVector(qvec, { limit, ...scope });
+      const vec = await searchSelectedText(engine, query, { limit, ...scope });
       vector = {
         rank: rankOf(vec.map(r => r.slug), target),
         score: vec.find(r => r.slug === target)?.score ?? null,

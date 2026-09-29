@@ -1,3 +1,4 @@
+import { validateDirectoryGuardPolicy, type DirectoryGuardPolicy } from './directory-identity-guard';
 export type SourceIngestProfileStatus = 'draft' | 'reviewed' | 'active' | 'paused' | 'deprecated';
 export type SourceIngestOnAccess = 'none' | 'banner' | 'enqueue_refresh' | 'acknowledge_when_stale';
 export type SourceIngestUpdateMode = 'managed_block';
@@ -99,6 +100,7 @@ export interface SourceIngestProfile {
   source_connector: string;
   source_object: string;
   transform?: SourceTransformProfile;
+  directory_guard?: { source_alias: string; policy: DirectoryGuardPolicy; approved_bootstrap_hash?: string; baseline_promotion?: 'hold' | 'full' };
   owner?: string;
   target: {
     gbrain_type: string;
@@ -107,6 +109,7 @@ export interface SourceIngestProfile {
   };
   selection?: { include?: SourceFilterRule[]; exclude?: SourceFilterRule[] };
   identity: {
+    nonwriting_bindings?: Record<string, { source_id: string; slug: string; type: 'facility'; approved: true }>;
     external_id_field: string;
     natural_key_fields?: string[];
     display_name_field: string;
@@ -118,7 +121,7 @@ export interface SourceIngestProfile {
     require_explicit_resolution?: boolean;
   };
   freshness?: { policy?: string; on_access?: SourceIngestOnAccess; changed_since_field?: string };
-  mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown>; source_fields?: string[]; linked_collections?: SourceLinkedCollection[]; article_template?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, string>; section_order?: string[]; include_title_heading?: boolean } };
+  mapping?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, unknown>; source_fields?: string[]; linked_collections?: SourceLinkedCollection[]; article_template?: { frontmatter?: Record<string, string | number | boolean | null>; sections?: Record<string, string>; section_order?: string[]; include_title_heading?: boolean; body_template?: string; typed_frontmatter?: boolean } };
   links?: SourceLinkRule[];
   change_intelligence?: SourceChangeIntelligencePolicy;
   update_policy: {
@@ -308,6 +311,8 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
     if (!isObject(p.mapping)) issues.push(issue('mapping', 'invalid_type', 'mapping must be an object.'));
     else {
       const article = p.mapping.article_template;
+      if (isObject(article) && article.body_template !== undefined && typeof article.body_template !== 'string') issues.push(issue('mapping.article_template.body_template', 'invalid_type', 'body_template must be a string.'));
+      if (isObject(article) && article.typed_frontmatter !== undefined && typeof article.typed_frontmatter !== 'boolean') issues.push(issue('mapping.article_template.typed_frontmatter', 'invalid_type', 'typed_frontmatter must be boolean.'));
       if (isObject(article) && article.include_title_heading !== undefined && typeof article.include_title_heading !== 'boolean') issues.push(issue('mapping.article_template.include_title_heading', 'invalid_type', 'include_title_heading must be boolean.'));
       if (isObject(article) && article.section_order !== undefined && !Array.isArray(article.section_order)) issues.push(issue('mapping.article_template.section_order', 'invalid_type', 'section_order must be an array.'));
       const collections = p.mapping.linked_collections;
@@ -373,6 +378,27 @@ export function validateSourceIngestProfile(raw: unknown): { ok: boolean; issues
     if (typeof p.security.pii !== 'boolean') issues.push(issue('security.pii', 'required', 'security.pii boolean is required.'));
   }
 
+  if (p.directory_guard !== undefined) {
+    try {
+      const g = p.directory_guard;
+      if (!isObject(g) || Object.keys(g).some(k => !['source_alias','policy','approved_bootstrap_hash','baseline_promotion'].includes(k)) || typeof g.source_alias !== 'string' || !SQL_IDENT_RE.test(g.source_alias)) throw Error('invalid_directory_guard');
+      validateDirectoryGuardPolicy(g.policy);
+      if (g.approved_bootstrap_hash !== undefined && (typeof g.approved_bootstrap_hash !== 'string' || !/^[a-f0-9]{64}$/.test(g.approved_bootstrap_hash))) throw Error('invalid_bootstrap_hash');
+      if (g.baseline_promotion !== undefined && !['hold','full'].includes(String(g.baseline_promotion))) throw Error('invalid_baseline_promotion');
+      const sources = isObject(p.transform) ? p.transform.sources : undefined;
+      if (sources !== undefined ? !Array.isArray(sources) || sources.filter(s => isObject(s) && s.alias === g.source_alias).length !== 1 : g.source_alias !== 'source') throw Error('guard_requires_unique_explicit_source');
+      if (Array.isArray(sources) && new Set(sources.map(s => isObject(s) ? s.alias : undefined)).size !== sources.length) throw Error('guard_duplicate_source_alias');
+      if (!isObject(p.identity) || p.identity.require_explicit_resolution !== true) throw Error('guard_requires_explicit_resolution');
+    } catch (e) { issues.push(issue('directory_guard','invalid_directory_guard', String(e))); }
+  }
+  if (isObject(p.identity) && p.identity.nonwriting_bindings !== undefined) {
+    const b = p.identity.nonwriting_bindings;
+    if (!p.directory_guard || !isObject(b)) issues.push(issue('identity.nonwriting_bindings','invalid_bindings','Bindings require directory guard.'));
+    else for (const [id,v] of Object.entries(b)) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(id) || !isObject(v) || Object.keys(v).sort().join(',') !== 'approved,slug,source_id,type' || v.approved !== true || v.type !== 'facility' || typeof v.source_id !== 'string' || !SOURCE_ID_RE.test(v.source_id) || typeof v.slug !== 'string' || !/^[a-z0-9][a-z0-9_/-]*$/.test(v.slug) || v.slug.includes('//') || v.slug.endsWith('/')) issues.push(issue('identity.nonwriting_bindings','invalid_binding','Expected approved source-qualified facility binding.'));
+      if (isObject(p.identity.existing_slug_map) && id in p.identity.existing_slug_map || Array.isArray(p.identity.explicit_create_ids) && p.identity.explicit_create_ids.includes(id)) issues.push(issue('identity.nonwriting_bindings','conflicting_resolution','Nonwriting identity cannot also write.'));
+    }
+  }
   const approvedSource = isObject(p.target) ? p.target.approved_source_id : undefined;
   if ((p.status === 'reviewed' || p.status === 'active') && typeof approvedSource !== 'string') issues.push(issue('target.approved_source_id', 'source_id_not_frozen', 'Reviewed/active profiles must freeze approved_source_id.'));
 
@@ -391,6 +417,35 @@ export function sourceIngestProfileJsonSchema(): Record<string, unknown> {
       status: { enum: ['draft', 'reviewed', 'active', 'paused', 'deprecated'] },
       source_connector: { type: 'string' },
       source_object: { type: 'string' },
+      mapping: { type: 'object', properties: { article_template: { type: 'object', properties: {
+        body_template: { type: 'string' },
+        typed_frontmatter: { type: 'boolean', default: false },
+      } } } },
+      directory_guard: {
+        type: 'object', additionalProperties: false, required: ['source_alias','policy'],
+        properties: {
+          source_alias: {type:'string',pattern:'^[A-Za-z_][A-Za-z0-9_]*$'},
+          approved_bootstrap_hash: {type:'string',pattern:'^[a-f0-9]{64}$'},
+          baseline_promotion: {enum:['hold','full'],default:'hold'},
+          policy: {
+            type:'object',additionalProperties:false,required:['fields','dateFormat','timezone','passportFields','anchors','typeAllowlist','scope'],
+            properties: {
+              fields:{type:'object',additionalProperties:false,required:['id','key','name','type','created','parent','site'],properties:Object.fromEntries(['id','key','name','type','created','parent','site'].map(k=>[k,{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9_.:-]*$'}]))},
+              dateFormat:{enum:['MM/DD/YYYY HH:mm:ss','DD.MM.YYYY HH:mm:ss']},
+              timezone:{type:'string',pattern:'^[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00)$'},
+              rootParentValues:{type:'array',minItems:1,uniqueItems:true,items:{enum:[null,'']}},
+              passportFields:{type:'array',uniqueItems:true,items:{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9_.:-]*$'}},
+              typeAllowlist:{type:'array',uniqueItems:true,items:{type:'string',minLength:1}},
+              scope:{type:'object',additionalProperties:false,required:['sites'],properties:{sites:{type:'array',items:{type:'string',pattern:'^[A-Za-z0-9][A-Za-z0-9_.:-]*$'}}}},
+              anchors:{type:'array',items:{type:'object',additionalProperties:false,required:['id','key','name','type','created','parent','site'],properties:{id:{type:'string'},key:{type:'string'},name:{type:'string',minLength:1},type:{type:'string'},site:{type:'string'},parent:{type:['string','null']},created:{type:['string','null']}}}},
+            },
+          },
+        },
+      },
+      identity: {type:'object',required:['external_id_field','display_name_field'],properties:{
+        external_id_field:{type:'string'},display_name_field:{type:'string'},
+        nonwriting_bindings:{type:'object',additionalProperties:{type:'object',additionalProperties:false,required:['source_id','slug','type','approved'],properties:{source_id:{type:'string',pattern:'^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$'},slug:{type:'string',pattern:'^[a-z0-9][a-z0-9_/-]*$'},type:{const:'facility'},approved:{const:true}}}},
+      }},
       target: { type: 'object', required: ['gbrain_type', 'slug_template'] },
     },
   };

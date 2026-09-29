@@ -14,6 +14,7 @@
 // also short-circuits (CI/scripted callers see nothing).
 
 import type { BrainEngine } from '../engine.ts';
+import { selectedTextEngine } from '../selected-text-embedding.ts';
 
 const NUDGE_BUDGET_MS = 3000;
 
@@ -49,11 +50,7 @@ export async function runInitNudge(engine: BrainEngine): Promise<void> {
 
     // Run 4 cheap counts in parallel against the 3s budget.
     const results = await Promise.allSettled([
-      engine.executeRaw<{ count: string | number }>(
-        `SELECT COUNT(*) AS count FROM content_chunks WHERE embedding IS NULL`,
-        [],
-        { signal: controller.signal },
-      ),
+      selectedTextEngine(engine).then(e => e.countStaleChunks()).then(count => [{ count }]),
       engine.executeRaw<{ count: string | number }>(
         `SELECT COUNT(*) AS count FROM pages
            WHERE type IN ('person', 'company', 'organization', 'entity')

@@ -1805,7 +1805,9 @@ export async function registerBuiltinHandlers(
   // Shell handler is always registered. Runtime env guard lives inside the
   // handler so claimed jobs emit a clear rejection log on workers missing
   // GBRAIN_ALLOW_SHELL_JOBS=1.
-  {
+  // Explicit CAS cohort HOLD: exclude shell from queue claim, even if execution is enabled.
+  // Other cohorts retain the existing registration and handler-time rejection behavior.
+  if (process.env.GBRAIN_HOLD_SHELL_JOBS !== '1') {
     const { shellHandler } = await import('../core/minions/handlers/shell.ts');
     worker.register('shell', shellHandler);
     if (!quiet) {

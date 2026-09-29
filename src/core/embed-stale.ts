@@ -18,6 +18,7 @@
  */
 
 import type { BrainEngine } from './engine.ts';
+import { selectedTextEngine, preflightSelectedText, selectedTextColumn, applySelectedTextEmbeddings } from './selected-text-embedding.ts';
 import type { ChunkInput } from './types.ts';
 import { embedBatchWithBackoff } from '../commands/embed.ts';
 import { type DbPacer, createNoopPacer, observed } from './db-pacer.ts';
@@ -111,11 +112,13 @@ export async function embedStaleForSource(
   sourceId: string,
   opts: EmbedStaleOpts = {},
 ): Promise<EmbedStaleResult> {
+  engine = await selectedTextEngine(engine);
+  await preflightSelectedText(engine);
   const batchSize = opts.batchSize ?? 2000;
   const concurrency = opts.concurrency ?? 20;
   const signal = opts.signal;
   const embedFn = opts.embedFn ?? ((texts, fnOpts) =>
-    embedBatchWithBackoff(texts, { abortSignal: fnOpts.abortSignal }));
+    embedBatchWithBackoff(texts, { abortSignal: fnOpts.abortSignal }, engine));
   // Defaulted no-op when pacing is off, so the observe()/pace() call sites
   // below are unconditional and cost ~nothing on the unpaced path.
   const pacer = opts.pacer ?? createNoopPacer();
@@ -159,7 +162,7 @@ export async function embedStaleForSource(
       }),
     );
     if (batch.length === 0) {
-      result.done = true;
+      result.done = selectedTextColumn(engine) ? await engine.countStaleChunks({ sourceId }) === 0 : true;
       return result;
     }
 
@@ -193,6 +196,12 @@ export async function embedStaleForSource(
           stale.map((c) => c.chunk_text),
           { abortSignal: signal },
         );
+        if (selectedTextColumn(engine)) {
+          const applied = await observed(pacer, () => applySelectedTextEmbeddings(engine, stale, embeddings));
+          result.embedded += applied;
+          result.pagesProcessed += applied > 0 ? 1 : 0;
+          return;
+        }
         const existing = await observed(pacer, () =>
           engine.getChunks(slug, { sourceId: keySourceId }),
         );
@@ -260,7 +269,7 @@ export async function embedStaleForSource(
 
     // Short batch = end of stale set; advance and exit.
     if (batch.length < batchSize) {
-      result.done = true;
+      result.done = selectedTextColumn(engine) ? await engine.countStaleChunks({ sourceId }) === 0 : true;
       return result;
     }
   }

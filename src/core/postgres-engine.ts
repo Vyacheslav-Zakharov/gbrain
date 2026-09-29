@@ -1,3 +1,4 @@
+import { textEmbeddingColumn, validateChunkEmbeddingDimensions, selectedTextInvalidation } from './text-embedding-column.ts';
 import postgres from 'postgres';
 import type {
   BrainEngine, LinkReadOpts,
@@ -2273,13 +2274,16 @@ export class PostgresEngine implements BrainEngine {
   }
 
   // Chunks
-  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string } & BatchOpts): Promise<void> {
+  async upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: import('./types.ts').ResolvedColumn } & BatchOpts): Promise<void> {
     return this.batchRetry(opts?.auditSite ?? 'upsertChunks', opts?.signal, () => this._upsertChunksOnce(slug, chunks, opts), chunks.length);
   }
 
-  private async _upsertChunksOnce(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string }): Promise<void> {
+  private async _upsertChunksOnce(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: import('./types.ts').ResolvedColumn }): Promise<void> {
     const sql = this.sql;
     const sourceId = opts?.sourceId ?? 'default';
+    validateChunkEmbeddingDimensions(chunks, opts?.embeddingColumn);
+    const target = textEmbeddingColumn(opts?.embeddingColumn);
+    const invalidateSelected = await selectedTextInvalidation(this, opts?.embeddingColumn);
 
     // Source-scope the page-id lookup. Without this filter, multi-source
     // brains where the slug exists in 2+ sources return >1 row and the
@@ -2306,7 +2310,7 @@ export class PostgresEngine implements BrainEngine {
     // scope metadata through upserts.
     // v0.27.1 (Phase 8): added `modality` + `embedding_image` to the column
     // list. Image chunks pass embedding=null + embedding_image=Float32Array.
-    const cols = '(page_id, chunk_index, chunk_text, chunk_source, embedding, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified, modality, embedding_image)';
+    const cols = `(page_id, chunk_index, chunk_text, chunk_source, ${target.col}, model, token_count, embedded_at, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified, modality, embedding_image)`;
     const rows: string[] = [];
     const params: unknown[] = [];
     let paramIdx = 1;
@@ -2323,7 +2327,7 @@ export class PostgresEngine implements BrainEngine {
         : null;
       const modality = chunk.modality ?? 'text';
 
-      const embeddingPh = embeddingStr ? `$${paramIdx++}::vector` : 'NULL';
+      const embeddingPh = embeddingStr ? `$${paramIdx++}::${target.cast}` : 'NULL';
       const embeddedAtPh = embeddingStr ? 'now()' : 'NULL';
       const embeddingImagePh = embeddingImageStr ? `$${paramIdx++}::vector` : 'NULL';
 
@@ -2371,7 +2375,11 @@ export class PostgresEngine implements BrainEngine {
        ON CONFLICT (page_id, chunk_index) DO UPDATE SET
          chunk_text = EXCLUDED.chunk_text,
          chunk_source = EXCLUDED.chunk_source,
-         embedding = CASE
+         ${invalidateSelected}
+         ${target.custom ? `${target.col} = CASE
+           WHEN EXCLUDED.chunk_text IS DISTINCT FROM content_chunks.chunk_text THEN EXCLUDED.${target.col}
+           ELSE COALESCE(EXCLUDED.${target.col}, content_chunks.${target.col}) END,
+         model = content_chunks.model,` : `         embedding = CASE
            WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedding
            WHEN content_chunks.embedding IS NULL THEN EXCLUDED.embedding
            WHEN EXCLUDED.embedded_at IS NOT NULL
@@ -2379,16 +2387,16 @@ export class PostgresEngine implements BrainEngine {
                 THEN EXCLUDED.embedding
            ELSE content_chunks.embedding
          END,
-         model = COALESCE(EXCLUDED.model, content_chunks.model),
+         model = COALESCE(EXCLUDED.model, content_chunks.model),`}
          token_count = EXCLUDED.token_count,
-         embedded_at = CASE
+         ${target.custom ? 'embedded_at = content_chunks.embedded_at,' : `         embedded_at = CASE
            WHEN EXCLUDED.chunk_text != content_chunks.chunk_text AND EXCLUDED.embedding IS NULL THEN NULL
            WHEN content_chunks.embedding IS NULL AND EXCLUDED.embedding IS NOT NULL THEN EXCLUDED.embedded_at
            WHEN EXCLUDED.embedded_at IS NOT NULL
                 AND (content_chunks.embedded_at IS NULL OR EXCLUDED.embedded_at > content_chunks.embedded_at)
                 THEN EXCLUDED.embedded_at
            ELSE content_chunks.embedded_at
-         END,
+         END,`}
          language = EXCLUDED.language,
          symbol_name = EXCLUDED.symbol_name,
          symbol_type = EXCLUDED.symbol_type,
@@ -2403,8 +2411,10 @@ export class PostgresEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Chunk[]> {
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; embeddingColumn?: import('./types.ts').ResolvedColumn }): Promise<Chunk[]> {
     const sql = this.sql;
+    const selected = opts?.embeddingColumn;
+    if (selected) textEmbeddingColumn(selected);
     const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
     const sourceId = opts?.sourceId ?? (sources ? null : 'default');
     const scopeFragment = sources
@@ -2416,7 +2426,7 @@ export class PostgresEngine implements BrainEngine {
       WHERE p.slug = ${slug}${scopeFragment}
       ORDER BY p.source_id, cc.chunk_index
     `;
-    return rows.map((r) => rowToChunk(r as Record<string, unknown>));
+    return rows.map((r) => rowToChunk((selected ? { ...r, embedding: r[selected.name], embedded_at: r[selected.name] == null ? null : (r.embedded_at ?? new Date(0)) } : r) as Record<string, unknown>, !!selected));
   }
 
   /**
@@ -2425,15 +2435,17 @@ export class PostgresEngine implements BrainEngine {
    * embedding_signature drift (NULL grandfathered). Shared by
    * countStaleChunks + sumStaleChunkChars (parity with the PGLite sibling).
    */
-  private buildStaleChunkWhere(opts?: { sourceId?: string; signature?: string }): { where: string; params: unknown[] } {
+  private buildStaleChunkWhere(opts?: { sourceId?: string; signature?: string; embeddingColumn?: import('./types.ts').ResolvedColumn }): { where: string; params: unknown[] } {
+    const target = textEmbeddingColumn(opts?.embeddingColumn);
     const params: unknown[] = [];
     const conds: string[] = [];
-    if (opts?.signature !== undefined) {
+    if (!target.custom && opts?.signature !== undefined) {
       params.push(opts.signature);
-      conds.push(`(cc.embedding IS NULL OR (p.embedding_signature IS NOT NULL AND p.embedding_signature <> $${params.length}))`);
+      conds.push(`(cc.${target.col} IS NULL OR (p.embedding_signature IS NOT NULL AND p.embedding_signature <> $${params.length}))`);
     } else {
-      conds.push(`cc.embedding IS NULL`);
+      conds.push(`cc.${target.col} IS NULL`);
     }
+    conds.push(`p.deleted_at IS NULL`);
     conds.push(`NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')`);
     if (opts?.sourceId !== undefined) {
       params.push(opts.sourceId);
@@ -2442,7 +2454,7 @@ export class PostgresEngine implements BrainEngine {
     return { where: conds.join(' AND '), params };
   }
 
-  async countStaleChunks(opts?: { sourceId?: string; signature?: string }): Promise<number> {
+  async countStaleChunks(opts?: { sourceId?: string; signature?: string; embeddingColumn?: import('./types.ts').ResolvedColumn }): Promise<number> {
     // Always JOIN pages so the embed_skip + signature predicates apply.
     // D7: source_id scoping. v0.41.31: optional signature widens staleness
     // to embedding_signature drift (NULL grandfathered).
@@ -2457,7 +2469,7 @@ export class PostgresEngine implements BrainEngine {
     return Number((rows[0] as { count?: number } | undefined)?.count ?? 0);
   }
 
-  async sumStaleChunkChars(opts?: { sourceId?: string; signature?: string }): Promise<number> {
+  async sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; embeddingColumn?: import('./types.ts').ResolvedColumn }): Promise<number> {
     // Sibling of countStaleChunks: same stale predicate, summing chunk_text
     // length for the sync cost preview. ::bigint guards int4 overflow.
     const { where, params } = this.buildStaleChunkWhere(opts);
@@ -2504,6 +2516,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async listStaleChunks(opts?: {
+    embeddingColumn?: import('./types.ts').ResolvedColumn;
     batchSize?: number;
     afterPageId?: number;
     afterChunkIndex?: number;
@@ -2512,6 +2525,7 @@ export class PostgresEngine implements BrainEngine {
     afterUpdatedAt?: string | null;
   }): Promise<StaleChunkRow[]> {
     const sql = this.sql;
+    const target = textEmbeddingColumn(opts?.embeddingColumn);
     const limit = opts?.batchSize ?? 2000;
     const afterPid = opts?.afterPageId ?? 0;
     const afterIdx = opts?.afterChunkIndex ?? -1;
@@ -2535,7 +2549,7 @@ export class PostgresEngine implements BrainEngine {
                  p.updated_at
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
-          WHERE cc.embedding IS NULL
+          WHERE cc.${sql.unsafe(target.col)} IS NULL AND p.deleted_at IS NULL
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
           LIMIT ${limit}
@@ -2545,7 +2559,7 @@ export class PostgresEngine implements BrainEngine {
                  p.updated_at
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
-          WHERE cc.embedding IS NULL
+          WHERE cc.${sql.unsafe(target.col)} IS NULL AND p.deleted_at IS NULL
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (
               p.updated_at < ${afterUpdated}::timestamptz
@@ -2563,7 +2577,7 @@ export class PostgresEngine implements BrainEngine {
                p.updated_at
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
-        WHERE cc.embedding IS NULL
+        WHERE cc.${sql.unsafe(target.col)} IS NULL AND p.deleted_at IS NULL
           AND p.source_id = ${opts.sourceId}
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
@@ -2574,7 +2588,7 @@ export class PostgresEngine implements BrainEngine {
                p.updated_at
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
-        WHERE cc.embedding IS NULL
+        WHERE cc.${sql.unsafe(target.col)} IS NULL AND p.deleted_at IS NULL
           AND p.source_id = ${opts.sourceId}
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (
@@ -2607,7 +2621,7 @@ export class PostgresEngine implements BrainEngine {
                cc.model, cc.token_count, p.source_id, cc.page_id
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
-        WHERE cc.embedding IS NULL
+        WHERE cc.${sql.unsafe(target.col)} IS NULL AND p.deleted_at IS NULL
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
         ORDER BY cc.page_id, cc.chunk_index
@@ -2620,7 +2634,7 @@ export class PostgresEngine implements BrainEngine {
              cc.model, cc.token_count, p.source_id, cc.page_id
       FROM content_chunks cc
       JOIN pages p ON p.id = cc.page_id
-      WHERE cc.embedding IS NULL
+      WHERE cc.${sql.unsafe(target.col)} IS NULL AND p.deleted_at IS NULL
         AND p.source_id = ${opts.sourceId}
         AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
         AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
@@ -5042,7 +5056,9 @@ export class PostgresEngine implements BrainEngine {
     `;
 
     const pageCount = Number(h.page_count);
-    const embedCoverage = Number(h.embed_coverage);
+    const selectedHealth = await (await import('./text-embedding-health.ts')).embeddingHealth(this);
+    const useSelectedHealth = selectedHealth.column !== 'embedding';
+    const embedCoverage = useSelectedHealth ? selectedHealth.coverage : Number(h.embed_coverage);
     const orphanPages = Number(h.orphan_pages);
     const deadLinks = Number(h.dead_links);
     const linkCount = Number(h.link_count);
@@ -5073,7 +5089,7 @@ export class PostgresEngine implements BrainEngine {
       embed_coverage: embedCoverage,
       stale_pages: Number(h.stale_pages),
       orphan_pages: orphanPages,
-      missing_embeddings: Number(h.missing_embeddings),
+      missing_embeddings: useSelectedHealth ? selectedHealth.missing : Number(h.missing_embeddings),
       brain_score: brainScore,
       dead_links: deadLinks,
       link_coverage: Number(h.link_coverage),

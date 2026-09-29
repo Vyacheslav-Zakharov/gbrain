@@ -964,14 +964,14 @@ export interface BrainEngine {
    * failure replays to the same end state. Callers MUST NOT wrap externally;
    * see {@link BatchOpts} retry-contract block.
    */
-  upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string } & BatchOpts): Promise<void>;
+  upsertChunks(slug: string, chunks: ChunkInput[], opts?: { sourceId?: string; embeddingColumn?: import('./types.ts').ResolvedColumn } & BatchOpts): Promise<void>;
   /**
    * Read every chunk for a page. `opts.sourceId` scopes to one source;
    * `opts.sourceIds` scopes to a federated allow-list and includes `source_id`
    * on each returned chunk. Without either option, the legacy `default`
    * source behavior is preserved.
    */
-  getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[] }): Promise<Chunk[]>;
+  getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; embeddingColumn?: import('./types.ts').ResolvedColumn }): Promise<Chunk[]>;
   /**
    * Count chunks across the brain where embedding IS NULL.
    * Pre-flight short-circuit for `embed --stale` so a 100%-embedded brain
@@ -982,7 +982,7 @@ export interface BrainEngine {
    * `gbrain embed --stale --source media-corpus` expect only that
    * source's NULLs touched; the caller threads `sourceId` here.
    */
-  countStaleChunks(opts?: { sourceId?: string; signature?: string }): Promise<number>;
+  countStaleChunks(opts?: { sourceId?: string; signature?: string; embeddingColumn?: import('./types.ts').ResolvedColumn }): Promise<number>;
   /**
    * Sum of LENGTH(chunk_text) over stale chunks — the character-count
    * backlog the embed phase / embed-backfill will process. Sibling of
@@ -997,7 +997,7 @@ export interface BrainEngine {
    * (never counted) so the post-migration corpus isn't flagged en masse.
    * Omit `signature` for the legacy `embedding IS NULL`-only count.
    */
-  sumStaleChunkChars(opts?: { sourceId?: string; signature?: string }): Promise<number>;
+  sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; embeddingColumn?: import('./types.ts').ResolvedColumn }): Promise<number>;
   /**
    * Stamp `pages.embedding_signature = signature` for one page. Called after
    * a page's chunks are (re)embedded so a later model swap can detect it as
@@ -1031,6 +1031,7 @@ export interface BrainEngine {
    * support.
    */
   listStaleChunks(opts?: {
+    embeddingColumn?: import('./types.ts').ResolvedColumn;
     batchSize?: number;
     afterPageId?: number;
     afterChunkIndex?: number;

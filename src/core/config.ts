@@ -634,9 +634,9 @@ export async function loadConfigWithEngine(
     (base !== undefined ? base : loadConfig()) ??
     ({ engine: 'postgres' } as GBrainConfig);
 
-  // DB-plane reads. Quiet failures — if the config table doesn't exist yet
-  // (pre-v36 brain mid-migration), treat as null and let file/env defaults
-  // win. The migration runner reads file/env directly anyway.
+  // Optional DB-plane reads are best effort. Selected embedding-space reads
+  // must fail closed: unavailable authority is not permission to use primary.
+  // The migration runner reads file/env directly anyway.
   async function dbBool(key: string): Promise<boolean | undefined> {
     try {
       const v = await engine.getConfig(key);
@@ -651,7 +651,8 @@ export async function loadConfigWithEngine(
       const v = await engine.getConfig(key);
       if (v === undefined || v === null || v === '') return undefined;
       return v;
-    } catch {
+    } catch (err) {
+      if (key === 'search_embedding_column' || key === 'embedding_columns') throw err;
       return undefined;
     }
   }
@@ -661,11 +662,13 @@ export async function loadConfigWithEngine(
   const dbOcr = await dbBool('embedding_image_ocr');
   const dbOcrModel = await dbStr('embedding_image_ocr_model');
   // v0.36 (D7) — embedding-column registry merge. Stored as JSON string in
-  // the config table. Parse + shape-check here; full registry validation
-  // (regex on keys, type/dim/provider field shapes) runs in the resolver at
-  // first use so a malformed DB row doesn't kill engine connect.
-  const dbEmbeddingColumns = await dbStr('embedding_columns');
-  const dbSearchEmbeddingColumn = await dbStr('search_embedding_column');
+  // the config table. Reject malformed JSON/object shapes here; full entry
+  // validation runs in the resolver. Do not read shadowed DB authority:
+  // file/env precedence must survive an unavailable lower-priority plane.
+  const dbEmbeddingColumns = fileConfig.embedding_columns === undefined
+    ? await dbStr('embedding_columns') : undefined;
+  const dbSearchEmbeddingColumn = fileConfig.search_embedding_column === undefined
+    ? await dbStr('search_embedding_column') : undefined;
 
   // DB applies only when env did NOT win. Env presence is detected by the
   // sync loadConfig() already setting the field. For each flag, prefer the
@@ -689,10 +692,10 @@ export async function loadConfigWithEngine(
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         merged.embedding_columns = parsed as Record<string, EmbeddingColumnConfig>;
       } else {
-        console.warn('[gbrain] config: embedding_columns DB value is not a JSON object; ignoring');
+        throw new Error('expected a JSON object');
       }
     } catch (err) {
-      console.warn(`[gbrain] config: embedding_columns DB value is not valid JSON; ignoring (${(err as Error).message})`);
+      throw new Error(`Invalid embedding_columns DB value: ${(err as Error).message}`);
     }
   }
   if (merged.search_embedding_column === undefined && dbSearchEmbeddingColumn !== undefined) {

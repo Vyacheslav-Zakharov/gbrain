@@ -8,7 +8,8 @@ import { chunkText } from './chunkers/recursive.ts';
 import { chunkCodeText, chunkCodeTextFull, detectCodeLanguage, CHUNKER_VERSION } from './chunkers/code.ts';
 import { findChunkForOffset } from './chunkers/edge-extractor.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
-import { embedBatch, embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
+import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
+import { selectedTextEngine, embedTextBatch, preflightSelectedText } from './selected-text-embedding.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath } from './sync.ts';
 import type { ChunkInput, PageInput, PageType } from './types.ts';
 import { computeEffectiveDate } from './effective-date.ts';
@@ -303,6 +304,7 @@ export async function importFromContent(
     };
   }
 
+  engine = await selectedTextEngine(engine);
   const parsed = parseMarkdown(content, slug + '.md', { activePack: opts.activePack });
 
   // v0.42 (#1699 trust boundary): strip gate-owned markers from UNTRUSTED
@@ -714,7 +716,8 @@ export async function importFromContent(
     const wrappedTexts = prefix
       ? chunks.map((c) => wrapChunkForEmbedding(c.chunk_text, prefix, c.chunk_source))
       : chunks.map((c) => c.chunk_text);
-    const embeddings = await embedBatch(wrappedTexts);
+    await preflightSelectedText(engine);
+    const embeddings = await embedTextBatch(engine, wrappedTexts);
     for (let i = 0; i < chunks.length; i++) {
       chunks[i].embedding = embeddings[i];
       // token_count tracks the wrapped string length so cost reporting
@@ -1058,6 +1061,7 @@ export async function importCodeFile(
   content: string,
   opts: { noEmbed?: boolean; force?: boolean; sourceId?: string } = {},
 ): Promise<ImportResult> {
+  engine = await selectedTextEngine(engine);
   const slug = slugifyCodePath(relativePath);
   const lang = detectCodeLanguage(relativePath) || 'unknown';
   const title = `${relativePath} (${lang})`;
@@ -1151,7 +1155,8 @@ export async function importCodeFile(
   if (!opts.noEmbed && needsEmbedIndexes.length > 0) {
     try {
       const textsToEmbed = needsEmbedIndexes.map((i) => chunks[i]!.chunk_text);
-      const embeddings = await embedBatch(textsToEmbed);
+      await preflightSelectedText(engine);
+      const embeddings = await embedTextBatch(engine, textsToEmbed);
       for (let j = 0; j < needsEmbedIndexes.length; j++) {
         const i = needsEmbedIndexes[j]!;
         chunks[i]!.embedding = embeddings[j]!;

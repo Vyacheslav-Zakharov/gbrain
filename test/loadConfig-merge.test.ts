@@ -92,14 +92,15 @@ describe('loadConfigWithEngine (Phase 4 / F3)', () => {
     expect(merged?.embedding_image_ocr).toBe(true);
   });
 
-  test('engine.getConfig throwing is non-fatal — file/env config still returned', async () => {
+  test('optional engine.getConfig failures are non-fatal — file/env config still returned', async () => {
     const base: GBrainConfig = {
       engine: 'pglite',
       embedding_multimodal: true,
     };
     const engine: FakeEngine = {
-      async getConfig() {
-        throw new Error('config table missing');
+      async getConfig(key: string) {
+        if (key === 'embedding_columns' || key === 'search_embedding_column') return null;
+        throw new Error('optional config unavailable');
       },
     };
     const merged = await loadConfigWithEngine(engine, base);
@@ -286,11 +287,12 @@ describe('loadConfigWithEngine (Phase 4 / F3)', () => {
       expect(merged?.dream?.patterns?.lookback_days).toBe(14);
     });
 
-    test('engine.getConfig throwing leaves dream.* unset (non-fatal, mirrors content_sanity)', async () => {
+    test('optional engine.getConfig failures leave dream.* unset (non-fatal, mirrors content_sanity)', async () => {
       const base: GBrainConfig = { engine: 'pglite' };
       const engine: FakeEngine = {
-        async getConfig() {
-          throw new Error('config table missing');
+        async getConfig(key: string) {
+          if (key === 'embedding_columns' || key === 'search_embedding_column') return null;
+          throw new Error('optional config unavailable');
         },
       };
       const merged = await loadConfigWithEngine(engine, base);

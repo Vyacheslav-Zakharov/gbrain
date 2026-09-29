@@ -16,6 +16,7 @@
 // when ctx threads — onboard surface threads explicitly per A26.
 
 import type { BrainEngine } from '../engine.ts';
+import { selectedTextEngine } from '../selected-text-embedding.ts';
 import type { RemediationStep } from '../remediation-step.ts';
 import { makeRemediationStep } from '../remediation-step.ts';
 
@@ -54,10 +55,7 @@ async function safeCount(engine: BrainEngine, sql: string, params: unknown[] = [
 export async function checkEmbedStaleness(
   engine: BrainEngine,
 ): Promise<OnboardCheckResult> {
-  const staleCount = await safeCount(
-    engine,
-    `SELECT COUNT(*) AS count FROM content_chunks WHERE embedding IS NULL`,
-  );
+  const staleCount = await (await selectedTextEngine(engine)).countStaleChunks();
   const remediations: RemediationStep[] = [];
   let status: 'ok' | 'warn' | 'fail' = 'ok';
   let message: string;
