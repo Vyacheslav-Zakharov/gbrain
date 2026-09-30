@@ -1,4 +1,5 @@
 import { marked } from 'marked';
+import { buildWikiHref } from './navigation';
 
 export interface OutlineItem {
   id: string;
@@ -46,7 +47,7 @@ function safeSlug(text: string, used: Set<string>): string {
   return candidate;
 }
 
-function sanitizeHtml(html: string, documentTitle = ''): RenderedMarkdown {
+function sanitizeHtml(html: string, documentTitle = '', sourceId = ''): RenderedMarkdown {
   const template = document.createElement('template');
   template.innerHTML = html;
   const firstHeading = template.content.querySelector('h1');
@@ -81,7 +82,7 @@ function sanitizeHtml(html: string, documentTitle = ''): RenderedMarkdown {
       if (href.startsWith(WIKI_PREFIX)) {
         try {
           node.dataset.wikiTarget = decodeURIComponent(href.slice(WIKI_PREFIX.length));
-          node.href = '#';
+          node.href = buildWikiHref(sourceId, node.dataset.wikiTarget);
           node.classList.add('wiki-link');
         } catch {
           node.removeAttribute('href');
@@ -151,11 +152,11 @@ export function stripFrontmatter(markdown: string): string {
   return end >= 0 ? markdown.slice(end + 4).replace(/^\s+/, '') : markdown;
 }
 
-export function renderMarkdown(markdown: string, documentTitle = ''): RenderedMarkdown {
+export function renderMarkdown(markdown: string, documentTitle = '', sourceId = ''): RenderedMarkdown {
   marked.setOptions({ gfm: true, breaks: false });
   const source = preprocessWikilinks(stripFrontmatter(markdown));
   const raw = marked.parse(source, { async: false }) as string;
-  return sanitizeHtml(raw, documentTitle);
+  return sanitizeHtml(raw, documentTitle, sourceId);
 }
 
 export function fallbackTitle(path: string): string {

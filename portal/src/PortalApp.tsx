@@ -143,7 +143,7 @@ export function PortalApp() {
   } : null, [session]);
 
   const selectedSource = useMemo(() => sources.find((source) => source.id === sourceId), [sources, sourceId]);
-  const rendered = useMemo(() => document ? renderMarkdown(document.content, document.title) : { html: '', outline: [] as OutlineItem[] }, [document]);
+  const rendered = useMemo(() => document ? renderMarkdown(document.content, document.title, document.source) : { html: '', outline: [] as OutlineItem[] }, [document]);
   const isFavorite = useMemo(() => document ? favorites.some((item) => item.source === document.source && item.path === document.path) : false, [document, favorites]);
 
   const refreshReviewPending = useCallback(async () => {
@@ -199,7 +199,7 @@ export function PortalApp() {
     });
   }, [storageKeys]);
 
-  const openDocument = useCallback(async (nextSource: string, path: string, push = true) => {
+  const openDocument = useCallback(async (nextSource: string, path: string, push = true, replace = false) => {
     if (!nextSource || !path) return;
     const generation = beginNavigation();
     if (!isPreviewable(path)) {
@@ -219,7 +219,7 @@ export function PortalApp() {
       setDocument(null);
       setContext(null);
       setBinary({ name, path, type: 'file', markdown: false, size: 0 });
-      if (push) writeLocation(nextSource, path, '');
+      if (push || replace) writeLocation(nextSource, path, '', replace);
       return;
     }
     rememberPortalReadingPosition();
@@ -248,7 +248,7 @@ export function PortalApp() {
       }
       if (storageKeys) localStorage.setItem(storageKeys.lastSource, nextSource);
       rememberDocument(file);
-      if (push) writeLocation(nextSource, path, '');
+      if (push || replace) writeLocation(nextSource, path, '', replace);
 
     } catch (caught) {
       if (generation !== navigationGeneration.current) return;
@@ -261,9 +261,30 @@ export function PortalApp() {
     }
   }, [beginNavigation, rememberDocument, storageKeys]);
 
+  const resolveWiki = useCallback(async (target: string, currentSource: string, push = true) => {
+    const generation = beginNavigation();
+    try {
+      const result = await portalApi.resolveLink(target, currentSource);
+      if (generation !== navigationGeneration.current) return;
+      if (!result.found || !result.source || !result.path) throw new Error(`Страница «${target}» не найдена в доступных источниках`);
+      // Native entry replaces its resolver URL only after the file opens; a
+      // failed resolution keeps the retryable URL and never guesses a slug.
+      await openDocument(result.source, result.path, push, !push);
+    } catch (caught) {
+      if (generation !== navigationGeneration.current) return;
+      setError(caught instanceof Error ? caught.message : 'Не удалось открыть ссылку');
+    }
+  }, [beginNavigation, openDocument]);
+
   const hydrateLocation = useCallback(async (replace = false) => {
     if (!sources.length || !storageKeys) return;
     const location = readLocation();
+    if (location.wiki) {
+      // Keep the origin source even if it is no longer in the visible list.
+      // The existing resolver is the authority for cross-source lookup and ACLs.
+      await resolveWiki(location.wiki, location.source, false);
+      return;
+    }
     const remembered = localStorage.getItem(storageKeys.lastSource) || '';
     const nextSource = sources.some((item) => item.id === location.source)
       ? location.source
@@ -276,7 +297,7 @@ export function PortalApp() {
     if (generation === navigationGeneration.current && replace && nextSource !== location.source) {
       writeLocation(nextSource, location.path, location.path ? '' : location.folder, true);
     }
-  }, [loadFolder, openDocument, sources, storageKeys]);
+  }, [loadFolder, openDocument, resolveWiki, sources, storageKeys]);
 
   useEffect(() => {
     const media = window.matchMedia('(max-width: 900px)');
@@ -354,7 +375,7 @@ export function PortalApp() {
       const location = readLocation();
       // Native hash navigation can emit popstate even for a repeated hash.
       // Only a document/source transition should fetch and remount the article.
-      if (document && location.path === document.path && location.source === document.source) {
+      if (!location.wiki && document && location.path === document.path && location.source === document.source) {
         // Accepting the committed article also supersedes any in-flight load.
         beginNavigation();
         // A loading skeleton has no headings. Defer this accepted history
@@ -463,16 +484,6 @@ export function PortalApp() {
     }
   };
 
-  const resolveWiki = async (target: string) => {
-    try {
-      const result = await portalApi.resolveLink(target, sourceId);
-      if (!result.found || !result.source || !result.path) throw new Error(`Страница «${target}» не найдена в доступных источниках`);
-      await openDocument(result.source, result.path, true);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Не удалось открыть ссылку');
-    }
-  };
-
   const onArticleClick = (event: React.MouseEvent<HTMLElement>) => {
     const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href]');
     if (!anchor) return;
@@ -489,8 +500,9 @@ export function PortalApp() {
       }
       return;
     }
+    if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
-    void resolveWiki(anchor.dataset.wikiTarget || '');
+    void resolveWiki(anchor.dataset.wikiTarget || '', document?.source || sourceId);
   };
 
   const toggleFavorite = () => {
@@ -512,7 +524,7 @@ export function PortalApp() {
   };
 
   const openBacklink = async (link: Backlink) => {
-    await resolveWiki(`${link.source}:${link.slug}`);
+    await resolveWiki(`${link.source}:${link.slug}`, sourceId);
   };
 
   const breadcrumbs = folder ? folder.split('/').filter(Boolean) : [];

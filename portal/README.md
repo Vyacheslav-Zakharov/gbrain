@@ -2,6 +2,32 @@
 
 See [SPA architecture](../docs/architecture/portal-spa.md) for delivery and authentication.
 
+## Native wiki links
+
+Wiki anchors immediately expose `/portal?source=<origin>&wiki=<target>` URLs.
+The encoded target is passed verbatim to the existing authenticated resolver;
+the client never guesses slugs or source permissions. Plain clicks use SPA
+navigation; Ctrl/Cmd/Shift/middle clicks and copied URLs retain browser behavior.
+Native entry and history resolve the URL, replacing it with the canonical source
+and path only after opening succeeds. Errors retain the retryable URL (or the
+current article on a failed plain click). New navigation and local heading
+selection invalidate pending resolver successes and failures.
+
+After building, from `portal/`:
+
+```sh
+PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs \
+CHROMIUM_EXECUTABLE=/absolute/path/to/chrome \
+timeout -k 5 90 bun run scripts/check-wiki-links.browser.ts
+```
+
+This serves the exact `dist` bytes on an ephemeral loopback port with synthetic
+read-only APIs, closed in `finally`. It exercises direct copied-link entry,
+reload, plain click, native Ctrl/Shift/middle windows, Cmd non-interception,
+encoded targets, cross-source aliases, errors, Back/Forward and stale resolver
+responses. Cmd's OS-native tab behavior requires macOS acceptance; no production
+authentication or backend ACL proof is claimed by this client fixture.
+
 ## Document fragments
 
 - Existing H1–H3 canonical IDs and their duplicate suffixes remain stable. H4–H6

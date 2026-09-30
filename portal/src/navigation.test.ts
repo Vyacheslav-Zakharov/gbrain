@@ -1,7 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import { buildPortalHref, isPreviewable, parentPath, parsePortalLocation } from './navigation';
+import { buildPortalHref, buildWikiHref, isPreviewable, parentPath, parsePortalLocation } from './navigation';
 
 describe('portal navigation', () => {
+  test('wiki URLs round-trip exact targets without deriving a path', () => {
+    const target = 'second:Псевдоним & + % ? "пример"#section';
+    const href = buildWikiHref('origin & source', target);
+    expect(parsePortalLocation(new URL(href, 'https://example.test').search)).toEqual({
+      source: 'origin & source', wiki: target, path: '', folder: '',
+    });
+    expect(new URL(href, 'https://example.test').hash).toBe('');
+  });
+
   test('round-trips Cyrillic source and document paths', () => {
     const href = buildPortalHref('internal-it', 'проекты/архитектура gbrain.md');
     expect(href).toContain('source=internal-it');
