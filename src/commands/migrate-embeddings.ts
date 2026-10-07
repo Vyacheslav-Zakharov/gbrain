@@ -52,6 +52,24 @@ import { withAIInvocationGuard } from '../core/ai/invocation-guard.ts';
  */
 export const GLOBAL_MIGRATION_LOCK_ID = 'gbrain-embedding-migration';
 
+/**
+ * Set-equality of two source-id censuses, independent of how either side was
+ * ordered. The lock set is sorted in JavaScript (UTF-16 code-unit order) while
+ * the post-lock census comes back `ORDER BY id`, i.e. in the database's
+ * collation. Under `en_US.utf8` (the default of the pgvector images and most
+ * managed Postgres) punctuation is ignored at the first level, so
+ * `alexandra-mityushina` sorts before `alexandr-kalentyev` there but after it
+ * in JavaScript. Comparing the two orders positionally reported a census
+ * change that never happened and refused every retry.
+ */
+export function sameSourceIdSet(a: ReadonlyArray<string>, b: ReadonlyArray<string>): boolean {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  for (let i = 0; i < sa.length; i++) if (sa[i] !== sb[i]) return false;
+  return true;
+}
+
 export const EMBEDDING_MIGRATION_RECOVERY = {
   status_command: 'gbrain migrate embeddings --status --json',
   docs: 'https://github.com/garrytan/gbrain/blob/master/docs/guides/embedding-migration.md#recovery',
@@ -655,7 +673,7 @@ export async function executeMigrationFlow(
     }
 
     const lockedCensus = await engine.executeRaw<{ id: string; incarnation: string; archived: boolean }>('SELECT id,incarnation::text,archived FROM sources ORDER BY id');
-    if (JSON.stringify(lockedCensus.map(s => s.id)) !== JSON.stringify(sourceIds)) {
+    if (!sameSourceIdSet(lockedCensus.map(s => s.id), sourceIds)) {
       return { status: 'apply_failed', reason: 'Source census changed while acquiring locks; no embedding work performed. Retry the scoped preview.' };
     }
     expectedSources = JSON.stringify(lockedCensus);
