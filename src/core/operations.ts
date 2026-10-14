@@ -6798,6 +6798,36 @@ export const operations: Operation[] = [
   run_skillopt,
 ];
 
+// Admission wraps the FULL operation before its first DB/file mutation. Every
+// transport and the agent tool bridge share these handlers (including aliases).
+for (const op of operations) {
+  if (!op.mutating && op.scope !== 'write') continue;
+  const handler = op.handler;
+  op.handler = async (ctx, p) => {
+    // Remote think explicitly cannot persist; keep its read availability.
+    if (op.name === 'think' && (ctx.remote !== false || (!p.save && !p.take))) return handler(ctx, p);
+    let sources: string[] | null = null;
+    if (['put_page', 'gbrain_page_put', 'delete_page', 'restore_page'].includes(op.name)) {
+      sources = [resolveFederatedWriteSourceId(ctx, p.source_id)];
+    } else if (['add_link', 'gbrain_link_add'].includes(op.name)) {
+      sources = [resolveFederatedWriteSourceId(ctx, p.from_source_id)];
+    } else if (['revert_version', 'add_tag', 'remove_tag', 'remove_link', 'add_timeline_entry', 'put_raw_data', 'log_ingest', 'file_upload'].includes(op.name)) {
+      sources = ctx.sourceId ? [ctx.sourceId] : null;
+    } else if (op.name === 'attachment_upload') {
+      sources = [resolveFederatedWriteSourceId(ctx, p.source_id)];
+    }
+    const { withSourceWrites, WriteAdmissionError } = await import('./write-admission.ts');
+    try {
+      return await withSourceWrites(ctx.engine, sources, () => handler(ctx, p));
+    } catch (error) {
+      if (error instanceof WriteAdmissionError) {
+        throw new OperationError('source_write_busy', error.message, 'Retry the entire operation after the source publication completes.');
+      }
+      throw error;
+    }
+  };
+}
+
 export const operationsByName = Object.fromEntries(
   operations.map(op => [op.name, op]),
 ) as Record<string, Operation>;

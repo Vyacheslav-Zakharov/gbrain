@@ -1134,6 +1134,13 @@ export class SyncLockBusyError extends Error {
 }
 
 export async function performSync(engine: BrainEngine, opts: SyncOpts): Promise<SyncResult> {
+  const { withSourceWrites } = await import('../core/write-admission.ts');
+  const repoPath = opts.repoPath || await readSyncAnchor(engine, opts.sourceId, 'repo_path');
+  return withSourceWrites(engine, [opts.sourceId ?? 'default'], () => performSyncAdmitted(engine, { ...opts, ...(repoPath ? { repoPath } : {}) }),
+    { repositoryPaths: repoPath ? [repoPath] : [] });
+}
+
+async function performSyncAdmitted(engine: BrainEngine, opts: SyncOpts): Promise<SyncResult> {
   // v0.22.13 CODEX-2: cross-process writer lock prevents two concurrent
   // syncs from racing on the same last_commit anchor (last writer wins,
   // bookmark regresses, silent corruption).

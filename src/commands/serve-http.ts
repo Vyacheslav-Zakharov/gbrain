@@ -705,6 +705,8 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
 
   // Express 5 app
   const app = express();
+  const { installHttpWriteAdmission } = await import('../core/write-admission-boundaries.ts');
+  installHttpWriteAdmission(app, engine);
   app.set('json replacer', jsonBigIntReplacer);
 
   const portalSessionTtlMs = 8 * 60 * 60 * 1000;

@@ -218,7 +218,12 @@ const MAX_FILE_SIZE = 5_000_000; // 5MB
  * so the guard has to live on this function — otherwise an authenticated caller
  * can spend the owner's OpenAI budget at will by shipping a megabyte-sized page.
  */
-export async function importFromContent(
+export async function importFromContent(...args: Parameters<typeof importFromContentAdmitted>): Promise<ImportResult> {
+  const { withSourceWrites } = await import('./write-admission.ts');
+  return withSourceWrites(args[0], [args[3]?.sourceId ?? 'default'], () => importFromContentAdmitted(...args));
+}
+
+async function importFromContentAdmitted(
   engine: BrainEngine,
   slug: string,
   content: string,

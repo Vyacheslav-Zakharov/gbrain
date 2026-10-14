@@ -981,7 +981,8 @@ export class MinionWorker extends EventEmitter {
     };
 
     try {
-      const result = await handler(context);
+      const { withWorkerWriteAdmission } = await import('../write-admission-boundaries.ts');
+      const result = await withWorkerWriteAdmission(this.engine, job.name, job.data, () => handler(context));
 
       clearInterval(lockTimer);
 

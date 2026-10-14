@@ -1105,6 +1105,28 @@ function refuseThinClient(command: string, mcpUrl: string): never {
 }
 
 async function handleCliOnly(command: string, args: string[]) {
+  // Standalone commands own their engine lifecycle and return before the main
+  // engine-connected switch. Admit their entire mutation, not their last write.
+  const earlyWriters = new Set(['schema', 'integrity', 'publish', 'frontmatter',
+    'skillify', 'skillpack', 'repair-jsonb', 'ze-switch', 'dream']);
+  const mutatingDoctor = command === 'doctor' && args.some(a => ['--fix', '--remediate'].includes(a));
+  const readSchema = command === 'schema' && ['active', 'list', 'show', 'validate', 'graph', 'lint', 'stats', 'explain', 'diff', 'detect', 'suggest', 'review-candidates', 'review-orphans'].includes(args[0] ?? 'active');
+  if ((earlyWriters.has(command) || mutatingDoctor) && !readSchema && !args.includes('--help') && !args.includes('-h')) {
+    const config = loadConfig();
+    if (config && !isThinClient(config)) {
+      const { createEngine } = await import('./core/engine-factory.ts');
+      const admissionEngine = await createEngine(config);
+      await admissionEngine.connect(config);
+      try {
+        const { withSourceWrites } = await import('./core/write-admission.ts');
+        return await withSourceWrites(admissionEngine, null, () => handleCliOnlyAdmitted(command, args));
+      } finally { await admissionEngine.disconnect(); }
+    }
+  }
+  return handleCliOnlyAdmitted(command, args);
+}
+
+async function handleCliOnlyAdmitted(command: string, args: string[]) {
   // Thin-client guard: refuse DB-bound commands cleanly with a pinpoint
   // hint instead of letting them fail later inside connectEngine or
   // mid-handler. v0.31.1 routes through `refuseThinClient` so every
@@ -1635,6 +1657,8 @@ async function handleCliOnly(command: string, args: string[]) {
   // All remaining CLI-only commands need a DB connection
   const engine = await connectEngine();
   try {
+    const { withCliWriteAdmission } = await import('./core/write-admission-boundaries.ts');
+    await withCliWriteAdmission(engine, command, args, async () => {
     switch (command) {
       case 'import': {
         const { runImport } = await import('./commands/import.ts');
@@ -2085,6 +2109,7 @@ async function handleCliOnly(command: string, args: string[]) {
         break;
       }
     }
+    });
   } finally {
     syncWatchdog?.dispose(); // #1633: tear down the hard-deadline watchdog on clean exit
     // #2084 — the CLI_ONLY fall-through teardown (drain every background-work
@@ -2422,6 +2447,13 @@ Run gbrain <command> --help for command-specific help.
 // process alive. A fatal error still exits 1 for every command, daemons
 // included (matches the prior unconditional process.exit(1) on rejection).
 if (import.meta.main) {
+  // Retain a trusted local pre-main guard without publishing deployment paths.
+  // A configured missing/failing script is fatal; remote args cannot override it.
+  const admissionScript = (loadConfigFileOnly() as { local_admission_script?: string } | null)?.local_admission_script;
+  if (admissionScript) {
+    const admission = Bun.spawnSync(['/usr/bin/python3', '-B', admissionScript], {stdout:'ignore', stderr:'inherit'});
+    if (admission.exitCode !== 0) process.exit(75);
+  }
   main().then(
     () => {
       if (shouldForceExitAfterMain()) flushThenExit(currentExitCode());

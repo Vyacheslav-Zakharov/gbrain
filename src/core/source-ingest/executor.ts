@@ -739,7 +739,21 @@ export async function runSourceIngestExecutor(
   opts: SourceIngestExecutorOptions,
   logger: { warn(msg: string): void } = console,
 ): Promise<SourceIngestExecutorResult> {
+  const { profile } = await loadProfile(engine, opts.profile_id);
+  const sourceId = profile.target.approved_source_id;
+  if (!sourceId) throw new Error('profile target approved_source_id is required');
+  const { withSourceWrites } = await import('../write-admission.ts');
+  return withSourceWrites(engine, [sourceId], () => runSourceIngestExecutorAdmitted(engine, opts, logger, sourceId));
+}
+
+async function runSourceIngestExecutorAdmitted(
+  engine: BrainEngine,
+  opts: SourceIngestExecutorOptions,
+  logger: { warn(msg: string): void },
+  admittedSourceId: string,
+): Promise<SourceIngestExecutorResult> {
   const { profile, version, hash } = await loadProfile(engine, opts.profile_id);
+  if (profile.target.approved_source_id !== admittedSourceId) throw new Error('Source-ingest target changed during admission; retry');
   await assertAllowedSourceConnectors(engine, profile);
   const sourceId = profile.target.approved_source_id;
   if (!sourceId) throw new Error('profile target approved_source_id is required');

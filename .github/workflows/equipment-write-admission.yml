@@ -1,0 +1,60 @@
+name: Equipment coordinated writes
+on:
+  workflow_dispatch:
+  push:
+    branches: [ops/equipment-coordinated-ingest-20261014]
+permissions:
+  contents: read
+concurrency:
+  group: equipment-writes-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: gbrain_write_admission_test
+        ports: ['5432:5432']
+        options: >-
+          --memory=768m --memory-swap=768m --cpus=1 --pids-limit=128
+          --health-cmd="pg_isready -U postgres -d gbrain_write_admission_test"
+          --health-interval=5s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Exact source and isolated config
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          mkdir -p "$RUNNER_TEMP/equipment-home"
+          printf 'GBRAIN_HOME=%s\n' "$RUNNER_TEMP/equipment-home" >> "$GITHUB_ENV"
+          git rev-parse HEAD
+      - name: Kernel locks and caller routing
+        run: |
+          timeout -k 10s 120s bun test test/write-admission.test.ts test/write-admission-boundaries.test.ts
+          timeout -k 10s 180s bun test test/write-admission-dispatch.test.ts test/local-admission-cli.test.ts --timeout 60000
+      - name: Actual PostgreSQL dispatch
+        env:
+          GBRAIN_WRITE_ADMISSION_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/gbrain_write_admission_test
+        run: |
+          test -f test/e2e/write-admission.test.ts
+          timeout -k 10s 180s bun test test/e2e/write-admission.test.ts --timeout 60000
+      - name: Affected source and ingestion regressions
+        run: |
+          timeout -k 10s 120s bun test test/source-scope-resolver.test.ts test/parity.test.ts
+          timeout -k 10s 120s bun test test/get-versions-source-scope.test.ts
+      - name: Typecheck and static checks
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
+        run: |
+          timeout -k 10s 180s bun run typecheck
+          bash scripts/check-test-isolation.sh
+          bash scripts/check-operations-filter-bypass.sh
+          git diff --check

@@ -144,6 +144,8 @@ export async function runImport(
       if (nudge) process.stderr.write(nudge + '\n');
     }
   }
+  const { withSourceWrites } = await import('../core/write-admission.ts');
+  return withSourceWrites(engine, [sourceId ?? 'default'], async () => {
   const workersIdx = args.indexOf('--workers');
   const workersArg = workersIdx !== -1 ? args[workersIdx + 1] : null;
   // v0.22.13 (PR #490 Q2): shared parseWorkers helper rejects bad input
@@ -465,6 +467,7 @@ export async function runImport(
   }
 
   return { imported, skipped, errors, chunksCreated, failures };
+  });
 }
 
 /**
