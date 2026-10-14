@@ -6800,9 +6800,12 @@ export const operations: Operation[] = [
 
 // Admission wraps the FULL operation before its first DB/file mutation. Every
 // transport and the agent tool bridge share these handlers (including aliases).
+const admittedHandlers = new Map<Operation['handler'], Operation['handler']>();
 for (const op of operations) {
   if (!op.mutating && op.scope !== 'write') continue;
   const handler = op.handler;
+  const admitted = admittedHandlers.get(handler);
+  if (admitted) { op.handler = admitted; continue; }
   op.handler = async (ctx, p) => {
     // Remote think explicitly cannot persist; keep its read availability.
     if (op.name === 'think' && (ctx.remote !== false || (!p.save && !p.take))) return handler(ctx, p);
@@ -6826,6 +6829,7 @@ for (const op of operations) {
       throw error;
     }
   };
+  admittedHandlers.set(handler, op.handler);
 }
 
 export const operationsByName = Object.fromEntries(
