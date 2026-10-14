@@ -1105,6 +1105,13 @@ function refuseThinClient(command: string, mcpUrl: string): never {
 }
 
 async function handleCliOnly(command: string, args: string[]) {
+  if (command === 'lint' || command === 'check-backlinks') {
+    const { withCliWriteAdmission } = await import('./core/write-admission-boundaries.ts');
+    // Filesystem-only handlers need no DB: their actual target supplies the
+    // complete physical lock domain, even outside the configured cwd.
+    const filesystemOnly = { executeRaw: async () => [] } as unknown as BrainEngine;
+    return withCliWriteAdmission(filesystemOnly, command, args, () => handleCliOnlyAdmitted(command, args));
+  }
   // Standalone commands own their engine lifecycle and return before the main
   // engine-connected switch. Admit their entire mutation, not their last write.
   const earlyWriters = new Set(['schema', 'integrity', 'publish', 'frontmatter',
@@ -1607,7 +1614,11 @@ async function handleCliOnlyAdmitted(command: string, args: string[]) {
       throw e;
     }
     try {
-      await withTimeout(dispatchReadOnlyCommand(engine, command, args), readOnlyTimeoutMs, label);
+      const { withCliWriteAdmission } = await import('./core/write-admission-boundaries.ts');
+      // Timeout selects a deadline, never an admission bypass. The grant owns
+      // the actual dispatcher promise (not the timer race) until it settles.
+      await withTimeout(withCliWriteAdmission(engine, command, args,
+        () => dispatchTimedCommand(engine, command, args)), readOnlyTimeoutMs, label);
     } catch (e) {
       if (e instanceof OperationTimeoutError) {
         const hint = userTimeoutMs ? '' : ` (default ${e.ms}ms; pass --timeout=Ns to override)`;
@@ -2127,13 +2138,13 @@ async function handleCliOnlyAdmitted(command: string, args: string[]) {
 }
 
 /**
- * v0.41.6.0 D3: dispatch helper for the read-only commands that take a
- * default wallclock timeout (`gbrain search`, `gbrain sources list`).
+ * Dispatch helper for commands with wallclock timeouts. The caller must
+ * apply withCliWriteAdmission: explicit timeouts can also select writers.
  * Keeps the timeout-wrap site in main() small and the per-command
  * dispatch logic colocated for easy extension. Pure dispatcher; no engine
  * lifecycle (caller owns connect/disconnect).
  */
-async function dispatchReadOnlyCommand(engine: BrainEngine, command: string, args: string[]): Promise<void> {
+async function dispatchTimedCommand(engine: BrainEngine, command: string, args: string[]): Promise<void> {
   switch (command) {
     case 'search': {
       const { runSearch } = await import('./commands/search.ts');
@@ -2146,7 +2157,7 @@ async function dispatchReadOnlyCommand(engine: BrainEngine, command: string, arg
       return;
     }
     default:
-      throw new Error(`dispatchReadOnlyCommand: unsupported command "${command}"`);
+      throw new Error(`dispatchTimedCommand: unsupported command "${command}"`);
   }
 }
 

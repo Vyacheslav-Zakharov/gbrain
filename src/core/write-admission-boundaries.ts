@@ -1,5 +1,7 @@
 import type { Application, RequestHandler } from 'express';
 import type { BrainEngine } from './engine.ts';
+import { realpathSync, statSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { withSourceWrites, WriteAdmissionError } from './write-admission.ts';
 
 // These paths only read/preview. POST is used for large request payloads.
@@ -61,8 +63,8 @@ export function withWorkerWriteAdmission<T>(engine: BrainEngine, name: string,
 const READ_CLI = new Set([
   'serve', 'watch', 'call', 'jobs', 'agent', 'features', 'graph-query', 'salience',
   'anomalies', 'status', 'whoknows', 'transcripts', 'models', 'founder', 'recall',
-  'code-def', 'code-refs', 'code-callers', 'code-callees', 'check-backlinks',
-  'lint', 'check-resolvable', 'check-update', 'skillpack-check', 'report',
+  'code-def', 'code-refs', 'code-callers', 'code-callees',
+  'check-resolvable', 'check-update', 'skillpack-check', 'report',
 ]);
 
 /** Existing scoped importer/sync APIs carry their own nested admission. Other
@@ -71,10 +73,25 @@ const READ_CLI = new Set([
 export async function withCliWriteAdmission<T>(engine: BrainEngine, command: string,
   args: string[], callback: () => Promise<T>): Promise<T> {
   if (args.includes('--help') || args.includes('-h') || READ_CLI.has(command)) return callback();
+  if (command === 'lint' || command === 'check-backlinks') {
+    const mutating = command === 'lint' ? args.includes('--fix') : args[0] === 'fix';
+    if (!mutating || args.includes('--dry-run')) return callback();
+    const dirIndex = args.indexOf('--dir');
+    const target = command === 'lint' ? args.find(a => !a.startsWith('--'))
+      : dirIndex >= 0 ? args[dirIndex + 1] : '.';
+    // Match the handler's selected target, not cwd or a configured source.
+    // Resolve file symlinks before taking their parent Git domain.
+    if (!target) return callback(); // handler reports missing argument; no write
+    const physical = realpathSync(target);
+    return withSourceWrites(engine, [], callback, {
+      repositoryPaths: [statSync(physical).isDirectory() ? physical : dirname(physical)],
+    });
+  }
   if (['sources', 'repos'].includes(command) && ['list', 'current', 'status', 'archived', 'audit'].includes(args[0] ?? 'list')) return callback();
   if (command === 'search' && args[0] !== 'tune') return callback();
   if (command === 'think' && !args.includes('--save') && !args.includes('--take')) return callback();
   if (command === 'import') return callback(); // source resolution at runImport, before first mutation
+  if (command === 'sync' && args.includes('--watch') && !args.includes('--all')) return callback(); // runSync admits each complete tick, not the idle daemon
   if (command === 'sync' && !args.includes('--all')) {
     const { resolveSourceId } = await import('./source-resolver.ts');
     const index = args.indexOf('--source');

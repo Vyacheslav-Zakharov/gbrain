@@ -39,6 +39,8 @@ jobs:
       - name: Kernel locks and caller routing
         run: |
           timeout -k 10s 120s bun test test/write-admission.test.ts test/write-admission-boundaries.test.ts
+          timeout -k 10s 120s bun test test/write-admission-cli-entrypoints.serial.test.ts
+          timeout -k 10s 180s bun test test/text-embedding-health.test.ts --timeout 60000
           timeout -k 10s 180s bun test test/write-admission-dispatch.test.ts test/local-admission-cli.test.ts --timeout 60000
       - name: Actual PostgreSQL dispatch
         env:

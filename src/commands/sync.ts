@@ -4040,25 +4040,28 @@ See also:
 
   while (true) {
     try {
-      const result = await performSync(engine, { ...opts, full: false });
-      consecutiveErrors = 0;
-      if (result.status === 'synced') {
-        const ts = new Date().toISOString().slice(11, 19);
-        console.log(`[${ts}] Synced: +${result.added} ~${result.modified} -${result.deleted} R${result.renamed}`);
-      }
-      // Same gate as non-watch: only manage .gitignore on successful sync.
-      // v0.41.13.0 (T7 / D-V3-5): partial joins the deferred posture.
-      // Same repo-resolution path so watch mode catches the implicit-resolved case.
-      if (
-        result.status !== 'dry_run' &&
-        result.status !== 'blocked_by_failures' &&
-        result.status !== 'partial'
-      ) {
-        const effectiveRepoPath = opts.repoPath ?? (await getDefaultSourcePath(engine));
-        if (effectiveRepoPath) {
-          manageGitignore(effectiveRepoPath, engine.kind);
+      const { withSourceWrites } = await import('../core/write-admission.ts');
+      const tickRepoPath = opts.repoPath ?? await readSyncAnchor(engine, sourceId, 'repo_path') ?? await getDefaultSourcePath(engine);
+      await withSourceWrites(engine, [sourceId], async () => {
+        const result = await performSync(engine, { ...opts, ...(tickRepoPath ? { repoPath: tickRepoPath } : {}), full: false });
+        consecutiveErrors = 0;
+        if (result.status === 'synced') {
+          const ts = new Date().toISOString().slice(11, 19);
+          console.log(`[${ts}] Synced: +${result.added} ~${result.modified} -${result.deleted} R${result.renamed}`);
         }
-      }
+        // Same gate as non-watch: only manage .gitignore on successful sync.
+        // v0.41.13.0 (T7 / D-V3-5): partial joins the deferred posture.
+        // Same repo-resolution path so watch mode catches the implicit-resolved case.
+        if (
+          result.status !== 'dry_run' &&
+          result.status !== 'blocked_by_failures' &&
+          result.status !== 'partial'
+        ) {
+          if (tickRepoPath) {
+            manageGitignore(tickRepoPath, engine.kind);
+          }
+        }
+      }, { repositoryPaths: tickRepoPath ? [tickRepoPath] : [] });
     } catch (e: unknown) {
       consecutiveErrors++;
       const msg = e instanceof Error ? e.message : String(e);
