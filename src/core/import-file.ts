@@ -312,6 +312,13 @@ async function importFromContentAdmitted(
   engine = await selectedTextEngine(engine);
   const parsed = parseMarkdown(content, slug + '.md', { activePack: opts.activePack });
 
+  // Enforce metadata for actual shared projects, not their documentation.
+  // Explicit type: note takes precedence over projects/ path inference.
+  if (opts.remote === true) {
+    const { assertProjectMetadata } = await import('./project-metadata.ts');
+    assertProjectMetadata(sourceId, slug, parsed.type, parsed.frontmatter ?? {});
+  }
+
   // v0.42 (#1699 trust boundary): strip gate-owned markers from UNTRUSTED
   // input. parseMarkdown preserves every frontmatter key except type/title/
   // tags/slug, so a remote MCP put_page (ctx.remote !== false, threaded as
